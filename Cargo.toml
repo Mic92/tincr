@@ -16,10 +16,6 @@ edition = "2024"
 license = "GPL-2.0-or-later"
 rust-version = "1.88"
 
-# Single source of truth for lint policy. Every crate sets
-# `[lints] workspace = true`. CI runs `clippy --all-targets -- -D warnings`,
-# so warn-level pedantic here = hard error in CI.
-#
 # `priority = -1` lets crate-level #[allow(clippy::specific_lint)] in
 # source override the group: pedantic loads first, item allows win.
 # Without it, the group is non-deterministically ordered against
@@ -52,9 +48,8 @@ panic = "unwind"
 # `Daemon::run` showed 12% cumulative instead of ~99%, and the perf
 # sampling overhead itself was 2.5× worse than C (broken DWARF unwind
 # falls back to scanning) — so profile data was misleading AND it
-# perturbed throughput unequally. Debug info is dead weight in the
-# binary at runtime; frame pointers cost one register (negligible at
-# this width). Same opt-level/LTO/CGU — codegen is identical to release.
+# perturbed throughput unequally. Same opt-level/LTO/CGU — codegen
+# is identical to release.
 [profile.profiling]
 inherits = "release"
 debug = true
@@ -72,9 +67,8 @@ debug = true
 # around it doesn't. ~21% throughput hit. Revisit when 0.10 fixes its inlining.
 chacha20 = "0.9"
 poly1305 = "0.8"
-# AES-256-GCM for the opt-in `SPTPSCipher = aes-256-gcm` fast path. ring
-# carries AES-NI/PCLMUL and ARMv8 AES/PMULL kernels and a constant-time
-# bitsliced fallback; we only use `ring::aead::AES_256_GCM`.
+# AES-256-GCM for the opt-in `SPTPSCipher = aes-256-gcm` fast path.
+# default-features = false: only `ring::aead::AES_256_GCM` is used.
 ring = { version = "0.17", default-features = false }
 # digest-0.11 cohort: the upcoming DHT crate (mainline) pins ed25519-dalek
 # 3.0-pre which transitively forces sha2 0.11. Carrying both dalek 2 and
