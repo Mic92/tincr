@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::io::Write;
+use std::path::PathBuf;
 
 use tinc_conf::vars::{self, VarFlags};
 use tinc_crypto::b64;
@@ -15,6 +16,61 @@ use crate::keypair;
 use crate::names::{Paths, check_id};
 
 use super::JoinResult;
+
+/// Open file handles plus their on-disk paths produced by
+/// [`OpenFiles::new`]. Bundles the two long-lived writers so chunk
+/// helpers can refer to them by name instead of through a 6-arg sig.
+///
+/// `f` (tinc.conf) is consumed at the chunk-1/chunk-2 boundary via
+/// [`OpenFiles::close_tinc_conf`]; `fh` (hosts/OURNAME) lives until
+/// after keygen so the public key can be appended.
+struct OpenFiles {
+    tinc_conf_path: PathBuf,
+    host_file_path: PathBuf,
+    f: Option<fs::File>,
+    fh: fs::File,
+}
+
+impl OpenFiles {
+    /// Create tinc.conf, hosts/NAME, and write the raw
+    /// `invitation-data` debug dump. Each created file is appended
+    /// to `created` for rollback.
+    fn new(
+        paths: &Paths,
+        name: &str,
+        data: &str,
+        created: &mut Vec<PathBuf>,
+    ) -> Result<Self, CmdError> {
+        let tinc_conf_path = paths.tinc_conf();
+        let mut f = create_nofollow(&tinc_conf_path)?;
+        created.push(tinc_conf_path.clone());
+        // FIRST line of tinc.conf. Everything else is appended below.
+        writeln!(f, "Name = {name}").map_err(io_err(&tinc_conf_path))?;
+
+        let host_file_path = paths.host_file(name);
+        let fh = create_nofollow(&host_file_path)?;
+        created.push(host_file_path.clone());
+
+        // `invitation-data` — the raw blob, for debugging "what did
+        // the daemon send?". Write the whole thing now; nothing
+        // reads it programmatically.
+        let inv_data_path = paths.confbase.join("invitation-data");
+        fs::write(&inv_data_path, data).map_err(io_err(&inv_data_path))?;
+        created.push(inv_data_path);
+
+        Ok(Self {
+            tinc_conf_path,
+            host_file_path,
+            f: Some(f),
+            fh,
+        })
+    }
+
+    /// Close tinc.conf. Called at the chunk-1/chunk-2 boundary.
+    fn close_tinc_conf(&mut self) {
+        self.f = None;
+    }
+}
 
 /// Keys dropped from chunk-2 host blocks: paths/exec the daemon would
 /// honour. Chunk-2 is otherwise written verbatim.
@@ -76,9 +132,8 @@ fn finalize_join_inner(
     data: &[u8],
     paths: &Paths,
     force: bool,
-    created: &mut Vec<std::path::PathBuf>,
+    created: &mut Vec<PathBuf>,
 ) -> Result<JoinResult, CmdError> {
-    // ─── Validate blob is text
     // Upstream treats `data` as a NUL-terminated C string. Embedded
     // NUL would truncate the parser silently. We accept any UTF-8
     // (which includes ASCII, which is all the file should be).
@@ -89,43 +144,58 @@ fn finalize_join_inner(
     // bytes→str is the SPTPS↔config boundary.
     let data = std::str::from_utf8(data)
         .map_err(|_| CmdError::BadInput("Invitation data is not valid UTF-8".into()))?;
-
-    // ─── Parse first chunk's first line: must be `Name = OURNAME`
-    // `get_value(data, "Name")` parses the *first* line and checks
-    // if it's the requested key. Not a search — first-line-only. So
-    // the invitation file format is rigid: `Name = X` MUST be line 1.
-    // `cmd_invite` writes it that way (`invite.rs:build_invitation_
-    // file` emits `Name` first). The contract test pins this.
     let mut lines = data.lines();
+    let name = parse_blob_header(&mut lines)?;
+
+    ensure_fresh_confbase(paths)?;
+    makedirs(paths)?;
+
+    let mut files = OpenFiles::new(paths, &name, data, created)?;
+    let boundary = write_chunk1(&mut lines, &mut files, &name, force)?;
+    files.close_tinc_conf();
+    let hosts_written = write_host_chunks(&mut lines, paths, &name, boundary, created)?;
+    let pubkey_b64 = generate_node_key(paths, &mut files, created)?;
+
+    // ─── Write tinc-up placeholder (shared with `init`)
+    if let Some(p) = crate::cmd::init::write_tinc_up_placeholder(paths)? {
+        created.push(p);
+    }
+
+    Ok(JoinResult {
+        name,
+        pubkey_b64,
+        hosts_written,
+    })
+}
+
+/// Parse and validate the mandatory `Name = OURNAME` first line.
+///
+/// `get_value(data, "Name")` upstream parses the *first* line and
+/// checks if it's the requested key. Not a search — first-line-only.
+/// So the invitation file format is rigid: `Name = X` MUST be line 1.
+/// `cmd_invite` writes it that way (`invite.rs:build_invitation_file`
+/// emits `Name` first). The contract test pins this.
+fn parse_blob_header(lines: &mut std::str::Lines<'_>) -> Result<String, CmdError> {
     let first = lines
         .next()
         .ok_or_else(|| CmdError::BadInput("No Name found in invitation!".into()))?;
     let name = parse_name_line(first)
         .ok_or_else(|| CmdError::BadInput("No Name found in invitation!".into()))?;
-
     if !check_id(name) {
         return Err(CmdError::BadInput(
             "Invalid Name found in invitation!".into(),
         ));
     }
-    let name = name.to_owned();
+    Ok(name.to_owned())
+}
 
-    // ─── NetName: ignored
-    // Upstream: if no `-n` was given, grep blob for `NetName`, set
-    // the global, then re-derive paths. We don't do dynamic path
-    // re-derivation (Paths is immutable, by design). The caller
-    // already picked confbase via `-c` or `-n`. If the blob's
-    // `NetName` disagrees with what they picked, the join succeeds
-    // anyway — the netname is just a directory name, not a wire
-    // concept. The upstream loop is for "I didn't pick a netname,
-    // use the one from the invite"; we say "pick one".
-    //
-    // The `NetName` line in chunk 1 is *recognized* (not "unknown
-    // variable") and dropped.
-
-    // ─── Check tinc.conf doesn't exist
-    // The join_XXXXXXXX random-netname dance is here upstream; we
-    // just bail.
+/// Bail if `tinc.conf` already exists.
+///
+/// Upstream does the `join_XXXXXXXX` random-netname dance here; we
+/// just bail. `NetName` from the blob is silently ignored — unlike
+/// upstream we don't re-derive `Paths` mid-flight (the caller already
+/// picked confbase via `-c` or `-n`).
+fn ensure_fresh_confbase(paths: &Paths) -> Result<(), CmdError> {
     let tinc_conf = paths.tinc_conf();
     if tinc_conf.exists() {
         return Err(CmdError::BadInput(format!(
@@ -133,53 +203,46 @@ fn finalize_join_inner(
             tinc_conf.display()
         )));
     }
+    Ok(())
+}
 
-    // ─── makedirs(DIR_HOSTS | DIR_CONFBASE | DIR_CACHE)
-    // Same mode 0755 as init.
+/// `makedirs(DIR_HOSTS | DIR_CONFBASE | DIR_CACHE)`. Mode 0755, same
+/// as `init`.
+fn makedirs(paths: &Paths) -> Result<(), CmdError> {
     if let Some(confdir) = &paths.confdir {
         makedir(confdir, 0o755)?;
     }
     makedir(&paths.confbase, 0o755)?;
     makedir(&paths.hosts_dir(), 0o755)?;
     makedir(&paths.cache_dir(), 0o755)?;
+    Ok(())
+}
 
-    // ─── Open three output files
-    // tinc.conf, hosts/NAME, invitation-data (raw blob for
-    // debugging). Upstream also opens `tinc-up.invitation` for
-    // `ifconfig_*`; we write a placeholder later, no streaming build.
-    //
-    // Keep `fh` (hosts/NAME) open across the chunk-1 loop AND the
-    // keygen step — the pubkey goes in *after* the chunk-1 vars,
-    // matching upstream's write order. Close `f` (tinc.conf) right
-    // after chunk 1.
-    let mut f = create_nofollow(&tinc_conf)?;
-    created.push(tinc_conf.clone());
-    // FIRST line of tinc.conf. Everything else is appended below.
-    writeln!(f, "Name = {name}").map_err(io_err(&tinc_conf))?;
-
-    let host_file = paths.host_file(&name);
-    let mut fh = create_nofollow(&host_file)?;
-    created.push(host_file.clone());
-
-    // `invitation-data` — the raw blob, for debugging "what did the
-    // daemon send?". Write the whole thing now; nothing reads it
-    // programmatically.
-    let inv_data_path = paths.confbase.join("invitation-data");
-    fs::write(&inv_data_path, data).map_err(io_err(&inv_data_path))?;
-    created.push(inv_data_path);
-
-    // ─── Chunk 1: filter through variables[]
+/// Walk chunk 1 (our own bootstrap config), routing each filtered
+/// var into tinc.conf or hosts/NAME. Stops at EOF or the next
+/// `Name = X` line, returning that boundary so chunk-2+ can pick up.
+///
+/// The boundary's `&str` borrows from the same `data` that backs
+/// `lines`, so the lifetime threads cleanly back to the caller.
+fn write_chunk1<'a>(
+    lines: &mut std::str::Lines<'a>,
+    files: &mut OpenFiles,
+    name: &str,
+    force: bool,
+) -> Result<Option<(&'a str, &'a str)>, CmdError> {
     // The hand-rolled tokenizer again (sixth instance). We use
     // `vars::lookup`.
     //
-    // The loop semantics are subtle. Upstream walks until `Name = X`
-    // where X != name (chunk boundary), `break`. Then the next loop
-    // picks up *with l still set to that Name line*. We replicate by
-    // tracking the current line across the chunk-1/chunk-2 boundary
-    // via `lines.by_ref()` — chunk 1 loop pushes the boundary line
-    // back by storing it.
-    let mut boundary: Option<(&str, &str)> = None; // (name_of_next_chunk, value)
+    // Loop semantics: upstream walks until `Name = X` where X !=
+    // name (chunk boundary), `break`. Then the next loop picks up
+    // *with l still set to that Name line*. We replicate by tracking
+    // the boundary line in the returned Option.
+    let mut boundary: Option<(&'a str, &'a str)> = None;
 
+    let f = files
+        .f
+        .as_mut()
+        .expect("tinc.conf handle open during chunk 1");
     for line in lines.by_ref() {
         // Skip comments. The separator line `#---...---#` starts
         // with `#` and is correctly skipped.
@@ -205,7 +268,7 @@ fn finalize_join_inner(
             break;
         }
 
-        // Recognized, dropped. See comment above.
+        // NetName: recognized (not "unknown variable") and dropped.
         if key.eq_ignore_ascii_case("NetName") {
             continue;
         }
@@ -243,37 +306,43 @@ fn finalize_join_inner(
         // goes to our host file (it's our subnet).
         //
         // We write `var.name` (canonical case from the table), not
-        // `key` (what the inviter wrote). Upstream writes the
-        // original case. We canonicalize. The daemon's config reader
+        // `key` (what the inviter wrote). The daemon's config reader
         // is case-insensitive so this doesn't change behavior; it
         // just normalizes the output. Same canonicalization as
         // `cmd_set` will do.
         let target = if var.flags.contains(VarFlags::HOST) {
-            &mut fh
+            &mut files.fh
         } else {
-            &mut f
+            &mut *f
         };
-        writeln!(target, "{} = {}", var.name, val).map_err(io_err(&tinc_conf))?;
+        writeln!(target, "{} = {}", var.name, val).map_err(io_err(&files.tinc_conf_path))?;
     }
 
-    // tinc.conf done. Close before the chunk-2 loop opens more files.
-    drop(f);
+    Ok(boundary)
+}
 
-    // ─── Chunk 2+: host files, unfiltered
-    // Each chunk is `Name = X\n` then verbatim lines until the next
-    // `Name = X` or EOF. The separator `#--...--#` is recognized and
-    // dropped.
-    //
-    // "Unfiltered" means no `variables[]` check. The host file is
-    // a *peer's* config; you don't filter what a peer publishes
-    // about themselves. (You DO filter what they tell you about
-    // YOUR config — that's chunk 1.)
-    //
+/// Walk chunks 2+ (peer host files, verbatim). Each chunk is
+/// `Name = X\n` then lines until the next `Name = X` or EOF.
+/// Returns the names of host files written, in order.
+///
+/// "Unfiltered" means no `variables[]` check — the host file is a
+/// *peer's* config; you don't filter what a peer publishes about
+/// themselves. (You DO filter what they tell you about YOUR config
+/// — that's chunk 1.) The exception is [`CHUNK2_DROP_KEYS`], the
+/// path/exec keys that would let a malicious peer entry pivot to
+/// code execution on our box.
+fn write_host_chunks<'a>(
+    lines: &mut std::str::Lines<'a>,
+    paths: &Paths,
+    name: &str,
+    mut boundary: Option<(&'a str, &'a str)>,
+    created: &mut Vec<PathBuf>,
+) -> Result<Vec<String>, CmdError> {
+    let mut hosts_written = Vec::new();
+
     // Loop structure: outer `while(l && Name)` { open file; inner
     // `while(get_line)` until next Name; close }. `l` carries across
     // iterations. We do the same with `boundary` carrying.
-    let mut hosts_written = Vec::new();
-
     while let Some((_, host_name)) = boundary.take() {
         if !check_id(host_name) {
             return Err(CmdError::BadInput(
@@ -283,7 +352,7 @@ fn finalize_join_inner(
         // Secondary chunk with our own name would clobber the
         // hosts/NAME we just opened. Case-insensitive: `hosts/Bob`
         // and `hosts/bob` are the same inode on case-folding FS.
-        if host_name.eq_ignore_ascii_case(&name) {
+        if host_name.eq_ignore_ascii_case(name) {
             return Err(CmdError::BadInput(
                 "Secondary chunk would overwrite our own host config file.".into(),
             ));
@@ -334,33 +403,29 @@ fn finalize_join_inner(
         }
     }
 
-    // ─── Generate our real node key
-    // Same as `init`: PEM private key at 0600, b64 pubkey as config
-    // line in hosts/NAME. The pubkey goes back over SPTPS so the
-    // daemon writes our hosts entry on its end.
+    Ok(hosts_written)
+}
+
+/// Generate the real Ed25519 node key.
+///
+/// Same as `init`: PEM private key at 0600, b64 pubkey appended to
+/// hosts/NAME *after* the chunk-1 HOST vars (matching upstream's
+/// write order). The returned pubkey goes back over SPTPS so the
+/// daemon writes our hosts entry on its end.
+fn generate_node_key(
+    paths: &Paths,
+    files: &mut OpenFiles,
+    created: &mut Vec<PathBuf>,
+) -> Result<String, CmdError> {
     let sk = keypair::generate();
     let pubkey_b64 = b64::encode(sk.public_key());
 
-    {
-        let priv_path = paths.ed25519_private();
-        crate::cmd::write_private_key(&priv_path, &sk, OpenKind::CreateExcl)?;
-        created.push(priv_path);
-    }
+    let priv_path = paths.ed25519_private();
+    crate::cmd::write_private_key(&priv_path, &sk, OpenKind::CreateExcl)?;
+    created.push(priv_path);
 
-    // Appended *after* whatever chunk-1 HOST vars went in.
-    writeln!(fh, "Ed25519PublicKey = {pubkey_b64}").map_err(io_err(&host_file))?;
-    drop(fh);
-
-    // ─── Write tinc-up placeholder (shared with `init`)
-    if let Some(p) = crate::cmd::init::write_tinc_up_placeholder(paths)? {
-        created.push(p);
-    }
-
-    Ok(JoinResult {
-        name,
-        pubkey_b64,
-        hosts_written,
-    })
+    writeln!(files.fh, "Ed25519PublicKey = {pubkey_b64}").map_err(io_err(&files.host_file_path))?;
+    Ok(pubkey_b64)
 }
 
 /// Parse the `Name = X` line specifically.
