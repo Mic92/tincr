@@ -432,7 +432,21 @@ pub(crate) fn handle_id(
         return id_invitation(conn, throwaway_b64, ctx, rng);
     }
 
-    // ─── BRANCH 3: bare name — peer (`:375-471`, legacy/bypass stripped)
+    id_peer(conn, name_tok, major, minor, ctx, rng)
+}
+
+/// `id_h` `:375-471` — bare-name peer branch (legacy/bypass stripped).
+/// Extracted from `handle_id` to mirror [`id_control`]/[`id_invitation`]:
+/// the three sigil branches share only the `(major, minor)` parse, so
+/// each lives in its own function and `handle_id` is a sigil match.
+fn id_peer(
+    conn: &mut Connection,
+    name_tok: &[u8],
+    major: u8,
+    minor: u8,
+    ctx: &IdCtx<'_>,
+    rng: &mut (impl RngCore + rand_core::CryptoRng),
+) -> Result<IdOk, DispatchError> {
     let name = std::str::from_utf8(name_tok)
         .ok()
         .filter(|s| check_id(s))
