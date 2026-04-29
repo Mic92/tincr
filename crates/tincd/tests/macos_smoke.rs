@@ -20,7 +20,7 @@
 
 #[path = "common/mod.rs"]
 #[macro_use]
-pub mod common;
+mod common;
 
 use common::*;
 use std::process::{Command, Stdio};

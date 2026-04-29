@@ -3,7 +3,7 @@
 //! is attacker plaintext. Pin the rejection boundary and that the
 //! largest real handshake record (hybrid KEX) still passes.
 
-pub mod common;
+mod common;
 
 use common::{SeedRng, feed_stream_try, keypair, wire, wire_only};
 use tinc_sptps::{

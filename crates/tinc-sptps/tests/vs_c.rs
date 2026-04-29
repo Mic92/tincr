@@ -35,7 +35,7 @@
 //! a raw stream. The underlying `chacha20::ChaCha20Legacy` *is* the right
 //! primitive though. Build a tiny `RngCore` over it.
 
-pub mod common;
+mod common;
 
 use common::NoRng;
 use rand_core::{CryptoRng, RngCore};

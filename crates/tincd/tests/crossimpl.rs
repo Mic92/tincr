@@ -88,7 +88,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 #[macro_use]
-pub mod common;
+mod common;
 use common::ChildWithLog;
 use common::linux::{run_ip, wait_for_carrier};
 use common::{

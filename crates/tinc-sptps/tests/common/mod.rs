@@ -2,6 +2,8 @@
 //! each `tests/*.rs` as a separate crate, so this lives in a directory
 //! and gets `mod common;`-ed into each.
 
+#![allow(dead_code)]
+
 use rand_core::{CryptoRng, RngCore};
 use tinc_crypto::sign::SigningKey;
 use tinc_sptps::{Framing, Output, Role, Sptps, SptpsAead, SptpsLabel};

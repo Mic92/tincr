@@ -36,7 +36,7 @@ use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 #[macro_use]
-pub mod common;
+mod common;
 use common::{
     alloc_port, drain_stderr, pubkey_from_seed, tincd_at, wait_for_file_with as wait_for_file,
     write_ed25519_privkey,

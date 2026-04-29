@@ -2,7 +2,7 @@
 
 #[path = "../common/mod.rs"]
 #[macro_use]
-pub mod common;
+mod common;
 
 mod gossip_edges;
 

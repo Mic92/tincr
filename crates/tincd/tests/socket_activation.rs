@@ -18,7 +18,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 #[macro_use]
-pub mod common;
+mod common;
 use common::{alloc_port, tincd_bin, wait_for_file, write_ed25519_privkey};
 
 /// Find `systemd-socket-activate` in PATH and verify it supports

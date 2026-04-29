@@ -11,7 +11,7 @@
 
 #[path = "common/mod.rs"]
 #[macro_use]
-pub mod common;
+mod common;
 
 use std::process::Stdio;
 use std::time::{Duration, Instant};

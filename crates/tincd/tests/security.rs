@@ -41,7 +41,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 #[macro_use]
-pub mod common;
+mod common;
 use common::{
     Ctl, PeerFixture, TmpGuard, drain_stderr, pubkey_from_seed, read_cookie, read_tcp_addr,
     tincd_at, wait_for_file, write_ed25519_privkey,

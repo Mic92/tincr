@@ -6,7 +6,7 @@ use std::process::{Child, Stdio};
 use std::time::Duration;
 
 #[macro_use]
-pub mod common;
+mod common;
 use common::{drain_stderr, read_cookie, tincd_at, wait_for_file};
 
 fn write_min_config(confbase: &std::path::Path) {

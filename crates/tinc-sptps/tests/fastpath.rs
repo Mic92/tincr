@@ -2,7 +2,7 @@
 //! (`seal_data_into` / `open_data_into`). Unlike `vs_c.rs` these don't
 //! need the C harness, so they always run.
 
-pub mod common;
+mod common;
 
 use common::{REPLAYWIN, SeedRng, handshake_pair, keypair};
 use tinc_sptps::{Framing, Role, Sptps, SptpsError};

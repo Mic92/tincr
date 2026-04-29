@@ -6,7 +6,7 @@
 //! `expect` on `None`). The test forges the bytes directly since
 //! `handshake_pair` can't inject a small-order point.
 
-pub mod common;
+mod common;
 
 use common::{SeedRng, keypair};
 use tinc_crypto::sign::{SIG_LEN, SigningKey};

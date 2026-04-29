@@ -3,6 +3,8 @@
 //! `measure` stay per-platform (netns re-exec vs host-route swap vs
 //! `perf`/`sample` don't share control flow).
 
+#![allow(dead_code)] // each bench uses a subset
+
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 

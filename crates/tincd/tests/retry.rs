@@ -20,7 +20,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 #[macro_use]
-pub mod common;
+mod common;
 use common::{
     ChildWithLog, Ctl, alloc_port, drain_stderr, read_cookie, tincd_at, wait_for_file,
     write_ed25519_privkey,
