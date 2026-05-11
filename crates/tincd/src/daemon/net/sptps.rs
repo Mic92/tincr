@@ -720,8 +720,6 @@ impl Daemon {
                 at_len,
             );
         } else if super::helpers::is_udp_unreachable_errno(&e) {
-            // Routing event (e.g. peer's v6 addr but no v6 default
-            // route). Clear cached addr + log at most once/min.
             // node_log_name borrows self; clone for the helper.
             let relay_name = self.node_log_name(relay_nid).to_owned();
             super::helpers::handle_udp_unreachable(

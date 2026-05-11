@@ -346,9 +346,7 @@ impl Daemon {
                 // outcome as the per-frame path, just `count×`.
                 super::helpers::handle_udp_emsgsize(tunnels, graph, relay_nid, origlen);
             } else if super::helpers::is_udp_unreachable_errno(&e) {
-                // Routing event on the batched path. Same handling
-                // as the immediate path; frames in this batch are
-                // lost, inner-TCP retransmits.
+
                 let relay_name = graph
                     .node(relay_nid)
                     .map_or("<gone>", |n| n.name.as_str())
