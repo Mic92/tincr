@@ -47,7 +47,8 @@ let
           address4 = "10.21.0.53";
         };
         openFirewall = false;
-      } // extraNet;
+      }
+      // extraNet;
 
       # The module declares Ed25519PrivateKeyFile but does not own
       # the bytes (stateful by design); supply them inline. tincd

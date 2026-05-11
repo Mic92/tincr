@@ -281,8 +281,7 @@ fn discover_paths(level: Level, paths: &Paths) -> SandboxPaths {
         rwc.push(dev.clone());
     }
 
-    let mut runtime_files: Vec<PathBuf> =
-        vec![paths.pidfile.clone(), paths.unixsocket.clone()];
+    let mut runtime_files: Vec<PathBuf> = vec![paths.pidfile.clone(), paths.unixsocket.clone()];
     let has_logfile = paths.logfile.is_some();
     if let Some(lf) = &paths.logfile {
         runtime_files.push(lf.clone());
@@ -355,8 +354,8 @@ fn build_and_apply_ruleset(p: SandboxPaths, level: Level) -> Result<(), String> 
     // /dev/* entries (the tun device) are char devices, not dirs;
     // skip them. Everything else in `rwc` is a directory we want
     // to ensure exists (addrcache, invitations, $STATE_DIRECTORY).
-    let dirs_to_create = std::iter::once(&p.hosts)
-        .chain(p.rwc.iter().filter(|d| !d.starts_with("/dev/")));
+    let dirs_to_create =
+        std::iter::once(&p.hosts).chain(p.rwc.iter().filter(|d| !d.starts_with("/dev/")));
     for d in dirs_to_create {
         if let Err(e) = std::fs::create_dir_all(d) {
             // Non-fatal: hosts/ existing is required by setup()
@@ -518,7 +517,10 @@ mod tests {
         assert!(p.rwc.contains(&PathBuf::from("/dev/net/tun")));
         assert_eq!(p.runtime_files.len(), 3);
         assert!(p.has_logfile);
-        assert_eq!(p.unlink_parents, vec![PathBuf::from("/run"), PathBuf::from("/run")]);
+        assert_eq!(
+            p.unlink_parents,
+            vec![PathBuf::from("/run"), PathBuf::from("/run")]
+        );
         assert_eq!(p.random, vec!["/dev/random", "/dev/urandom"]);
     }
 

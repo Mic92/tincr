@@ -215,19 +215,6 @@ impl Daemon {
             self.edge_addrs.remove(&rev);
         }
 
-        // If the deleted edge disconnected `to` from the mesh, GC it
-        // now. Without this, a node that disconnects and has its
-        // edges gossiped away stays in `graph` forever - the only
-        // other purge triggers are REQ_PURGE (operator-manual) and
-        // the contradiction storm (rare). Our slotmap walks are
-        // O(slots) for `dump_nodes`/`send_everything`. The check is
-        // cheap (one `reachable` read); the actual purge runs only on
-        // the unreachability transition.
-        if !self.graph.node(to_id).is_some_and(|n| n.reachable) {
-            let nw_purge = self.purge();
-            return Ok(nw | nw_purge);
-        }
-
         Ok(nw)
     }
 }

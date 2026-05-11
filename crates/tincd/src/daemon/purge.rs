@@ -48,10 +48,12 @@ use tinc_proto::{Request, Subnet};
 impl Daemon {
     /// See module doc.
     ///
-    /// Called from:
-    /// - `REQ_PURGE` ctl arm
-    /// - `on_del_edge` after a `DEL_EDGE` makes `to` unreachable —
-    ///   see `gossip.rs` callsite comment.
+    /// Called from the `REQ_PURGE` ctl arm only. Previously also
+    /// called from `on_del_edge` after a `DEL_EDGE` made `to`
+    /// unreachable, but that caused a contradiction storm in mixed
+    /// meshes (issue #4): pass 1 broadcast `DEL_EDGE` for valid
+    /// edges of transiently-unreachable nodes, owning nodes
+    /// contradicted, and the cycle repeated.
     ///
     /// Returns `needs_write` from the gossip broadcasts (pass 1) so
     /// the metaconn arm can `maybe_set_write_any` once.

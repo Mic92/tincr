@@ -262,7 +262,8 @@ let
       ConfigureWithoutCarrier = true;
       LinkLocalAddressing = "no";
       IPv6AcceptRA = false;
-    } // optionalAttrs net.dns.enable {
+    }
+    // optionalAttrs net.dns.enable {
       DNS =
         optional (net.dns.address4 != null) net.dns.address4
         ++ optional (net.dns.address6 != null) net.dns.address6;

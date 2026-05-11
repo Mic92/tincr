@@ -3,11 +3,13 @@ use std::time::Duration;
 use super::common::*;
 use super::node::*;
 
-/// `purge()` via `REQ_PURGE`.
+/// `purge()` via explicit `REQ_PURGE`.
 ///
 /// Three daemons in a chain: alice — mid — bob. Kill bob; mid's
 /// `terminate()` deletes the mid↔bob edges and gossips `DEL_EDGE` to
 /// alice. Alice's `on_del_edge` runs `graph()` → bob unreachable.
+/// Bob stays in the node list (no auto-purge — removed to fix
+/// issue #4 oscillation storm).
 ///
 /// Then send `REQ_PURGE` to alice. Pass 1 deletes bob's outgoing
 /// edges (none — alice never had a bob→* edge, only mid→bob),
@@ -18,14 +20,8 @@ use super::node::*;
 /// Why three daemons, not two: with two, killing alice's only peer
 /// also kills the only meta-connection that `DEL_EDGE` could arrive
 /// on. The `terminate()` path on the SURVIVING daemon's side does
-/// the local `del_edge` directly (`connect.rs::terminate`), which doesn't
-/// touch `on_del_edge` and so doesn't trigger our purge-on-del-edge
-/// hook. `REQ_PURGE` works either way, but the `on_del_edge` hook (the
-/// memory-growth fix) needs gossip to actually propagate.
-///
-/// We test BOTH triggers: alice's `on_del_edge` should auto-purge
-/// bob (the `gossip.rs` hook); we then verify with `REQ_PURGE` that
-/// the ctl arm replies `"18 8 0"` and is idempotent (already gone).
+/// the local `del_edge` directly (`connect.rs::terminate`), which
+/// doesn't touch `on_del_edge`.
 #[test]
 fn purge_removes_unreachable_node() {
     use std::io::{BufRead, Write};
@@ -72,42 +68,47 @@ fn purge_removes_unreachable_node() {
         (nodes.len() == 3 && bob_reachable).then_some(())
     });
 
-    // ─── kill bob → mid gossips DEL_EDGE → alice purges ────────
-    // mid's `terminate()` (`connect.rs`) sends DEL_EDGE for
-    // mid→bob and bob→mid to alice. Alice's `on_del_edge` for the
-    // mid→bob direction: deletes the edge, runs graph() → bob
-    // unreachable, then our hook calls `purge()`. Pass 2 fires:
-    // no edge points to bob anymore (both directions gone),
-    // !autoconnect, !strictsubnets → node_del.
+    // ─── kill bob → mid gossips DEL_EDGE ─────────────────────
+    // mid's `terminate()` sends DEL_EDGE for mid→bob and
+    // bob→mid to alice. Alice's `on_del_edge` runs graph() →
+    // bob unreachable. No auto-purge (removed to fix issue #4
+    // oscillation storm). Bob stays in the node list as
+    // unreachable until explicit REQ_PURGE.
     let _ = bob_child.kill();
     let _ = bob_child.wait();
 
-    // alice's view: bob GONE (not just unreachable). 2 rows.
-    // EOF on the meta socket is immediate (SIGKILL → kernel sends
-    // RST/FIN); mid's `terminate()` runs synchronously, broadcasts
-    // DEL_EDGE, the `maybe_set_write_any` we added flushes it. One
-    // loopback round trip.
+    // Wait for bob to become unreachable on alice.
     poll_until(Duration::from_secs(10), || {
         let nodes = alice_ctl.dump(3);
-        let bob_row = nodes.iter().any(|r| {
-            r.strip_prefix("18 3 ")
-                .and_then(|b| b.split_whitespace().next())
-                == Some("bob")
-        });
-        (nodes.len() == 2 && !bob_row).then_some(())
+        node_status(&nodes, "bob")
+            .is_some_and(|s| s & 0x10 == 0)
+            .then_some(())
     });
 
-    // ─── REQ_PURGE: ack `"18 8 0"`, idempotent ───────────────────
-    // `control_ok(c, REQ_PURGE)` → `"18 8 0\n"`. bob is already
-    // gone (auto-purge above); this proves the ctl arm is wired up
-    // and handles the empty-purge case (
-    // both `splay_each` loops just iterate zero unreachable nodes).
+    // ─── REQ_PURGE: bob deleted ────────────────────────────
+    // Without auto-purge, bob is unreachable but still in the
+    // node list. Explicit REQ_PURGE deletes him: pass 1 gossips
+    // DEL_EDGE/DEL_SUBNET (nothing for bob — no outgoing edges),
+    // pass 2 sees no edge to bob, !autoconnect, !strictsubnets
+    // → node_del. dump_nodes goes from 3 rows to 2.
     writeln!(alice_ctl.w, "18 8").unwrap();
     let mut ack = String::new();
     alice_ctl.r.read_line(&mut ack).expect("purge ack");
     assert_eq!(ack.trim_end(), "18 8 0", "REQ_PURGE control_ok reply");
 
-    // Still 2 rows; alice and mid both reachable.
+    let nodes = alice_ctl.dump(3);
+    assert_eq!(
+        nodes.len(),
+        2,
+        "bob should be gone after REQ_PURGE: {nodes:?}"
+    );
+
+    // ─── REQ_PURGE again: idempotent ───────────────────────
+    writeln!(alice_ctl.w, "18 8").unwrap();
+    let mut ack2 = String::new();
+    alice_ctl.r.read_line(&mut ack2).expect("purge ack 2");
+    assert_eq!(ack2.trim_end(), "18 8 0", "idempotent REQ_PURGE");
+
     let nodes = alice_ctl.dump(3);
     assert_eq!(nodes.len(), 2, "idempotent: {nodes:?}");
     assert!(
