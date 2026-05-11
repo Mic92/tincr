@@ -114,7 +114,13 @@ fn setup(name: &str) -> ConfDir {
 /// Tests that need `Get`/`Add`/explicit node/etc spell those out
 /// against this base via struct-update syntax.
 fn cmd<'a>(action: Action, var: &'a str, value: &'a str) -> ConfigCmd<'a> {
-    ConfigCmd { action, node: None, var, value, force: false }
+    ConfigCmd {
+        action,
+        node: None,
+        var,
+        value,
+        force: false,
+    }
 }
 
 /// Routing + canonicalization table: which file does this var go to?
@@ -140,7 +146,10 @@ fn intent_routing() {
     for &(action, explicit, var, val, expect_node, expect_var) in cases {
         let (intent, _) = build_intent(
             &paths,
-            &ConfigCmd { node: explicit, ..cmd(action, var, val) },
+            &ConfigCmd {
+                node: explicit,
+                ..cmd(action, var, val)
+            },
         )
         .unwrap();
         assert_eq!(intent.node.as_deref(), expect_node, "var: {var:?}");
@@ -166,8 +175,7 @@ fn intent_dual_tagged_goes_to_tinc_conf() {
     assert!(v.flags.contains(VarFlags::SERVER));
     assert!(v.flags.contains(VarFlags::HOST));
 
-    let (intent, _) =
-        build_intent(&paths, &cmd(Action::Set, "Cipher", "aes-256-gcm")).unwrap();
+    let (intent, _) = build_intent(&paths, &cmd(Action::Set, "Cipher", "aes-256-gcm")).unwrap();
     // SERVER bit set → tinc.conf, even though HOST is also set.
     assert_eq!(intent.node, None);
 }
@@ -243,7 +251,10 @@ fn intent_errors() {
     for &(action, explicit, var, val, msg) in cases {
         let e = build_intent(
             &paths,
-            &ConfigCmd { node: explicit, ..cmd(action, var, val) },
+            &ConfigCmd {
+                node: explicit,
+                ..cmd(action, var, val)
+            },
         )
         .unwrap_err();
         let CmdError::BadInput(m) = e else {
@@ -264,7 +275,10 @@ fn intent_unknown_var_force_proceeds() {
     let paths = cd.paths().clone();
     let (intent, warns) = build_intent(
         &paths,
-        &ConfigCmd { force: true, ..cmd(Action::Set, "NoSuchVar", "x") },
+        &ConfigCmd {
+            force: true,
+            ..cmd(Action::Set, "NoSuchVar", "x")
+        },
     )
     .unwrap();
     assert_eq!(intent.variable, "NoSuchVar"); // user's casing survives
