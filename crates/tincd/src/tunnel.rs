@@ -129,14 +129,9 @@ pub(crate) struct TunnelState {
     /// `n->udp_reply_sent`. `try_udp` keepalive gate.
     pub udp_reply_sent: Option<Instant>,
 
-    /// Rust-only. When the last `sendmsg` to this peer's `udp_addr`
-    /// failed with a "destination not locally routable" errno
-    /// (`ENETUNREACH`/`EHOSTUNREACH`/`EADDRNOTAVAIL`/`EAFNOSUPPORT`).
-    /// Used by [`crate::daemon::net::helpers::handle_udp_unreachable`]
-    /// to (a) rate-limit the warn log to once per minute per peer
-    /// and (b) gate `choose_udp_address`'s reflexive arm: while a
-    /// recent failure is in effect, prefer the cold edge-walk so we
-    /// don't keep retrying the same broken stashed address.
+    /// Last "destination unreachable" timestamp for this peer's UDP
+    /// path. Used to rate-limit warnings and deprioritise the
+    /// reflexive arm in `choose_udp_address`.
     pub udp_send_failed_at: Option<Instant>,
 
     /// `n->udp_info_sent`. `send_udp_info` debounce. Only when WE
