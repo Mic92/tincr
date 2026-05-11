@@ -2,10 +2,13 @@ use super::super::Daemon;
 use super::DEVICE_DRAIN_CAP;
 
 use std::io;
+use std::sync::Arc;
+use std::time::Instant;
 
 use crate::tunnel::TunnelState;
 
 use crate::graph::NodeId;
+use crate::shard::TunnelHandles;
 
 impl Daemon {
     /// Drain loop. LT epoll re-fires next turn if we leave bytes
@@ -292,6 +295,8 @@ impl Daemon {
             &mut self.listeners,
             &mut self.dp.tunnels,
             &self.graph,
+            &self.tunnel_handles,
+            self.timers.now(),
         );
     }
 
@@ -306,6 +311,8 @@ impl Daemon {
         listeners: &mut [super::ListenerSlot],
         tunnels: &mut crate::inthash::IntHashMap<NodeId, TunnelState>,
         graph: &crate::graph::Graph,
+        tunnel_handles: &crate::inthash::IntHashMap<NodeId, Arc<TunnelHandles>>,
+        now: Instant,
     ) {
         let Some((b, sock, relay_nid, origlen)) = batch.take() else {
             return;
@@ -338,6 +345,22 @@ impl Daemon {
                 // lost (kernel rejected the whole sendmsg) — same
                 // outcome as the per-frame path, just `count×`.
                 super::helpers::handle_udp_emsgsize(tunnels, graph, relay_nid, origlen);
+            } else if super::helpers::is_udp_unreachable_errno(&e) {
+                // Routing event on the batched path. Same handling
+                // as the immediate path; frames in this batch are
+                // lost, inner-TCP retransmits.
+                let relay_name = graph
+                    .node(relay_nid)
+                    .map_or("<gone>", |n| n.name.as_str())
+                    .to_owned();
+                super::helpers::handle_udp_unreachable(
+                    tunnels,
+                    tunnel_handles,
+                    relay_nid,
+                    &relay_name,
+                    &e,
+                    now,
+                );
             } else {
                 let relay_name = graph.node(relay_nid).map_or("<gone>", |n| n.name.as_str());
                 log::warn!(target: "tincd::net",
