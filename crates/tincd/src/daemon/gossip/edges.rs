@@ -6,7 +6,6 @@ use crate::daemon::{ConnId, Daemon};
 use crate::dispatch::{DispatchError, parse_add_edge, parse_del_edge};
 
 use tinc_proto::AddrStr;
-use tinc_proto::msg::DelEdge;
 
 impl Daemon {
     /// Edge exists with different params ⇒ update in place (`Graph::`
@@ -180,7 +179,7 @@ impl Daemon {
             return Ok(nw);
         }
 
-        let mut nw = if self.settings.tunnelserver {
+        let nw = if self.settings.tunnelserver {
             false
         } else {
             self.forward_request(from_conn, body)
@@ -191,26 +190,15 @@ impl Daemon {
 
         self.run_graph_and_log();
 
-        // If `to` became unreachable AND has edge back to us (the
-        // synthesized reverse from on_ack), delete + broadcast.
+        // If `to` became unreachable and we still hold a synthesized
+        // reverse edge `to → myself` (from on_ack), drop it locally
+        // but do NOT broadcast DEL_EDGE for it. That edge is owned by
+        // `to`; broadcasting our local SSSP observation on its behalf
+        // makes every receiver do the same, cascading (issue #8). If
+        // `to` is really dead, its meta-peers send first-party DELs.
         if !self.graph.node(to_id).is_some_and(|n| n.reachable)
             && let Some(rev) = self.graph.lookup_edge(to_id, self.myself)
         {
-            if !self.settings.tunnelserver {
-                let line = DelEdge {
-                    from: edge.to,
-                    to: self.name.clone(),
-                }
-                .format(Self::nonce());
-                // `97ef5af0` bug class: this DEL_EDGE was queued but
-                // never armed WRITE. `purge()` below CAN cover it (same
-                // conns, broadcast = all active) - but only if purge has
-                // anything to broadcast. After `del_edge(rev)` below,
-                // `to` has zero outgoing edges; if it also owns no
-                // subnets, purge pass-1 emits nothing, `nw_purge=false`,
-                // and this line sits for up to pinginterval. OR it in.
-                nw |= self.broadcast_line(&line);
-            }
             self.graph.del_edge(rev);
             self.edge_addrs.remove(&rev);
         }
