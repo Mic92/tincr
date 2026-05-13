@@ -335,6 +335,28 @@ mod tests {
     }
 
     #[test]
+    fn req_key_punch_roundtrip() {
+        // PUNCH (reqno 64) carries a `,`-separated addrlist as the
+        // payload. Wire-shape identical to a SPTPS init's b64 payload
+        // (`%s`) — a legacy peer parses it, hits the unknown-reqno
+        // `default:` arm, and ignores it.
+        let line = "15 alice bob 64 1.2.3.4_655,2001:db8::1_655";
+        let m = ReqKey::parse(line).unwrap();
+        let ext = m.ext.as_ref().unwrap();
+        assert_eq!(ext.reqno, crate::request::REQ_KEY_PUNCH);
+        assert_eq!(ext.payload.as_deref(), Some("1.2.3.4_655,2001:db8::1_655"));
+        assert_eq!(m.format(), line);
+
+        // PUNCH_SYNC (reqno 65) has no payload.
+        let line = "15 alice bob 65";
+        let m = ReqKey::parse(line).unwrap();
+        let ext = m.ext.as_ref().unwrap();
+        assert_eq!(ext.reqno, crate::request::REQ_KEY_PUNCH_SYNC);
+        assert!(ext.payload.is_none());
+        assert_eq!(m.format(), line);
+    }
+
+    #[test]
     fn req_key_unknown_reqno() {
         // req_key_ext_h has a `default:` that logs and returns true.
         // Unknown reqno is *not* a parse error.

@@ -713,6 +713,7 @@ impl Daemon {
         // GC stale backoff entries so the map doesn't grow unbounded
         // on a long-lived daemon with churning shortcut targets.
         self.shortcut_backoff.retain(|_, &mut t| t > now);
+        self.sweep_punches();
 
         let mut names: Vec<&str> = self.node_ids.keys().map(String::as_str).collect();
         names.sort_unstable();

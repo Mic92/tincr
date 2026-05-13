@@ -49,6 +49,7 @@ mod platform;
 mod pmtu;
 #[cfg(feature = "upnp")]
 mod portmap;
+mod punch;
 mod reload;
 mod route_decide;
 mod route_mac;

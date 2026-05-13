@@ -37,6 +37,7 @@ mod metaconn;
 mod net;
 pub use net::MAX_PENDING_META;
 mod periodic;
+mod punch;
 mod purge;
 mod settings;
 mod setup;
@@ -140,6 +141,8 @@ pub enum TimerWhat {
     /// from the event loop (NOT a side thread) so a wedged loop
     /// stops pinging and systemd actually restarts us.
     Watchdog,
+    /// One-shot: fire the sim-open dial for a `Delaying` punch.
+    Punch(NodeId),
 }
 
 /// TERM/QUIT/INT all map to Exit.
@@ -427,6 +430,15 @@ pub struct Daemon {
     /// resolve an address) and by the cold-start pre-resolve in
     /// `spawn_dht_discovery`.
     pub(crate) has_dht_key: HashSet<String>,
+
+    /// In-flight sim-open punches by peer. One per peer max.
+    /// Cleared on dial / expiry / peer connecting another way.
+    pub(crate) punches: HashMap<NodeId, crate::punch::PunchState>,
+    /// One-shot dial timers for `PunchState::Delaying`.
+    pub(crate) punch_timers: HashMap<NodeId, TimerId>,
+    /// Pre-bound ephemeral sockets per inflight punch (≤2: v4 + v6).
+    /// Bound before `PUNCH` so the port is known; consumed at dial.
+    pub(crate) punch_socks: HashMap<NodeId, Vec<crate::outgoing::PunchSock>>,
 
     /// Per-node "don't re-add as a shortcut before" stamp. Set in
     /// `execute_auto_action` on `Disconnect{AutoShortcut}` and
@@ -721,6 +733,9 @@ impl Daemon {
                         if let Some((tid, iv)) = self.watchdog {
                             self.timers.set(tid, iv);
                         }
+                    }
+                    TimerWhat::Punch(nid) => {
+                        self.on_punch_timer(nid);
                     }
                 }
             }

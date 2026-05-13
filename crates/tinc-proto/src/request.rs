@@ -138,6 +138,21 @@ impl fmt::Display for Request {
 pub const PROT_MAJOR: u8 = 17;
 pub const PROT_MINOR: u8 = 7;
 
+/// `REQ_KEY` extension sub-type for DCUtR-style coordinated
+/// simultaneous-open (`docs/design/dcutr-tcp-simopen.md`). NOT a
+/// `Request` variant: it only ever appears as the fourth field of a
+/// `REQ_KEY` line (`reqno`), where C tinc's `req_key_ext_h` has a
+/// `default:` that logs+ignores unknown values. Keeping it out of the
+/// `Request` enum makes that one-sidedness explicit.
+///
+/// Picked 64/65, not 24/25, to leave a wide gap above C's `LAST = 24`
+/// guard — upstream is free to grow `request_t` without colliding.
+pub const REQ_KEY_PUNCH: i32 = 64;
+/// Companion to [`REQ_KEY_PUNCH`]: the timing trigger. Carries no
+/// payload. On receipt the responder waits `RTT/2` then dials the
+/// initiator's previously-advertised addresses.
+pub const REQ_KEY_PUNCH_SYNC: i32 = 65;
+
 #[cfg(test)]
 mod tests {
     use super::*;

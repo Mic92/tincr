@@ -8,7 +8,8 @@ use crate::conn::Connection;
 use crate::dispatch::parse_ack;
 use crate::listen::fmt_addr;
 use crate::outgoing::{
-    ConnectAttempt, OutgoingId, ProxyConfig, probe_connecting, try_connect, try_connect_via_proxy,
+    ConnectAttempt, OutOrigin, OutgoingId, ProxyConfig, probe_connecting, try_connect,
+    try_connect_via_proxy,
 };
 use crate::pmtu::PmtuState;
 use crate::tunnel::MTU;
@@ -220,6 +221,10 @@ impl Daemon {
                 edge_options,
             },
         );
+        // Direct meta conn established — cancel any inflight punch.
+        // (May have raced: the punch dial succeeded, OR a normal
+        // outgoing/inbound conn beat it. Either way we're done.)
+        self.clear_punch(peer_id);
 
         // `active` is the `broadcast_targets` "past ACK" filter. Set
         // BEFORE broadcast so the new conn DOES get its own edge back;
@@ -752,6 +757,19 @@ impl Daemon {
             if let Some(key) = crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, &name) {
                 d.request_resolve(&name, key);
             }
+        }
+
+        // Sim-open punch fallback: every TCP/UDP candidate failed and
+        // this is a shortcut slot (we already have a relayed meta path).
+        // Coordinate a TCP simultaneous-open through the relay so both
+        // sides' SYNs cross in flight. One attempt per backoff cycle
+        // (this is the retry path; `bump_timeout` already throttled).
+        if self
+            .outgoings
+            .get(oid)
+            .is_some_and(|o| o.origin == OutOrigin::AutoShortcut)
+        {
+            self.maybe_start_punch(&name);
         }
     }
 
