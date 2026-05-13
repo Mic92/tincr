@@ -8,7 +8,8 @@ use crate::conn::Connection;
 use crate::dispatch::parse_ack;
 use crate::listen::fmt_addr;
 use crate::outgoing::{
-    ConnectAttempt, OutgoingId, ProxyConfig, probe_connecting, try_connect, try_connect_via_proxy,
+    ConnectAttempt, OutOrigin, OutgoingId, ProxyConfig, probe_connecting, try_connect,
+    try_connect_via_proxy,
 };
 use crate::pmtu::PmtuState;
 use crate::tunnel::MTU;
@@ -220,6 +221,8 @@ impl Daemon {
                 edge_options,
             },
         );
+        // Direct meta conn established — cancel any inflight punch.
+        self.clear_punch(peer_id);
 
         self.seen.purge_mentions(&name);
 
@@ -310,6 +313,7 @@ impl Daemon {
         if let Some(io_id) = self.conns.get(id).and_then(|c| c.io_id) {
             self.ev.del(io_id);
         }
+        self.forget_punch_dial(id);
 
         let Some(conn) = self.conns.remove(id) else {
             // Slotmap is generational; stale ConnId → None. Idempotent.
@@ -755,6 +759,16 @@ impl Daemon {
                 d.request_resolve(&name, key);
             }
         }
+
+        // Every candidate failed on a shortcut slot: try a sim-open
+        // punch through the relay. One attempt per backoff cycle.
+        if self
+            .outgoings
+            .get(oid)
+            .is_some_and(|o| o.origin == OutOrigin::AutoShortcut)
+        {
+            self.maybe_start_punch(&name);
+        }
     }
 
     /// Async connect completion check. Returns `true` to fall through
@@ -784,6 +798,8 @@ impl Daemon {
                     .unwrap_or_default();
                 log::debug!(target: "tincd::conn",
                             "Error while connecting to {name} ({hostname}): {e}");
+                // Punch dials recover from RST by re-dialing.
+                self.on_punch_dial_failed(id);
                 // terminate() now re-drives do_outgoing_connection
                 // for any conn that maps to an Outgoing (C parity);
                 // no need to drive it again here.
