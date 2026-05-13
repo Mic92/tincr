@@ -37,6 +37,7 @@ mod metaconn;
 pub(crate) mod net;
 pub use net::MAX_PENDING_META;
 mod periodic;
+mod punch;
 mod purge;
 mod settings;
 mod setup;
@@ -142,6 +143,10 @@ pub enum TimerWhat {
     /// from the event loop (NOT a side thread) so a wedged loop
     /// stops pinging and systemd actually restarts us.
     Watchdog,
+    /// One-shot: fire the sim-open dial for a `Delaying` punch.
+    Punch(NodeId),
+    /// One-shot: replay RST-killed punch dials from the same ports.
+    PunchRedial(NodeId),
 }
 
 /// TERM/QUIT/INT all map to Exit.
@@ -431,6 +436,19 @@ pub struct Daemon {
     /// resolve an address) and by the cold-start pre-resolve in
     /// `spawn_dht_discovery`.
     pub(crate) has_dht_key: HashSet<String>,
+
+    /// In-flight sim-open punches by peer. One per peer max.
+    /// Cleared on dial / expiry / peer connecting another way.
+    pub(crate) punches: HashMap<NodeId, punch::PunchEntry>,
+    /// One-shot dial timers for `PunchState::Delaying`.
+    pub(crate) punch_timers: HashMap<NodeId, TimerId>,
+    /// Pre-bound ephemeral sockets per inflight punch (≤2: v4 + v6).
+    /// Bound before `PUNCH` so the port is known; consumed at dial.
+    pub(crate) punch_socks: HashMap<NodeId, Vec<crate::outgoing::PunchSock>>,
+    /// Punch conns in flight, for RST recovery.
+    pub(crate) punch_dials: HashMap<ConnId, punch::PunchDial>,
+    /// Failed punch dials awaiting their re-dial timer.
+    pub(crate) punch_redials: HashMap<NodeId, Vec<punch::PunchDial>>,
 
     /// Per-node "don't re-add as a shortcut before" stamp. Set in
     /// `execute_auto_action` on `Disconnect{AutoShortcut}` and
@@ -738,6 +756,12 @@ impl Daemon {
                         if let Some((tid, iv)) = self.watchdog {
                             self.timers.set(tid, iv);
                         }
+                    }
+                    TimerWhat::Punch(nid) => {
+                        self.on_punch_timer(nid);
+                    }
+                    TimerWhat::PunchRedial(nid) => {
+                        self.on_punch_redial_timer(nid);
                     }
                 }
             }

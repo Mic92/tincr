@@ -136,6 +136,14 @@ impl fmt::Display for Request {
 pub const PROT_MAJOR: u8 = 17;
 pub const PROT_MINOR: u8 = 7;
 
+/// `REQ_KEY` extension sub-type for the sim-open punch
+/// (`docs/PUNCH.md`). Only ever a `REQ_KEY` reqno field; C tinc
+/// logs and ignores unknown values. 64/65 leave a gap above C's
+/// `LAST = 24` so upstream can grow without colliding.
+pub const REQ_KEY_PUNCH: i32 = 64;
+/// Timing trigger, no payload. Responder waits `RTT/2` then dials.
+pub const REQ_KEY_PUNCH_SYNC: i32 = 65;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -342,6 +342,16 @@ let
         AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
         NoNewPrivileges = true;
 
+        # Default-deny bind, then allow the listeners plus the
+        # ephemeral range (outgoing meta, DHT, punch sockets).
+        SocketBindDeny = [ "any" ];
+        SocketBindAllow = [
+          "tcp:${toString net.listenPort}"
+          "udp:${toString net.listenPort}"
+          "tcp:1024-65535"
+          "udp:1024-65535"
+        ];
+
         ProtectSystem = "strict";
         ProtectHome = true;
         ProtectKernelTunables = true;
