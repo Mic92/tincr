@@ -148,6 +148,7 @@ impl Daemon {
     /// addr for the punch hint (see body comment).
     fn relay_req_key(
         &mut self,
+        from_conn: ConnId,
         to_nid: NodeId,
         from_nid: NodeId,
         msg: &ReqKey,
@@ -247,6 +248,20 @@ impl Daemon {
                        msg.to);
             return Some(false);
         };
+        // Loop break: our nexthop toward `to` is the same meta-conn
+        // the message came in on. The upstream peer disagrees with our
+        // SSSP about the route to `to` (or vice versa). Without this
+        // guard the message ping-pongs at meta-conn wire speed until
+        // gossip reconverges, saturating both sides' write queues —
+        // see issue #N (REQ_KEY/ANS_KEY relay loop). C tinc has the
+        // equivalent check (`c == from->nexthop->connection`).
+        if conn_id == from_conn {
+            log::debug!(target: "tincd::proto",
+                        "Dropping REQ_KEY {} → {} relay: nexthop loops back \
+                         to source {}",
+                        msg.from, msg.to, conn_name);
+            return Some(false);
+        }
         let Some(conn) = self.conns.get_mut(conn_id) else {
             return Some(false);
         };
@@ -276,7 +291,9 @@ impl Daemon {
             return Ok(false);
         };
 
-        if let Some(nw) = self.relay_req_key(to_nid, from_nid, &msg, body_str, &conn_name) {
+        if let Some(nw) =
+            self.relay_req_key(from_conn, to_nid, from_nid, &msg, body_str, &conn_name)
+        {
             return Ok(nw);
         }
 
@@ -547,6 +564,14 @@ impl Daemon {
                            msg.to);
                 return Ok(false);
             };
+            // Loop break: see relay_req_key for the rationale.
+            if conn_id == from_conn {
+                log::debug!(target: "tincd::proto",
+                            "Dropping ANS_KEY {} → {} relay: nexthop loops back \
+                             to source {}",
+                            msg.from, msg.to, conn_name);
+                return Ok(false);
+            }
             let Some(conn) = self.conns.get_mut(conn_id) else {
                 return Ok(false);
             };
