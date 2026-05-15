@@ -107,6 +107,12 @@ struct Simulation {
     hop_delay: u64,
     nonce_counter: u64,
     msg_count: u64,
+    /// Models the pre-fix `on_del_edge` reverse-broadcast (issue #8):
+    /// when a DEL_EDGE makes `b` unreachable and a synthesized
+    /// reverse `b → self` exists, broadcast `DEL_EDGE(b, self)`.
+    reverse_broadcast_amplifier: bool,
+    /// DEL_EDGE envelopes enqueued (originals + forwards + amplifier).
+    del_edge_enqueued: u64,
 }
 
 impl Simulation {
@@ -118,6 +124,8 @@ impl Simulation {
             hop_delay,
             nonce_counter: 0,
             msg_count: 0,
+            reverse_broadcast_amplifier: false,
+            del_edge_enqueued: 0,
         }
     }
 
@@ -186,6 +194,9 @@ impl Simulation {
     }
 
     fn send_msg(&mut self, sender: &str, dest: &str, msg: Msg, nonce: u64) {
+        if matches!(msg, Msg::DelEdge { .. }) {
+            self.del_edge_enqueued += 1;
+        }
         self.queue.push_back(Envelope {
             arrive_tick: self.tick + self.hop_delay,
             sender: sender.to_string(),
@@ -226,6 +237,7 @@ impl Simulation {
                         msg: msg.clone(),
                         nonce,
                     });
+                    self.del_edge_enqueued += 1;
                 }
             }
         }
@@ -360,6 +372,29 @@ impl Simulation {
                     // doing so caused a contradiction storm that
                     // made the mesh oscillate. Purge is only
                     // triggered by explicit `tinc purge` (REQ_PURGE).
+
+                    // Reverse-broadcast amplifier (issue #8); see
+                    // field doc. Conditional so tests can compare
+                    // cascade size with amplifier on vs off.
+                    if self.reverse_broadcast_amplifier
+                        && !peer.graph.node(to_id).is_some_and(|n| n.reachable)
+                        && peer.graph.lookup_edge(to_id, peer.myself).is_some()
+                    {
+                        let amp_msg = Msg::DelEdge {
+                            from: to.clone(),
+                            to: dest_name.clone(),
+                        };
+                        let amp_peers: Vec<String> = peer.meta_peers.clone();
+                        let amp_nonce = alloc_nonce();
+                        for p in &amp_peers {
+                            outgoing.push((
+                                dest_name.clone(),
+                                p.clone(),
+                                amp_msg.clone(),
+                                amp_nonce,
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -482,4 +517,73 @@ fn multi_node_zero_contradictions() {
             "{obs}: carol should be reachable"
         );
     }
+}
+
+/// Regression for issue #8: receiver R holds a synthesized reverse
+/// `V → R` but no forward `R → V`, then receives `DEL_EDGE(W, V)`
+/// deleting V's last visible edge. Pre-fix, R would broadcast a
+/// fresh `DEL_EDGE(V, R)` to each meta-peer; post-fix it only
+/// forwards the inbound message.
+#[test]
+fn reverse_broadcast_amplifier_emits_extra_del_edge() {
+    fn build_scenario(amplifier_on: bool) -> u64 {
+        let mut sim = Simulation::new(0);
+        sim.reverse_broadcast_amplifier = amplifier_on;
+
+        for name in ["R", "W", "V", "X", "Y"] {
+            sim.add_node(name);
+        }
+
+        // X/Y are passive forwarding targets only.
+        sim.nodes.get_mut("R").unwrap().meta_peers = vec!["X".into(), "Y".into()];
+
+        // Craft R's graph: only V→R and W→V. No R→V, so V is
+        // unreachable from R both before and after W→V is deleted.
+        {
+            let r = sim.nodes.get_mut("R").unwrap();
+            let w_id = r.lookup_or_add("W");
+            let v_id = r.lookup_or_add("V");
+            r.graph.add_edge(w_id, v_id, 0, 0);
+            r.graph.add_edge(v_id, r.myself, 0, 0);
+            r.run_sssp();
+            assert!(
+                !r.graph.node(v_id).unwrap().reachable,
+                "test setup: V should be unreachable from R (no R→V edge)"
+            );
+            assert!(
+                r.graph.lookup_edge(v_id, r.myself).is_some(),
+                "test setup: reverse V→R must be present"
+            );
+        }
+
+        // Sender isn't a forwarding target so emit counts are clean.
+        let nonce = sim.next_nonce();
+        let baseline = sim.del_edge_enqueued;
+        sim.send_msg(
+            "outside",
+            "R",
+            Msg::DelEdge {
+                from: "W".into(),
+                to: "V".into(),
+            },
+            nonce,
+        );
+        sim.run(3);
+        sim.del_edge_enqueued - baseline
+    }
+
+    let quiet_emits = build_scenario(false);
+    let loud_emits = build_scenario(true);
+
+    // OFF: 1 inbound + 2 forwards = 3. ON: + 2 reverse emits = 5.
+    assert_eq!(
+        quiet_emits, 3,
+        "post-fix should emit only the inbound DEL_EDGE + 2 forwards; \
+         got {quiet_emits}"
+    );
+    assert_eq!(
+        loud_emits, 5,
+        "amplifier ON should emit inbound + 2 forwards + 2 reverse \
+         broadcasts; got {loud_emits}"
+    );
 }
