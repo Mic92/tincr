@@ -59,11 +59,7 @@ pub(super) fn is_udp_unreachable_errno(e: &std::io::Error) -> bool {
     };
     matches!(
         raw,
-        // Stable Linux ABI values.
-        101 // ENETUNREACH
-        | 113 // EHOSTUNREACH
-        | 97  // EAFNOSUPPORT
-        | 99  // EADDRNOTAVAIL
+        libc::ENETUNREACH | libc::EHOSTUNREACH | libc::EAFNOSUPPORT | libc::EADDRNOTAVAIL
     )
 }
 

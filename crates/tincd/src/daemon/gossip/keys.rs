@@ -357,6 +357,13 @@ impl Daemon {
             nw |= self.send_udp_info(from_nid, &msg.from, true);
             return Ok(nw);
         }
+        if ext.reqno == tinc_proto::request::REQ_KEY_PUNCH
+            || ext.reqno == tinc_proto::request::REQ_KEY_PUNCH_SYNC
+        {
+            // ─── case PUNCH / PUNCH_SYNC: DCUtR-style sim-open
+            // coordination. See `daemon/punch.rs` + design doc.
+            return Ok(self.on_punch_msg(from_nid, &msg.from, ext));
+        }
         if ext.reqno != Request::ReqKey as i32 {
             // REQ_PUBKEY/ANS_PUBKEY: hard-error - operator provisions
             // by hand.

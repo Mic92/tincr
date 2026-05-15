@@ -194,6 +194,55 @@ fn dial_nonblocking(
     Some(sock)
 }
 
+/// Pre-bound sim-open punch socket. Bound before `PUNCH` is sent so
+/// the ephemeral port is known; connected from later, on `SYNC`. See
+/// `docs/PUNCH.md`.
+pub(crate) struct PunchSock {
+    pub(crate) sock: Socket,
+    /// `getsockname()` after bind. Port is the ephemeral allocation.
+    pub(crate) local: SocketAddr,
+}
+
+/// Bind an ephemeral TCP socket for `domain`. Non-blocking, `SO_REUSEADDR`.
+/// NOT `SO_REUSEPORT` — punch never shares the listener's port.
+pub(crate) fn punch_bind(domain: Domain, sockopts: &SockOpts) -> Option<PunchSock> {
+    let local: SocketAddr = match domain {
+        Domain::IPV4 => (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
+        Domain::IPV6 => (std::net::Ipv6Addr::UNSPECIFIED, 0).into(),
+        _ => return None,
+    };
+    let sock = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))
+        .map_err(|e| log::debug!(target: "tincd::punch", "socket(): {e}"))
+        .ok()?;
+    crate::set_nosigpipe(&sock);
+    sock.set_nonblocking(true).ok()?;
+    let _ = sock.set_reuse_address(true);
+    let _ = sock.set_tcp_nodelay(true);
+    if domain == Domain::IPV6 {
+        let _ = sock.set_only_v6(true);
+    }
+    apply_dial_sockopts(&sock, sockopts);
+    if let Err(e) = sock.bind(&SockAddr::from(local)) {
+        log::debug!(target: "tincd::punch", "bind {local}: {e}");
+        return None;
+    }
+    let local = sock.local_addr().ok()?.as_socket()?;
+    Some(PunchSock { sock, local })
+}
+
+/// Non-blocking `connect()` from a pre-bound punch socket. Consumes
+/// (a TCP socket connects once). Returns `Some` on `Ok`/`EINPROGRESS`.
+pub(crate) fn punch_connect(ps: PunchSock, target: SocketAddr) -> Option<Socket> {
+    match ps.sock.connect(&SockAddr::from(target)) {
+        Ok(()) => Some(ps.sock),
+        Err(e) if e.raw_os_error() == Some(Errno::EINPROGRESS as i32) => Some(ps.sock),
+        Err(e) => {
+            log::debug!(target: "tincd::punch", "connect {target}: {e}");
+            None
+        }
+    }
+}
+
 /// One iteration of `do_outgoing_connection`'s `goto begin` loop.
 /// Creates a socket, sets nonblocking, calls `connect()`. The daemon
 /// loops this until `Started` or `Exhausted`.

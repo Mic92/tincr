@@ -346,7 +346,6 @@ impl Daemon {
                 // outcome as the per-frame path, just `count×`.
                 super::helpers::handle_udp_emsgsize(tunnels, graph, relay_nid, origlen);
             } else if super::helpers::is_udp_unreachable_errno(&e) {
-
                 let relay_name = graph
                     .node(relay_nid)
                     .map_or("<gone>", |n| n.name.as_str())
