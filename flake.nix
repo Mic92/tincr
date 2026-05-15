@@ -22,6 +22,7 @@
         "x86_64-linux"
         "aarch64-linux"
         "aarch64-darwin"
+        "riscv64-linux"
       ];
       eachSystem = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
       treefmt = eachSystem (_: pkgs: treefmt-nix.lib.evalModule pkgs ./nix/treefmt.nix);
