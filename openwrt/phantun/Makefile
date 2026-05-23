@@ -20,7 +20,7 @@ PKG_BUILD_PARALLEL:=1
 MAKE_PATH:=phantun
 
 include $(INCLUDE_DIR)/package.mk
-include ../../lang/rust/rust-package.mk
+include $(TOPDIR)/feeds/packages/lang/rust/rust-package.mk
 
 define Package/phantun/Default
   SECTION:=net
