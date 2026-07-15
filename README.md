@@ -55,6 +55,15 @@ cargo install --git https://github.com/Mic92/tincr --locked tincd
 nix build github:Mic92/tincr#packages.x86_64-linux.tincd
 ```
 
+> **x86_64 CPU baseline:** the default `tincd` output targets
+> `x86-64-v3` (Haswell/2013+, AVX2). On older or low-power chips
+> (pre-Haswell, Atom, AMD Jaguar) it will `SIGILL`; use the
+> runtime-dispatched build instead:
+>
+> ```sh
+> nix build github:Mic92/tincr#packages.x86_64-linux.tincd-compat
+> ```
+
 ## Quick start
 
 See [docs/QUICKSTART.md](docs/QUICKSTART.md) for the two-node

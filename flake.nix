@@ -40,6 +40,8 @@
           tincd = pkgs.callPackage ./nix/tincd.nix {
             craneLib = crane.mkLib pkgs;
           };
+          # Pre-Haswell x86_64 (no AVX2). See baselineCpu in tincd.nix.
+          tincd-compat = self.packages.${system}.tincd.override { baselineCpu = true; };
         }
       );
 
