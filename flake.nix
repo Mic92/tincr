@@ -29,7 +29,8 @@
     in
     {
       packages = eachSystem (
-        _: pkgs: {
+        system: pkgs: {
+          default = self.packages.${system}.tincd;
           kat-vectors = pkgs.callPackage ./nix/kat-vectors.nix { };
           kat-graph = pkgs.callPackage ./nix/kat-graph.nix { };
           kat-checksum = pkgs.callPackage ./nix/kat-checksum.nix { };
