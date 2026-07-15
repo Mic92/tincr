@@ -8,6 +8,9 @@
   craneLib,
   lib,
   installShellFiles,
+  # true → drop the x86-64-v3/AVX2 floor from .cargo/config.toml so
+  # the binary runs on pre-Haswell x86_64. Slower crypto, no SIGILL.
+  baselineCpu ? false,
 }:
 let
   rustSrc = lib.fileset.unions [
@@ -32,6 +35,12 @@ let
     # netns tests need bwrap+userns the sandbox lacks. The dev shell
     # runs the full suite; this is the deployment artifact.
     doCheck = false;
+  }
+  // lib.optionalAttrs baselineCpu {
+    # Env RUSTFLAGS replaces .cargo/config.toml's target.* rustflags
+    # (cargo does not merge them); restate frame-pointers, omit
+    # target-cpu=x86-64-v3 and chacha20_force_avx2.
+    RUSTFLAGS = "-C force-frame-pointers=yes";
   };
   # Dummy src/{lib,main}.rs from every workspace Cargo.toml; compiles
   # all crates.io deps. Rebuilds only when Cargo.{toml,lock} change.
