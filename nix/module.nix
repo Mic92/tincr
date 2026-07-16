@@ -271,14 +271,24 @@ let
     };
   };
 
-  etcForNet =
+  mkHostsDir =
     netName: net:
-    {
-      "tinc/${netName}/tinc.conf".text = mkTincConf netName net;
-    }
-    // mapAttrs' (
-      hostName: text: nameValuePair "tinc/${netName}/hosts/${hostName}" { text = text; }
-    ) net.hosts;
+    pkgs.runCommand "tinc-${netName}-hosts"
+      {
+        __structuredAttrs = true;
+        hostFiles = net.hosts;
+      }
+      ''
+        mkdir -p "$out"
+        for name in "''${!hostFiles[@]}"; do
+          printf '%s' "''${hostFiles[$name]}" > "$out/$name"
+        done
+      '';
+
+  etcForNet = netName: net: {
+    "tinc/${netName}/tinc.conf".text = mkTincConf netName net;
+    "tinc/${netName}/hosts".source = mkHostsDir netName net;
+  };
 
   unitName = netName: "tincr-${netName}";
 
@@ -361,10 +371,6 @@ let
           "@system-service"
           "~@privileged @resources"
         ];
-
-        # ProtectSystem=strict makes /etc RO; tincd writes back to
-        # hosts/ when it learns `Address=` from peers/invitations.
-        ReadWritePaths = [ "/etc/tinc/${netName}" ];
       };
     };
 
