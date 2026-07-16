@@ -156,6 +156,16 @@ fn checksum(data: &[u8], initial: u64) -> u16 {
     !fold16(checksum_nofold(data, initial))
 }
 
+/// Zero the IPv4 header-checksum field and write a freshly computed one
+/// (RFC 791: the checksum covers the header only).
+#[inline]
+fn ipv4_write_csum(ip: &mut [u8], iphlen: usize) {
+    ip[IPV4_CSUM_OFF] = 0;
+    ip[IPV4_CSUM_OFF + 1] = 0;
+    let csum = checksum(&ip[..iphlen], 0);
+    ip[IPV4_CSUM_OFF..IPV4_CSUM_OFF + 2].copy_from_slice(&csum.to_be_bytes());
+}
+
 /// Fold a 64-bit one's-complement accumulator to 16 bits (no
 /// complement). Four folds is enough for `u64` (each fold halves the
 /// bit width of the carry).
@@ -359,12 +369,8 @@ pub fn tso_split(
         return Err(TsoError::TooShort);
     }
     hdr_buf[..hdr_len].copy_from_slice(&pkt[..hdr_len]);
-    if !is_v6 {
-        // Zero IPv4 header checksum; it's recomputed per-segment
-        // (totlen + ID change).
-        hdr_buf[IPV4_CSUM_OFF] = 0;
-        hdr_buf[IPV4_CSUM_OFF + 1] = 0;
-    }
+    // The IPv4 header checksum needs no pre-clear: `ipv4_write_csum`
+    // zeroes it before recomputing per-segment.
     // Zero TCP checksum. Recomputed per-segment.
     hdr_buf[csum_at] = 0;
     hdr_buf[csum_at + 1] = 0;
@@ -439,10 +445,7 @@ pub fn tso_split(
             #[expect(clippy::cast_possible_truncation)] // total_len ≤ hdr+gso_size ≤ MTU < 65536
             let totlen = total_len as u16;
             ip[IPV4_TOTLEN_OFF..IPV4_TOTLEN_OFF + 2].copy_from_slice(&totlen.to_be_bytes());
-            // Csum field already zeroed (from hdr_buf). Compute over
-            // the IP header only (RFC 791: "covers the header only").
-            let csum = checksum(&ip[..iphlen], 0);
-            ip[IPV4_CSUM_OFF..IPV4_CSUM_OFF + 2].copy_from_slice(&csum.to_be_bytes());
+            ipv4_write_csum(ip, iphlen);
         }
 
         // TCP header, from the cleared hdr_buf.
@@ -785,10 +788,7 @@ impl GroBucket {
                 pkt[IPV6_PLEN_OFF..IPV6_PLEN_OFF + 2].copy_from_slice(&(totlen - 40).to_be_bytes());
             } else {
                 pkt[IPV4_TOTLEN_OFF..IPV4_TOTLEN_OFF + 2].copy_from_slice(&totlen.to_be_bytes());
-                pkt[IPV4_CSUM_OFF] = 0;
-                pkt[IPV4_CSUM_OFF + 1] = 0;
-                let csum = checksum(&pkt[..iphlen], 0);
-                pkt[IPV4_CSUM_OFF..IPV4_CSUM_OFF + 2].copy_from_slice(&csum.to_be_bytes());
+                ipv4_write_csum(pkt, iphlen);
             }
 
             // Pseudo-header partial into the TCP csum field.

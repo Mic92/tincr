@@ -489,17 +489,8 @@ fn siocgifhwaddr(fd: BorrowedFd<'_>) -> io::Result<Mac> {
     // (kernel only sets the first 6 for `ARPHRD_ETHER`). We only
     // read `[0..6]`.
     #[allow(clippy::cast_sign_loss)] // c_char→u8: raw MAC bytes (c_char sign is arch-dependent)
-    let mac: Mac = {
-        let sa_data = unsafe { ifr.ifr_ifru.ifru_hwaddr }.sa_data;
-        [
-            sa_data[0] as u8,
-            sa_data[1] as u8,
-            sa_data[2] as u8,
-            sa_data[3] as u8,
-            sa_data[4] as u8,
-            sa_data[5] as u8,
-        ]
-    };
+    let sa_data = unsafe { ifr.ifr_ifru.ifru_hwaddr }.sa_data.map(|c| c as u8);
+    let mac: Mac = sa_data[..6].try_into().expect("sa_data is 14 bytes");
     Ok(mac)
 }
 
