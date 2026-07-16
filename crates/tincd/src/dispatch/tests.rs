@@ -603,9 +603,9 @@ fn myself_options_empty_config() {
 }
 
 /// `TCPOnly = yes` sets TCPONLY
-/// and INDIRECT (`:391` implication), and `:442` `choice =
+/// and INDIRECT (implied), and `choice =
 /// !(options & OPTION_TCPONLY)` makes the PMTU default off.
-/// `ClampMSS` unaffected (`:449` default on).
+/// `ClampMSS` unaffected (default on).
 #[test]
 fn myself_options_tcponly_implies_indirect_clears_pmtu() {
     let opts = myself_options_from_config(&cfg(&["TCPOnly = yes"]));
@@ -618,8 +618,8 @@ fn myself_options_tcponly_implies_indirect_clears_pmtu() {
 }
 
 /// `IndirectData = yes` standalone: only INDIRECT, defaults
-/// otherwise. PMTU default `:442` is `!(options & TCPONLY)` =
-/// true; `ClampMSS` `:449` true.
+/// otherwise. PMTU default is `!(options & TCPONLY)` =
+/// true; `ClampMSS` true.
 #[test]
 fn myself_options_indirect_only() {
     let opts = myself_options_from_config(&cfg(&["IndirectData = yes"]));

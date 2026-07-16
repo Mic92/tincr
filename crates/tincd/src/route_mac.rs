@@ -4,8 +4,8 @@
 //! `learn_mac` is split out: we return [`LearnAction`], daemon does
 //! the subnet-add + `ADD_SUBNET` broadcast.
 //!
-//! Daemon-side: `age_subnets` (`:491-521`), `route_broadcast`
-//! (`:559`), and the post-route mutations (`:1052-1102`).
+//! Daemon-side: `age_subnets`, `route_broadcast`
+//!, and the post-route mutations.
 
 #![forbid(unsafe_code)]
 
@@ -23,27 +23,27 @@ pub(crate) type Mac = [u8; 6];
 ///
 /// New-vs-Refresh is provisional: `mac_table` is a snapshot of ALL
 /// nodes' MACs, not just `myself`'s. The C scopes the lookup to
-/// `myself` (`:525`); the daemon does that check on receipt.
+/// `myself`; the daemon does that check on receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LearnAction {
-    /// `:1031` source != myself.
+    /// source != myself.
     NotOurs,
 
-    /// `:528 if(!subnet)`. Daemon: `subnet_add`, `ADD_SUBNET`, arm timer.
+    /// Unknown source MAC. Daemon: `subnet_add`, `ADD_SUBNET`, arm timer.
     New(Mac),
 
-    /// `:551-555 else`. Daemon: bump lease (no gossip). Fires even
+    /// Known source MAC. Daemon: bump lease (no gossip). Fires even
     /// for remotely-owned MACs (VM migration); daemon re-scopes.
     Refresh(Mac),
 }
 
 /// `route_mac`. `frame` includes the real eth header (TAP). Unknown
 /// dest →
-/// `Broadcast` (`:1042`), not `Unreachable` — switches flood.
+/// `Broadcast`, not `Unreachable` — switches flood.
 ///
-/// `from_myself`: gates learning (`:1031`). `source`: for the
-/// `:1047` loop check (we have the table here, unlike `route_ipv4`).
-/// `myself`: gates the `FMODE_OFF/decrement_ttl` deferrals (`:1052`).
+/// `from_myself`: gates learning. `source`: for the
+/// loop check (we have the table here, unlike `route_ipv4`).
+/// `myself`: gates the `FMODE_OFF/decrement_ttl` deferrals.
 /// `resolve`: `None` → Broadcast (stale gossip safe default).
 ///
 /// # Panics

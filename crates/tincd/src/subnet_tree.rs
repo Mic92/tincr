@@ -339,7 +339,7 @@ impl SubnetTree {
     /// subnet is already in the tree (preloaded by `load_all_nodes`
     /// from the operator's hosts/ files), the strictsubnets gate is
     /// silently bypassed. The gate fires only on UNAUTHORIZED subnets
-    /// (not in tree → fall through to `:116`).
+    /// (not in tree → fall through to).
     ///
     /// Allocates a `String` for the lookup key (same shape as
     /// `del()`). `ADD_SUBNET` is control-path-rare; the alloc is fine.

@@ -8,8 +8,8 @@
 //! C inlines subnet-lookup; we split: `parse_*` returns target IP,
 //! daemon looks up, `build_*` synthesizes.
 //!
-//! `overwrite-mac` (`:970-973`, `:830-832`) and `source != myself`
-//! (`:964-967`, `:814-817`): handled at the daemon callsite
+//! `overwrite-mac` and `source != myself`: handled at the daemon
+//! callsite
 //! (`handle_arp`/`handle_ndp`); this module stays pure.
 
 #![forbid(unsafe_code)]
@@ -161,9 +161,9 @@ pub(crate) fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
 /// Eth: dst←orig-src, src←orig-src⊕FF. Ip6: dst←orig-src,
 /// src←target (hlim untouched; kernel set 255, RFC 4861 §7.2.2).
 /// Icmp6: type←ADVERT, reserved←Solicited.
-/// Opt: `type←TARGET_LLADDR`, lladdr←fake MAC (`:904`).
+/// Opt: `type←TARGET_LLADDR`, lladdr←fake MAC.
 ///
-/// `:895` `decrement_ttl`: gated at the daemon callsite (`handle_ndp`)
+/// `decrement_ttl`: gated at the daemon callsite (`handle_ndp`)
 /// before this fn is called — keeps this module pure.
 #[must_use]
 pub(crate) fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {

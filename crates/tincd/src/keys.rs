@@ -196,8 +196,8 @@ pub(crate) fn read_ecdsa_private_key(
 /// 3. `hosts/NAME` PEM block (`cmd_exchange` writes)
 ///
 /// `host_config` is the peer's; caller already loaded it. Returns
-/// `None` on failure: `id_h` treats it as "downgrade to legacy"
-/// (then rejected at `:443-447`).
+/// `None` on failure: the caller rejects the peer (legacy protocol
+/// is not supported).
 ///
 /// Source-order subtlety: if `hosts/NAME` has BOTH the var and a
 /// PEM block, the var wins silently (early return). No consistency
@@ -230,10 +230,8 @@ pub(crate) fn read_ecdsa_public_key(
             |e| PathBuf::from(e.get_str()),
         );
 
-    // Open + parse.
-    // C logs ERR on `fopen` fail (`:196-199`). We match. `:204` logs
-    // ERR on parse fail too (unless `errno == ENOENT`, which means
-    // `read_pem` got EOF before BEGIN).
+    // Open + parse. Errors are logged; a missing PEM block is
+    // silently treated as "no key".
     let f = match File::open(&path) {
         Ok(f) => f,
         Err(e) => {
@@ -575,9 +573,9 @@ mod tests {
         assert_eq!(loaded, pk);
     }
 
-    /// `hosts/NAME` exists but has no PEM and no inline var. C
-    /// `:204`'s `errno == ENOENT` suppression: `read_pem` returns
-    /// `PemError::NotFound`, we map to None silently.
+    /// `hosts/NAME` exists but has no PEM and no inline var:
+    /// `read_pem` returns `PemError::NotFound`, mapped to None
+    /// silently.
     ///
     /// This is the "fresh `tinc init` followed by manual `hosts/peer`
     /// edit" case. The user added Port/Subnet but forgot the key.

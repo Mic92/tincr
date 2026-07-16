@@ -44,19 +44,18 @@ pub(crate) enum InvitePhase {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ServeError {
-    /// `:217-223`. Single-use: already-used cookie → ENOENT here too.
+    /// Single-use: an already-used cookie shows up as ENOENT here too.
     #[error("non-existing or already-used invitation")]
     NonExisting,
-    /// `:230-237`.
     #[error("expired invitation")]
     Expired,
-    /// `:277`. First line isn't `Name = <valid-id>`, or name == myself.
+    /// First line isn't `Name = <valid-id>`, or name == myself.
     #[error("invalid invitation file: {0}")]
     BadInvitationFile(String),
-    /// `:125`. Newline in pubkey = config-injection attempt.
+    /// Newline in pubkey = config-injection attempt.
     #[error("invalid public key from invited node")]
     BadPubkey,
-    /// `:131`. Don't overwrite: would replace a known key.
+    /// Don't overwrite: would replace a known key.
     #[error("host config file {} already exists", .0.display())]
     HostFileExists(PathBuf),
     #[error("I/O error on {}: {err}", path.display())]
@@ -194,7 +193,7 @@ pub(crate) fn serve_cookie(
 /// Writes `hosts/{name}`. Addrcache/script/unlink/type-2 are daemon-side.
 ///
 /// # Errors
-/// - `BadPubkey` (`:125`): newline = config-injection (**security**).
+/// - `BadPubkey`: newline = config-injection (**security**).
 /// - `HostFileExists`: don't overwrite (**security**: attacker could
 ///   replace a known key). We use `O_CREAT|O_EXCL` (no TOCTOU).
 pub(crate) fn finalize(

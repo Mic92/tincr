@@ -206,20 +206,20 @@ pub(crate) fn route_ipv6<T>(
 /// we reify the four exits.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TtlResult {
-    /// `:365,384,386`: TTL>1 decremented (or unknown ethertype).
+    /// : TTL>1 decremented (or unknown ethertype).
     Decremented,
-    /// `:344-347,376-379`: TTL≤1 AND already ICMP-time-exceeded.
+    /// : TTL≤1 AND already ICMP-time-exceeded.
     /// Silent drop (storm guard).
     DropSilent,
-    /// `:345,377`: TTL≤1, not already time-exceeded. Daemon bounces.
+    /// : TTL≤1, not already time-exceeded. Daemon bounces.
     SendIcmp { icmp_type: u8, icmp_code: u8 },
-    /// `:339-341,368-370`: checklength failed.
+    /// : checklength failed.
     TooShort,
 }
 
 /// `do_decrement_ttl`. In-place TTL/hop-limit decrement + IPv4
 /// checksum adjust (RFC 1624 incremental: `csum +=
-/// old + ~new` then fold — `:354-360`). v6 has no IP checksum.
+/// old + ~new` then fold —). v6 has no IP checksum.
 pub(crate) fn decrement_ttl(data: &mut [u8]) -> TtlResult {
     // Read ethertype, skip 8021Q tag if present.
     if data.len() < ETHER_SIZE {

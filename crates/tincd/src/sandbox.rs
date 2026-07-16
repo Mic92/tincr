@@ -181,7 +181,7 @@ pub fn can(action: Action) -> bool {
 ///
 /// # Panics
 ///
-/// Called twice. C asserts `!entered` (`:137`). The state machine
+/// Called twice. C asserts `!entered`. The state machine
 /// is one-shot; a second call is a bug in `main()`.
 pub fn enter(level: Level, paths: &Paths, chrooted: bool) -> Result<(), String> {
     let prev = STATE.swap(level as u8 | ENTERED_BIT, Ordering::Relaxed);

@@ -89,7 +89,7 @@ pub(crate) fn inet_checksum(data: &[u8], prevsum: u16) -> u16 {
 /// `struct ip` (`ipv4.h:74-85`). 20 bytes, no options.
 ///
 /// `ip_vhl` is the bitfield byte: `(version << 4) | ihl`. The C
-/// uses `:4` bitfields with `__BYTE_ORDER` gymnastics (`ipv4.h
+/// uses bitfields with `__BYTE_ORDER` gymnastics (`ipv4.h
 /// :67-72`); we use a `u8` and getters. Wire byte for normal IPv4
 /// is `0x45` (v=4, ihl=5 words = 20 bytes).
 #[repr(C, packed)]

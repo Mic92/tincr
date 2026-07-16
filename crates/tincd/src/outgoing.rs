@@ -87,7 +87,7 @@ impl Outgoing {
 }
 
 /// Result of one connect attempt. The `goto begin` loop in
-/// `do_outgoing_connection` (`:564-662`) expressed as an enum so the
+/// `do_outgoing_connection` expressed as an enum so the
 /// daemon can drive the loop without `goto`.
 #[derive(Debug)]
 pub(crate) enum ConnectAttempt {
@@ -617,7 +617,7 @@ pub(crate) fn do_outgoing_pipe(
 
 /// Parse `Address = host port` lines from `hosts/NAME` into
 /// **unresolved** `(host, port)` pairs. Resolve happens
-/// lazily in `get_recent_address` (`:157-199`). We mirror that:
+/// lazily in `get_recent_address`. We mirror that:
 /// no DNS here, just string parsing. Literal IPs are parsed inline by
 /// [`AddressCache::next_addr`]; hostnames are handed to
 /// [`crate::bgresolve::DnsWorker`] via

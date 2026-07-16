@@ -9,7 +9,7 @@
 //!   ALREADY WIRED (`daemon/gossip.rs:312`). Slow: b64 inflate × meta-conn-SPTPS encrypt × per-tunnel-SPTPS
 //!   encrypt. The 12.9 Mbps from `2b5dda45`'s commit body.
 //!
-//! - binary (`:975-986`): `"21 LEN\n"` then `LEN` raw bytes via
+//! - binary: `"21 LEN\n"` then `LEN` raw bytes via
 //!   `c->sptpslen`. proto-minor ≥ 7 only (so the receiver knows to
 //!   read raw blobs). WHAT THIS MODULE BUILDS/PARSES.
 //!
@@ -62,7 +62,7 @@ pub(crate) fn build_frame(dst: NodeId6, src: NodeId6, ct: &[u8]) -> Vec<u8> {
     out
 }
 
-/// `:616-634`. Parse `dst_id`, `src_id`, return tail.
+/// Parse `dst_id`, `src_id`, return tail.
 ///
 /// `None` on `len < 12` (the C: `return false`, hard error — unlike
 /// the unknown-ID cases below which `return true` to keep the conn

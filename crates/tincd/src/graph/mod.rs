@@ -1380,7 +1380,7 @@ mod glue_tests {
         let routes = g.sssp(a);
         let t = diff_reachability(&mut g, a, &routes);
         assert!(t.is_empty());
-        // Untouched — the `continue` is before `:251`.
+        // Untouched — the `continue` skips the update.
         assert!(!g.node(a).unwrap().reachable);
     }
 

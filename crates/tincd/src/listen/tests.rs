@@ -110,7 +110,7 @@ fn fmt_addr_cases() {
 /// the actual pidfile.
 ///
 /// What we CAN test: empty slice → "127.0.0.1 port 0". The C
-/// `:161` getsockname-fail fallback.
+/// getsockname-fail fallback.
 #[test]
 fn pidfile_addr_empty_fallback() {
     assert_eq!(pidfile_addr(&[]), "127.0.0.1 port 0");
@@ -248,7 +248,7 @@ fn open_udp_pmtudisc_do() {
 /// only helps with `TIME_WAIT`, not active listeners). The fail is
 /// graceful — `open_one` returns `None`, no panic.
 ///
-/// This is the "EADDRINUSE → continue" path (`:705`).
+/// This is the "EADDRINUSE → continue" path.
 #[test]
 fn open_port_clash_is_graceful() {
     let first = open_listeners(0, AddrFamily::Ipv4, &opts());
@@ -314,7 +314,7 @@ fn open_bind_to_interface_lo() {
 }
 
 /// `SO_BINDTODEVICE` to a nonexistent interface: hard failure.
-/// `open_one` returns `None` (the C closes the fd at `:244,391`).
+/// `open_one` returns `None` (the fd is closed on drop).
 /// No panic; the listener pair just doesn't materialize.
 #[test]
 #[cfg(target_os = "linux")]
@@ -345,7 +345,7 @@ fn open_fwmark_set() {
     };
     let listeners = open_listeners(0, AddrFamily::Ipv4, &o);
     assert_eq!(listeners.len(), 1);
-    // Read back from BOTH sockets — TCP `:248` and UDP `:383`.
+    // Read back from BOTH sockets — TCP and UDP.
     let tcp_mark = getsockopt(&listeners[0].tcp.as_fd(), sockopt::Mark).unwrap();
     let udp_mark = getsockopt(&listeners[0].udp.as_fd(), sockopt::Mark).unwrap();
     assert_eq!(tcp_mark, 0x1234);

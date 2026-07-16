@@ -82,9 +82,9 @@ impl MacLeases {
 
     /// Prune expired. Returns `(expired_macs, any_left)`.
     ///
-    /// `any_left` = at least one unexpired lease remains (`:512-514`).
+    /// `any_left` = at least one unexpired lease remains.
     /// Daemon re-arms the 10s timer iff `any_left`; otherwise lets it
-    /// lapse (`:518-521`).
+    /// lapse.
     ///
     /// `expired` are removed from `self`. Daemon for each:
     /// `subnets.del(Subnet::Mac{addr,..})` + broadcast DEL.

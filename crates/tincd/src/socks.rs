@@ -3,10 +3,10 @@
 //! SOCKS4 (<https://www.openssh.com/txt/socks4.protocol>): IPv4 only.
 //! Req `[04][01][port:2be][ip:4][userid\0]`; resp 8B, status `0x5A`.
 //!
-//! SOCKS5 (RFC 1928): three round-trips sent as one blob (`:175-237`).
+//! SOCKS5 (RFC 1928): three round-trips sent as one blob.
 //! Greet+auth+connect; resp is `choice+auth_status+conn_resp` concat.
 //!
-//! NOT here: SOCKS4A (`:80` "not implemented"), HTTP CONNECT
+//! NOT here: SOCKS4A (not implemented), HTTP CONNECT
 //! (daemon's `send_proxyrequest`), `PROXY_EXEC` (I/O).
 
 #![forbid(unsafe_code)]
