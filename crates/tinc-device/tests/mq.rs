@@ -149,7 +149,7 @@ fn mq_vnet_hdr_on_queue0() {
     run_ip(&["addr", "add", "10.77.0.1/24", "dev", "shard0"]);
     run_ip(&["link", "set", "shard0", "up"]);
 
-    // ── Echo loop: read any queue, swap, write back ────────────────
+    // Echo loop: read any queue, swap, write back
     // Dup the fds: echo thread owns its dups, main thread keeps the
     // Tun structs (whose Drop closes the originals). Independent
     // file-table entries to the same kernel `tun_file`.
@@ -181,7 +181,7 @@ fn mq_vnet_hdr_on_queue0() {
                     continue; // too short for vnet_hdr + IPv4 header
                 }
 
-                // ── Capture vnet_hdr fields (THE test) ──────────────
+                // Capture vnet_hdr fields (THE test)
                 // virtio_net_hdr layout (le): flags@0 gso_type@1
                 // hdr_len@2 gso_size@4 csum_start@6 csum_offset@8
                 let gso_type = buf[1];
@@ -193,7 +193,7 @@ fn mq_vnet_hdr_on_queue0() {
                     .unwrap()
                     .push((gso_type, gso_size, csum_start, ip_ver, n));
 
-                // ── Swap & reflect (IPv4 only) ──────────────────────
+                // Swap & reflect (IPv4 only)
                 // Checksums survive: ip_csum sums src+dst (commute);
                 // tcp pseudo-hdr sums src_ip+dst_ip and sport+dport
                 // (both commute). The partial csum the kernel left us
@@ -222,7 +222,7 @@ fn mq_vnet_hdr_on_queue0() {
         drop(echo_fds); // OwnedFd::drop closes each dup.
     });
 
-    // ── Generate traffic: TCP via hairpin ───────────────────────────
+    // Generate traffic: TCP via hairpin
     // Listener on .1, connector to .2. The /24 route on shard0 sends
     // .2 out the TUN; echo swaps → packets arrive "from .2 to .1" →
     // local delivery to the listener. .2 is NOT local (only .1 is).
@@ -265,7 +265,7 @@ fn mq_vnet_hdr_on_queue0() {
     echo.join().unwrap();
     lthread.join().unwrap();
 
-    // ── Assert: vnet_hdr is present and correctly sized ─────────────
+    // Assert: vnet_hdr is present and correctly sized
     let cap = captured.lock().unwrap();
     assert!(
         !cap.is_empty(),

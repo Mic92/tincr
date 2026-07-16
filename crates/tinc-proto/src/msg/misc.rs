@@ -26,7 +26,6 @@ use crate::Request;
 use crate::addr::AddrStr;
 use crate::tok::{ParseError, Tok};
 
-// ────────────────────────────────────────────────────────────────────
 // PACKET / SPTPS_PACKET — length-prefix-only headers
 
 /// `tcppacket_h` / `sptps_tcppacket_h` shared body: `%*d %hd` then
@@ -102,7 +101,6 @@ impl SptpsPacket {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // UDP_INFO
 
 /// Body of `UDP_INFO`. Tells `to` what address `from` was seen at —
@@ -119,11 +117,9 @@ pub struct UdpInfo {
 }
 
 impl UdpInfo {
-    /// `udp_info_h`: `sscanf("%*d %s %s %s %s")`, `check_id(from && to)`.
-    ///
-    /// `from == to` is *not* checked in C. (Edges are directed and
-    /// can't self-loop; UDP info is just a hint and a node sending to
-    /// itself is weird but not protocol-invalid.)
+    /// Parse `UDP_INFO`. `from == to` is not rejected: UDP info is
+    /// just a hint and a node sending to itself is weird but not
+    /// protocol-invalid.
     ///
     /// # Errors
     /// Too few tokens or bad name.
@@ -158,7 +154,6 @@ impl UdpInfo {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // MTU_INFO
 
 /// Body of `MTU_INFO`. Propagates path-MTU discovery results along the
@@ -175,19 +170,15 @@ pub struct MtuInfo {
     /// from `to` since its last `MTU_INFO`. Lets a node behind an
     /// inbound-UDP filter learn that its OUTBOUND probes did arrive
     /// (the UDP reply was eaten, so the meta channel carries the ack
-    /// instead). C tinc's `sscanf("%*d %s %s %d")` stops after `mtu`
-    /// and ignores trailing tokens → wire-compatible. `0` (or absent)
-    /// = nothing to report.
+    /// instead). Wire-compatible: C tinc ignores trailing tokens after
+    /// `mtu`. `0` (or absent) = nothing to report.
     pub udp_rx_len: u16,
 }
 
 impl MtuInfo {
-    /// `mtu_info_h`: `sscanf("%*d %s %s %d")`, `check_id(from && to)`.
-    ///
-    /// The `mtu < 512` check happens *after* parse in C, before
-    /// `check_id` — but it logs differently (`"invalid MTU"` vs
-    /// `"invalid name"`). We don't enforce it here: it's a policy
-    /// bound that the daemon can adjust, not a wire-format rule.
+    /// Parse `MTU_INFO`. The `mtu < 512` bound is not enforced here:
+    /// it's a policy bound that the daemon can adjust, not a
+    /// wire-format rule.
     ///
     /// # Errors
     /// Too few tokens, bad name, or non-integer MTU.
@@ -199,8 +190,8 @@ impl MtuInfo {
         let to = t.id()?;
         let mtu = t.d()?;
         // Rust extension: optional 4th field. C tinc never emits it
-        // (→ 0); a Rust peer does. Negative/oversized → 0 (best-
-        // effort hint, not worth tearing the conn down for).
+        // (→ 0); a Rust peer does. Negative/oversized → 0 (best-effort
+        // hint, not worth tearing the conn down for).
         let udp_rx_len = t.d_opt()?.and_then(|v| u16::try_from(v).ok()).unwrap_or(0);
 
         Ok(Self {

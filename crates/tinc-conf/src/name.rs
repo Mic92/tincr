@@ -13,7 +13,7 @@
 //! process-global env (`set_var` is `unsafe` in edition 2024 and racy
 //! under parallel test runners). Callers supply the real lookups.
 //!
-//! Semantics match upstream `net_setup.c`:
+//! Semantics (compatible with existing configs):
 //!
 //! - Literal `Name = foo` → validated with [`check_id`], returned
 //!   unchanged. No squashing: `Name = a-b` is an error.
@@ -105,7 +105,8 @@ mod tests {
         assert_eq!(expand_name("alice", no_env, no_host).unwrap(), "alice");
         // The squash is a convenience for hostnames, not a general
         // sanitizer: a literal dash goes straight to check_id and
-        // fails. Asymmetry is intentional (matches upstream).
+        // fails. The asymmetry is intentional and load-bearing for
+        // existing configs.
         assert!(expand_name("has-dash", no_env, no_host).is_err());
         assert!(expand_name("", no_env, no_host).is_err());
     }

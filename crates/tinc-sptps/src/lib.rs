@@ -50,9 +50,8 @@ pub const KEX_LEN: usize = 65;
 /// sides publish an `ek` and the ciphertexts ride on the SIG record.
 pub const KEX_LEN_HYBRID: usize = KEX_LEN + tinc_crypto::hybrid::EK_LEN;
 
-/// Nonce length. `ECDH_SIZE` in C — same as the public key length, which
-/// is a coincidence the C exploits by reusing the constant. We give them
-/// distinct names.
+/// Nonce length. Numerically equal to the ECDH public key length, but
+/// that's a coincidence — keep the constants distinct.
 pub const NONCE_LEN: usize = 32;
 
 /// SPTPS protocol version, byte 0 of every KEX. Hardcoded to 0 since the

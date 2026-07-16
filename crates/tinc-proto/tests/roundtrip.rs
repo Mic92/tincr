@@ -13,7 +13,6 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use tinc_proto::msg::{AddEdge, AnsKey, DelEdge, MtuInfo, ReqKey, ReqKeyExt, UdpInfo};
 use tinc_proto::{AddrStr, Subnet};
 
-// ────────────────────────────────────────────────────────────────────
 // Shared generators
 
 /// Node names: `[A-Za-z0-9_]+`. The proptest regex strategy is the right
@@ -41,7 +40,6 @@ fn arb_token() -> impl Strategy<Value = String> {
     "[!-~]{1,200}".prop_map(String::from)
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Generators
 
 prop_compose! {
@@ -78,7 +76,6 @@ fn arb_subnet() -> impl Strategy<Value = Subnet> {
     prop_oneof![arb_v4(), arb_v6(), arb_mac()]
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Properties
 
 proptest! {
@@ -87,9 +84,9 @@ proptest! {
     /// `parse(format(x)) == x`. The fundamental round-trip.
     ///
     /// What this *doesn't* catch: a parser that accepts more than the
-    /// formatter emits. That's ok — the C parser is also more lenient
-    /// than the formatter (one-digit MAC parts, etc.). The KATs cover
-    /// the lenient-input cases.
+    /// formatter emits. That's fine — the parser is deliberately more
+    /// lenient (one-digit MAC parts, etc.); the KATs cover the
+    /// lenient-input cases.
     #[test]
     fn subnet_roundtrip(s in arb_subnet()) {
         let wire = s.to_string();
@@ -108,17 +105,16 @@ proptest! {
         prop_assert_eq!(wire1, wire2);
     }
 
-    /// Display output never exceeds the C's 64-byte buffer (the `strncpy`
-    /// in `str2net`). MAC is fixed-length 17; v6 caps at 39 + `/128#` +
-    /// 11 digits = ~55. This guards against accidentally overflowing it
-    /// with a future format change.
+    /// Display output never exceeds 64 bytes — C tinc parses subnet
+    /// strings into a fixed 64-byte buffer, so exceeding it would
+    /// break interop. MAC is fixed-length 17; v6 caps at 39 + `/128#`
+    /// + 11 digits = ~55.
     #[test]
     fn subnet_fits_buffer(s in arb_subnet()) {
         prop_assert!(s.to_string().len() < 64);
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // MAC↔v6 disambiguation regression.
 //
 // The proptest above won't trigger this — `arb_mac` produces MACs and
@@ -166,7 +162,6 @@ proptest! {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Message round-trips. One per struct that has both parse and format.
 //
 // The pattern is the same throughout: generate a struct, format, parse,

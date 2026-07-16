@@ -1,6 +1,6 @@
 use super::*;
 
-// ─── to_af_prefix — the inverse map
+// to_af_prefix — the inverse map
 
 /// `0x0800` → `htonl(AF_INET)`. `AF_INET = 2` everywhere
 /// (4.2BSD legacy). Bytes are `[0, 0, 0, 2]` ON ALL
@@ -55,7 +55,7 @@ fn nibble_then_prefix_roundtrip() {
     assert_eq!(prefix[3], af6_low);
 }
 
-// ─── Fixtures
+// Fixtures
 
 /// Construct a `BsdTun` directly. Can't use `open()` (cfg-
 /// gated to BSD targets). Module-private fields.
@@ -114,7 +114,7 @@ fn drain(fd: &OwnedFd) -> Vec<u8> {
     out
 }
 
-// ─── Tun: +14 (= fd.rs)
+// Tun: +14 (= fd.rs)
 
 /// Tun read: feed an IPv4 packet to the pipe; the device
 /// reads at +14, synthesizes the ether header. Byte-
@@ -170,7 +170,7 @@ fn tun_write_strips_ether() {
     assert_eq!(&got, &[0x45, 0x00, 0xDE, 0xAD]);
 }
 
-// ─── Utun: +10, IGNORE prefix (read), SYNTHESIZE (write)
+// Utun: +10, IGNORE prefix (read), SYNTHESIZE (write)
 
 /// Utun read ignores the AF prefix: feed a garbage `[0xFF;4]`
 /// prefix + valid IPv4. If read decoded the prefix it would error;
@@ -282,7 +282,7 @@ fn utun_write_unknown_ethertype_errors() {
     assert_eq!(&frame[10..14], &[0, 0, 0x08, 0x06]);
 }
 
-// ─── Tap: +0 (= raw.rs)
+// Tap: +0 (= raw.rs)
 
 /// Tap read: ethernet in, ethernet out. `raw.rs` verbatim.
 #[test]
@@ -329,7 +329,7 @@ fn tap_write_ether_via_seqpacket() {
     assert_eq!(frame[10], 0x0B); // shost[4], untouched
 }
 
-// ─── EOF + error paths
+// EOF + error paths
 
 /// EOF → `UnexpectedEof`.
 #[test]

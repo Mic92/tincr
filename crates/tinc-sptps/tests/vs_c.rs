@@ -43,7 +43,6 @@ use tinc_crypto::sign::SigningKey;
 use tinc_ffi::{CKey, CSptps, Event, seed_rng, serial_guard};
 use tinc_sptps::{Framing, Output, Role, Sptps};
 
-// ────────────────────────────────────────────────────────────────────
 // RNG bridge: same ChaCha20 stream as csrc/shim.c's randomize().
 //
 // shim.c: `chacha_keysetup(ctx, key, 256); chacha_ivsetup(ctx, iv_zero, NULL)`
@@ -120,7 +119,6 @@ impl RngCore for BridgeRng {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Harness
 
 const REPLAYWIN: usize = 16; // sptps_replaywin default in C
@@ -158,7 +156,6 @@ fn wire(mut outs: Vec<Output>) -> Vec<u8> {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Tests
 
 /// Rust initiator ↔ C responder. The "does it interop at all" check.
@@ -534,7 +531,7 @@ fn rust_vs_c_rekey() {
     };
     alice.receive(&sig_b, &mut NoRng).unwrap();
 
-    // ─── Re-KEX: Alice (Rust) initiates ───
+    // Re-KEX: Alice (Rust) initiates
     // Fresh RNG bytes for the new ephemeral. The Rust RNG and the C RNG
     // are independent here (different sides, different seeds).
     let mut rekey_rng = BridgeRng::new(&[3; 32]);
@@ -615,7 +612,6 @@ fn rust_vs_c_rekey() {
     );
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Abstraction for byte_identical_wire_output: same script, two backends.
 
 #[derive(Clone, Copy)]

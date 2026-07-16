@@ -1,37 +1,21 @@
 //! Linux TUN/TAP.
 //!
-//! ──────────── ioctl approach: NOT the nix macro ────────────────────
+//! # ioctl approach: not the nix macros
 //!
-//! `tui.rs` uses `nix::ioctl_read_bad!` for `TIOCGWINSZ`. That works
-//! because `TIOCGWINSZ` only writes (kernel → us). `TUNSETIFF` is
-//! encoded as `_IOW` (us → kernel) but the kernel WRITES BACK
-//! `ifr_name` after the ioctl. The ioctl encoding lies about the
-//! direction.
+//! `TUNSETIFF` is encoded as `_IOW` (us → kernel) but the kernel
+//! WRITES BACK `ifr_name` after the ioctl — the encoding lies about
+//! the direction. `nix::ioctl_write_ptr_bad!` generates
+//! `unsafe fn(fd, *const T)`, documenting the wrong contract (the
+//! kernel also writes). So we call `libc::ioctl(fd, req, *mut ifreq)`
+//! directly, with a scoped `#[allow(unsafe_code)]` and a SAFETY
+//! comment stating what the kernel reads/writes/locks.
 //!
-//! `nix::ioctl_write_ptr_bad!` generates `unsafe fn(fd, *const T)`.
-//! We'd need `*mut T` to soundly let the kernel write. Casting
-//! `*mut → *const` for the call is sound (the kernel side takes
-//! `void __user *` and ignores const), but it documents the WRONG
-//! contract — `*const` says "kernel reads this" when it also writes.
+//! # `libc::ifreq` layout
 //!
-//! So: bypass the macro. Direct `libc::ioctl(fd, req, *mut ifreq)`.
-//! The macro's value was `if ret < 0 { Err(Errno::last()) }` — three
-//! lines we can write ourselves. We get the right pointer type AND
-//! the third-instance pattern (tui ioctl, info `localtime_r`, this)
-//! still holds: scoped `#[allow(unsafe_code)]`, SAFETY comment that
-//! says what the kernel reads/writes/locks.
+//! `ifr_name: [c_char; 16]` + 24-byte `ifr_ifru` union. `ifr_flags`
+//! is `ifr_ifru.ifru_flags: c_short` (2 bytes at offset 16).
 //!
-//! ──────────── `libc::ifreq` layout ─────────────────────────────────
-//!
-//! Smoke-verified `sizeof(struct ifreq) == 40` on `x86_64` glibc, and
-//! `libc::ifreq` matches. Layout: `ifr_name: [c_char; 16]` + 24-byte
-//! `ifr_ifru` union (largest members are 16 bytes, padded to 24).
-//!
-//! `ifr_flags` is `ifr_ifru.ifru_flags: c_short` (2 bytes at offset
-//! 16). C code typically uses `ifr.ifr_flags` (a `#define` alias
-//! into the union); we write `ifr.ifr_ifru.ifru_flags`.
-//!
-//! ──────────── Why `O_CLOEXEC` matters here more than usual ──────────
+//! # Why `O_CLOEXEC` matters here more than usual
 //!
 //! The daemon spawns `tinc-up`, `tinc-down`, `host-NAME-up` scripts.
 //! Without CLOEXEC, the script inherits the TUN fd.
@@ -71,10 +55,10 @@ pub struct Tun {
     /// between poll-return and read) → `EAGAIN`, not block.
     fd: File,
 
-    /// Kernel-assigned interface name. C: `iface` global. Set
-    /// post-ioctl from `ifr.ifr_name` (kernel writes the actual
-    /// name back, even if we requested one — it might've truncated
-    /// or appended a number).
+    /// Kernel-assigned interface name, read back from `ifr.ifr_name`
+    /// after the ioctl (the kernel writes the actual name back, even
+    /// if we requested one — it might've truncated or appended a
+    /// number).
     iface: String,
 
     /// L2 vs L3. Set at open, never changes. The read/write paths
@@ -100,25 +84,18 @@ impl Tun {
     ///   - `InvalidInput` (EINVAL) on TUNSETIFF: bad flags, bad
     ///     ifname. Shouldn't happen with our construction.
     ///   - `AlreadyExists` (EBUSY) on TUNSETIFF: interface name
-    ///     taken by another process. C commit `a7e906d2` (since
-    ///     reverted by ethertap-drop, but the EBUSY case is real).
+    ///     taken by another process.
     pub fn open(cfg: &DeviceConfig) -> io::Result<Self> {
         let device = cfg.device.as_deref().unwrap_or(DEFAULT_DEVICE);
 
-        // ─── ifr_name pack — BEFORE open
-        // Validation is pure; open needs CAP_NET_ADMIN. Validate
-        // first so tests can hit the error path without root.
+        // Pack ifr_name BEFORE open: validation is pure; open needs
+        // CAP_NET_ADMIN. Validate first so tests can hit the error
+        // path without root.
         let ifr_name = pack_ifr_name(cfg.iface.as_deref())?;
 
-        // ─── ifr_flags
-        // `as i16`: constants fit (1, 2, 0x1000, 0x4000).
-        // `IFF_ONE_QUEUE` NOT set: no-op since kernel `5d09710`
-        // (2.6.27).
-        //
         // TUN: `IFF_VNET_HDR | IFF_NO_PI`. Reads are
         // `[vnet_hdr(10)][raw IP]`; eth header synthesized in
-        // `drain()` or by `tso_split`. Same approach as wg-go
-        // (`tun_linux.go:566`).
+        // `drain()` or by `tso_split`.
         //
         // TAP: `IFF_NO_PI` only. vnet_hdr would need `tso_split`
         // to preserve the real eth header instead of synthesizing
@@ -134,26 +111,20 @@ impl Tun {
             Mode::Tap => libc::IFF_TAP | libc::IFF_NO_PI,
         } as i16;
 
-        // ─── open + TUNSETIFF
         // `iface = None` → ifr_name zeroed → kernel picks `tun0` /
         // `tap0` / first free; the chosen name is read back.
         let (fd, iface) = open_queue(device, ifr_name, flags)?;
 
-        // ─── SIOCGIFHWADDR (TAP only)
-        // The MAC is kernel-generated (random with the locally-
-        // administered bit set). The daemon's `route.c` uses it
-        // for ARP replies in switch mode.
-        //
-        // Failure (`:125`: `LOG_WARNING`, not error) → C continues
-        // with `mymac = {0}`. We `None`. The ARP path with `None`
-        // would send all-zeros source MAC, which is invalid but
-        // Port the warning-not-error.
+        // SIOCGIFHWADDR (TAP only): the MAC is kernel-generated
+        // (random with the locally-administered bit set); switch mode
+        // uses it for ARP replies. Failure is non-fatal — continue
+        // with `None`.
         let mac = match cfg.mode {
             Mode::Tap => siocgifhwaddr(fd.as_fd()).ok(),
             Mode::Tun => None,
         };
 
-        // ─── TUNSETOFFLOAD (TUN only) ──────────────────────────
+        // TUNSETOFFLOAD (TUN only)
         // Feature-detect: `TUNSETOFFLOAD` returns `EINVAL` for
         // unknown flags (`tun.c:2886` "gives the user a way to test
         // for new features"). `TUN_F_TSO4/6` is kernel 2.6.27 —
@@ -231,7 +202,7 @@ impl Tun {
             return Tun::open(cfg).map(|t| vec![t]);
         }
 
-        // ─── n > 1: explicit name + TUN-only ───────────────────────────
+        // n > 1: explicit name + TUN-only
         let Some(name) = cfg.iface.as_deref() else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -290,11 +261,10 @@ impl Tun {
 /// `open(/dev/net/tun)` so length validation fires without
 /// `CAP_NET_ADMIN`.
 ///
-/// `None` → zeros → kernel picks. `len >= 16` → `Err`. STRICTER
-/// than `strncpy + [15]=0` truncation (which fails three steps
-/// later as `ENODEV` in the
-/// user's `ip addr add`). `c_char` sign varies by arch; cast is
-/// sound (kernel reads bytes).
+/// `None` → zeros → kernel picks. `len >= 16` → `Err` rather than
+/// silent truncation (which would only surface later as `ENODEV` in
+/// the user's `ip addr add`). `c_char` sign varies by arch; the cast
+/// is sound (kernel reads bytes).
 ///
 /// # Errors
 /// `InvalidInput` for too-long name. The error message includes
@@ -303,13 +273,13 @@ impl Tun {
 fn pack_ifr_name(iface: Option<&str>) -> io::Result<[libc::c_char; libc::IFNAMSIZ]> {
     let mut buf = [0; libc::IFNAMSIZ];
     let Some(name) = iface else {
-        // Empty → kernel picks. C: `if(iface)` skips the strncpy.
+        // Empty → kernel picks.
         return Ok(buf);
     };
     let bytes = name.as_bytes();
-    // `< IFNAMSIZ` not `<=`: room for NUL. The kernel reads as a
-    // C string; 16 chars + no NUL = unterminated. C's `[15]=0`
-    // forces termination by truncation; we reject instead.
+    // `< IFNAMSIZ` not `<=`: room for NUL. The kernel reads a
+    // C string; 16 chars + no NUL = unterminated. Reject instead of
+    // truncating.
     if bytes.len() >= libc::IFNAMSIZ {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -335,9 +305,8 @@ fn pack_ifr_name(iface: Option<&str>) -> io::Result<[libc::c_char; libc::IFNAMSI
 // the `ioctl` feature for what is a three-line errno wrapper, so
 // the shim is hand-rolled but kept to a single audited call site.
 
-/// Zeroed `struct ifreq` with `ifr_name` set. The shared prefix of
-/// `tunsetiff` / `siocgifhwaddr`: C's `struct ifreq ifr = {0}` then
-/// `strncpy(ifr.ifr_name, ...)`. One `unsafe` for the `mem::zeroed`,
+/// Zeroed `struct ifreq` with `ifr_name` set. Shared prefix of
+/// `tunsetiff` / `siocgifhwaddr`: one `unsafe` for the `mem::zeroed`,
 /// shared by both ioctl shims.
 ///
 /// `libc::ifreq` has no `Default` (the union member blocks derive).
@@ -430,19 +399,12 @@ fn tunsetiff(
     // takes `rtnl_lock` for `TUNSETIFF`; we don't observe.
     ioctl_ifreq(fd, libc::TUNSETIFF, &mut ifr)?;
 
-    // ─── Read back ifr_name
+    // Read back ifr_name. The kernel `strscpy`s into it,
+    // NUL-terminated; `from_bytes_until_nul` finds the NUL or fails.
+    // If it fails (kernel bug, no NUL in 16 bytes), error out.
     //
-    // The kernel `strscpy`s into `ifr_name`, NUL-terminated. The
-    // C's defensive `[15]=0` is belt-and-suspenders (kernel always
-    // terminates). We trust the kernel: `from_bytes_until_nul`
-    // finds the NUL or fails. If it fails (kernel bug, no NUL in
-    // 16 bytes), we error out — STRICTER than C (which would
-    // produce a 15-byte string of garbage).
-    //
-    // `c_char` signedness varies by arch; `.map(.. as u8)` is the
-    // safe equivalent of the `CStr::from_ptr(ifr_name.as_ptr())`
-    // reinterpretation it replaces (kernel ifnames are ASCII per
-    // `dev_valid_name`, so the cast preserves).
+    // `c_char` signedness varies by arch; `.map(.. as u8)` is safe
+    // (kernel ifnames are ASCII per `dev_valid_name`).
     //
     // `to_string_lossy`: never lossy in practice, but forward-
     // compatible (kernel might relax someday) and avoids the
@@ -527,17 +489,8 @@ fn siocgifhwaddr(fd: BorrowedFd<'_>) -> io::Result<Mac> {
     // (kernel only sets the first 6 for `ARPHRD_ETHER`). We only
     // read `[0..6]`.
     #[allow(clippy::cast_sign_loss)] // c_char→u8: raw MAC bytes (c_char sign is arch-dependent)
-    let mac: Mac = {
-        let sa_data = unsafe { ifr.ifr_ifru.ifru_hwaddr }.sa_data;
-        [
-            sa_data[0] as u8,
-            sa_data[1] as u8,
-            sa_data[2] as u8,
-            sa_data[3] as u8,
-            sa_data[4] as u8,
-            sa_data[5] as u8,
-        ]
-    };
+    let sa_data = unsafe { ifr.ifr_ifru.ifru_hwaddr }.sa_data.map(|c| c as u8);
+    let mac: Mac = sa_data[..6].try_into().expect("sa_data is 14 bytes");
     Ok(mac)
 }
 
@@ -569,7 +522,7 @@ impl Device for Tun {
 
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.mode {
-            // ─── TUN (vnet_hdr) ────────────────────────────────
+            // TUN (vnet_hdr).
             // `IFF_NO_PI | IFF_VNET_HDR`: kernel expects
             // `[vnet_hdr(10)][raw IP]` on write (`tun_get_user`
             // at `tun.c:1731`). The daemon's `buf` is
@@ -601,8 +554,7 @@ impl Device for Tun {
                 write_fd(self.fd.as_fd(), &buf[ETH_HLEN - VNET_HDR_LEN..])
             }
 
-            // ─── TAP
-            // Direct write.
+            // TAP: direct write.
             Mode::Tap => write_fd(self.fd.as_fd(), buf),
         }
     }
@@ -662,7 +614,7 @@ impl Device for Tun {
             return crate::drain_via_read(self, arena, cap);
         }
 
-        // ─── TUN: vnet_hdr path ──────────────────────────────
+        // TUN: vnet_hdr path
         // ONE read into the contiguous arena. A super-packet can be
         // 65535 + 10 bytes; `as_contiguous_mut` is `cap*STRIDE` =
         // 64*1600 = 102400 bytes. Fits.
@@ -706,10 +658,9 @@ impl Device for Tun {
 
         match hdr.gso() {
             Some(GsoType::None) | None => {
-                // ─── Non-GSO frame: pass-through ─────────────
+                // Non-GSO frame: pass-through.
                 // Single IP packet. Complete partial csum, synth
-                // eth header, return as `Frames{1}`. wg-go
-                // `tun_linux.go:382-397` `gsoNoneChecksum` path.
+                // eth header, return as `Frames{1}`.
                 //
                 // Layout transform IN PLACE in slot 0:
                 //   before: [vnet_hdr(10)][IP pkt]
@@ -741,7 +692,7 @@ impl Device for Tun {
                 Ok(DrainResult::Frames { count: 1 })
             }
             Some(gso_type @ (GsoType::TcpV4 | GsoType::TcpV6)) => {
-                // ─── TCP super-segment ──────────────────────
+                // TCP super-segment
                 // Shift IP packet to offset 0 so the daemon's
                 // `tso_split` call sees `as_contiguous()[..len]`
                 // without an offset. 10 bytes left, in place.
@@ -819,8 +770,8 @@ mod tests {
         assert_eq!("fifteen_chars_!".len(), 15);
     }
 
-    /// Exactly 16 bytes → Err. STRICTER than C (which truncates
-    /// to 15). The error message names the limit.
+    /// Exactly 16 bytes → Err (no silent truncation). The error
+    /// message names the limit.
     #[test]
     fn pack_ifr_name_exactly_16_err() {
         let name = "sixteen_chars_!!"; // 16 bytes

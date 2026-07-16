@@ -54,7 +54,6 @@ const STREAM_SIG_LEN: usize = 2 + 1 + 64;
 const DGRAM_KEX_LEN: usize = 4 + 1 + 65;
 const DGRAM_SIG_LEN: usize = 4 + 1 + 64;
 
-// ────────────────────────────────────────────────────────────────────
 // Helpers
 
 /// Generate a key blob from a deterministic seed. Uses tinc-crypto's
@@ -114,8 +113,6 @@ fn dribble(peer: &mut CSptps, data: &[u8]) -> Vec<Event> {
     all
 }
 
-// ────────────────────────────────────────────────────────────────────
-
 #[test]
 fn stream_handshake_c_to_c() {
     let _g = serial_guard();
@@ -123,7 +120,7 @@ fn stream_handshake_c_to_c() {
 
     let label = b"tinc-ffi handshake test";
 
-    // ─── Step 1: both sides KEX ───
+    // Step 1: both sides KEX
     // Seed before each start. The two seeds must differ or both sides
     // generate identical ECDH ephemerals and the handshake degenerates
     // into a key-with-yourself test (still passes, but less interesting).
@@ -156,7 +153,7 @@ fn stream_handshake_c_to_c() {
     assert_eq!(bob_kex.len(), STREAM_KEX_LEN);
     assert_eq!(&bob_kex[..3], &[0, 65, SPTPS_HANDSHAKE]);
 
-    // ─── Step 2: Alice receives Bob's KEX, sends SIG ───
+    // Step 2: Alice receives Bob's KEX, sends SIG
     // Initiator branch in receive_kex: store hiskex, immediately send_sig.
     let (n, evs) = alice.receive(&bob_kex);
     assert_eq!(n, bob_kex.len());
@@ -164,13 +161,13 @@ fn stream_handshake_c_to_c() {
     assert_eq!(alice_sig.len(), STREAM_SIG_LEN);
     assert_eq!(&alice_sig[..3], &[0, 64, SPTPS_HANDSHAKE]);
 
-    // ─── Step 3: Bob receives Alice's KEX, sends nothing ───
+    // Step 3: Bob receives Alice's KEX, sends nothing
     // Responder branch: just stores hiskex, returns true. No callbacks.
     let (n, evs) = bob.receive(&alice_kex);
     assert_eq!(n, alice_kex.len());
     assert!(evs.is_empty(), "responder doesn't SIG until it sees SIG");
 
-    // ─── Step 4: Bob receives Alice's SIG ───
+    // Step 4: Bob receives Alice's SIG
     // This is the busy step. receive_sig:
     //   - verifies, does ECDH, runs PRF, sets outcipher
     //   - because !initiator: calls send_sig() → Wire event
@@ -190,13 +187,13 @@ fn stream_handshake_c_to_c() {
     };
     assert!(matches!(evs[1], Event::HandshakeDone));
 
-    // ─── Step 5: Alice receives Bob's SIG ───
+    // Step 5: Alice receives Bob's SIG
     // Initiator path: same receive_sig but skips send_sig (already sent).
     let (n, evs) = alice.receive(&bob_sig);
     assert_eq!(n, bob_sig.len());
     assert_eq!(evs, vec![Event::HandshakeDone]);
 
-    // ─── Step 6: app traffic round-trip ───
+    // Step 6: app traffic round-trip
     // Now outstate=true, instate=true on both sides. send_record encrypts.
     let msg = b"hello bob";
     let evs = alice.send_record(0, msg);
@@ -253,8 +250,8 @@ fn stream_handshake_survives_byte_dribble() {
     // resulting event stream must be identical — the reassembly buffer
     // in sptps_receive_data is supposed to be transparent.
     //
-    // This isn't an sptps.c test (upstream presumably tests this); it's
-    // a harness test. If the sink-draining logic in our shim were
+    // This is a harness test, not an sptps.c test. If the
+    // sink-draining logic in our shim were
     // dropping events on calls that produce nothing, this would catch it.
 
     let ((ak1, ak2), (bk1, bk2)) = ckeys(1, 2);
@@ -444,7 +441,7 @@ fn rekey_uses_ack_state() {
 
     let ((ak1, ak2), (bk1, bk2)) = ckeys(1, 2);
 
-    // ─── Initial handshake (compressed; tested above) ───
+    // Initial handshake (compressed; tested above)
     seed_rng(&[1; 32]);
     let (mut alice, e) = CSptps::start(Role::Initiator, Framing::Stream, &ak1, &ak2, b"rekey");
     let kex_a = sole_wire(e);
@@ -461,7 +458,7 @@ fn rekey_uses_ack_state() {
     };
     let (_, _) = alice.receive(&sig_b);
 
-    // ─── Re-KEX ───
+    // Re-KEX
     // force_kex sends a new KEX. This time it's *encrypted* (outstate=true).
     seed_rng(&[3; 32]); // fresh randomness for the new ephemeral
     let e = alice.force_kex();
