@@ -141,10 +141,8 @@ pub(crate) fn winsize() -> Winsize {
 /// user's shell is left in raw mode — no echo, no line buffering,
 /// `stty sane` to recover.
 ///
-/// Ctrl-C → SIGINT → process death → kernel doesn't restore
-/// termios. KNOWN GAP. The fix is a `signal_hook` SIGINT handler
-/// that drops the guard; deferred until someone Ctrl-C's it and
-/// complains.
+/// Ctrl-C → SIGINT → process death → kernel doesn't restore termios.
+/// Known gap; the fix would be a SIGINT handler that drops the guard.
 ///
 /// We don't hold a `StdoutLock` — it would block cooked-mode
 /// `read_line`. Writes lock per-call via `print!`; fine at 1Hz.
@@ -180,7 +178,7 @@ impl RawMode {
         // Snapshot BEFORE mutation.
         let original = termios::tcgetattr(fd)?;
 
-        // ─── Mutate
+        // Mutate
         let mut raw = original.clone();
         raw.local_flags &= !(LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::ISIG);
         // `VMIN=1, VTIME=0`: `read()` blocks for 1 byte. poll()
@@ -229,7 +227,7 @@ impl RawMode {
         // Lock held for f's duration only; released before re-raw.
         let result = f(&mut stdin.lock());
 
-        // ─── Re-raw (best-effort; same flags as enter())
+        // Re-raw (best-effort; same flags as enter())
         let mut raw = self.original.clone();
         raw.local_flags &= !(LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::ISIG);
         raw.control_chars[SpecialCharacterIndices::VMIN as usize] = 1;

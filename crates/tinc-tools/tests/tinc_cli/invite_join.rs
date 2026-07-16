@@ -51,7 +51,7 @@ fn invite_prints_url() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("restart or reload"), "stderr was: {stderr}");
 
-    // ─── fsck contract ───
+    // fsck contract
     // The invitation key + invitation file should NOT trip fsck.
     // fsck only checks the node's OWN key (ed25519_key.priv at
     // confbase root), not invitation keys. If fsck's path glob
@@ -144,9 +144,9 @@ fn invite_missing_arg() {
     assert!(stderr.contains("node name"));
 }
 
-// ────────────────────────────────────────────────────────────────────
+//
 // join through the binary
-// ────────────────────────────────────────────────────────────────────
+//
 //
 // What this proves over the unit tests in `cmd/join.rs`: argv
 // parsing (`tinc join URL` vs `echo URL | tinc join`), exit-code
@@ -159,9 +159,8 @@ fn invite_missing_arg() {
 // are TODO. The pieces below that path — URL parse, preflight,
 // `finalize_join`, `server_receive_cookie` — are all unit-covered.
 
-/// Bad URL → exit 1 with the C's exact message, no TCP attempted.
-/// The "Invalid invitation URL." message is the C error; matching
-/// it means existing docs/forum posts apply.
+/// Bad URL → exit 1, no TCP attempted. The "Invalid invitation URL."
+/// message matches C tinc so existing docs/forum posts apply.
 #[test]
 fn join_bad_url() {
     let (_dir, cb) = bare_dir();

@@ -114,8 +114,7 @@ const CHUNK2_DROP_KEYS: &[&str] = &[
 /// Only via `keypair::generate`'s `OsRng::fill_bytes` if the OS
 /// entropy source is broken.
 // Sequence of distinct steps sharing local state (open file handles,
-// the line iterator). Upstream is 400 lines for the same reason; it
-// does it with goto.
+// the line iterator).
 pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResult, CmdError> {
     let mut created: Vec<std::path::PathBuf> = Vec::new();
     let r = finalize_join_inner(data, paths, force, &mut created);
@@ -134,10 +133,8 @@ fn finalize_join_inner(
     force: bool,
     created: &mut Vec<PathBuf>,
 ) -> Result<JoinResult, CmdError> {
-    // Upstream treats `data` as a NUL-terminated C string. Embedded
-    // NUL would truncate the parser silently. We accept any UTF-8
-    // (which includes ASCII, which is all the file should be).
-    // Non-UTF-8 → bail; better than silently truncating.
+    // Accept any UTF-8 (the blob should be ASCII); non-UTF-8 bails
+    // rather than silently truncating.
     //
     // Why not `&str` parameter: the SPTPS receive path delivers
     // `Vec<u8>` (it doesn't know the payload is text). The
@@ -156,7 +153,7 @@ fn finalize_join_inner(
     let hosts_written = write_host_chunks(&mut lines, paths, &name, boundary, created)?;
     let pubkey_b64 = generate_node_key(paths, &mut files, created)?;
 
-    // ─── Write tinc-up placeholder (shared with `init`)
+    // Write tinc-up placeholder (shared with `init`)
     if let Some(p) = crate::cmd::init::write_tinc_up_placeholder(paths)? {
         created.push(p);
     }
@@ -170,11 +167,9 @@ fn finalize_join_inner(
 
 /// Parse and validate the mandatory `Name = OURNAME` first line.
 ///
-/// `get_value(data, "Name")` upstream parses the *first* line and
-/// checks if it's the requested key. Not a search — first-line-only.
-/// So the invitation file format is rigid: `Name = X` MUST be line 1.
-/// `cmd_invite` writes it that way (`invite.rs:build_invitation_file`
-/// emits `Name` first). The contract test pins this.
+/// The invitation format is rigid: `Name = X` must be line 1 (not merely
+/// present somewhere). `invite.rs:build_invitation_file` emits `Name`
+/// first; the contract test pins this.
 fn parse_blob_header(lines: &mut std::str::Lines<'_>) -> Result<String, CmdError> {
     let first = lines
         .next()
@@ -191,10 +186,9 @@ fn parse_blob_header(lines: &mut std::str::Lines<'_>) -> Result<String, CmdError
 
 /// Bail if `tinc.conf` already exists.
 ///
-/// Upstream does the `join_XXXXXXXX` random-netname dance here; we
-/// just bail. `NetName` from the blob is silently ignored — unlike
-/// upstream we don't re-derive `Paths` mid-flight (the caller already
-/// picked confbase via `-c` or `-n`).
+/// Bails if the confbase is already populated. `NetName` from the blob is
+/// silently ignored — `Paths` is not re-derived mid-flight (the caller
+/// already picked confbase via `-c` or `-n`).
 fn ensure_fresh_confbase(paths: &Paths) -> Result<(), CmdError> {
     let tinc_conf = paths.tinc_conf();
     if tinc_conf.exists() {
@@ -233,10 +227,9 @@ fn write_chunk1<'a>(
     // The hand-rolled tokenizer again (sixth instance). We use
     // `vars::lookup`.
     //
-    // Loop semantics: upstream walks until `Name = X` where X !=
-    // name (chunk boundary), `break`. Then the next loop picks up
-    // *with l still set to that Name line*. We replicate by tracking
-    // the boundary line in the returned Option.
+    // Chunk boundary: a `Name = X` line where X != name ends this chunk,
+    // and the next loop must resume at that same line — tracked via the
+    // boundary line in the returned Option.
     let mut boundary: Option<(&'a str, &'a str)> = None;
 
     let f = files
@@ -372,9 +365,8 @@ fn write_host_chunks<'a>(
                 continue;
             }
 
-            // Upstream's tokenizer here only checks if the FIRST
-            // token is exactly "Name" (4 chars). `Namespace = foo`
-            // passes through (len=9).
+            // Only a first token of exactly "Name" starts a new chunk;
+            // `Namespace = foo` passes through.
             //
             // We use `split_var` (the chunk-1 tokenizer) and check
             // for "Name". Its `=` handling differs slightly from the
@@ -397,8 +389,8 @@ fn write_host_chunks<'a>(
             }
 
             // `.lines()` strips the newline; add it back. (Yes, this
-            // means a host file with no trailing newline *gains* one.
-            // Upstream does the same. Harmless.)
+            // means a host file with no trailing newline gains one.
+            // Harmless.)
             writeln!(hf, "{line}").map_err(io_err(&host_path))?;
         }
     }
@@ -409,9 +401,8 @@ fn write_host_chunks<'a>(
 /// Generate the real Ed25519 node key.
 ///
 /// Same as `init`: PEM private key at 0600, b64 pubkey appended to
-/// hosts/NAME *after* the chunk-1 HOST vars (matching upstream's
-/// write order). The returned pubkey goes back over SPTPS so the
-/// daemon writes our hosts entry on its end.
+/// hosts/NAME after the chunk-1 HOST vars. The returned pubkey goes back
+/// over SPTPS so the daemon writes our hosts entry on its end.
 fn generate_node_key(
     paths: &Paths,
     files: &mut OpenFiles,

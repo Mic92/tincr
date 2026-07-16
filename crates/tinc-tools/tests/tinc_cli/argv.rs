@@ -1,7 +1,7 @@
 use super::{bin, tinc};
 use std::process::Command;
 
-// ─── tinc-auth argv surface
+// tinc-auth argv surface
 // No fake_daemon coverage here (tinc-auth speaks HTTP, separate
 // concern); just prove the flag parser matches the other binaries.
 
@@ -83,14 +83,13 @@ fn help_subcommand_same_as_option() {
     assert_eq!(out_h.stdout, out_opt.stdout);
 }
 
-// ────────────────────────────────────────────────────────────────────
+//
 // network — switch-reject + argc only (list reads compile-time
 // CONFDIR /etc/tinc, can't fake from integration test)
-// ────────────────────────────────────────────────────────────────────
+//
 
-/// `tinc network NAME` → error with `-n` advice. Deliberate
-/// Upstream-behavior-drop #2. The upstream `switch_network` mutates globals
-/// for the readline loop; we have no loop.
+/// `tinc network NAME` → error with `-n` advice; switch mode is not
+/// supported without an interactive shell.
 #[test]
 fn network_switch_rejected() {
     let out = tinc(&["network", "foo"]);

@@ -29,7 +29,6 @@ fn pidfile_parse() {
 }
 
 /// Pidfile validation: cookie must be exactly 64 hex chars.
-/// We tighten over upstream here.
 #[test]
 fn pidfile_cookie_validated() {
     let dir = tempfile::tempdir().unwrap();
@@ -144,7 +143,7 @@ where
         let mut write = &theirs;
         let mut br = BufReader::new(read);
 
-        // ─── Recv ID, check cookie
+        // Recv ID, check cookie
         let mut line = String::new();
         br.read_line(&mut line).unwrap();
         // Shape: "0 ^COOKIE 0\n".
@@ -155,14 +154,14 @@ where
         assert_eq!(parts[1], format!("^{expected_cookie}"));
         assert_eq!(parts[2], "0");
 
-        // ─── Send greeting line 1 (send_id)
+        // Send greeting line 1 (send_id)
         // The CLI ignores everything after the first int.
         writeln!(write, "0 fakedaemon 17.7").unwrap();
 
-        // ─── Send greeting line 2 (ACK + ctl-ver + pid)
+        // Send greeting line 2 (ACK + ctl-ver + pid)
         writeln!(write, "4 0 {daemon_pid}").unwrap();
 
-        // ─── Hand off to test-specific serving
+        // Hand off to test-specific serving
         serve(&mut br, &mut write);
         // Drop closes.
     })
@@ -428,7 +427,7 @@ fn stop_drains_to_eof() {
     daemon.join().unwrap();
 }
 
-// ─── recv_row: the dump prefix-strip + terminator detect
+// recv_row: the dump prefix-strip + terminator detect
 //
 // Same harness as `recv_lines_until_eof`, but using the typed
 // `recv_row` instead of hand-tokenizing. The parse step (body →
@@ -512,8 +511,7 @@ fn recv_row_eof_mid_dump() {
     daemon.join().unwrap();
 }
 
-/// Wrong code (`"19 3 ..."`) → error. We tighten over upstream:
-/// a non-18 prefix is corruption.
+/// Wrong code (`"19 3 ..."`) → error: a non-18 prefix is corruption.
 #[test]
 fn recv_row_bad_code() {
     let cookie = "4".repeat(64);
@@ -646,7 +644,7 @@ fn recv_data_after_recv_line_shared_buffer() {
         pid: 0,
     };
 
-    // ─── Record 1
+    // Record 1
     // `recv_line` reads through '\n'. BufReader's first read
     // pulls EVERYTHING (Cursor returns it all). 'LOGDATA' is
     // now in BufReader's buffer.
@@ -659,7 +657,7 @@ fn recv_data_after_recv_line_shared_buffer() {
     ctl.recv_data(&mut data).unwrap();
     assert_eq!(&data, b"LOGDATA");
 
-    // ─── Record 2
+    // Record 2
     // STILL in BufReader's buffer (Cursor returned everything
     // on the first read).
     let line = ctl.recv_line().unwrap().unwrap();
@@ -669,7 +667,7 @@ fn recv_data_after_recv_line_shared_buffer() {
     ctl.recv_data(&mut data2).unwrap();
     assert_eq!(&data2, b"HELLO");
 
-    // ─── EOF
+    // EOF
     let line = ctl.recv_line().unwrap();
     assert_eq!(line, None);
 }

@@ -43,24 +43,17 @@
 //! `invite()` → in-process server stub ↔ SPTPS → `finalize_join()`
 //! writes a confbase that `read_private` accepts. No subprocess.
 //!
-//! ## What we drop from upstream
+//! ## Limitations
 //!
-//! - **Netname re-derivation loop**: random `join_DEADBEEF` netname
-//!   if `-n vpn` is already populated. We require `-c` or empty
-//!   confbase.
-//! - **`ifconfig` script generation**: per-platform `ip`/`ifconfig`/
-//!   `netsh` synthesis (~300 LOC). We write a placeholder;
-//!   `Ifconfig`/`Route` keywords are recognized but not acted on.
-//! - **tty prompts**: same "no prompts" deviation as init/genkey/fsck.
-//! - **RSA keygen**: `DISABLE_LEGACY`.
-//! - **`check_port`**: stub.
+//! - Requires `-c` or an empty confbase; no fallback to a randomly named
+//!   netname when the target is already populated.
+//! - `Ifconfig`/`Route` keywords in the invitation are recognized but not
+//!   turned into per-platform scripts; a placeholder `tinc-up` is written.
+//! - No tty prompts, no RSA keygen, no port-availability probe.
 //!
-//! ## What we tighten
-//!
-//! - **Data accumulation cap.** Upstream `xrealloc` grows unbounded.
-//!   We cap at 1 MiB (a 1000-node mesh's invitation is ~50 KiB).
-//! - **Variable filter is exact, not prefix.** We use
-//!   `tinc-conf::vars::lookup` directly. Same `VAR_SAFE` table.
+//! Accumulated invitation data is capped at 1 MiB (a 1000-node mesh's
+//! invitation is ~50 KiB); the safe-variable filter matches names exactly
+//! via `tinc-conf::vars::lookup`.
 
 mod finalize;
 mod server_stub;
@@ -93,26 +86,21 @@ use super::{CmdError, io_err, makedir};
 
 use wire::{PROT_MAJOR, parse_greeting_line1, parse_greeting_line2, recv_line};
 
-/// SPTPS handshake label. Both sides hardcode this string; the 15 is
-/// `strlen("tinc invitation")`. Passed as `label.into()` so the
-/// trailing NUL is NOT included (matching upstream's explicit `15`,
-/// not `sizeof`).
+/// SPTPS handshake label. Both sides hardcode this string, without a
+/// trailing NUL — the label bytes must match C tinc exactly for the
+/// handshake to succeed.
 pub(crate) const INVITE_LABEL: &[u8] = b"tinc invitation";
 
-/// `PROT_MINOR` in the *outgoing* greeting is hardcoded `1`, NOT 7.
-/// Upstream builds the full version string with the real `PROT_MINOR`
-/// then *throws it away* and sends `1` instead. The daemon overwrites
-/// `c->protocol_minor = 2` anyway. So the value we send is dead, but
-/// we match the bytes because that's what hits the wire.
+/// `PROT_MINOR` in the outgoing greeting is hardcoded `1` (not the real
+/// minor version) to match what the C client puts on the wire; the daemon
+/// ignores it anyway.
 const PROT_MINOR_SENT: u32 = 1;
 
-/// Hard cap on accumulated invitation data. Upstream grows unbounded
-/// (`xrealloc(data, datalen + len + 1)` in a loop). 1 MiB is ~20×
-/// a realistic invitation from a 1000-node mesh.
+/// Hard cap on accumulated invitation data. 1 MiB is ~20× a realistic
+/// invitation from a 1000-node mesh.
 const MAX_DATA: usize = 1 << 20;
 
-/// Socket read timeout. Upstream's `wait_socket_recv` `select`s with
-/// `tv_sec = 5`. We use the same.
+/// Socket read timeout, matching the C client's 5-second select timeout.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 // finalize_join — the testable seam
@@ -121,10 +109,9 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// SPTPS (type-1 record); the rest is informational.
 ///
 /// Why this isn't `()`: `finalize_join` doesn't touch the SPTPS
-/// connection — that's a layer above. It returns what the SPTPS
-/// layer needs to send. Upstream has the `sptps_send_record` *inside*
-/// `finalize_join` because `sptps` is a global there. We split:
-/// `finalize_join` is pure-fs, the caller does the send.
+/// connection — that's a layer above. It returns what the SPTPS layer
+/// needs to send: `finalize_join` is pure filesystem work, the caller
+/// does the send.
 #[derive(Debug)]
 pub struct JoinResult {
     /// `Name = X` from chunk 1, line 1. The new node's name.
@@ -134,8 +121,7 @@ pub struct JoinResult {
     /// NOT secret — it's the public key.
     pub pubkey_b64: String,
     /// Names of host files written from secondary chunks. For tests
-    /// and for the binary's "Configuration stored" summary. Upstream
-    /// doesn't surface this; we do because it's free.
+    /// and for the binary's "Configuration stored" summary.
     pub hosts_written: Vec<String>,
 }
 
@@ -155,15 +141,14 @@ pub struct JoinResult {
 ///
 /// # Panics
 /// Only via `keypair::generate`'s entropy source.
-// Sequence of distinct steps sharing local state (sockets, SPTPS
-// pump, accumulated blob). Upstream is one function for the same
-// reason — the steps share too much state to split cleanly.
+// Sequence of distinct steps sharing local state (sockets, SPTPS pump,
+// accumulated blob); the steps share too much state to split cleanly.
 pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
-    // ─── Parse URL
+    // Parse URL
     let parsed =
         parse_url(url).ok_or_else(|| CmdError::BadInput("Invalid invitation URL.".into()))?;
 
-    // ─── Preflight: confbase must be fresh
+    // Preflight: confbase must be fresh
     // Do this BEFORE connecting — the cookie is single-use on the
     // daemon side (rename to .used). If we connect, send cookie,
     // daemon renames, then WE fail on "tinc.conf exists" — the
@@ -185,14 +170,14 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         )));
     }
 
-    // ─── Generate throwaway key
+    // Generate throwaway key
     // This key is ONLY for the SPTPS handshake; it's not the node's
     // identity. The daemon doesn't store it. (The real node key is
     // generated inside `finalize_join`.)
     let throwaway = keypair::generate();
     let throwaway_b64 = b64::encode(throwaway.public_key());
 
-    // ─── Connect
+    // Connect
     // `TcpStream::connect((host, port))` does the getaddrinfo loop
     // internally (resolves all addrs, tries each). We lose the
     // per-addr "Could not connect to X port Y" stderr lines, but
@@ -213,13 +198,13 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         .map_err(io_err("set_read_timeout"))?;
     eprintln!("Connected to {} port {}...", parsed.host, parsed.port);
 
-    // ─── Meta-greeting exchange
+    // Meta-greeting exchange
     // Two lines out, two lines in.
     //
     // OUT: "0 ?<throwaway-pubkey-b64> 17.1\n"
     //   `0` = ID request type. `?` prefix tells `id_h` "invitation".
-    //   `17.1` = PROT_MAJOR.PROT_MINOR_SENT. The minor is dead (daemon
-    //   overwrites it), but we match upstream's bytes.
+    //   `17.1` = PROT_MAJOR.PROT_MINOR_SENT. The minor is ignored by the
+    //   daemon, but the bytes match what the C client sends.
     let greeting = format!("0 ?{throwaway_b64} {PROT_MAJOR}.{PROT_MINOR_SENT}\n");
     sock.write_all(greeting.as_bytes())
         .map_err(io_err("send"))?;
@@ -244,16 +229,14 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
     // Parse line 2. The fingerprint is everything after `"4 "`.
     let fingerprint = parse_greeting_line2(&line2)?;
 
-    // ─── Verify key_hash
+    // Verify key_hash
     // The whole point of the URL's first 24 chars: prove the daemon
     // holds the invitation key.
     //
     // `fingerprint_hash`, not `key_hash`: `key_hash` takes a raw
-    // pubkey and re-b64s it. The daemon sent us the b64 string
-    // directly; hashing it directly is `key_hash`'s body. Upstream
-    // never decodes the wire string back to bytes — re-encoding
-    // could produce a different alphabet (`+/` vs `-_`) and the
-    // hash would differ. Hash exactly what arrived.
+    // pubkey and re-b64s it. The daemon sent us the b64 string directly;
+    // hash exactly what arrived — decoding and re-encoding could pick a
+    // different alphabet (`+/` vs `-_`) and the hash would differ.
     if fingerprint_hash(fingerprint) != parsed.key_hash {
         return Err(CmdError::BadInput(format!(
             "Peer has an invalid key. Please make sure you're using the correct URL.\n{fingerprint:?}"
@@ -270,7 +253,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         })
         .ok_or_else(|| CmdError::BadInput("Invalid pubkey from peer".into()))?;
 
-    // ─── Start SPTPS
+    // Start SPTPS
     // initiator=true (we connected), datagram=false (TCP stream).
     // replaywin=0 (stream mode ignores it; matches the test harness).
     let (mut sptps, init_out) = Sptps::start(
@@ -283,11 +266,8 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         &mut OsRng,
     );
 
-    // ─── SPTPS pump
-    // The upstream structure is callback-based: `invitation_send`
-    // writes to sock, `invitation_receive` accumulates type-0, calls
-    // `finalize_join` on type-1, sets `success=true` on type-2. We
-    // do the same with explicit state in this loop.
+    // SPTPS pump: accumulate type-0 records, finalize on type-1, mark
+    // success on type-2, with explicit state in this loop.
     //
     // The `buf` from the meta-greeting may have leftover bytes (the
     // first SPTPS record could've arrived in the same recv as line 2).
@@ -318,10 +298,8 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
                             }
                             data.extend_from_slice(&bytes);
                         }
-                        // case 1: finalize. Upstream calls
-                        // `finalize_join()` which has the
-                        // `sptps_send_record` *inside* it. We split:
-                        // finalize returns the pubkey, we send.
+                        // case 1: finalize returns the pubkey; the send
+                        // happens here.
                         1 => {
                             let r = finalize_join(&data, paths, force)?;
                             pubkey_to_send = Some(r.pubkey_b64);

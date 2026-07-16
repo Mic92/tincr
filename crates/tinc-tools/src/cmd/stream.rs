@@ -28,15 +28,12 @@
 //! start of the data block; see `ctl.rs`'s `CtlSocket` doc-comment
 //! for why `BufReader` is the shared buffer.
 //!
-//! ## The SIGINT handler — NOT ported
+//! ## No SIGINT handler
 //!
-//! Upstream installs a SIGINT handler that `shutdown(fd, SHUT_RDWR)`s
-//! so the loop exits cleanly with code 0 instead of 130. NOT ported:
-//! the daemon doesn't care (kernel closes the socket either way,
-//! connection-reaper handles it), `tinc log` is interactive so
-//! nobody checks `$?`, and the static-fd signal-handler dance has
-//! hairy failure modes. Exit codes for streaming commands aren't a
-//! contract.
+//! Ctrl-C exits with 130 instead of shutting the socket down for a clean
+//! exit 0. The daemon doesn't care (the kernel closes the socket either
+//! way), `tinc log` is interactive so nobody checks `$?`, and a
+//! static-fd signal handler has hairy failure modes.
 //!
 //! ## pcap headers: native-endian
 //!
@@ -134,18 +131,15 @@ const DEBUG_UNSET: i32 = -1;
 /// escapes look like garbage in less without `-R`.
 /// `isatty(stdout)` is false then → no color.
 ///
-/// Why not check `NO_COLOR` env var (the modern convention):
-/// upstream doesn't. `script -c "tinc log"` is the answer (PTY in
-/// between). Same as every isatty-gated colorizer.
+/// `NO_COLOR` is not honored; force color via a PTY (`script -c "tinc
+/// log"`) if needed.
 fn use_ansi_escapes_stdout() -> bool {
     use std::io::IsTerminal;
     if !std::io::stdout().is_terminal() {
         return false;
     }
-    // Empty string is "set" in the getenv sense (non-NULL for
-    // `TERM=`). `env::var` returns `Ok("")` for that, which is
-    // `!= "dumb"`, so colors on. Probably wrong (TERM= means "no
-    // terminfo"), but upstream-compat.
+    // An empty `TERM=` still enables color (it's != "dumb"). Arguably
+    // wrong, but matches C tinc's behavior.
     match std::env::var("TERM") {
         Ok(term) => term != "dumb",
         Err(_) => false, // unset, or non-UTF-8 (unlikely)
@@ -184,7 +178,7 @@ where
     S: Read + Write,
     W: Write,
 {
-    // ─── Subscribe
+    // Subscribe
     // The bool prints as 0/1; the daemon reads as int and treats
     // nonzero as true. `i32::from(bool)` is 0/1.
     ctl.send_int2(
@@ -193,7 +187,7 @@ where
         i32::from(use_color),
     )?;
 
-    // ─── Receive loop
+    // Receive loop
     // Reused buffer; `clear` + `resize` per-iteration. `resize`
     // doesn't shrink capacity, so after the first message we never
     // re-alloc. `with_capacity` for the FIRST message: pre-size to
@@ -214,9 +208,7 @@ where
         // by 10000×.
         buf.clear();
         buf.resize(len, 0);
-        // Mid-data EOF → bubble (slightly noisier than upstream,
-        // but the daemon dying mid-stream is rare and a message
-        // helps).
+        // Mid-data EOF (daemon died mid-stream) bubbles up as an error.
         ctl.recv_data(&mut buf)?;
 
         // The data is the FORMATTED log line (priority prefix,
@@ -239,10 +231,8 @@ where
 
 /// CLI entry: `tinc log [LEVEL]`.
 ///
-/// `LEVEL` is `atoi`'d upstream; `atoi("garbage")` is 0 (silently).
-/// We use `parse::<i32>()` which errors. STRICTER, but `tinc log
-/// abc` succeeding-with-level-0 is a footgun. The change is
-/// observable but only for invalid input.
+/// `LEVEL` is parsed strictly: `tinc log abc` errors instead of silently
+/// meaning level 0.
 ///
 /// The SIGINT handler is NOT here (see module doc). Ctrl-C kills
 /// the process; exit 130. Daemon doesn't care.
@@ -408,18 +398,18 @@ where
     W: Write,
     Clock: FnMut() -> SystemTime,
 {
-    // ─── Subscribe
+    // Subscribe
     #[expect(clippy::cast_possible_wrap)] // snaplen ≤ MTU; daemon reads %d (i32 wire)
     ctl.send_int(CtlRequest::Pcap, snaplen as i32)?;
 
-    // ─── Global header
+    // Global header
     // ONCE, before the loop. Wireshark reads this to know the
     // link-type and endianness.
     out.write_all(&pcap_global_header(snaplen))
         .map_err(CtlError::Io)?;
     out.flush().map_err(CtlError::Io)?;
 
-    // ─── Receive loop
+    // Receive loop
     // Same buffer-reuse as `log_loop`. Packets are bigger (up to
     // 9018), so the upfront capacity matters more.
     let mut buf: Vec<u8> = Vec::with_capacity(PCAP_DATA_MAX);
@@ -455,10 +445,8 @@ where
 
 /// CLI entry: `tinc pcap [SNAPLEN]`.
 ///
-/// `SNAPLEN`: `atoi`'d upstream. We `parse::<u32>()`. Stricter
-/// (rejects negative — `atoi("-5")` is `-5` then assigned to a
-/// `uint32_t` arg which wraps to a huge number; daemon then never
-/// clips). `tinc pcap -5` failing is better.
+/// `SNAPLEN` is parsed as `u32`, so negative or garbage input errors
+/// instead of wrapping to a huge snaplen.
 ///
 /// # Errors
 /// Same as `run_log`.

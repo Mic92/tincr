@@ -3,18 +3,15 @@ use std::fs;
 
 use crate::names::PathsInput;
 
-// ─── Kind parsing
-//
-// The argv → Kind step. The `reachable nodes` shift is the
-// tricky one (must shift BEFORE arity check).
+// Kind parsing: argv → Kind. The `reachable nodes` shift must happen
+// before the arity check.
 
 fn s(v: &[&str]) -> Vec<String> {
     v.iter().map(|&x| x.to_owned()).collect()
 }
 
-/// `parse_kind` Ok-path table. `strcasecmp` throughout. The
-/// `reachable nodes` shift: argv++/argc-- so the rest of the
-/// dispatch sees `nodes` as argv[1].
+/// `parse_kind` Ok-path table. Case-insensitive throughout; `reachable`
+/// is shifted off before the type dispatch.
 #[test]
 fn kind_ok() {
     #[rustfmt::skip]
@@ -27,12 +24,12 @@ fn kind_ok() {
         (&["graph"],            Kind::Graph),
         (&["digraph"],          Kind::Digraph),
         (&["invitations"],      Kind::Invitations),
-        // strcasecmp: nobody types it this way, but accepted
+        // case-insensitive
         (&["NODES"],            Kind::Nodes),
         (&["Digraph"],          Kind::Digraph),
         // reachable shift
         (&["reachable", "nodes"], Kind::ReachableNodes),
-        // strcasecmp on `reachable` too
+        // case-insensitive on `reachable` too
         (&["REACHABLE", "nodes"], Kind::ReachableNodes),
     ];
     for (input, expected) in cases {
@@ -52,10 +49,9 @@ fn kind_err() {
     let cases: &[(&[&str], &str)] = &[
         // `reachable X` for X != nodes.
         (&["reachable", "edges"], "only supported for nodes"),
-        // The 90s GNU backtick-apostrophe.
+        // GNU-style backtick-apostrophe quoting in the message.
         (&["reachable", "graph"], "`reachable'"),
-        // `reachable` alone: `argc > 2` fails first, falls to `argc != 2`.
-        // Our match: rest.first() is None → arity message.
+        // `reachable` alone → arity message.
         (&["reachable"],          "Invalid number"),
         // Zero args → arity.
         (&[],                     "Invalid number"),
@@ -84,10 +80,8 @@ fn kind_needs_daemon() {
     assert!(!Kind::Invitations.needs_daemon());
 }
 
-// ─── NodeRow parse
-//
-// Golden vector: hand-computed from the daemon's format string,
-// with realistic values. `n->hostname` = "10.0.0.1 port 655".
+// NodeRow parse: golden vector hand-computed from the daemon's dump
+// format with realistic values.
 
 /// The reference row. `recv_row` strips `18 3 `, so the body
 /// starts at `name`.
@@ -132,10 +126,8 @@ fn node_parse_golden() {
     assert!(r.reachable());
 }
 
-/// Host-field variants beyond the golden vector.
-/// - `n->hostname = NULL` → daemon sends `"unknown port unknown"`;
-///   the `port` literal still splits.
-/// - `MYSELF`: a literal in `sockaddr2hostname` format.
+/// Host-field variants beyond the golden vector: `"unknown port unknown"`
+/// (unresolved address; the `port` literal still splits) and `MYSELF`.
 #[test]
 fn node_parse_host_variants() {
     // unknown host: status 0 → no reachable/validkey bits
@@ -178,11 +170,11 @@ fn node_parse_short() {
 ///
 /// Three facets of one contract:
 /// - the full golden line (the spec, byte-for-byte)
-/// - rtt suffix: present iff `udp_ping_rtt != -1`, `%03d` padded
-/// - status `%04x` pad (contrast conn dump's unpadded `%x`)
+/// - rtt suffix: present iff `udp_ping_rtt != -1`, zero-padded millis
+/// - status zero-padded to 4 hex digits (contrast conn dump's unpadded)
 #[test]
 fn node_fmt_plain_contract() {
-    // ─── Full string match. This IS the spec. ───
+    // Full string match — this IS the spec.
     let r = NodeRow::parse(NODE_BODY).unwrap();
     assert_eq!(
         r.fmt_plain(),
@@ -193,7 +185,7 @@ fn node_fmt_plain_contract() {
         "golden line (with rtt)"
     );
 
-    // ─── udp_ping_rtt = -1 → no rtt suffix at all ───
+    // udp_ping_rtt = -1 → no rtt suffix at all
     let no_rtt = NodeRow::parse(
         "carol 000000000000 unknown port unknown \
          0 0 0 0 0 0 - - 99 0 0 0 0 -1 0 0 0 0",
@@ -206,7 +198,7 @@ fn node_fmt_plain_contract() {
         "rtt=-1: ends after tx, no trailing space"
     );
 
-    // ─── substring checks: %03d rtt pad + %04x status pad ───
+    // substring checks: rtt pad + status pad
     let fmt = |body| NodeRow::parse(body).unwrap().fmt_plain();
     #[rustfmt::skip]
     let cases: &[(&str, &str, &str)] = &[
@@ -214,7 +206,7 @@ fn node_fmt_plain_contract() {
         ("rtt 50us → 0.050 (%03d pad)", "x 0 h port p 0 0 0 0 0 0 - - 0 0 0 0 0 50 0 0 0 0",    " rtt 0.050"),
         ("rtt 1000us → 1.000",          "x 0 h port p 0 0 0 0 0 0 - - 0 0 0 0 0 1000 0 0 0 0",  " rtt 1.000"),
         ("rtt 12345us → 12.345",        "x 0 h port p 0 0 0 0 0 0 - - 0 0 0 0 0 12345 0 0 0 0", " rtt 12.345"),
-        ("status 0x12 → 0012 (%04x)",   NODE_BODY,                                              "status 0012 "),
+        ("status 0x12 → 0012 (padded)", NODE_BODY,                                              "status 0012 "),
         ("status 0 → 0000 (4 chars)",   "x 0 h port p 0 0 0 0 0 0 - - 0 0 0 0 0 -1 0 0 0 0",    "status 0000 "),
     ];
     for (label, body, want) in cases {
@@ -222,7 +214,7 @@ fn node_fmt_plain_contract() {
     }
 }
 
-// ─── DOT format: color cascade
+// DOT format: color cascade
 
 /// `fmt_dot` color cascade, an if-else-if chain in this order:
 ///   1. MYSELF → green + filled
@@ -268,10 +260,10 @@ fn node_dot_color_cascade() {
     assert!(r.fmt_dot().contains("\"me\" [label = \"me\""));
 }
 
-// ─── EdgeRow
+// EdgeRow
 
-/// Golden vector. Both addresses are `sockaddr2hostname` output
-/// (3 tokens each). Body has `recv_row` already stripped `18 4 `.
+/// Golden vector. Both addresses are the fused "HOST port PORT" form.
+/// Body has `recv_row` already stripped `18 4 `.
 const EDGE_BODY: &str = "alice bob 10.0.0.2 port 655 192.168.1.5 port 655 1000000c 100";
 
 #[test]
@@ -307,26 +299,20 @@ fn edge_fmt_plain() {
     );
 }
 
-/// DOT edge weight: `1 + 65536/weight`. `%f` is 6 decimal places.
-/// weight=100 → 1+655.36 = 656.36.
+/// DOT edge weight: `1 + 65536/weight` printed with 6 decimals.
+/// weight=100 → 656.36, which in f32 renders as 656.359985 — the same
+/// value C tinc prints, so output stays byte-identical.
 #[test]
 fn edge_dot_weight_calc() {
     let r = EdgeRow::parse(EDGE_BODY).unwrap();
     let dot = r.fmt_dot(true).unwrap();
-    // 1.0 + 65536.0/100.0 = 656.36. Six decimals: 656.360000.
-    // BUT: f32 precision. 656.36 might be 656.359985 in f32.
-    // Upstream uses float (32-bit) so it has the same issue:
-    //   float w = 1.0f + 65536.0f / 100.0f;  → 656.359985
-    //   printf("%f", w);                      → "656.359985"
-    // We must match that, which we do by using f32. Assert it.
     assert!(dot.contains("w = 656.359985"));
     assert!(dot.contains("weight = 656.359985"));
 }
 
-/// `fmt_dot` dedup + arrow style. Digraph emits all (`->`).
-/// Undirected: suppress `from > to` half (strcmp is byte-order,
-/// Rust String Ord is byte-order). The `>` not `>=` means
-/// self-loops emit (tinc has no self-edges, but).
+/// `fmt_dot` dedup + arrow style. Digraph emits all (`->`); undirected
+/// suppresses the `from > to` half (byte-order compare). `>` not `>=`,
+/// so self-loops would emit (tinc has no self-edges).
 #[test]
 fn edge_dot_dedup_table() {
     const BA: &str = "bob alice 10.0.0.1 port 655 unspec port unspec 0 100";
@@ -349,7 +335,7 @@ fn edge_dot_dedup_table() {
     }
 }
 
-// ─── SubnetRow + strip_weight
+// SubnetRow + strip_weight
 
 /// `SubnetRow::parse` shapes. Broadcast owner `"(broadcast)"`
 /// (parens are literal). Weight suffix survives parse — stored
@@ -370,9 +356,9 @@ fn subnet_parse_table() {
     }
 }
 
-/// `fmt_plain`: `strip_weight` applied. The daemon shouldn't
-/// SEND `#10` (its `net2str` already strips default), but defense
-/// against older daemons. Non-default weights survive.
+/// `fmt_plain`: `strip_weight` applied. The daemon shouldn't send `#10`
+/// (it already strips the default), but older daemons might. Non-default
+/// weights survive.
 #[test]
 fn subnet_fmt_table() {
     let row = |s: &str, o: &str| SubnetRow {
@@ -391,22 +377,20 @@ fn subnet_fmt_table() {
     }
 }
 
-/// `strip_weight`: `#10` only. Includes corner cases from
-/// upstream's `len >= 3` check.
+/// `strip_weight`: only the exact `#10` suffix is stripped.
 #[test]
 fn strip_weight_table() {
     #[rustfmt::skip]
     let cases: &[(&str, &str)] = &[
-        // ─── only `#10` is stripped ───
+        // only `#10` is stripped
         ("10.0.0.0/24#10",  "10.0.0.0/24"),
         ("10.0.0.0/24#5",   "10.0.0.0/24#5"),    // other weights survive
         ("10.0.0.0/24#100", "10.0.0.0/24#100"),  // #100 ≠ #10
         ("10.0.0.0/24",     "10.0.0.0/24"),      // no suffix → unchanged
-        // ─── upstream `len >= 3` corner cases ───
-        // `"#10"` (3 chars) → `""`. Never a valid subnet but it's
-        // what upstream does (`!strcmp(netstr + 0, "#10")` matches).
+        // corner cases
+        // `"#10"` alone → ""; never a valid subnet, but the suffix matches.
         ("#10",    ""),
-        // 2 chars → no match. `len >= 3` fails first.
+        // shorter than the suffix → no match.
         ("10",     "10"),
         // "#100" ends in "100", not "#10" → no match.
         ("a#100",  "a#100"),
@@ -418,11 +402,9 @@ fn strip_weight_table() {
     }
 }
 
-// ─── ConnRow
+// ConnRow
 
-/// Golden vector. Daemon: 5 fields (after 18 6). CLI: 6 (one
-/// `port` literal). `c->hostname` is `sockaddr2hostname` of the
-/// peer's address.
+/// Golden vector: 6 CLI fields, one `port` literal in the fused address.
 const CONN_BODY: &str = "bob 10.0.0.2 port 655 0 7 1a";
 
 #[test]
@@ -436,9 +418,9 @@ fn conn_parse_golden() {
     assert_eq!(r.status, 0x1a);
 }
 
-/// `fmt_plain`: full golden line + `status %x` UNPADDED check.
-/// Contrast node's `%04x`; upstream is inconsistent and we
-/// replicate that.
+/// `fmt_plain`: full golden line + unpadded status check (contrast the
+/// node row's zero-padded status; the inconsistency is part of the pinned
+/// output format).
 #[test]
 fn conn_fmt_plain_contract() {
     let r = ConnRow::parse(CONN_BODY).unwrap();
@@ -454,7 +436,7 @@ fn conn_fmt_plain_contract() {
     assert!(r0.fmt_plain().ends_with("status 0"), "status 0 → 1 char");
 }
 
-// ─── dump_invitations
+// dump_invitations
 
 /// Tempdir for invitations tests. Same shape as invite.rs tests:
 /// init confbase, write the invitations dir manually.
@@ -511,9 +493,9 @@ fn inv_empty_cases() {
     );
 }
 
-/// Valid invitations: 24-char b64 name, `Name = X` first line.
-/// rstrip on the name value strips all trailing whitespace
-/// (CRLF from Windows-edited files).
+/// Valid invitations: 24-char b64 name, `Name = X` first line. Trailing
+/// whitespace on the name value is stripped (CRLF from Windows-edited
+/// files).
 #[test]
 fn inv_valid_table() {
     #[rustfmt::skip]
@@ -521,8 +503,8 @@ fn inv_valid_table() {
         // (label,                      file content)
         ("plain LF",                    "Name = bob\n# rest of file\n"),
         ("rstrip: CRLF + trailing tab", "Name = bob\t \r\n"),
-        // P4: same tokenizer as `tinc.conf` — `Name=bob` must list
-        // even though `cmd_invite` always writes the spaced form.
+        // Same tokenizer as tinc.conf — a hand-edited `Name=bob` must
+        // list even though invite always writes the spaced form.
         ("no-space `=`",                "Name=bob\n"),
     ];
     for (label, content) in cases {
@@ -550,17 +532,17 @@ fn inv_skipped() {
     #[rustfmt::skip]
     let cases: &[(&str, &str, &str)] = &[
         //          (filename,              content,           why)
-        // ─── wrong-length filename: the 24-char filter ───
+        // wrong-length filename: the 24-char filter
         // `ed25519_key.priv` is in the same dir (per-invitation key);
         // must NOT show up as an invitation.
         ("ed25519_key.priv",     "key blob",         "key file (wrong length)"),
         // 23 chars, valid b64.
         (&short,                 "Name = nope\n",    "23-char name"),
-        // 25 chars. Upstream would read first 24 and pass; we tighten to exact.
+        // 25 chars — the exact-24 filter rejects it.
         (&long,                  "Name = nope\n",    "25-char name"),
-        // ─── 24 chars, NOT valid b64 ───
+        // 24 chars, NOT valid b64
         (&bad_b64,               "Name = bob\n",     "bad b64 (`*` not in alphabet)"),
-        // ─── valid filename, bad content ───
+        // valid filename, bad content
         // First line not a `Name` key at all.
         (&valid_name,            "Address = x\n",   "first line not Name"),
         // `check_id` failure: name with hyphen.
@@ -577,7 +559,7 @@ fn inv_skipped() {
 }
 
 /// Multiple invites: collect all. Order is readdir order
-/// (filesystem-defined). We don't sort; upstream doesn't either.
+/// (filesystem-defined, unsorted).
 #[test]
 fn inv_multiple() {
     let (d, paths) = setup_inv();
@@ -601,8 +583,7 @@ fn inv_multiple() {
 }
 
 /// Mixed: one valid, one bad-b64, one wrong-length, one bad-name.
-/// Only the valid one survives. Upstream silently skips bad ones
-/// (with stderr warnings; we don't warn from lib code).
+/// Only the valid one survives; bad entries are silently skipped.
 #[test]
 fn inv_mixed() {
     let (d, paths) = setup_inv();
@@ -624,9 +605,8 @@ fn inv_mixed() {
     assert_eq!(rows[0].invitee, "good");
 }
 
-/// Permission denied on the DIRECTORY → error (not ENOENT).
-/// (Upstream's message has a "Cannot not [sic]" double negative
-/// typo. We don't replicate the message.)
+/// Permission denied on the directory → error (unlike ENOENT, which is
+/// an empty result).
 #[test]
 #[cfg(all(unix, not(target_os = "macos")))]
 fn inv_dir_perms() {
@@ -676,11 +656,8 @@ fn inv_file_perms_skip() {
     fs::set_permissions(&bad, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
 }
 
-// ─── End-to-end with the actual `cmd::invite` output
-//
 // Contract test: `tinc invite bob` writes a file → `tinc dump
-// invitations` finds it. The two functions agree on the format.
-// If `invite` ever changes its `Name = ` line, this fires.
+// invitations` finds it. Fires if invite ever changes its `Name = ` line.
 
 /// `invite()` writes a file that `dump_invitations()` accepts.
 /// Full-fidelity: real `cookie_filename`, real file content from
@@ -689,12 +666,11 @@ fn inv_file_perms_skip() {
 fn inv_roundtrip_with_invite() {
     use crate::cmd::invite;
 
-    // ─── init
     let cd = crate::testutil::ConfDir::bare();
     let paths = cd.paths().clone();
     let cb = cd.confbase();
     crate::cmd::init::run(&paths, "alice").unwrap();
-    // invite needs Address (we dropped the HTTP probe).
+    // invite requires an Address line in the host file.
     fs::write(
         cb.join("hosts/alice"),
         format!(
@@ -704,15 +680,12 @@ fn inv_roundtrip_with_invite() {
     )
     .unwrap();
 
-    // ─── invite
-    // `now` parameterized for sweep_expired tests; pass real time.
+    // `now` is parameterized for sweep_expired tests; pass real time.
     let now = std::time::SystemTime::now();
     let result = invite::invite(&paths, None, "bob", now).unwrap();
-    // The URL is in result.url; we don't need it. The file is
-    // written.
+    // Only the written file matters here, not the returned URL.
     let _ = result;
 
-    // ─── dump
     let rows = dump_invitations(&paths).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].invitee, "bob");

@@ -49,7 +49,7 @@ fn cross_init_key_loads_in_c() {
     let alice_pub = extract_pubkey_to_pem(&alice_base.join("hosts/alice"), dir.path(), "alice");
     let bob_pub = extract_pubkey_to_pem(&bob_base.join("hosts/bob"), dir.path(), "bob");
 
-    // ─── Now the actual SPTPS handshake. C both sides. ─────────────
+    // Now the actual SPTPS handshake. C both sides.
     // alice serves (responder), bob connects (initiator).
     // This is the `self_roundtrip.rs` choreography, inlined and
     // simplified (we don't need the full Impl matrix here, just C↔C

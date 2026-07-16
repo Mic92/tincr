@@ -63,10 +63,8 @@ pub(super) fn parse_greeting_line1(line: &str) -> Result<(), CmdError> {
     if !check_id(his_name) {
         return Err(bad());
     }
-    // `hismajor` must equal PROT_MAJOR. Minor is don't-care: the
-    // sscanf `%d.%d` on "17\0" stops at the `.` mismatch but still
-    // returns 3 (the mismatch is after 3 conversions). So minor is
-    // optional. We replicate: parse `MAJOR` or `MAJOR.MINOR`.
+    // The major version must equal PROT_MAJOR; the minor is optional and
+    // ignored, so both `MAJOR` and `MAJOR.MINOR` are accepted.
     let ver = tok.next().ok_or_else(bad)?;
     let major: u32 = ver
         .split('.')
@@ -87,10 +85,8 @@ pub(super) fn parse_greeting_line1(line: &str) -> Result<(), CmdError> {
 pub(super) fn parse_greeting_line2(line: &str) -> Result<&str, CmdError> {
     let bad = || CmdError::BadInput("Cannot read greeting from peer".into());
 
-    // We're stricter than upstream's sscanf: split on first space,
-    // check first token is "4". `"4X"` would fail here (no space).
-    // The daemon always sends `"4 FINGERPRINT"` (`send_request` adds
-    // a space between `%d` and `%s`).
+    // Split on first space and require the first token to be exactly "4";
+    // the daemon always sends "4 FINGERPRINT".
     let (code, rest) = line.split_once(' ').ok_or_else(bad)?;
     let code: u32 = code.parse().map_err(|_| bad())?;
     if code != ACK || rest.is_empty() {

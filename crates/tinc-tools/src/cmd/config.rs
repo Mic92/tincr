@@ -9,15 +9,8 @@ use tinc_conf::vars::{self, VarFlags};
 use super::{CmdError, TmpGuard, exchange, io_err};
 use crate::names::{self, Paths};
 
-// Action enum — GET/SET/ADD/DEL after argv normalization.
-
-/// What to do. We add `Unset` for the pre-dispatch state where
-/// `get` defaults to `Get` but might become `Set` if a value is
-/// given (the action-coercion).
-///
-/// Why not a separate `Action::Get` vs `Action::GetOrSet`: upstream
-/// resolves the ambiguity *before* the file walk, so by the time we
-/// open the file there are exactly four states. Matching that.
+/// The four operations after argv normalization; `get` with a value has
+/// already been coerced to `Set` before the file walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Get,
@@ -26,26 +19,19 @@ pub enum Action {
     Del,
 }
 
-// Parsed argv — everything before we touch the filesystem
-
-/// The intent, after all argv munging is done. This is the testable
-/// seam: argv → `Intent` → file walk. Tests can construct `Intent`
-/// directly to exercise the file walk without going through argv.
+/// Fully-resolved intent: argv → `Intent` → file walk. Tests can construct
+/// `Intent` directly to exercise the file walk without going through argv.
 ///
-/// `node = None` means `tinc.conf`. `node = Some(n)` means
-/// `hosts/n`. Upstream threads `node` through as `char*` and checks
-/// it at the end; we resolve up-front.
+/// `node = None` means `tinc.conf`; `node = Some(n)` means `hosts/n`.
 #[derive(Debug)]
 pub struct Intent {
     /// What to do. After all coercions (get-with-value → set,
     /// add-on-single → set).
     pub action: Action,
-    /// Canonical-case variable name. `port` in argv → `Port` here.
-    /// If the var is unknown (and `--force`), this is the user's
-    /// casing — there's nothing to canonicalize against.
+    /// Canonical-case variable name (`port` in argv → `Port`). Unknown vars
+    /// keep the user's casing — there's nothing to canonicalize against.
     pub variable: String,
-    /// The value to set/add, or the filter for del. Always empty for
-    /// `Get` (the get-with-value coercion happened upstream).
+    /// Value to set/add, or the filter for del. Empty for `Get`.
     pub value: String,
     /// `Some(name)` → `hosts/name`. `None` → `tinc.conf`.
     pub node: Option<String>,
@@ -56,14 +42,8 @@ pub struct Intent {
     pub warn_on_remove: bool,
 }
 
-/// Warnings the validation layer emits to stderr. Upstream does
-/// `fprintf(stderr, ...)` inline; we collect, the binary prints.
-/// Tests assert on the vec.
-///
-/// Why an enum and not just `Vec<String>`: tests want to assert
-/// "an obsolete-var warning fired", not "a string containing
-/// 'obsolete' was emitted". Same `matches!` pattern as fsck's
-/// `Finding`.
+/// Warnings collected during validation; the binary prints them to stderr.
+/// An enum (not strings) so tests can `matches!` on the warning kind.
 #[derive(Debug)]
 pub enum Warning {
     /// `--force` set on an `OBSOLETE` var.
@@ -99,27 +79,17 @@ impl std::fmt::Display for Warning {
     }
 }
 
-// Stage 1: argv → (raw action, optional explicit node, var, value)
-
 /// Parse `[NODE.]VAR [= VAL]` from a pre-joined argv string.
 ///
-/// The `node.var` split happens *after* `var = val` tokenization,
-/// so `alice.Port = 655` parses as `(alice, Port, 655)` but
-/// `alice.Port=655` parses as... `(alice, Port, 655)` too — the
-/// `=` is in the `strcspn` stop set, so the var-end is found
-/// before the `.` matters. The `.` is found by `strchr` on the
-/// var portion only.
-///
-/// Returns `(node, var, val)`. `node` is `None` if no `.` in the
-/// key. `val` is `""` if no value given. Empty `var` is a caller
-/// error.
+/// Returns `(node, var, val)`. `node` is `None` if no `.` in the key.
+/// `val` is `""` if no value given.
 ///
 /// # Errors
 /// `var` is empty (e.g. input is `".Port"` or `"= 655"` or `""`).
 fn parse_var_expr(joined: &str) -> Result<(Option<&str>, &str, &str), CmdError> {
     let (key, val) = tinc_conf::split_kv(joined);
 
-    // `.` doesn't appear in any var name (vars.rs table is alnum-only)
+    // `.` doesn't appear in any var name (vars table is alnum-only),
     // so `find('.')` is unambiguous.
     let (node, var) = match key.find('.') {
         Some(dot) => (Some(&key[..dot]), &key[dot + 1..]),
@@ -132,11 +102,6 @@ fn parse_var_expr(joined: &str) -> Result<(Option<&str>, &str, &str), CmdError> 
 
     Ok((node, var, val))
 }
-
-// Stage 2: validate against vars table, decide target file, coerce
-// action. This is the C's `for(int i = 0; variables[i].name; i++)`
-// loop body plus the surrounding `if(!found)` and `if(node &&
-// !check_id)` checks.
 
 /// Bundled args for [`build_intent`]. `paths` stays separate — it's
 /// the environment, not the command.
@@ -159,25 +124,20 @@ pub struct ConfigCmd<'a> {
 /// Validate the variable, decide which file to edit, apply the
 /// action coercions.
 ///
-/// `paths` is needed because non-HOST vars on a missing-node
-/// expression resolve to `hosts/$(get_my_name)`, which reads
-/// `tinc.conf`.
+/// `paths` is needed because HOST-only vars with no explicit node resolve
+/// to `hosts/$(get_my_name)`, which requires reading `tinc.conf`.
 ///
 /// `cmd.force` gates: unknown vars, obsolete vars, server-var-in-hostfile.
 ///
 /// # Errors
-/// Same as the C's `return 1` paths: obsolete without force,
-/// not-host without force, unknown without force, `get_my_name`
-/// failed, `check_id` on node failed, set/add without value.
+/// Obsolete without force, not-host without force, unknown without force,
+/// `get_my_name` failed, `check_id` on node failed, set/add without value.
 ///
-/// # The Subnet validation special case
+/// # Subnet validation
 ///
-/// When `variable == "Subnet"` and a value is given, we parse it
-/// and reject malformed/non-canonical subnets early. This is the
-/// *one* case where the `variables[]` table isn't enough — Subnet
-/// is the only var with a validated value format that the CLI
-/// checks. (The daemon validates everything via `read_config_file`,
-/// but `cmd_config` writes blindly otherwise.)
+/// When `variable == "Subnet"` and a value is given, malformed or
+/// non-canonical subnets are rejected early. Subnet is the only variable
+/// whose value format the CLI validates; everything else is written blindly.
 pub fn build_intent(
     paths: &Paths,
     cmd: &ConfigCmd<'_>,
@@ -191,31 +151,24 @@ pub fn build_intent(
     } = *cmd;
     let mut warnings = Vec::new();
 
-    // ─── Action coercion: get + value → set
-    // Happens BEFORE the table lookup — `tinc get Port 655` becomes
-    // a `set` regardless of Port's flags.
+    // Coerce get + value → set before the table lookup, so
+    // `tinc get Port 655` becomes a set regardless of Port's flags.
     let mut action = if raw_action == Action::Get && !value.is_empty() {
         Action::Set
     } else {
         raw_action
     };
 
-    // ─── set/add need a value
-    // Check is BEFORE table lookup — we keep that ordering so
+    // Check for a missing value before the table lookup, so
     // `tinc set garbagename` says "no value" not "unknown variable".
     if matches!(action, Action::Set | Action::Add) && value.is_empty() {
         return Err(CmdError::BadInput("No value for variable given.".into()));
     }
 
-    // ─── Look up in the variables table
-    // Linear scan, `strcasecmp` match. ~80 entries; O(n) is fine.
     let found = vars::lookup(var);
 
-    // ─── Subnet special case: validate value early
-    // The check is inside the table-scan loop body (after
-    // `found = true`), so it only fires if the var is known AND
-    // named Subnet. Case-insensitive via `lookup` + checking the
-    // canonical table name.
+    // Subnet is the only var with value validation; only fires when the
+    // var is known and canonically named Subnet.
     if let Some(v) = found
         && v.name == "Subnet"
         && !value.is_empty()
@@ -223,13 +176,11 @@ pub fn build_intent(
         validate_subnet(value)?;
     }
 
-    // ─── Canonical name from the table
-    // If unknown, the user's casing survives.
+    // Canonical name from the table; unknown vars keep the user's casing.
     let canonical: String = found.map_or_else(|| var.to_owned(), |v| v.name.to_owned());
 
-    // ─── Obsolete check
-    // Only fires for set/add — `get` and `del` on an obsolete var
-    // are fine (you might be cleaning up an old config).
+    // Obsolete check only fires for set/add — get and del on an obsolete
+    // var are fine (you might be cleaning up an old config).
     if let Some(v) = found
         && v.flags.contains(VarFlags::OBSOLETE)
         && matches!(action, Action::Set | Action::Add)
@@ -243,12 +194,9 @@ pub fn build_intent(
         }
     }
 
-    // ─── Server-var-in-hostfile check
-    // `node.VAR` where VAR isn't HOST. `tinc set alice.DeviceType
-    // tap` is suspicious — DeviceType is a server-only var, why are
-    // you putting it in alice's host file? Again only set/add —
-    // reading or deleting one is fine (might be cleaning up after a
-    // previous --force).
+    // Server-var-in-hostfile check: `tinc set alice.DeviceType tap` is
+    // suspicious because DeviceType is a server-only var. Only set/add —
+    // reading or deleting is fine (might be cleaning up after --force).
     let mut node: Option<String> = explicit_node.map(str::to_owned);
     if let (Some(_), Some(v)) = (&node, found)
         && !v.flags.contains(VarFlags::HOST)
@@ -263,28 +211,19 @@ pub fn build_intent(
         }
     }
 
-    // ─── HOST-only var with no explicit node → my host file
-    // `tinc set Subnet 10.0.0.0/24` — Subnet is HOST-only, no
-    // `node.` prefix, so where does it go? `get_my_name` reads
-    // tinc.conf, finds `Name =`, returns it.
-    //
-    // The condition is `!node && !(type & VAR_SERVER)` — note it's
-    // NOT `type & VAR_HOST`. The dual-tagged vars (e.g. `Port`,
-    // both SERVER and HOST) take the SERVER path here → they go in
-    // tinc.conf. Single-HOST-only goes in hosts/$me.
+    // HOST-only var with no explicit node goes into my own host file
+    // (hosts/$me, from `Name =` in tinc.conf). The test is "not SERVER",
+    // not "is HOST": dual-tagged vars like Port stay in tinc.conf.
     if node.is_none()
         && let Some(v) = found
         && !v.flags.contains(VarFlags::SERVER)
     {
-        // get_my_name's error already says "Name not found
-        // in tinc.conf"; we don't wrap.
+        // get_my_name's error already says "Name not found in tinc.conf".
         node = Some(exchange::get_my_name(paths)?);
     }
-    // If not found AND no explicit node: tinc.conf. Unknown vars go
-    // in the server config unless you say otherwise.
+    // Unknown var with no explicit node goes into tinc.conf.
 
-    // ─── Action coercion: add on non-MULTIPLE → set
-    // The two `warnonremove` cases.
+    // Action coercion and the two warn-on-remove cases.
     let mut warn_on_remove = false;
     if let Some(v) = found {
         let multiple = v.flags.contains(VarFlags::MULTIPLE);
@@ -293,26 +232,20 @@ pub fn build_intent(
             warn_on_remove = true;
             action = Action::Set;
         } else if action == Action::Set && multiple {
-            // `tinc set Subnet 10.0.0.0/24` → still set, warn that
-            // you're nuking the other subnets.
+            // `tinc set Subnet ...` deletes sibling values; warn.
             warn_on_remove = true;
         }
     }
     // Unknown var: no coercion. `add` stays `add`.
 
-    // ─── check_id on node
     if let Some(n) = &node
         && !names::check_id(n)
     {
         return Err(CmdError::BadInput("Invalid name for node.".into()));
     }
 
-    // ─── Unknown var
-    // Three-way: get/del → warning only, set/add without force →
-    // error, set/add with force → warning. The warning's `:`
-    // placement differs between the two upstream messages
-    // (`"Warning: %s is..."` vs `"%s: is..."`) — likely a typo;
-    // we keep ours consistent.
+    // Unknown var: get/del → warning only, set/add without force → error,
+    // set/add with force → warning.
     if found.is_none() {
         if force || matches!(action, Action::Get | Action::Del) {
             warnings.push(Warning::Unknown(canonical.clone()));
@@ -335,17 +268,13 @@ pub fn build_intent(
     ))
 }
 
-/// Subnet value validation.
-///
-/// Splits into a separate function because it's the one place
-/// `cmd_config` reaches into `tinc-proto`. The dep is justified
-/// (see Cargo.toml comment) but isolating it makes the boundary
-/// visible.
+/// Subnet value validation. Kept separate because it's the one place this
+/// module reaches into `tinc-proto`.
 fn validate_subnet(value: &str) -> Result<(), CmdError> {
     use std::str::FromStr;
     let s = tinc_proto::Subnet::from_str(value)
         .map_err(|_| CmdError::BadInput(format!("Malformed subnet definition {value}")))?;
-    // `is_canonical`: host bits must be zero.
+    // Host bits must be zero.
     if !s.is_canonical() {
         return Err(CmdError::BadInput(format!(
             "Network address and prefix length do not match: {value}"
@@ -354,27 +283,20 @@ fn validate_subnet(value: &str) -> Result<(), CmdError> {
     Ok(())
 }
 
-// Stage 3: the file walk. Read, transform, write-via-tmpfile, rename.
-
-/// `Get`: scan the file, collect matching values.
-///
-/// Doesn't open a tmpfile — read-only.
+/// `Get`: scan the file, collect matching values. Read-only.
 ///
 /// # Errors
-/// File doesn't exist (`fopen` fails) or read error.
+/// File doesn't exist or read error.
 pub fn run_get(path: &std::path::Path, variable: &str) -> Result<Vec<String>, CmdError> {
     let contents = fs::read_to_string(path).map_err(io_err(path))?;
 
     let mut found = Vec::new();
-    // `split_inclusive` because we don't care about the newline
-    // here (we trim it off the value anyway), but it keeps the
-    // shape consistent with `run_edit` where the newline matters.
     for line in contents.split_inclusive('\n') {
         let Some((key, val)) = split_line(line) else {
             continue;
         };
-        // `eq_ignore_ascii_case`: the variable is canonical-case
-        // from the table; the file might say `port = 655`.
+        // Case-insensitive: the variable is canonical-case from the table;
+        // the file might say `port = 655`.
         if key.eq_ignore_ascii_case(variable) {
             found.push(val.to_owned());
         }
@@ -384,45 +306,32 @@ pub fn run_get(path: &std::path::Path, variable: &str) -> Result<Vec<String>, Cm
 
 /// `Set`/`Add`/`Del`: scan + transform + write tmpfile + rename.
 ///
-/// `intent.action` MUST NOT be `Get` — call `run_get` for that.
-/// (Debug-asserted; the binary's adapter routes correctly.)
+/// `intent.action` must not be `Get` — call `run_get` for that.
 ///
 /// # Panics
-/// `intent.action == Get` (use `run_get`). The `unreachable!` is
-/// the release-mode mirror of the `debug_assert_ne` at function
-/// entry. The `parsed.unwrap()` inside the loop is statically safe
-/// (it's behind an `is_some_and` guard); allowed via lint rather
-/// than refactored to nested `if let` because the latter would
-/// need a 60-line indent shift for zero behavioral difference.
+/// If `intent.action == Get`.
 ///
 /// # Errors
-/// Read failure, write failure, rename failure. Also: `Del` that
-/// matched zero lines (`"No configuration variables deleted."`).
+/// Read failure, write failure, rename failure, or a `Del` that matched
+/// zero lines. `Set` and `Add` never fail at the walk stage — if no match
+/// exists, they append.
 ///
-/// The `Set` and `Add` cases never fail at the walk stage — if no
-/// match exists, they append.
-///
-/// Returns the per-line `Removing` warnings; success means the file
-/// changed (Del-with-no-match is `Err`, Set/Add always rewrite).
+/// Returns the per-line `Removing` warnings.
 pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<Vec<Warning>, CmdError> {
     debug_assert_ne!(intent.action, Action::Get, "use run_get for Get");
 
-    // ─── Read whole file
-    // We can `read_to_string` — config files are kilobytes.
     let contents = fs::read_to_string(path).map_err(io_err(path))?;
 
-    // ─── Open tmpfile (RAII; cleaned up on `?`)
-    // The `.config.tmp` suffix is exactly upstream's.
+    // Tmpfile is cleaned up on `?` via the RAII guard.
     let (guard, mut tf) = TmpGuard::open(path, ".config.tmp")?;
 
-    // ─── Walk lines
     let mut already_set = false; // Set wrote its one line
     let mut removed_any = false; // Del matched something
     let mut add_dup = false; // Add found exact match
     let mut warnings = Vec::new();
 
     for line in contents.split_inclusive('\n') {
-        // ─── Tokenize. None → not a key=val line (blank/comment/PEM)
+        // None → not a key=val line (blank/comment/PEM)
         let parsed = split_line(line);
 
         let matched = parsed
@@ -443,12 +352,12 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<Vec<Warning>,
                         removed_any = true;
                         continue; // ← the delete
                     }
-                    // else: fall through to copy-verbatim. A Subnet
-                    // line that didn't match the filter survives.
+                    // else: fall through to copy-verbatim. A line that
+                    // didn't match the filter survives.
                 }
 
-                // SET: replace first match, delete rest — this is what
-                // makes SET on a MULTIPLE var dangerous (warnonremove).
+                // SET: replace first match, delete the rest — this is what
+                // makes SET on a MULTIPLE var dangerous (warn_on_remove).
                 Action::Set => {
                     // No warning if same value: nothing is being lost.
                     if intent.warn_on_remove && !line_val.eq_ignore_ascii_case(&intent.value) {
@@ -463,10 +372,8 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<Vec<Warning>,
                         continue;
                     }
 
-                    // First match: replace in-place. Note: canonical
-                    // case for the key, *not* the file's casing.
-                    // `port = 655` in → `Port = 655` out. Intentional
-                    // (the table is the canon).
+                    // First match: replace in-place, using the canonical
+                    // case from the table (`port = 655` → `Port = 655`).
                     writeln!(tf, "{} = {}", intent.variable, intent.value).map_err(tmpfile_werr)?;
                     already_set = true;
                     continue;
@@ -483,8 +390,8 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<Vec<Warning>,
             }
         }
 
-        // ─── Copy verbatim (`split_inclusive` kept the `\n`; only the
-        // last line of a no-trailing-newline file needs one added).
+        // Copy verbatim (`split_inclusive` kept the `\n`; only the last
+        // line of a no-trailing-newline file needs one added).
         tf.write_all(line.as_bytes()).map_err(tmpfile_werr)?;
         if !line.ends_with('\n') {
             tf.write_all(b"\n").map_err(tmpfile_werr)?;
@@ -528,29 +435,16 @@ fn tmpfile_werr(e: std::io::Error) -> CmdError {
     }
 }
 
-// The line tokenizer — instance #7.
-
 /// Parse a config-file line into `(key, val)`.
 ///
-/// Differences from `join::split_var` (instance #6):
-/// - Input has a trailing `\n` (file lines via `split_inclusive`);
-///   we `rstrip` the value.
-/// - We return `None` for blank lines AND for empty-key lines.
-///
-/// Why not call `join::split_var` then trim: the rstrip set is
-/// `\t\r\n `. `split_var`'s caller already stripped its newlines;
-/// ours hasn't. Different post-conditions.
+/// Input still carries its trailing `\n` (from `split_inclusive`), so
+/// trailing whitespace is stripped here. Returns `None` for blank and
+/// empty-key lines.
 ///
 /// PEM blocks: a `-----BEGIN PUBLIC KEY-----` line tokenizes as
-/// `key = "-----BEGIN"`, `val = "PUBLIC KEY-----"`. It won't match
-/// any variable name, so it falls through to copy-verbatim. We
-/// inherit upstream's behavior — `tinc set -----BEGIN something`
-/// would do something weird, but so would upstream.
+/// `key = "-----BEGIN"`, which never matches a variable name and thus
+/// falls through to copy-verbatim.
 fn split_line(line: &str) -> Option<(&str, &str)> {
-    // rstrip first: \t\r\n and space. We do it on the *whole line* up
-    // front, then tokenize. Upstream does it on bvalue after key
-    // extraction — equivalent, since the key portion never has trailing
-    // whitespace anyway (the stop set IS whitespace).
     let (key, val) = tinc_conf::split_kv(line.trim_end_matches(['\t', '\r', '\n', ' ']));
     if key.is_empty() {
         None
@@ -559,11 +453,8 @@ fn split_line(line: &str) -> Option<(&str, &str)> {
     }
 }
 
-// Top-level: glue stages 1+2+3, handle the Port special case,
-// fire opportunistic reload.
-
-/// Result of a full `cmd_config` invocation. The binary turns this
-/// into stdout/stderr/exit-code. Tests assert on the structure.
+/// Result of a full config invocation. The binary turns this into
+/// stdout/stderr/exit-code. Tests assert on the structure.
 #[derive(Debug)]
 pub enum ConfigOutput {
     /// `Get` found these values. Binary prints one per line.
@@ -572,77 +463,54 @@ pub enum ConfigOutput {
     Edited,
 }
 
-/// `cmd_config` end-to-end.
+/// The config command end-to-end.
 ///
-/// `joined` is the rejoined argv tail — `args.join(" ")`. Upstream
-/// does the joining itself (`strncat` loop); we push that to the
-/// binary adapter so this function gets one string and the test
-/// surface is simpler.
+/// `joined` is the rejoined argv tail (`args.join(" ")`); the binary
+/// adapter does the joining so this function takes one string.
 ///
-/// The opportunistic reload (`connect_tincd(false)`) is *not* here —
-/// that's a binary concern. This function is fs-only. The binary
-/// calls `ctl_simple::reload` after `Edited` returns.
+/// The opportunistic reload after an edit is a binary concern; this
+/// function is filesystem-only.
 ///
 /// # Errors
-/// Validation failure (unknown var without force, etc.), file
-/// missing, write error, `Del` matched nothing.
+/// Validation failure (unknown var without force, etc.), file missing,
+/// write error, `Del` matched nothing.
 ///
 /// # `get Port` special case
 ///
-/// If you ask for `Port` and the daemon is running, return the
-/// *runtime* port from the pidfile instead of the configured one.
-/// `Port = 0` in config → daemon picks a free port → pidfile has
-/// the truth. We replicate but as best-effort: if `Pidfile::read`
-/// succeeds, return that port; else fall back to scanning the
-/// config like any other var. Upstream *exits early* on pidfile
-/// success without falling back, which means a stale pidfile
-/// (daemon crashed, file lingers) gives a stale port. We inherit
-/// that — it's what users expect.
+/// If asking for `Port` with no explicit node and the pidfile is readable,
+/// the *runtime* port from the pidfile is returned instead of the configured
+/// one — with `Port = 0` the daemon picks a free port and only the pidfile
+/// knows it. If the pidfile is missing, fall back to scanning the config.
+/// A stale pidfile therefore gives a stale port.
 ///
-/// `paths` must have `resolve_runtime` called for the pidfile
-/// path to be available. The binary's `needs_daemon` flag is `true`
-/// for `config`/`get`/`set`/`add`/`del` for this reason — even
-/// though they're 99% filesystem, the Port-from-pidfile and the
-/// post-edit reload both need the runtime paths.
+/// `paths` must have `resolve_runtime` called so the pidfile path is
+/// available; that's why the binary marks the config commands `needs_daemon`.
 pub fn run(
     paths: &Paths,
     raw_action: Action,
     joined: &str,
     force: bool,
 ) -> Result<(ConfigOutput, Vec<Warning>), CmdError> {
-    // ─── Stage 1: parse the var expression
     let (explicit_node, var, value) = parse_var_expr(joined)?;
 
-    // ─── Port-from-pidfile special case
-    // Condition: GET, var is Port (case-insens), no explicit node
-    // (checked before any node resolution). We additionally check
-    // `value.is_empty()` — upstream's GET→SET coercion (when value
-    // is present) runs first, so by the time the Port check runs
-    // it's already been coerced. The `is_empty()` here is redundant
-    // but kept for clarity.
+    // Port-from-pidfile special case: only for a plain GET of Port with no
+    // explicit node. `value.is_empty()` excludes the get-with-value form,
+    // which is really a set.
     if raw_action == Action::Get
         && value.is_empty()
         && explicit_node.is_none()
         && var.eq_ignore_ascii_case("Port")
     {
-        // resolve_runtime must have run for pidfile() to be
-        // populated. If the binary forgot (needs_daemon: false on
-        // a config command), this panics, which is correct — it's
-        // a binary bug, not user error.
+        // resolve_runtime must have run for pidfile() to be populated;
+        // panicking here indicates a binary bug, not user error.
         let pidfile_path = paths.pidfile();
         if let Ok(pf) = crate::ctl::Pidfile::read(pidfile_path) {
-            // Return early with the pidfile's port. The `Got`
-            // wrapper makes the binary print it the same way as any
-            // other get.
             return Ok((ConfigOutput::Got(vec![pf.port]), Vec::new()));
         }
-        // Upstream prints a stderr warning here. We swallow it — if
-        // the pidfile's missing, the daemon's down and the
-        // configured port IS the truth. The warning is noise. Minor
-        // deviation, documented.
+        // Pidfile missing means the daemon is down and the configured
+        // port is the truth; fall through to the normal file scan.
     }
 
-    // ─── Stage 2: validate, resolve node, coerce action
     let (intent, mut warnings) = build_intent(
         paths,
         &ConfigCmd {
@@ -654,17 +522,14 @@ pub fn run(
         },
     )?;
 
-    // ─── Figure out which file
     let target = match &intent.node {
         Some(node) => paths.hosts_dir().join(node),
         None => paths.tinc_conf(),
     };
 
-    // ─── Stage 3: walk the file
     match intent.action {
         Action::Get => {
             let values = run_get(&target, &intent.variable)?;
-            // Empty result → error.
             if values.is_empty() {
                 return Err(CmdError::BadInput(
                     "No matching configuration variables found.".into(),
@@ -673,14 +538,12 @@ pub fn run(
             Ok((ConfigOutput::Got(values), warnings))
         }
         Action::Set | Action::Add | Action::Del => {
-            // Merge walk-warnings (Removing) after validation warnings.
+            // Walk warnings (Removing) come after validation warnings.
             warnings.extend(run_edit(&target, &intent)?);
             Ok((ConfigOutput::Edited, warnings))
         }
     }
 }
-
-// Tests
 
 #[cfg(test)]
 mod tests;
