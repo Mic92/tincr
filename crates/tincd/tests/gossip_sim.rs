@@ -108,10 +108,10 @@ struct Simulation {
     nonce_counter: u64,
     msg_count: u64,
     /// Models the pre-fix `on_del_edge` reverse-broadcast (issue #8):
-    /// when a DEL_EDGE makes `b` unreachable and a synthesized
+    /// when a `DEL_EDGE` makes `b` unreachable and a synthesized
     /// reverse `b → self` exists, broadcast `DEL_EDGE(b, self)`.
     reverse_broadcast_amplifier: bool,
-    /// DEL_EDGE envelopes enqueued (originals + forwards + amplifier).
+    /// `DEL_EDGE` envelopes enqueued (originals + forwards + amplifier).
     del_edge_enqueued: u64,
 }
 

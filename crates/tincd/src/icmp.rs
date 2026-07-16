@@ -59,7 +59,7 @@ const IPPROTO_ICMPV6: u8 = 58;
 /// `IP_MSS - ip_size - icmp_size` = 576−20−8.
 pub(crate) const V4_QUOTE_CAP: usize = IP_MSS - IP_SIZE - ICMP_SIZE; // 548
 
-/// Build an ICMPv4 error packet (RFC 792).
+/// Build an `ICMPv4` error packet (RFC 792).
 ///
 /// `original` is the full ethernet frame as read from the TUN
 /// (eth hdr + IP hdr + payload). Returns a new ethernet frame:
@@ -144,7 +144,7 @@ pub(crate) fn build_v4_unreachable(
 /// `IP_MSS - ip6_size - icmp6_size` = 576−40−8.
 pub(crate) const V6_QUOTE_CAP: usize = IP_MSS - IP6_SIZE - ICMP6_SIZE; // 528
 
-/// Build an ICMPv6 error packet (RFC 4443).
+/// Build an `ICMPv6` error packet (RFC 4443).
 ///
 /// Same shape as [`build_v4_unreachable`] but the `ICMPv6` checksum
 /// includes a pseudo-header (RFC 4443 §2.3 → RFC 2460 §8.1):
@@ -387,7 +387,7 @@ mod tests {
         assert_eq!(quote, &orig[ETHER_SIZE..ETHER_SIZE + V4_QUOTE_CAP]);
     }
 
-    /// FRAG_NEEDED fills nextmtu: bytes 6-7 of the ICMP header, BE.
+    /// `FRAG_NEEDED` fills nextmtu: bytes 6-7 of the ICMP header, BE.
     #[test]
     fn v4_frag_needed_sets_mtu() {
         let orig = v4_orig_frame();

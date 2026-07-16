@@ -287,7 +287,7 @@ impl Graph {
     ///
     /// Returns `None` if the slot was already freed (no-op). Chosen
     /// over panic because daemon teardown can hit double-delete races
-    /// (connection close + DEL_EDGE arriving close together) and a
+    /// (connection close + `DEL_EDGE` arriving close together) and a
     /// no-op is the conservative choice. Callers that care can check
     /// the return.
     ///
@@ -338,7 +338,7 @@ impl Graph {
     ///
     /// Does **not** hunt down *incoming* edges. Any edge with `to ==`
     /// this node becomes a dangling reference; the protocol layer
-    /// (DEL_EDGE handling) is responsible for deleting both halves of
+    /// (`DEL_EDGE` handling) is responsible for deleting both halves of
     /// a pair before the node itself is purged. That said, the cascade
     /// nulls the twin's `reverse`, and `sssp`/`mst` skip reverseless
     /// edges — so a dangling `to` is invisible to the algorithms.

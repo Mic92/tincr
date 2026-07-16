@@ -262,11 +262,11 @@ pub(crate) enum DispatchError {
     BadId(String),
     /// ACK line malformed.
     BadAck(String),
-    /// ADD/DEL_SUBNET parse failed.
+    /// `ADD/DEL_SUBNET` parse failed.
     BadSubnet(String),
-    /// ADD/DEL_EDGE parse failed.
+    /// `ADD/DEL_EDGE` parse failed.
     BadEdge(String),
-    /// REQ/ANS_KEY parse failed.
+    /// `REQ/ANS_KEY` parse failed.
     BadKey(String),
 }
 
@@ -879,7 +879,7 @@ pub(crate) fn parse_key_msg<'a, T, E>(
     Ok((s, m))
 }
 
-/// Parse an ADD_SUBNET body. Host bits are not required to be zero;
+/// Parse an `ADD_SUBNET` body. Host bits are not required to be zero;
 /// non-canonical nets simply never match a lookup. This matches C tinc.
 ///
 /// # Errors
@@ -890,7 +890,7 @@ pub(crate) fn parse_add_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subne
     })
 }
 
-/// Parse a DEL_SUBNET body. Same format as ADD.
+/// Parse a `DEL_SUBNET` body. Same format as ADD.
 ///
 /// # Errors
 /// See [`parse_add_subnet`].
@@ -898,7 +898,7 @@ pub(crate) fn parse_del_subnet(body: &[u8]) -> Result<(String, tinc_proto::Subne
     parse_add_subnet(body)
 }
 
-/// Parse an ADD_EDGE body.
+/// Parse an `ADD_EDGE` body.
 ///
 /// # Errors
 /// `BadEdge`: not UTF-8 or `AddEdge::parse` failed.
@@ -910,7 +910,7 @@ pub(crate) fn parse_add_edge(body: &[u8]) -> Result<tinc_proto::msg::AddEdge, Di
     )
 }
 
-/// Parse a DEL_EDGE body.
+/// Parse a `DEL_EDGE` body.
 ///
 /// # Errors
 /// `BadEdge`: not UTF-8 or `DelEdge::parse` failed.

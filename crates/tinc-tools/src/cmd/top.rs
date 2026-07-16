@@ -311,7 +311,7 @@ fn sort_key(s: &NodeStats, mode: SortMode, cumulative: bool) -> f64 {
 
 /// Rows 0-2: status line, blank row, reversed column headers.
 ///
-/// The header bar is REVERSE + text + CLEAR_EOL + RESET: erasing while
+/// The header bar is REVERSE + text + `CLEAR_EOL` + RESET: erasing while
 /// still in reverse fills the rest of the line with the reversed
 /// background (xterm/vte "background color erase"), giving the filled-bar
 /// look.
