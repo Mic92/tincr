@@ -144,16 +144,15 @@ pub trait Device: Send {
         Err(io::ErrorKind::Unsupported.into())
     }
 
-    /// `device_type` for logging. C: `device_type` global (`:35`).
-    /// `route.c` branches on `routing_mode`, not this.
+    /// L2 (TAP) vs L3 (TUN) mode, mainly for logging; routing
+    /// decisions branch on the daemon's routing mode, not this.
     fn mode(&self) -> Mode;
 
     /// Kernel-chosen interface name, set post-TUNSETIFF. Daemon
     /// passes it as `INTERFACE=` to scripts.
     fn iface(&self) -> &str;
 
-    /// `mymac` — TAP only (`SIOCGIFHWADDR`, `:121-126`). `None`
-    /// for TUN.
+    /// The device MAC — TAP only (`SIOCGIFHWADDR`). `None` for TUN.
     fn mac(&self) -> Option<Mac>;
 
     /// Borrowed fd for `EventLoop::add`. `Dummy` returns `None`;
@@ -346,7 +345,7 @@ pub use bsd::{BsdTun, BsdVariant};
 mod tests {
     use super::*;
 
-    // ─── default drain()
+    // default drain()
     //
     // The default impl is the BSD/macOS path. Test it with a mock that
     // returns a scripted sequence of read() outcomes; the trait body

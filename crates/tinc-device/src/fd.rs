@@ -56,8 +56,7 @@ pub struct FdTun {
     /// The tun fd. Raw IP channel — no `tun_pi`, no prefix.
     fd: File,
 
-    /// `"fd/5"` or `"fd:/path"` for error messages. C logs
-    /// `"fd/%d"` (`:231`); path variant is our addition.
+    /// `"fd/5"` or `"fd:/path"` for error messages.
     device_label: String,
 }
 
@@ -100,7 +99,7 @@ fn recv_one_fd(stream: &impl AsRawFd) -> io::Result<OwnedFd> {
     use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
 
     // 1-byte iov: the Java sender writes one payload byte alongside
-    // the fd cmsg, and the C `:56` `ret <= 0` check requires it.
+    // the fd cmsg; a zero-length recv would look like EOF.
     let mut iobuf = [0u8; 1];
     let mut iov = [IoSliceMut::new(&mut iobuf)];
 
@@ -138,8 +137,8 @@ fn recv_one_fd(stream: &impl AsRawFd) -> io::Result<OwnedFd> {
         ));
     }
 
-    // Accept exactly one fd. STRICTER than C: 2+ fds is an error,
-    // not "silently take the first".
+    // Accept exactly one fd. Receiving 2+ fds is an error, not
+    // "silently take the first".
     let fds = msg
         .cmsgs()?
         .find_map(|cm| match cm {
@@ -217,8 +216,8 @@ impl Device for FdTun {
         }
 
         let Some(ethertype) = from_ip_nibble(buf[ETH_HLEN]) else {
-            // Include the actual nibble (C's message is bare
-            // "unknown"); daemon decides whether to log it.
+            // Include the actual nibble; daemon decides whether to
+            // log it.
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -332,13 +331,11 @@ mod tests {
 
         assert_eq!(e.kind(), io::ErrorKind::InvalidData);
         let msg = e.to_string();
-        // Our error includes the actual nibble (more useful
-        // than C's bare "unknown").
+        // The error includes the actual nibble.
         assert!(msg.contains("0x5"), "msg: {msg}");
     }
 
-    /// EOF → `UnexpectedEof`. The Java `VpnService` stopped. C
-    /// `:213` errors on `lenin <= 0`.
+    /// EOF → `UnexpectedEof`: the Java `VpnService` stopped.
     #[test]
     fn read_eof_via_pipe() {
         let (r, w) = pipe();

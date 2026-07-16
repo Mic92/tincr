@@ -4,9 +4,8 @@
 //! hands us one ≤64KB skb prefixed by `virtio_net_hdr`. We split it back
 //! into MTU-sized TCP segments.
 //!
-//! Ported from wireguard-go `tun/offload_linux.go` `gsoSplit`. Same
-//! seqno/ID/csum arithmetic. We additionally prepend a synthetic eth
-//! header per chunk because `forward_packet` reads ethertype at byte 12.
+//! Each chunk gets a synthetic eth header prepended because
+//! `forward_packet` reads the ethertype at byte 12.
 //!
 //! Lives in `tinc-device` because the same `virtio_net_hdr` format
 //! appears on FreeBSD `TAPSVNETHDR` and Windows NDIS LSO.
@@ -17,61 +16,43 @@
 use crate::arena::GsoType;
 use crate::ether::{ETH_HLEN, ETH_P_IP, ETH_P_IPV6, set_etherheader};
 
-// ── virtio_net_hdr ─────────────────────────────────────────────────
-
-/// `struct virtio_net_hdr` — `include/uapi/linux/virtio_net.h:222`.
-/// 10 bytes. Prepended by `tun_put_user` (`tun.c:2064`) when
-/// `IFF_VNET_HDR` is set.
-///
-/// ## Endianness
-///
-/// `__virtio16` fields use legacy virtio endianness: HOST-endian
-/// (`tun_vnet.h:50` `tun_vnet_legacy_is_little_endian` =
-/// `virtio_legacy_is_little_endian()` = the host's native order).
-/// On LE hosts (x86_64, aarch64, riscv64 — every Linux target tinc
-/// builds for) that's LE, so `from_le_bytes` reads correctly.
-///
-/// BE Linux targets that the kernel still supports: s390x, ppc64
-/// (BE variant), and some embedded MIPS. On those, the kernel writes
-/// BE u16s here AND `from_le_bytes` byte-swaps them → garbage. The
-/// fix would be `from_ne_bytes` (matching the kernel's host-native
-/// behavior), but that's untested and we don't have a BE CI runner.
-/// Better to fail loudly than silently corrupt.
+/// `struct virtio_net_hdr` endianness: `__virtio16` fields use legacy
+/// virtio (host-native) byte order. We decode with `from_le_bytes`,
+/// which is only correct on little-endian hosts. On big-endian hosts
+/// that would silently corrupt the header; fail the build loudly
+/// instead (no BE CI runner to validate a `from_ne_bytes` fix).
 #[cfg(target_endian = "big")]
 compile_error!("virtio_net_hdr endianness needs TUNSETVNETLE on BE hosts");
 
-/// `sizeof(struct virtio_net_hdr)`. The kernel default `vnet_hdr_sz`
-/// (`tun.c:2791`: `tun->vnet_hdr_sz = sizeof(struct virtio_net_hdr)`).
-/// Can be raised via `TUNSETVNETHDRSZ` to 12 (`_mrg_rxbuf` variant,
-/// for v1+hash); we don't.
+/// `sizeof(struct virtio_net_hdr)`, the kernel's default `vnet_hdr_sz`.
+/// `TUNSETVNETHDRSZ` could raise it to 12 (`_mrg_rxbuf` variant); we
+/// keep the default.
 pub const VNET_HDR_LEN: usize = 10;
 
-/// `VIRTIO_NET_HDR_F_NEEDS_CSUM` — `virtio_net.h:153`. `flags` bit:
-/// "the kernel left the L4 checksum partial (`CHECKSUM_PARTIAL` skb
-/// state); compute it from `csum_start` and place at `csum_start +
-/// csum_offset`". Set on every TSO frame (TSO implies csum offload).
-/// Also set on `GSO_NONE` frames when the kernel TX path has csum
-/// offload enabled — those need [`gso_none_checksum`].
+/// `VIRTIO_NET_HDR_F_NEEDS_CSUM`: the kernel left the L4 checksum
+/// partial; compute it from `csum_start` and place it at
+/// `csum_start + csum_offset`. Set on every TSO frame, and also on
+/// `GSO_NONE` frames when TX csum offload is enabled — those need
+/// [`gso_none_checksum`].
 const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
 
-/// `VIRTIO_NET_HDR_GSO_*` — `virtio_net.h:158-161`. `gso_type` values.
+/// `VIRTIO_NET_HDR_GSO_*` values for `gso_type`.
 const VIRTIO_NET_HDR_GSO_NONE: u8 = 0;
 const VIRTIO_NET_HDR_GSO_TCPV4: u8 = 1;
 const VIRTIO_NET_HDR_GSO_TCPV6: u8 = 4;
 
-/// Parsed `virtio_net_hdr`. The raw 10-byte struct, fields decoded
-/// from LE. wg-go `virtioNetHdr` (`offload_linux.go:29`).
+/// Parsed `virtio_net_hdr`: the raw 10-byte struct, fields decoded
+/// from LE.
 #[derive(Debug, Clone, Copy)]
 pub struct VirtioNetHdr {
     /// `VIRTIO_NET_HDR_F_*` flags. We only act on `NEEDS_CSUM`.
     pub flags: u8,
     /// `VIRTIO_NET_HDR_GSO_*`. Mapped to [`GsoType`] by [`Self::gso`].
     pub gso_type: u8,
-    /// IP header + TCP header length. **DON'T TRUST IT** — wg-go
-    /// `tun_linux.go:417`: "can be equal to the length of the entire
-    /// first packet when the kernel is handling it as part of a
-    /// FORWARD path". Recompute from `csum_start` + parsed TCP hlen.
-    /// We carry it for the `GSO_NONE` case (where it's correct).
+    /// IP header + TCP header length. **DON'T TRUST IT** — on the
+    /// kernel FORWARD path it can equal the length of the entire
+    /// first packet. Recompute from `csum_start` + parsed TCP hlen.
+    /// Carried for the `GSO_NONE` case (where it's correct).
     pub hdr_len: u16,
     /// MSS. Payload bytes per output segment.
     pub gso_size: u16,
@@ -86,13 +67,11 @@ pub struct VirtioNetHdr {
 }
 
 impl VirtioNetHdr {
-    /// Decode the 10-byte header. wg-go `decode` (`:38`) does an
-    /// `unsafe.Slice` memcpy; we read fields explicitly so the LE
-    /// conversion is documented at the boundary.
+    /// Decode the 10-byte header.
     ///
-    /// Returns `None` if `raw.len() < 10` — short read on a `vnet_hdr`
-    /// device means the device is misconfigured (kernel always writes
-    /// the full header). Caller drops the frame.
+    /// Returns `None` if `raw.len() < 10` — a short read on a `vnet_hdr`
+    /// device means the device is misconfigured (the kernel always
+    /// writes the full header). Caller drops the frame.
     #[must_use]
     #[inline]
     pub fn decode(raw: &[u8]) -> Option<Self> {
@@ -109,11 +88,7 @@ impl VirtioNetHdr {
         })
     }
 
-    /// Encode into a 10-byte buffer. wg-go `encode` (`:45`): an
-    /// `unsafe.Slice` memcpy. We write fields explicitly so the LE
-    /// encoding is documented at the boundary, mirroring [`decode`].
-    /// GRO TUN write path: this fills the `vnet_hdr` slot that
-    /// `1da3d1d7` left zeroed.
+    /// Encode into a 10-byte buffer.
     ///
     /// # Panics
     /// Debug-asserts `buf.len() >= 10`. Callers slice the GRO
@@ -151,26 +126,15 @@ impl VirtioNetHdr {
     }
 }
 
-// ── checksum ───────────────────────────────────────────────────────
-
-/// RFC 1071 internet checksum, no fold. wg-go `checksumNoFold`
-/// (`checksum.go:9`) — but without the 128-byte adc unroll.
+/// RFC 1071 internet checksum, no fold.
 ///
-/// At 20-byte IP headers and ~1500-byte TCP payloads, the simple
-/// loop is ~0.5µs/pkt. Crypto is 4.6µs. The wg-go unroll uses
-/// `bits.Add64` for explicit carry propagation — in Rust that's
-/// `u64::carrying_add` (nightly) or manual `(sum, carry)` tuple
-/// threading. The 8-byte-per-iteration loop with `u64::from_be_
-/// bytes` reads + `wrapping_add` + post-hoc carry count would gain
-/// ~0.3µs. Not nothing at 10G; not the bottleneck at 3G. Crypto
-/// dominates; revisit checksum unrolling if it ever doesn't.
+/// Deliberately unoptimized: the simple loop costs ~0.5µs/pkt while
+/// crypto costs ~4.6µs, so an unrolled carry-propagating variant would
+/// not move the bottleneck. Revisit if crypto ever stops dominating.
 ///
-/// `initial` is BIG-endian-interpreted (wg-go does a
-/// `NativeEndian → BigEndian` swap on entry). We accumulate in BE
-/// space throughout — `from_be_bytes` on each chunk, return value is
-/// the BE-interpreted sum. The fold-and-complement in [`checksum`]
-/// produces a host-order u16 that, when written via `to_be_bytes`,
-/// puts the correct bytes on the wire.
+/// `initial` is BIG-endian-interpreted; we accumulate in BE space
+/// throughout, so the fold-and-complement in [`checksum`] yields a
+/// value that `to_be_bytes` puts correctly on the wire.
 #[inline]
 fn checksum_nofold(data: &[u8], initial: u64) -> u64 {
     let mut sum = initial;
@@ -180,17 +144,13 @@ fn checksum_nofold(data: &[u8], initial: u64) -> u64 {
     }
     if let [tail] = rem {
         // RFC 1071 §4.1: tail byte is the HIGH byte of a zero-padded
-        // 16-bit word. wg-go: `binary.NativeEndian.Uint16([b[0], 0])`
-        // then byteswap → `b[0] << 8` in BE space.
+        // 16-bit word.
         sum += u64::from(*tail) << 8;
     }
     sum
 }
 
-/// Fold 64→16 + complement. wg-go `checksum` (`checksum.go:86`).
-/// Four folds is enough for `u64` (each fold halves the bit width
-/// of the carry). The complement is the RFC 1071 one's-complement
-/// final step.
+/// Fold 64→16 + complement (RFC 1071 one's-complement final step).
 #[inline]
 fn checksum(data: &[u8], initial: u64) -> u16 {
     !fold16(checksum_nofold(data, initial))
@@ -232,8 +192,7 @@ fn be32(b: &[u8], o: usize) -> u32 {
     u32::from_be_bytes(b[o..o + 4].try_into().unwrap())
 }
 
-/// TCP/UDP pseudo-header checksum. wg-go `pseudoHeaderChecksumNoFold`
-/// (`checksum.go:95`). RFC 793 §3.1 / RFC 8200 §8.1: sum over
+/// TCP/UDP pseudo-header checksum. RFC 793 §3.1 / RFC 8200 §8.1: sum over
 /// `src_addr ‖ dst_addr ‖ [0, protocol] ‖ tcp_length_BE`.
 ///
 /// `addr_len`: 4 (IPv4) or 16 (IPv6). The slice `addrs` is `src_addr
@@ -247,12 +206,10 @@ fn pseudo_header_checksum_nofold(proto: u8, addrs: &[u8], tcp_len: u16) -> u64 {
     sum + u64::from(tcp_len)
 }
 
-// ── tso_split ──────────────────────────────────────────────────────
-
-// IP header field offsets. Same as `tincd::packet::Ipv4Hdr` layout
-// but we work on raw byte slices here (no zerocopy dependency in
-// tinc-device, and `tso_split` needs `&mut` access while iterating
-// which the `#[repr(packed)]` accessor pattern doesn't give).
+// IP header field offsets. We work on raw byte slices here: no
+// zerocopy dependency in tinc-device, and `tso_split` needs `&mut`
+// access while iterating which a `#[repr(packed)]` accessor pattern
+// doesn't give.
 
 const IPV4_TOTLEN_OFF: usize = 2;
 const IPV4_ID_OFF: usize = 4;
@@ -275,34 +232,28 @@ const IPPROTO_TCP: u8 = 6;
 
 /// What went wrong. All of these are kernel-contract violations
 /// (the `vnet_hdr` describes a packet shape that doesn't match the
-/// actual bytes) — log + drop, don't panic. wg-go returns `error`;
-/// we map to a unit-per-variant enum so the daemon can log which one.
+/// actual bytes) — log + drop, don't panic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TsoError {
     /// Packet shorter than `csum_start + 13` (can't read TCP hlen).
-    /// wg-go: `"packet is too short"`.
     TooShort,
-    /// TCP data offset < 5 or > 15 words. wg-go: `"tcp header len
-    /// is invalid"`. Kernel never sets this (the TCP stack validates),
-    /// but we don't trust the wire.
+    /// TCP data offset < 5 or > 15 words. Kernel never sets this
+    /// (the TCP stack validates), but we don't trust the wire.
     BadTcpHlen,
-    /// `csum_start + csum_offset` past end of packet. wg-go: `"end
-    /// of checksum offset exceeds packet length"`.
+    /// `csum_start + csum_offset` past end of packet.
     BadCsumOffset,
-    /// IP version nibble doesn't match `gso_type`. wg-go: `"ip
-    /// header version: %d, GSO type: %d"`. Shouldn't happen (the
-    /// kernel knows what it's segmenting).
+    /// IP version nibble doesn't match `gso_type`. Shouldn't happen
+    /// (the kernel knows what it's segmenting).
     IpVersionMismatch,
     /// Output scratch too small. With `DEVICE_DRAIN_CAP=64` slots
-    /// at 1600 stride, 64KB / 1400 ≈ 47 segments fit. If `gso_size`
-    /// is tiny (kernel can do 88-byte MSS for some PMTU edge cases),
-    /// 64KB / 88 = 745 segments — we drop. wg-go: `ErrTooManySegments`.
-    /// Mitigated: tinc's PMTU probe never returns < 590.
+    /// at 1600 stride, 64KB / 1400 ≈ 47 segments fit; a tiny
+    /// `gso_size` (the kernel can emit 88-byte MSS in PMTU edge
+    /// cases) could need far more, in which case we drop. Mitigated:
+    /// tinc's PMTU probe never returns < 590.
     TooManySegments,
 }
 
-/// `gsoNoneChecksum` (wg-go `offload_linux.go:985`). For `GSO_NONE`
-/// frames with `NEEDS_CSUM` set: the kernel left the L4 checksum
+/// For `GSO_NONE` frames with `NEEDS_CSUM` set: the kernel left the L4 checksum
 /// half-done (it wrote the pseudo-header sum into the checksum field
 /// as the "initial value", expecting hardware to finish). We finish.
 ///
@@ -324,7 +275,7 @@ pub fn gso_none_checksum(pkt: &mut [u8], csum_start: u16, csum_offset: u16) {
     pkt[csum_at..csum_at + 2].copy_from_slice(&sum.to_be_bytes());
 }
 
-/// Split a TCP super-segment. wg-go `gsoSplit` (`offload_linux.go:901`).
+/// Split a TCP super-segment into MTU-sized frames.
 ///
 /// `pkt`: the IP packet from the device read, AFTER stripping the
 /// 10-byte `vnet_hdr`. `[IP header][TCP header][≤64KB payload]`. NO
@@ -348,9 +299,6 @@ pub fn gso_none_checksum(pkt: &mut [u8], csum_start: u16, csum_offset: u16) {
 /// # Errors
 /// See [`TsoError`]. All variants indicate a malformed input or
 /// undersized scratch — log + drop the super-segment.
-// adds eth-header synthesis and the validation that wg-go does in
-// `handleVirtioRead` before the call. Factoring would obscure the
-// 1:1 port mapping that lets you diff against upstream for bugs.
 pub fn tso_split(
     pkt: &[u8],
     hdr: &VirtioNetHdr,
@@ -368,9 +316,8 @@ pub fn tso_split(
         }
     };
 
-    // ─── Validate IP version against gso_type ──────────────────
-    // wg-go `tun_linux.go:404-414`. Kernel should never violate
-    // this (it set gso_type FROM the IP version), but check anyway.
+    // Validate IP version against gso_type. Kernel should never
+    // violate this (it set gso_type FROM the IP version), but check anyway.
     if pkt.is_empty() {
         return Err(TsoError::TooShort);
     }
@@ -379,9 +326,8 @@ pub fn tso_split(
         return Err(TsoError::IpVersionMismatch);
     }
 
-    // ─── Recompute hdr_len from TCP data offset ────────────────
-    // wg-go `tun_linux.go:417-433`: don't trust hdr.hdr_len.
-    // `csum_start` is the IP header length (the L4 header offset).
+    // Recompute hdr_len from the TCP data offset — don't trust
+    // hdr.hdr_len. `csum_start` is the IP header length (the L4 header offset).
     let iphlen = usize::from(hdr.csum_start);
     if pkt.len() <= iphlen + TCP_DATAOFF_OFF {
         return Err(TsoError::TooShort);
@@ -396,57 +342,51 @@ pub fn tso_split(
         return Err(TsoError::TooShort);
     }
 
-    // wg-go `:443-446`: csum_offset bounds. `csum_offset` is 16 for
-    // TCP (`tcphdr.th_sum` offset) — pin it. The kernel always sets
-    // it correctly but a wrong value would write to a random offset.
+    // csum_offset bounds: it's 16 for TCP (`tcphdr.th_sum` offset).
+    // The kernel always sets it correctly but a wrong value would
+    // write to a random offset.
     let csum_at = iphlen + usize::from(hdr.csum_offset);
     if csum_at + 2 > pkt.len() {
         return Err(TsoError::BadCsumOffset);
     }
 
-    // ─── Read invariants from the input ────────────────────────
-    // wg-go `:912-915`: clear input csum fields BEFORE reading
-    // anything else (so we don't have to track which output bytes
-    // came from the cleared input). We CAN'T mutate `pkt` (it's
-    // `&[u8]`, and it's a slice into the device arena which the
-    // daemon may want to inspect for debugging). Instead: copy the
-    // header into a stack buffer, clear THAT, copy from there.
+    // Csum fields must be cleared before checksumming, but `pkt` is
+    // a shared slice into the device arena which the daemon may still
+    // inspect. Copy the header into a stack buffer, clear that, and
+    // copy from there.
     let mut hdr_buf = [0u8; 60 + 60]; // max IPv6 hdr + max TCP hdr
     if hdr_len > hdr_buf.len() || csum_at + 2 > hdr_buf.len() {
         return Err(TsoError::TooShort);
     }
     hdr_buf[..hdr_len].copy_from_slice(&pkt[..hdr_len]);
     if !is_v6 {
-        // wg-go `:906`: zero IPv4 header checksum. It's recomputed
-        // per-segment (totlen + ID change).
+        // Zero IPv4 header checksum; it's recomputed per-segment
+        // (totlen + ID change).
         hdr_buf[IPV4_CSUM_OFF] = 0;
         hdr_buf[IPV4_CSUM_OFF + 1] = 0;
     }
-    // wg-go `:911`: zero TCP checksum. Recomputed per-segment.
+    // Zero TCP checksum. Recomputed per-segment.
     hdr_buf[csum_at] = 0;
     hdr_buf[csum_at + 1] = 0;
 
-    // wg-go `:916`: first segment's TCP sequence number. Each
-    // subsequent segment adds `gso_size`. RFC 793 §3.3: seqno
-    // counts payload bytes.
+    // First segment's TCP sequence number; each subsequent segment
+    // adds `gso_size` (RFC 793 §3.3: seqno counts payload bytes).
     let first_seq = be32(pkt, iphlen + TCP_SEQ_OFF);
 
-    // wg-go `:903-904`: src+dst addr slice for pseudo-header.
+    // src+dst addr slice for the pseudo-header.
     let (addr_off, addr_len) = ip_addr_span(is_v6);
     let addrs = &pkt[addr_off..addr_off + addr_len];
 
-    // wg-go `:936`: IPv4 ID from the FIRST segment, increment for
-    // each subsequent. RFC 6864: ID need not be unique for atomic
-    // datagrams (DF set, no frag), but the kernel still increments
-    // and receivers may use it for diagnostics. Match wg-go.
+    // IPv4 ID from the FIRST segment, incremented per segment.
+    // RFC 6864: ID need not be unique for atomic datagrams (DF set,
+    // no frag), but the kernel still increments and receivers may
+    // use it for diagnostics.
     let first_id = if is_v6 { 0 } else { be16(pkt, IPV4_ID_OFF) };
 
     let ethertype = if is_v6 { ETH_P_IPV6 } else { ETH_P_IP };
     let gso_size = usize::from(hdr.gso_size);
     let max_slots = out.len() / out_stride;
 
-    // ─── The split loop ────────────────────────────────────────
-    // wg-go `:921-981`.
     let mut next_data = hdr_len;
     let mut i = 0usize;
     while next_data < pkt.len() {
@@ -469,20 +409,18 @@ pub fn tso_split(
 
         let slot = &mut out[i * out_stride..i * out_stride + frame_len];
 
-        // ─── synthetic eth header ──────────────────────────────
-        // The vnet_hdr device speaks raw IP (no PI, no eth). The
+        // Synthetic eth header: the vnet_hdr device speaks raw IP (no PI, no eth). The
         // daemon speaks eth (`forward_packet` reads ethertype at
         // byte 12). Same synth as `fd.rs::FdTun::read`.
         set_etherheader(slot, ethertype);
 
         let ip = &mut slot[ETH_HLEN..];
 
-        // ─── IP header ─────────────────────────────────────────
-        // wg-go `:933`: copy IP header. From our cleared hdr_buf.
+        // IP header, from the cleared hdr_buf.
         ip[..iphlen].copy_from_slice(&hdr_buf[..iphlen]);
 
         if is_v6 {
-            // wg-go `:949`: IPv6 payload length = TCP hdr + payload.
+            // IPv6 payload length = TCP hdr + payload.
             // RFC 8200 §3: "Length of the IPv6 payload, i.e., the
             // rest of the packet following this IPv6 header".
             // total_len - iphlen = tcp_hlen + seg_data_len.
@@ -494,7 +432,7 @@ pub fn tso_split(
             // `csum_start` points past them). RFC 8200 §4: ext
             // headers are immutable in transit anyway.
         } else {
-            // wg-go `:937-943`: ID++, total_len, recompute csum.
+            // ID++, total_len, recompute csum.
             #[expect(clippy::cast_possible_truncation)] // i ≤ 47 in practice
             let id = first_id.wrapping_add(i as u16);
             ip[IPV4_ID_OFF..IPV4_ID_OFF + 2].copy_from_slice(&id.to_be_bytes());
@@ -507,17 +445,16 @@ pub fn tso_split(
             ip[IPV4_CSUM_OFF..IPV4_CSUM_OFF + 2].copy_from_slice(&csum.to_be_bytes());
         }
 
-        // ─── TCP header ────────────────────────────────────────
-        // wg-go `:952`: copy from cleared hdr_buf.
+        // TCP header, from the cleared hdr_buf.
         ip[iphlen..hdr_len].copy_from_slice(&hdr_buf[iphlen..hdr_len]);
 
-        // wg-go `:956`: seqno = first + gso_size * i. Wrapping is
-        // correct (TCP seqno is mod 2^32, RFC 793 §3.3).
+        // seqno = first + gso_size * i. Wrapping is correct
+        // (TCP seqno is mod 2^32, RFC 793 §3.3).
         #[expect(clippy::cast_possible_truncation)] // TCP seqno is mod 2^32 (RFC 793 §3.3)
         let seq = first_seq.wrapping_add((gso_size * i) as u32);
         ip[iphlen + TCP_SEQ_OFF..iphlen + TCP_SEQ_OFF + 4].copy_from_slice(&seq.to_be_bytes());
 
-        // wg-go `:958-961`: FIN + PSH only on the LAST segment.
+        // FIN + PSH only on the LAST segment.
         // RFC 793: FIN consumes a seqno → must be on the final
         // segment of the burst. PSH means "deliver now" → only
         // meaningful on the last (the receiver buffers the others).
@@ -529,11 +466,9 @@ pub fn tso_split(
             ip[iphlen + TCP_FLAGS_OFF] &= !(TCP_FLAG_FIN | TCP_FLAG_PSH);
         }
 
-        // ─── payload ───────────────────────────────────────────
         ip[hdr_len..total_len].copy_from_slice(&pkt[next_data..seg_end]);
 
-        // ─── TCP checksum ──────────────────────────────────────
-        // wg-go `:973-977`. Pseudo-header + TCP header + payload.
+        // TCP checksum: pseudo-header + TCP header + payload.
         // RFC 793 §3.1. The pseudo-header `tcp_len` is "TCP header
         // + data" — same as what we sum over.
         #[expect(clippy::cast_possible_truncation)] // tcp_hlen+seg_data_len ≤ MTU < 65536
@@ -549,8 +484,6 @@ pub fn tso_split(
 
     Ok(i)
 }
-
-// ── GRO coalesce ───────────────────────────────────────────────────
 
 /// Max coalesced IP packet size. The kernel's `tun_get_user` accepts
 /// up to `IP_MAX_MTU` (65535) for `gso_type != NONE` skbs. We cap
@@ -578,22 +511,19 @@ pub enum GroVerdict {
 /// collect same-flow packets back into a super-
 /// segment + `virtio_net_hdr`, write once.
 ///
-/// **Single-slot, append-only.** wg-go's `tcpGROTable` is a full
-/// flow hashmap with prepend support. We don't need either: the
-/// receiving daemon under iperf3 sees ONE flow's data packets in
-/// seq order (per recvmmsg batch). Mismatch → flush → restart
-/// handles the rare interleaved-flow case correctly (just doesn't
-/// coalesce across the gap). The iperf3-is-one-flow assumption
-/// matches the throughput bench's profiling target.
+/// **Single-slot, append-only.** No flow hashmap or prepend support:
+/// under a bulk transfer the receiving daemon sees ONE flow's data
+/// packets in seq order per batch. A mismatch → flush → restart
+/// handles the rare interleaved-flow case correctly (it just doesn't
+/// coalesce across the gap).
 ///
-/// **No csum verification.** wg-go's `checksumValid` gate
-/// (`offload_linux.go:389`) protects against an inner packet with
-/// a corrupt csum polluting the coalesced result (kernel only
-/// re-verifies the SUPER's csum, which we recompute). But our
-/// inner packets are SPTPS-AEAD-authenticated bytes from a peer's
-/// `tso_split` (or kernel TCP for non-GSO peers) — a bad csum
-/// here is a sender-side bug, not tampering. The `netns::
-/// tso_ingest_stream_integrity` sha256 catches it end-to-end.
+/// **No csum verification.** A corrupt inner checksum could pollute
+/// the coalesced result (the kernel only re-verifies the SUPER's
+/// csum, which we recompute). But our inner packets are
+/// SPTPS-AEAD-authenticated bytes from a peer's `tso_split` (or
+/// kernel TCP for non-GSO peers) — a bad csum here is a sender-side
+/// bug, not tampering. The `netns::tso_ingest_stream_integrity`
+/// sha256 test catches it end-to-end.
 ///
 /// Buffer layout: `[vnet_hdr(10)][IP super-packet]`. The slice
 /// returned by [`flush`] is fed directly to `Device::write_super`
@@ -604,7 +534,7 @@ pub struct GroBucket {
     /// Valid length of `buf`. `0` = empty bucket.
     len: usize,
 
-    // ─── coalesce key (wg-go `tcpFlowKey` shape) ────────────────
+    // coalesce key
     is_v6: bool,
     iphlen: u8,
     tcphlen: u8,
@@ -614,33 +544,29 @@ pub struct GroBucket {
     addrs: [u8; 32],
     sport: u16,
     dport: u16,
-    /// wg-go `tcpFlowKey.rxAck`: "varying ack values should not be
-    /// coalesced" — the kernel's GRO does the same (`tcp_gro_
-    /// receive` in `net/ipv4/tcp_offload.c:268` flushes on ack
-    /// mismatch). Under heavy unidirectional flow, data-direction
-    /// segments share the same ack (it only moves when the SENDER
-    /// has new data, which iperf3-receiver-side rarely does).
+    /// Varying ack values must not be coalesced (the kernel's GRO
+    /// flushes on ack mismatch too). Under heavy unidirectional flow,
+    /// data-direction segments share the same ack.
     ack: u32,
-    /// `tos`/`ttl` (v4) or `tclass`/`hlim` (v6). wg-go
-    /// `ipHeadersCanCoalesce`: kernel GRO flushes on these too.
-    /// Stored together: low byte = ttl/hlim, high = tos/tclass.
+    /// `tos`/`ttl` (v4) or `tclass`/`hlim` (v6). Kernel GRO flushes
+    /// on these too. Stored together: low byte = ttl/hlim, high =
+    /// tos/tclass.
     ip_meta: u16,
 
-    // ─── coalesce state (wg-go `tcpGROItem`) ───────────────────
+    // coalesce state
     /// Expected seq of the NEXT packet to append. `first_seq +
     /// total_payload_appended`.
     next_seq: u32,
-    /// Payload size of the FIRST packet. wg-go: subsequent packets'
-    /// payload must be ≤ this (a smaller packet may end the run; a
-    /// larger one would put a small packet mid-run, which the
-    /// kernel's GSO can't represent).
+    /// Payload size of the FIRST packet. Subsequent packets' payload
+    /// must be ≤ this (a smaller packet may end the run; a larger one
+    /// would put a small packet mid-run, which the kernel's GSO can't
+    /// represent).
     gso_size: u16,
     /// PSH was seen on the last appended packet. Nothing may append
     /// after PSH — "deliver now" must be the LAST segment.
     psh_set: bool,
-    /// A smaller-than-gso_size packet was appended. wg-go: "a
-    /// smaller packet on the end" terminates the run — GSO emits
-    /// fixed-size segments + one short tail.
+    /// A smaller-than-gso_size packet was appended, terminating the
+    /// run — GSO emits fixed-size segments + one short tail.
     short_tail: bool,
     /// Number of packets merged (including the first). 1 = single
     /// packet, no GSO needed (zero `vnet_hdr` on flush).
@@ -677,32 +603,29 @@ impl GroBucket {
     /// Try to coalesce `ip` into the bucket.
     ///
     /// `ip` is the raw IP packet (NO eth header, NO `vnet_hdr`) —
-    /// the daemon strips its synthetic eth before calling. wg-go
-    /// `tcpGRO` (`offload_linux.go:531`) shape, minus the table
-    /// machinery.
+    /// the daemon strips its synthetic eth before calling.
     ///
     /// `Coalesced`: packet absorbed, caller drops it. `FlushFirst`:
     /// flush + retry. `NotCandidate`: write individually.
     pub fn offer(&mut self, ip: &[u8]) -> GroVerdict {
-        // ─── candidate check (wg-go `packetIsGROCandidate` :751) ───
         if ip.len() < 40 {
             // 20 (min IPv4) + 20 (min TCP). v6 is 60; checked below.
             return GroVerdict::NotCandidate;
         }
         let is_v6 = match ip[0] >> 4 {
             4 => {
-                // wg-go `:757`: "IPv4 packets w/IP options do not
-                // coalesce" — IHL must be exactly 5 words.
+                // IPv4 packets with IP options do not coalesce —
+                // IHL must be exactly 5 words.
                 if ip[0] & 0x0F != 5 || ip[9] != IPPROTO_TCP {
                     return GroVerdict::NotCandidate;
                 }
-                // wg-go `:561`: no fragmented segments. MF flag,
-                // or any fragment-offset bits.
+                // No fragmented segments: MF flag or any
+                // fragment-offset bits.
                 if ip[6] & 0x20 != 0 || ip[6] & 0x1F != 0 || ip[7] != 0 {
                     return GroVerdict::NotCandidate;
                 }
-                // wg-go `:546`: totlen sanity. A trailing pad (eth
-                // minimum-frame) would mismatch here.
+                // totlen sanity. A trailing pad (eth minimum-frame)
+                // would mismatch here.
                 if usize::from(be16(ip, 2)) != ip.len() {
                     return GroVerdict::NotCandidate;
                 }
@@ -712,9 +635,8 @@ impl GroBucket {
                 if ip.len() < 60 || ip[6] != IPPROTO_TCP {
                     return GroVerdict::NotCandidate;
                 }
-                // wg-go `:541`: payload-len sanity. v6 has no
-                // header csum, so this is the only consistency
-                // check available.
+                // Payload-len sanity. v6 has no header csum, so this
+                // is the only consistency check available.
                 if usize::from(be16(ip, 4)) != ip.len() - 40 {
                     return GroVerdict::NotCandidate;
                 }
@@ -729,9 +651,9 @@ impl GroBucket {
             return GroVerdict::NotCandidate;
         }
 
-        // wg-go `:566-574`: only ACK or ACK|PSH. FIN/SYN/RST/URG
-        // → noop. Pure ACK (zero payload) → also noop — the kernel
-        // GRO doesn't coalesce them either (`:577`).
+        // Only ACK or ACK|PSH coalesce. FIN/SYN/RST/URG → noop.
+        // Pure ACK (zero payload) → also noop — the kernel GRO
+        // doesn't coalesce them either.
         let flags = ip[iphlen + TCP_FLAGS_OFF];
         let psh_set = flags & TCP_FLAG_PSH != 0;
         if flags & !TCP_FLAG_PSH != TCP_FLAG_ACK {
@@ -747,11 +669,10 @@ impl GroBucket {
         let sport = be16(ip, iphlen);
         let dport = be16(ip, iphlen + 2);
         let (addr_off, addr_len) = ip_addr_span(is_v6);
-        // wg-go `ipHeadersCanCoalesce` `:279-307`. v4: tos at [1],
-        // ttl at [8], DF at [6]>>5. v6: tclass split across [0..2]
-        // (we store the [0] high nibble + [1] high nibble), hlim
-        // at [7]. Packed into one u16 so the compare below stays
-        // a single branch.
+        // v4: tos at [1], ttl at [8], DF at [6]>>5. v6: tclass split
+        // across [0..2] (we store the [0] high nibble + [1] high
+        // nibble), hlim at [7]. Packed into one u16 so the compare
+        // below stays a single branch.
         let ip_meta = if is_v6 {
             u16::from(ip[0] & 0x0F) << 12 | u16::from(ip[1] & 0xF0) << 4 | u16::from(ip[7])
         } else {
@@ -761,7 +682,7 @@ impl GroBucket {
         #[expect(clippy::cast_possible_truncation)] // payload_len < 65535
         let gso_size = payload_len as u16;
 
-        // ─── empty bucket: seed it ──────────────────────────────────
+        // Empty bucket: seed it.
         if self.len == 0 {
             self.buf[VNET_HDR_LEN..VNET_HDR_LEN + ip.len()].copy_from_slice(ip);
             self.len = VNET_HDR_LEN + ip.len();
@@ -785,9 +706,7 @@ impl GroBucket {
             return GroVerdict::Coalesced;
         }
 
-        // ─── flow key match (wg-go `tcpPacketsCanCoalesce` :334) ───
-        // wg-go's lookup is a hashmap miss; our single-slot is a
-        // linear compare. Same effect for the one-flow case.
+        // Flow key match.
         if is_v6 != self.is_v6
             || iphlen != usize::from(self.iphlen)
             || tcphlen != usize::from(self.tcphlen)
@@ -799,28 +718,26 @@ impl GroBucket {
         {
             return GroVerdict::FlushFirst;
         }
-        // wg-go `:340-345`: TCP options bytes must match exactly
-        // (timestamps with monotonic values would be safe to
-        // coalesce, but wg-go doesn't bother and neither do we —
-        // the kernel re-splits with the SUPER's timestamp anyway).
+        // TCP options bytes must match exactly (timestamps with
+        // monotonic values would be safe to coalesce, but the kernel
+        // re-splits with the SUPER's timestamp anyway).
         if tcphlen > 20 {
             let pkt_head = &self.buf[VNET_HDR_LEN..];
             if ip[iphlen + 20..iphlen + tcphlen] != pkt_head[iphlen + 20..iphlen + tcphlen] {
                 return GroVerdict::FlushFirst;
             }
         }
-        // wg-go `:352`: seq adjacency. Append-only: pkt must be
-        // exactly at `next_seq`. (wg-go also tries prepend at
-        // `:368`; we don't — reordered packets just flush.)
+        // Seq adjacency. Append-only: pkt must be exactly at
+        // `next_seq`; reordered packets just flush.
         if seq != self.next_seq {
             return GroVerdict::FlushFirst;
         }
-        // wg-go `:354-357`: can't append after PSH; can't append
-        // after a short tail (GSO is fixed-size + one trailer).
+        // Can't append after PSH; can't append after a short tail
+        // (GSO is fixed-size + one trailer).
         if self.psh_set || self.short_tail {
             return GroVerdict::FlushFirst;
         }
-        // wg-go `:363`: larger packet can't follow smaller.
+        // Larger packet can't follow smaller.
         if gso_size > self.gso_size {
             return GroVerdict::FlushFirst;
         }
@@ -829,10 +746,9 @@ impl GroBucket {
             return GroVerdict::FlushFirst;
         }
 
-        // ─── append payload ─────────────────────────────────────────
-        // wg-go `coalesceTCPPackets` `:494-496`: just the bytes;
-        // headers stay from the FIRST packet. PSH propagates to
-        // the head's flags so the kernel sees it on the super.
+        // Append payload bytes only; headers stay from the FIRST
+        // packet. PSH propagates to the head's flags so the kernel
+        // sees it on the super.
         self.buf[self.len..self.len + payload_len].copy_from_slice(&ip[iphlen + tcphlen..]);
         self.len += payload_len;
         self.next_seq = self.next_seq.wrapping_add(u32::from(gso_size));
@@ -849,7 +765,7 @@ impl GroBucket {
 
     /// Finalize the bucket. Fixes up IP totlen/csum, writes the
     /// `virtio_net_hdr`, returns the wire-ready `[vnet_hdr][IP]`
-    /// slice. wg-go `applyTCPCoalesceAccounting` (`:624`).
+    /// slice.
     ///
     /// `None` if empty. The bucket is reset on return.
     pub fn flush(&mut self) -> Option<&[u8]> {
@@ -862,8 +778,7 @@ impl GroBucket {
         let pkt = &mut self.buf[VNET_HDR_LEN..len];
 
         if self.num_merged > 1 {
-            // ─── fix up the super-packet's IP header ──────────────
-            // wg-go `:640-649`.
+            // Fix up the super-packet's IP header.
             #[expect(clippy::cast_possible_truncation)] // capped at GRO_MAX_IP_LEN
             let totlen = pkt.len() as u16;
             if self.is_v6 {
@@ -876,12 +791,12 @@ impl GroBucket {
                 pkt[IPV4_CSUM_OFF..IPV4_CSUM_OFF + 2].copy_from_slice(&csum.to_be_bytes());
             }
 
-            // ─── pseudo-header partial into TCP csum field ─────────
-            // wg-go `:658-664`. `NEEDS_CSUM` tells the kernel "L4
-            // csum is partial; finish from `csum_start`". We write
-            // the folded-but-NOT-complemented pseudo — the kernel
-            // chains it (RFC 1071) with the TCP-hdr+payload sum.
-            // Same shape `gso_none_checksum` reads on ingest.
+            // Pseudo-header partial into the TCP csum field.
+            // `NEEDS_CSUM` tells the kernel "L4 csum is partial;
+            // finish from `csum_start`". We write the
+            // folded-but-NOT-complemented pseudo — the kernel chains
+            // it (RFC 1071) with the TCP-hdr+payload sum. Same shape
+            // `gso_none_checksum` reads on ingest.
             let (addr_off, addr_len) = ip_addr_span(self.is_v6);
             #[expect(clippy::cast_possible_truncation)] // ≤ 65535-iphlen
             let l4_len = (pkt.len() - iphlen) as u16;
@@ -890,17 +805,14 @@ impl GroBucket {
                 &pkt[addr_off..addr_off + addr_len],
                 l4_len,
             );
-            // Fold-no-complement. wg-go does `checksum([]byte{},
-            // psum)` — their `checksum` doesn't complement (`:92`
-            // returns the raw fold). Ours does, so fold separately.
+            // Fold without complement — [`checksum`] complements, so
+            // fold separately here.
             let p = fold16(pseudo);
             pkt[iphlen + TCP_CSUM_OFF..iphlen + TCP_CSUM_OFF + 2].copy_from_slice(&p.to_be_bytes());
 
-            // ─── vnet_hdr ─────────────────────────────────────────────
-            // wg-go `:629-636`. The kernel's `virtio_net_hdr_to_skb`
-            // (`virtio_net.h:83`) maps NEEDS_CSUM → CHECKSUM_PARTIAL
-            // and gso_type → SKB_GSO_TCPV4/6; `napi_gro_receive`
-            // does the rest.
+            // The kernel's `virtio_net_hdr_to_skb` maps NEEDS_CSUM →
+            // CHECKSUM_PARTIAL and gso_type → SKB_GSO_TCPV4/6;
+            // `napi_gro_receive` does the rest.
             #[expect(clippy::cast_possible_truncation)] // iphlen+tcphlen ≤ 100
             let hdr = VirtioNetHdr {
                 flags: VIRTIO_NET_HDR_F_NEEDS_CSUM,
@@ -916,11 +828,10 @@ impl GroBucket {
             };
             hdr.encode(&mut self.buf[..VNET_HDR_LEN]);
         } else {
-            // num_merged == 1: single packet went through the
-            // bucket but nothing joined. wg-go `:667-672`: zero
-            // vnet_hdr (gso_type=NONE, no csum offload). The IP
-            // packet is verbatim from the first `offer` — csum
-            // already valid (sender's tso_split or kernel TCP).
+            // num_merged == 1: single packet went through the bucket
+            // but nothing joined. Zero vnet_hdr (gso_type=NONE, no
+            // csum offload). The IP packet is verbatim from the first
+            // `offer` — csum already valid.
             self.buf[..VNET_HDR_LEN].fill(0);
         }
 
@@ -934,8 +845,6 @@ impl Default for GroBucket {
         Self::new()
     }
 }
-
-// ── tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests;

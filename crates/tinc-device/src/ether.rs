@@ -73,7 +73,7 @@ pub(crate) fn set_etherheader(buf: &mut [u8], ethertype: u16) {
 mod tests {
     use super::*;
 
-    // ─── from_ip_nibble
+    // from_ip_nibble
 
     /// `from_ip_nibble(u8) -> Option<u16>`. Full domain in one
     /// table: only the HIGH nibble matters (IP version field).
@@ -82,17 +82,17 @@ mod tests {
     fn nibble_cases() {
         #[rustfmt::skip]
         let cases: &[(u8, Option<u16>)] = &[
-            // ─── IPv4: version=4 in high nibble, IHL in low.
+            // IPv4: version=4 in high nibble, IHL in low.
             // `0x45` is the canonical IPv4 first byte (IHL=5 words =
             // 20 bytes, no options). `0x4F` is max IHL (60 bytes).
             (0x45, Some(ETH_P_IP)),
             (0x40, Some(ETH_P_IP)),
             (0x4F, Some(ETH_P_IP)),
-            // ─── IPv6: version=6 in high nibble, traffic class high
+            // IPv6: version=6 in high nibble, traffic class high
             // nibble in low. `0x60` is canonical (default TC).
             (0x60, Some(ETH_P_IPV6)),
             (0x6F, Some(ETH_P_IPV6)),
-            // ─── Unknown versions → None.
+            // Unknown versions → None.
             // IP version 5 was ST-II (RFC 1819, experimental, dead).
             // Version 7-15 unassigned. Version 0-3 pre-IPv4 historical.
             (0x00, None),
@@ -105,7 +105,7 @@ mod tests {
         }
     }
 
-    // ─── set_etherheader
+    // set_etherheader
 
     /// Zero MACs, write ethertype big-endian. Pre-fill with garbage
     /// to verify the zero AND that bytes past 14 are untouched.
