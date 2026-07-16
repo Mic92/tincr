@@ -6,9 +6,9 @@
 //!
 //! This is **not** HKDF. It's the RFC 4346 §5 `P_hash` construction, which
 //! predates HKDF and has a different chaining structure. Worse, tinc deviates
-//! from RFC 4346 in one critical way: where the RFC says `A(0) = seed`, tinc
-//! initialises `A(0) = [0u8; 64]` (because the C code `memset`s before the
-//! first HMAC). One iteration in, the outputs diverge from any TLS library.
+//! from RFC 4346 in one critical way: where the RFC says `A(0) = seed`,
+//! tinc initialises `A(0) = [0u8; 64]`. One iteration in, the outputs
+//! diverge from any TLS library.
 //!
 //! ## The algorithm, as actually implemented in `prf.c`
 //!
@@ -44,8 +44,8 @@ const MD_LEN: usize = 64;
 /// than the HMAC block size (128 bytes for SHA-512); the `hmac` crate handles
 /// the key-hashing fallback so we don't replicate `prf.c`'s manual version.
 pub fn prf(secret: &[u8], seed: &[u8], out: &mut [u8]) {
-    // Mirror the C buffer exactly: [A(i) | seed]. Starting with A(0) = zeros
-    // is the load-bearing tinc-specific quirk. Allocating per call is fine;
+    // Buffer layout: [A(i) | seed]. Starting with A(0) = zeros is the
+    // load-bearing tinc-specific quirk. Allocating per call is fine;
     // this runs once per handshake, not per packet.
     let mut data = Zeroizing::new(vec![0u8; MD_LEN + seed.len()]);
     data[MD_LEN..].copy_from_slice(seed);
@@ -54,7 +54,7 @@ pub fn prf(secret: &[u8], seed: &[u8], out: &mut [u8]) {
     while written < out.len() {
         // Inner HMAC: A(i) = HMAC(secret, A(i-1) ++ seed).
         // Result overwrites the first MD_LEN bytes of `data`, so the seed
-        // tail stays put for the next iteration — same trick the C code uses.
+        // tail stays put for the next iteration.
         let a_i = Zeroizing::new(hmac(secret, &data));
         data[..MD_LEN].copy_from_slice(&*a_i);
 
@@ -78,12 +78,10 @@ pub fn prf(secret: &[u8], seed: &[u8], out: &mut [u8]) {
 /// the unwrap is unreachable. The lint allow is preferable to bubbling a
 /// phantom error variant up through `prf()`.
 ///
-/// Kept separate purely so the loop above reads as two distinct steps —
-/// the C code names them "inner" and "outer" and that distinction matters
-/// when comparing implementations side-by-side.
+/// Kept separate purely so the loop above reads as two distinct steps.
 fn hmac(key: &[u8], msg: &[u8]) -> [u8; MD_LEN] {
     // `new_from_slice` accepts any key length and applies RFC 2104's
-    // hash-if-too-long rule internally, matching `hmac_sha512` in prf.c.
+    // hash-if-too-long rule internally, which is what tinc's PRF expects.
     let mut mac = HmacSha512::new_from_slice(key).unwrap();
     mac.update(msg);
     mac.finalize().into_bytes().into()

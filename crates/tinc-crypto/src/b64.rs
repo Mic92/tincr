@@ -43,9 +43,7 @@ pub fn encode_urlsafe(src: &[u8]) -> String {
 }
 
 fn encode_with(src: &[u8], alphabet: &[u8; 64]) -> String {
-    // Walk forward in 3-byte groups; the C code walks *backward* purely so it
-    // can encode in-place when src and dst overlap. We have separate buffers,
-    // so the straightforward direction is fine — same output, easier to read.
+    // Walk forward in 3-byte groups; direction doesn't affect the output.
     let mut out = Vec::with_capacity(src.len().div_ceil(3) * 4);
     for chunk in src.chunks(3) {
         // LSB-first pack. The chunk may be 1, 2, or 3 bytes; missing bytes
@@ -70,10 +68,7 @@ fn encode_with(src: &[u8], alphabet: &[u8; 64]) -> String {
 
 /// Decode, accepting both alphabets simultaneously.
 ///
-/// Returns `None` if any character is outside the union alphabet. Unlike the
-/// C version this does **not** decode in-place and does not silently truncate
-/// at embedded NUL (the C code's `&& src[i]` check) — Rust strings can't
-/// contain interior NULs from the places we read them anyway.
+/// Returns `None` if any character is outside the union alphabet.
 #[must_use]
 pub fn decode(src: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(src.len() / 4 * 3 + 2);

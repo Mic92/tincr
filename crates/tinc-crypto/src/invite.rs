@@ -107,9 +107,8 @@ pub fn fingerprint(public: &[u8; PUBLIC_LEN]) -> String {
 #[must_use]
 pub fn key_hash(public: &[u8; PUBLIC_LEN]) -> [u8; COOKIE_LEN] {
     // Intermediate string is short-lived and not secret (it's the public
-    // key); no zeroize needed. We could avoid the allocation by feeding
-    // the encoder output to a streaming hasher, but 43 bytes is noise and
-    // the allocation makes the C correspondence obvious.
+    // key); no zeroize needed. Avoiding the 43-byte allocation with a
+    // streaming hasher isn't worth the complexity.
     let fp = fingerprint(public);
     fingerprint_hash(&fp)
 }
