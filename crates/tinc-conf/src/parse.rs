@@ -128,13 +128,11 @@ pub fn split_kv(line: &str) -> (&str, &str) {
     (&line[..key_end], val)
 }
 
-/// Case-fold for lookup. C uses `strcasecmp` which is locale-dependent
-/// in theory but ASCII-only in practice on every target tinc runs on.
-/// We pin it to ASCII explicitly. Non-ASCII bytes pass through — they
-/// never appear in valid variable names but `strcasecmp` doesn't
-/// reject them either, just compares them literally.
+/// Case-fold for lookup: ASCII-only, so folding is locale-independent.
+/// Non-ASCII bytes pass through unchanged — they never appear in valid
+/// variable names and are simply compared literally.
 fn ascii_fold(s: &str) -> String {
-    s.bytes().map(|b| b.to_ascii_lowercase() as char).collect()
+    s.to_ascii_lowercase()
 }
 
 // File reader
