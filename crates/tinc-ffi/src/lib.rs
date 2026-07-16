@@ -48,7 +48,6 @@ pub fn serial_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Raw FFI surface. Hand-declared — see build.rs for why no bindgen.
 
 #[link(name = "tinc_sptps_ffi", kind = "static")]
@@ -78,7 +77,6 @@ unsafe extern "C" {
 
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Public types
 
 /// One side's role in the handshake.
@@ -225,8 +223,8 @@ impl<'k> CSptps<'k> {
     /// state is process-global; concurrent `start`s race on it. This is a
     /// test harness — write serial tests.
     ///
-    /// `label` is the binding context (`"sptps_test"` in the upstream test
-    /// binary, the connection identifier in `tincd`). Both sides must agree
+    /// `label` is the binding context (a connection identifier in a
+    /// real daemon; tests use a fixed string). Both sides must agree
     /// on it or the SIG transcript hash diverges and the handshake fails.
     ///
     /// The returned events include the first wire bytes — `sptps_start`
@@ -378,8 +376,6 @@ impl Drop for CSptps<'_> {
         unsafe { ffi_harness_free(self.h.as_ptr()) }
     }
 }
-
-// ────────────────────────────────────────────────────────────────────
 
 /// Seed the C-side `randomize()` keystream.
 ///
