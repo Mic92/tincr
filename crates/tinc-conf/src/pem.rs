@@ -27,14 +27,12 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use tinc_crypto::b64;
 use zeroize::Zeroizing;
 
-/// `read_pem` errors. `NotFound` maps to the case where the BEGIN
-/// marker is absent — distinct from "found but
-/// malformed" because callers (`read_ecdsa_public_key` in
-/// `net_setup.c`) check `errno == ENOENT` to fall through to the
-/// `Ed25519PublicKey =` config-variable path.
+/// `read_pem` errors. `NotFound` (BEGIN marker absent) is distinct
+/// from "found but malformed" because callers fall back to the
+/// `Ed25519PublicKey =` config variable only in the missing case.
 #[derive(Debug, thiserror::Error)]
 pub enum PemError {
-    /// `-----BEGIN <type>-----` never found. C: `errno = ENOENT`.
+    /// `-----BEGIN <type>-----` never found.
     #[error("PEM block not found")]
     NotFound,
     /// Found the block but `b64decode_tinc` rejected a line.
