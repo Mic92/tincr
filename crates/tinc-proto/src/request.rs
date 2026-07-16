@@ -17,10 +17,9 @@ use core::fmt;
 
 /// Wire request types. Values match `request_t` in `protocol.h`.
 ///
-/// `STATUS` and `ERROR` exist in the C enum but have no handler
-/// (`request_entries[STATUS] = {NULL, "STATUS"}`). They're here because
-/// the discriminant values are positional and skipping them would shift
-/// everything after.
+/// `STATUS` and `ERROR` are legacy types with no handler. They're here
+/// because the discriminant values are positional and skipping them
+/// would shift everything after.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Request {
@@ -29,10 +28,9 @@ pub enum Request {
     Challenge = 2,
     ChalReply = 3,
     Ack = 4,
-    /// No handler in C. Legacy.
+    /// Legacy; no handler.
     Status = 5,
-    /// No handler in C. Legacy. (Windows `#define ERROR` conflict in C
-    /// is the reason for the `#undef` in `protocol.h`; not our problem.)
+    /// Legacy; no handler.
     Error = 6,
     Termreq = 7,
     Ping = 8,
