@@ -261,7 +261,7 @@ pub(crate) fn decide(
         .filter_map(|n| n.nexthop.as_deref())
         .collect();
 
-    // ─── shortcut add ────────────────────────────────────────────
+    // shortcut add.
     // `max_by` (not random): the heaviest relay is the one most
     // worth collapsing; ties broken by name for determinism. Count
     // active+pending shortcut slots toward the cap so a 3rd hot peer
@@ -295,7 +295,7 @@ pub(crate) fn decide(
         }
     }
 
-    // ─── drop ────────────────────────────────────────────────────
+    // drop.
     // C :188-190. > D_HI → drop a superfluous outgoing.
     if nc > knobs.d_hi {
         let act =
@@ -548,7 +548,7 @@ mod tests {
         )
     }
 
-    // ═══════════════════════ legacy behaviour ════════════════════
+    // legacy behaviour.
 
     /// Exactly 3 conns, no pending, no unreachable → Noop.
     #[test]
@@ -813,7 +813,7 @@ mod tests {
         // Negative (`has_dht_key=false`) is `connect_skips_ineligible`.
     }
 
-    // ═══════════════════════ shortcut behaviour ══════════════════
+    // shortcut behaviour.
 
     fn dflt(
         myself: &str,
@@ -1154,7 +1154,7 @@ mod tests {
         );
     }
 
-    // ═══════════════════════ hot-nexthop guard ═══════════════════
+    // hot-nexthop guard.
 
     /// nc=8 (>`D_HI`), 5 outgoing all multi-homed, one is `nexthop`
     /// for a peer pushing 100 KiB/s → that one is never the random

@@ -15,7 +15,6 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-// ────────────────────────────────────────────────────────────────────
 // IDs
 
 /// Index into [`Graph`]'s node slab.
@@ -75,7 +74,6 @@ fn sticky_post_pass(
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Slab payloads. Minimal — just what the algorithms read.
 
 /// One node. This is the graph-relevant slice of the daemon's node
@@ -124,7 +122,6 @@ pub struct Edge {
     to_name: String,
 }
 
-// ────────────────────────────────────────────────────────────────────
 // SSSP output. Side table — the C writes into `node_t` directly.
 
 /// SSSP routing for one node, or `None` if unreachable from `myself`.
@@ -160,7 +157,6 @@ pub struct Route {
     pub options: u32,
 }
 
-// ────────────────────────────────────────────────────────────────────
 // The graph
 
 /// Node + edge slabs, plus the weight-ordered edge index Kruskal walks.
@@ -496,7 +492,6 @@ impl Graph {
             .map_or(&[], |node| node.edges.as_slice())
     }
 
-    // ────────────────────────────────────────────────────────────────
     // sssp_bfs
 
     /// `sssp_bfs`. Returns one `Option<Route>` per node, indexed by
@@ -693,7 +688,6 @@ impl Graph {
         route
     }
 
-    // ────────────────────────────────────────────────────────────────
     // mst_kruskal
 
     /// `mst_kruskal`. Returns the set of edges whose `connection_t`
@@ -775,7 +769,6 @@ impl Graph {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Unit tests for invariants. KAT differential tests live in
 // tests/kat.rs.
 
@@ -839,7 +832,6 @@ mod tests {
         assert!(r[1].is_none()); // b unreachable
     }
 
-    // ────────────────────────────────────────────────────────────────
     // Deletion
 
     /// Triangle a-b-c, all bidi. Handy for delete tests.
@@ -989,7 +981,6 @@ mod tests {
         assert_eq!(live, vec![a, c]);
     }
 
-    // ────────────────────────────────────────────────────────────────
     // edge_iter + update_edge
 
     #[test]
@@ -1075,7 +1066,6 @@ mod tests {
         assert!(!mst.contains(&ab));
     }
 
-    // ────────────────────────────────────────────────────────────────
     // sssp_sticky
 
     /// Diamond src─r1─dst / src─r2─dst. Both paths 2 hops; weight
@@ -1203,7 +1193,6 @@ mod tests {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // `graph()` glue: SSSP result → reachability transitions.
 //
 // `sssp` runs the BFS and returns `Vec<Option<Route>>` — `Some` =

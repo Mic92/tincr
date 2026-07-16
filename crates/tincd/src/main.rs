@@ -1088,7 +1088,7 @@ mod tests {
         assert_eq!(a.socket, PathBuf::from("/tmp/s"));
     }
 
-    // ─── resolve_debug_level
+    // resolve_debug_level.
 
     // Hand-rolled tempdir (matches tests/common/mod.rs::TmpGuard;
     // no tempfile dep in this crate). PID+TID → nextest-parallel-safe.
@@ -1176,7 +1176,7 @@ mod tests {
         assert_eq!(resolve_debug_level(&a), None);
     }
 
-    // ─── check_socket_activation
+    // check_socket_activation.
 
     /// PID matching ours + `LISTEN_FDS=2` → Some(2). The happy path.
     #[test]

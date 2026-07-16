@@ -11,7 +11,7 @@
 //!   not an identity — return all host-prefix subnets.
 //! - **PTR** for `*.in-addr.arpa` / `*.ip6.arpa`: reverse-lookup in
 //!   the subnet tree so `who`/`journalctl` show node names.
-//! - **NXDOMAIN otherwise.** No upstream forwarding; split-DNS via
+//! - **NXDOMAIN otherwise.** No forwarding to real resolvers; split-DNS via
 //!   systemd-resolved (`~suffix` routing-only domain) means the OS
 //!   only sends our suffix here.
 //!
@@ -31,7 +31,7 @@ use crate::packet::{Ipv4Hdr, Ipv4Pseudo, Ipv6Hdr, Ipv6Pseudo, inet_checksum};
 use crate::subnet_tree::SubnetTree;
 use tinc_proto::Subnet;
 
-// ── Config ──────────────────────────────────────────────────────────
+// Config.
 
 /// DNS stub config. Daemon-side `Option<DnsConfig>` is `None` when
 /// disabled. No default `dns_addr` because it has to be (a) routed
@@ -51,7 +51,7 @@ pub(crate) struct DnsConfig {
     pub suffix: String,
 }
 
-// ── Wire constants (RFC 1035) ───────────────────────────────────────
+// Wire constants (RFC 1035).
 
 const DNS_HDR_LEN: usize = 12;
 /// Response, Authoritative Answer. RD echoed from query.
@@ -73,7 +73,7 @@ const CLASS_IN: u16 = 1;
 /// can churn its `/32` after a config change.
 const TTL: u32 = 30;
 
-// ── Packet intercept ────────────────────────────────────────────────
+// Packet intercept.
 //
 // Reuses `packet.rs` constants. The actual offsets are written out
 // here because they're load-bearing for the ETH+IP+UDP slicing and
@@ -84,8 +84,8 @@ const IP4_SIZE: usize = 20;
 const IP6_SIZE: usize = 40;
 const UDP_SIZE: usize = 8;
 const IPPROTO_UDP: u8 = 17;
-/// 0x86DD. `route.rs` has a private copy; we don't want to thread
-/// it through `packet.rs` (which is missing it, see `:322` comment).
+/// 0x86DD. `route.rs` has a private copy; not worth threading through
+/// `packet.rs`.
 const ETH_P_IPV6: u16 = 0x86DD;
 
 /// Is this an IPv4 UDP packet to `dns_addr:53`? Full-frame match
@@ -170,7 +170,7 @@ pub(crate) fn match_v6<'a>(
     Some((src, sport, &data[udp_off + UDP_SIZE..]))
 }
 
-// ── DNS query parse ─────────────────────────────────────────────────
+// DNS query parse.
 
 /// What we pulled out of the question section. Everything we need to
 /// build a response. The raw `qname` bytes (still in wire format —
@@ -223,7 +223,7 @@ fn parse_query(dns: &[u8]) -> Option<Result<ParsedQuery<'_>, (u16, bool, u16)>> 
         return Some(Err((id, rd, RCODE_FORMERR)));
     }
 
-    // ─── QNAME: walk length-prefixed labels.
+    // QNAME: walk length-prefixed labels.
     // RFC 1035 §4.1.2: "a domain name represented as a sequence of
     // labels, where each label consists of a length octet followed
     // by that number of octets. The domain name terminates with the
@@ -295,7 +295,7 @@ fn parse_query(dns: &[u8]) -> Option<Result<ParsedQuery<'_>, (u16, bool, u16)>> 
     }))
 }
 
-// ── PTR helpers ─────────────────────────────────────────────────────
+// PTR helpers.
 
 /// `5.0.0.10.in-addr.arpa` → `10.0.0.5`. RFC 1035 §3.5. Octets
 /// reversed; each is a separate label.
@@ -351,7 +351,7 @@ fn encode_name(name: &str) -> Vec<u8> {
     out
 }
 
-// ── Answer builder ──────────────────────────────────────────────────
+// Answer builder.
 
 /// Build the DNS response payload (header + question + answers).
 /// Separate from the IP/UDP wrapping so unit tests can poke it
@@ -384,7 +384,7 @@ pub(crate) fn answer(
         }
     };
 
-    // ─── A / AAAA: <node>.<suffix> → host-prefix Subnets
+    // A / AAAA: <node>.<suffix> → host-prefix Subnets.
     if q.qtype == TYPE_A || q.qtype == TYPE_AAAA {
         // Suffix match. Lowercase already (parse_query did it).
         // Match against `cfg.suffix` lowered too — config is
@@ -483,7 +483,7 @@ pub(crate) fn answer(
         ));
     }
 
-    // ─── PTR: arpa → owner name
+    // PTR: arpa → owner name.
     if q.qtype == TYPE_PTR {
         return Some(answer_ptr(&q, cfg, subnets));
     }
@@ -607,7 +607,7 @@ fn build_response(
     out
 }
 
-// ── IP/UDP wrap ─────────────────────────────────────────────────────
+// IP/UDP wrap.
 //
 // Builds the full eth+IP+UDP+DNS reply frame for `device.write()`.
 // Same shape as `icmp.rs::build_v4_unreachable` — fresh `Vec`, not
@@ -672,7 +672,7 @@ pub(crate) fn wrap_v4(
 
     write_eth_swap(&mut out, original, crate::packet::ETH_P_IP);
 
-    // ─── IPv4. Same builder pattern as `icmp.rs:123-137`.
+    // IPv4. Same builder pattern as `icmp.rs`.
     let mut ip = Ipv4Hdr::default();
     ip.set_vhl(4, 5);
     // truncation: DNS responses are bounded (~512 in practice with
@@ -686,7 +686,7 @@ pub(crate) fn wrap_v4(
     ip.ip_sum = inet_checksum(ip.as_bytes(), 0xFFFF);
     out.extend_from_slice(ip.as_bytes());
 
-    // ─── UDP. RFC 768 + RFC 1071: pseudo-header → UDP header → payload.
+    // UDP. RFC 768 + RFC 1071: pseudo-header → UDP header → payload.
     #[expect(clippy::cast_possible_truncation)] // bounded by DNS reply size (~512)
     let udp_len = (UDP_SIZE + dns_reply.len()) as u16;
     let mut pseudo = Ipv4Pseudo::default();
@@ -717,7 +717,7 @@ pub(crate) fn wrap_v6(
 
     write_eth_swap(&mut out, original, ETH_P_IPV6);
 
-    // ─── IPv6. No IP-level checksum (it's the UDP layer's job).
+    // IPv6. No IP-level checksum (it's the UDP layer's job).
     let mut ip6 = Ipv6Hdr::default();
     ip6.set_flow(0x6000_0000);
     #[expect(clippy::cast_possible_truncation)] // bounded by DNS reply size (~512)
@@ -728,7 +728,7 @@ pub(crate) fn wrap_v6(
     ip6.ip6_dst = dst_ip.octets();
     out.extend_from_slice(ip6.as_bytes());
 
-    // ─── UDP. Pseudo-header → UDP header → payload. RFC 2460 §8.1 (now 8200).
+    // UDP. Pseudo-header → UDP header → payload. RFC 2460 §8.1 (now 8200).
     #[expect(clippy::cast_possible_truncation)] // bounded by DNS reply size (~512)
     let udp_len = (UDP_SIZE + dns_reply.len()) as u16;
     let mut pseudo = Ipv6Pseudo::default();
@@ -742,8 +742,6 @@ pub(crate) fn wrap_v6(
     out.extend_from_slice(dns_reply);
     out
 }
-
-// ════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -775,7 +773,7 @@ mod tests {
         q
     }
 
-    // ─── parse_query
+    // parse_query.
 
     #[test]
     fn parse_query_basic() {
@@ -837,7 +835,7 @@ mod tests {
         assert_eq!(r.unwrap_err().2, RCODE_FORMERR);
     }
 
-    // ─── PTR parsing
+    // PTR parsing.
 
     #[test]
     fn ptr_v4_roundtrip() {
@@ -863,7 +861,7 @@ mod tests {
         assert_eq!(parse_ptr_v6(short), None);
     }
 
-    // ─── answer()
+    // answer().
 
     #[test]
     fn answer_a_single() {
@@ -1040,7 +1038,7 @@ mod tests {
         assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 1);
     }
 
-    // ─── match_v4 / match_v6
+    // match_v4 / match_v6.
 
     fn mk_udp4(dst: Ipv4Addr, dport: u16, payload: &[u8]) -> Vec<u8> {
         let mut p = vec![0u8; ETHER_SIZE + IP4_SIZE + UDP_SIZE];
@@ -1121,7 +1119,7 @@ mod tests {
         assert_eq!(dns, &payload[..]);
     }
 
-    // ─── wrap_v4 / wrap_v6: kernel-verifiable checksums
+    // wrap_v4 / wrap_v6: kernel-verifiable checksums.
 
     /// Pin the IPv4 wrapping. Kernel verifies the IP checksum on RX
     /// (drops silently if wrong); the netns integration test catches

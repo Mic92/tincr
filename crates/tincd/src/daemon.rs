@@ -191,13 +191,13 @@ pub(crate) struct ListenerSlot {
 #[expect(clippy::struct_excessive_bools)] // independent gates
 // (overwrite_mac, any_pcap, etc), not a state enum.
 pub struct Daemon {
-    // ─── arena
+    // arena.
     /// Slotmap not `Vec<Option>` - generational keys. A `ConnId`
     /// from a closed connection is a different key than the next
     /// connection allocated in the same slot.
     pub(crate) conns: SlotMap<ConnId, Connection>,
 
-    // ─── substrate
+    // substrate.
     /// The TUN/TAP. `Box<dyn>` - the variant (`Dummy`/`Tun`/`Fd`/
     /// `Raw`/`Bsd`) is chosen at setup time by `DeviceType`.
     pub(crate) device: Box<dyn Device>,
@@ -482,7 +482,7 @@ pub struct Daemon {
     /// check.
     pub(crate) age_subnets_timer: Option<TimerId>,
 
-    // ─── settings
+    // settings.
     /// The config knobs. Reload swaps this.
     pub(crate) settings: DaemonSettings,
 
@@ -493,7 +493,7 @@ pub struct Daemon {
     /// to track explicitly than to do exact-count arithmetic).
     pub(crate) device_enabled: bool,
 
-    // ─── event loop machinery
+    // event loop machinery.
     /// epoll + slot table. Generic over `IoWhat`.
     pub(crate) ev: EventLoop<IoWhat>,
     /// Timer wheel. Generic over `TimerWhat`.
@@ -694,7 +694,7 @@ impl Daemon {
         let mut fired_signals = Vec::with_capacity(4);
 
         while self.running {
-            // ─── timers
+            // timers.
             // tick(): cache `now`, drain expired. Ignore returned
             // deadline — handlers below re-arm, recompute after.
             let _ = self.timers.tick(&mut fired_timers);
@@ -725,7 +725,7 @@ impl Daemon {
                 }
             }
 
-            // ─── poll
+            // poll.
             // Recompute after dispatch (handlers re-arm). Floor 1ms:
             // sub-ms rounds to epoll_wait(0) and spins; all timers
             // here are second-granularity so the slop is invisible.
@@ -740,7 +740,7 @@ impl Daemon {
                 return RunOutcome::PollError;
             }
 
-            // ─── io dispatch
+            // io dispatch.
             for &(what, ready) in &fired_io {
                 match what {
                     IoWhat::Signal => {
@@ -815,7 +815,7 @@ impl Daemon {
                 }
             }
 
-            // ─── log tap drain
+            // log tap drain.
             // The `log::Log` impl is `'static` and can't reach
             // `&mut self.conns`. It pushes to a thread-local buffer;
             // drain here. Once-per-turn batching is fine: log lines
@@ -827,7 +827,7 @@ impl Daemon {
         RunOutcome::Clean
     }
 
-    // ─── timer handlers
+    // timer handlers.
 }
 
 impl Drop for Daemon {

@@ -52,7 +52,6 @@ use crate::subnet_tree::SubnetTree;
 /// `TunnelHandles` key fields fixed-size.
 const CIPHER_KEY_LEN: usize = 64;
 
-// ────────────────────────────────────────────────────────────────────
 // TunnelHandles — shared per-peer fast-path state
 
 /// Per-peer fast-path state cloned out of the live `Sptps` at
@@ -142,7 +141,6 @@ pub(crate) struct TunnelHandles {
     pub stats: Arc<crate::tunnel::TrafficStats>,
 }
 
-// ────────────────────────────────────────────────────────────────────
 // TxSnapshot — the fast-path's read-only view of routing state
 
 /// The Super arm's read-only snapshot. [`tx_probe`] takes

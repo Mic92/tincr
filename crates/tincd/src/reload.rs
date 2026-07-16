@@ -154,7 +154,7 @@ mod tests {
         xs.into_iter().collect()
     }
 
-    // ─── diff_subnets ───────────────────────────────────────────────
+    // diff_subnets.
 
     #[test]
     fn subnets_no_change() {
@@ -207,7 +207,7 @@ mod tests {
         assert_eq!(diff.removed, vec![old]);
     }
 
-    // ─── diff_connect_to ────────────────────────────────────────────
+    // diff_connect_to.
 
     #[test]
     fn connect_to_diff() {
@@ -226,7 +226,7 @@ mod tests {
         assert!(remove.is_empty());
     }
 
-    // ─── conns_to_terminate ─────────────────────────────────────────
+    // conns_to_terminate.
 
     #[test]
     fn conns_to_terminate_mtime_newer() {

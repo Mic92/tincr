@@ -243,7 +243,7 @@ pub(crate) struct Connection {
     /// Vec keeps the "inbuf is plaintext-only" invariant.
     pub sptps_buf: Vec<u8>,
 
-    // ─── Per-host config extracted at id_h. Upstream retains the
+    // Per-host config extracted at id_h. Upstream retains the.
     // whole `c->config_tree`; we extract just the keys send_ack/ack_h
     // read. None = absent.
     /// `hosts/NAME` `IndirectData`.

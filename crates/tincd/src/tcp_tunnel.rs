@@ -40,7 +40,7 @@ use rand_core::RngCore;
 
 use crate::node_id::NodeId6;
 
-// ─── frame build/parse ───────────────────────────────────────────────
+// frame build/parse.
 
 /// `dst_id ‖ src_id` header length. `if(len <
 /// sizeof(node_id_t) * 2)`.
@@ -78,7 +78,7 @@ pub(crate) fn parse_frame(blob: &[u8]) -> Option<(NodeId6, NodeId6, &[u8])> {
     ))
 }
 
-// ─── random early drop ───────────────────────────────────────────────
+// random early drop.
 
 /// Congestion gate for the TCP fallback. Higher outbuf fill →
 /// linearly higher drop probability above the half-max threshold.
@@ -114,7 +114,7 @@ pub(crate) fn random_early_drop<R: RngCore>(outbuf_len: usize, max: usize, rng: 
     excess > r
 }
 
-// ─── tests ────────────────────────────────────────────────────────────
+// tests.
 
 #[cfg(test)]
 mod tests {
@@ -123,7 +123,7 @@ mod tests {
 
     use super::*;
 
-    // ── frame ────────────────────────────────────────────────────────
+    // frame.
 
     #[test]
     fn build_roundtrip() {
@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(frame, expect);
     }
 
-    // ── RED ──────────────────────────────────────────────────────────
+    // RED.
 
     #[test]
     fn red_below_half_never_drops() {

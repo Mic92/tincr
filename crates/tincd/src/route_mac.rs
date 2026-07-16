@@ -111,7 +111,6 @@ pub(crate) fn route_mac<T, S: std::hash::BuildHasher>(
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Tests
 
 #[cfg(test)]

@@ -54,7 +54,6 @@ pub(crate) fn is_multicast_subnet(subnet: &Subnet) -> bool {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Keys
 //
 // One key type per family. The key STORES the full `Subnet` plus the
@@ -92,7 +91,7 @@ struct MacKey {
     owner: Option<String>,
 }
 
-// ─── Ord impls: the C comparators ───────────────────────────────────
+// Ord impls: the C comparators.
 //
 // The C does `b->prefixlength - a->prefixlength` (int subtraction).
 // That's fine for u8-range values but `a->weight - b->weight` is an
@@ -226,7 +225,6 @@ impl PartialOrd for MacKey {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // SubnetTree
 
 /// `subnet_tree` from `subnet.c`. The global routing table.
@@ -496,7 +494,6 @@ impl SubnetTree {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Tests
 
 #[cfg(test)]

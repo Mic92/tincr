@@ -453,7 +453,7 @@ impl Discovery {
     pub fn tick(&mut self, now: Instant) -> TickResult {
         let mut out = TickResult::default();
 
-        // ── drain worker results (non-blocking). Do this *first* so a
+        // drain worker results (non-blocking). Do this *first* so a.
         // publish/snapshot that completed since the previous tick is
         // visible before we gate the next one.
         for res in self.worker.res_rx.try_iter().collect::<Vec<_>>() {
@@ -488,7 +488,7 @@ impl Discovery {
             }
         }
 
-        // ── ask worker to refresh snapshot for *next* tick.
+        // ask worker to refresh snapshot for *next* tick.
         let _ = self.worker.req_tx.send(WorkerReq::Snapshot);
 
         let vote = self.cached_vote;
@@ -810,7 +810,7 @@ mod tests {
         assert!(parsed.direct.contains(&SocketAddr::V4(reflexive)));
         assert_eq!(parsed.tcp, None, "alice didn't set portmapped_tcp");
 
-        // ─── tcp= round-trip: portmapped addr publishes + resolves.
+        // tcp= round-trip: portmapped addr publishes + resolves.
         let mapped: SocketAddr = "203.0.113.7:655".parse().unwrap();
         assert!(alice.set_portmapped_tcp(Some(mapped)));
         assert!(!alice.set_portmapped_tcp(Some(mapped)), "unchanged");

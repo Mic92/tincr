@@ -152,7 +152,7 @@ impl ControlSocket {
     /// `AlreadyRunning` if the connect-probe succeeds (second daemon).
     /// `Io` for socket/bind/listen failures.
     pub(crate) fn bind(path: &Path) -> Result<Self, BindError> {
-        // ─── connect-probe
+        // connect-probe.
         // `UnixStream::connect`: if it succeeds, something's
         // there. If `ECONNREFUSED` (or `ENOENT` — no socket file
         // at all), good, proceed.
@@ -163,12 +163,12 @@ impl ControlSocket {
         // error — ECONNREFUSED, ENOENT, EACCES all mean "nothing
         // is healthily listening there", which is what we want.
 
-        // ─── unlink stale (only if it's actually a socket)
+        // unlink stale (only if it's actually a socket).
         if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
             let _ = std::fs::remove_file(path);
         }
 
-        // ─── bind under umask 0077
+        // bind under umask 0077.
         // `UnixListener::bind` listens internally → no fchmod window;
         // tighten umask so the inode is born 0700. Process-global, but
         // tightening only strips bits → fails safe for other threads.
@@ -184,13 +184,13 @@ impl ControlSocket {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
             .map_err(BindError::Io)?;
 
-        // ─── listen
+        // listen.
         // `UnixListener::bind` already calls `listen()` internally
         // with backlog 128 (std's default). The
         // backlog is "max pending accept() queue length"; 128 is
         // fine, control connections are rare.
 
-        // ─── nonblocking
+        // nonblocking.
         // epoll is level-triggered; the listener fd needs O_NONBLOCK
         // so accept() returns EWOULDBLOCK when the queue is empty
         // instead of blocking the loop. C doesn't set this — it

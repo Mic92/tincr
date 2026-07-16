@@ -100,7 +100,7 @@ impl Daemon {
             FeedResult::Sptps(events) => return self.on_feed_sptps(id, events),
         }
 
-        // ─── drain inbuf
+        // drain inbuf.
         loop {
             // Split borrow: helper would lock all of `self`.
             let conn = self.conns.get_mut(id).expect("ConnId not live");
@@ -111,7 +111,7 @@ impl Daemon {
             // Cheap (control lines <100 bytes).
             let line: Vec<u8> = conn.inbuf.bytes_raw()[range].to_vec();
 
-            // ─── HTTP proxy response intercept
+            // HTTP proxy response intercept.
             // `read_line` excludes `\n`, includes `\r`.
             //
             // Real HTTP proxies (Squid) send headers in 2xx CONNECT
@@ -142,7 +142,7 @@ impl Daemon {
                 // Fall through — header → check_gate → terminate.
             }
 
-            // ─── check_gate
+            // check_gate.
             let req = match check_gate(conn, &line) {
                 Ok(r) => r,
                 Err(e) => {
@@ -153,7 +153,7 @@ impl Daemon {
                 }
             };
 
-            // ─── handler dispatch
+            // handler dispatch.
             let (result, needs_write) = match req {
                 Request::Id => match self.dispatch_request_id(id, &line) {
                     Some(r) => r,
@@ -254,7 +254,7 @@ impl Daemon {
             }
         };
 
-        // ─── SPTPS-init piggyback (Peer + Invitation common path)
+        // SPTPS-init piggyback (Peer + Invitation common path).
         // Queue the init Wire frames (sptps_start emits KEX-only).
         let mut nw = needs_write;
         for o in init {
@@ -487,7 +487,7 @@ impl Daemon {
     /// apply or completed cleanly and the caller should fall through
     /// to the line-based dispatch loop.
     fn on_feed_data(&mut self, id: ConnId) -> Option<FeedDrain> {
-        // ─── pre-SPTPS tcplen consume (SOCKS proxy reply)
+        // pre-SPTPS tcplen consume (SOCKS proxy reply).
         // Mutually exclusive with the Sptps arm: SOCKS sets
         // tcplen before SPTPS starts.
         // Split borrow: helper would lock all of `self`.
@@ -619,7 +619,7 @@ impl Daemon {
                     }
                 }
                 Output::Record { mut bytes, .. } => {
-                    // ─── tcplen short-circuit
+                    // tcplen short-circuit.
                     // PACKET 17 sets tcplen; the NEXT record is a raw
                     // VPN blob (single-encrypted, meta-SPTPS only —
                     // direct neighbors only). crossimpl.rs pins this:

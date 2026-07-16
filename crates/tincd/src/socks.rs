@@ -13,7 +13,7 @@
 
 use std::net::SocketAddr;
 
-// ── SOCKS4 wire constants ──────────────────────────────────────────
+// SOCKS4 wire constants.
 const SOCKS4_VERSION: u8 = 4;
 const SOCKS4_CMD_CONN: u8 = 1;
 const SOCKS4_REPLY_VERSION: u8 = 0;
@@ -21,7 +21,7 @@ const SOCKS4_STATUS_OK: u8 = 0x5A;
 /// `sizeof(socks4_response_t)` (`proxy.h:18-23`): ver+status+port+ip.
 const SOCKS4_RESPONSE_LEN: usize = 8;
 
-// ── SOCKS5 wire constants ──────────────────────────────────────────
+// SOCKS5 wire constants.
 const SOCKS5_VERSION: u8 = 5;
 const SOCKS5_AUTH_METHOD_NONE: u8 = 0;
 const SOCKS5_AUTH_METHOD_PASSWORD: u8 = 2;
@@ -111,7 +111,7 @@ fn build_socks5(target: SocketAddr, creds: Option<&Creds>) -> Result<(Vec<u8>, u
     let mut buf = Vec::new();
     let mut resplen = SOCKS5_SERVER_CHOICE_LEN; // :188
 
-    // ── Greet. :183: nmethods=1 — server's choice is predictable
+    // Greet. :183: nmethods=1 — server's choice is predictable.
     // (our method or 0xFF). "Offered password, server chose anon"
     // doesn't arise for tinc's shape.
     buf.push(SOCKS5_VERSION);
@@ -122,7 +122,7 @@ fn build_socks5(target: SocketAddr, creds: Option<&Creds>) -> Result<(Vec<u8>, u
         SOCKS5_AUTH_METHOD_NONE
     });
 
-    // ── Auth (RFC 1929, :192-213): [01][userlen][user][passlen][pass]
+    // Auth (RFC 1929, :192-213): [01][userlen][user][passlen][pass].
     if let Some((user, pass)) = password_auth {
         buf.push(SOCKS5_AUTH_VERSION);
         #[expect(clippy::cast_possible_truncation)] // checked ≤255 above
@@ -135,7 +135,7 @@ fn build_socks5(target: SocketAddr, creds: Option<&Creds>) -> Result<(Vec<u8>, u
         resplen += SOCKS5_AUTH_STATUS_LEN; // :213
     }
 
-    // ── Connect (:217-220)
+    // Connect.
     buf.push(SOCKS5_VERSION);
     buf.push(SOCKS5_COMMAND_CONN);
     buf.push(0); // reserved
@@ -282,8 +282,6 @@ pub(crate) enum BuildError {
     CredTooLong,
 }
 
-// ───────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,7 +291,7 @@ mod tests {
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), port))
     }
 
-    // ── SOCKS4 build ───────────────────────────────────────────────
+    // SOCKS4 build.
 
     #[test]
     fn socks4_v4_anonymous() {
@@ -330,7 +328,7 @@ mod tests {
         assert_eq!(err, BuildError::Socks4Ipv6);
     }
 
-    // ── SOCKS5 build ───────────────────────────────────────────────
+    // SOCKS5 build.
 
     #[test]
     fn socks5_v4_anonymous() {
@@ -424,7 +422,7 @@ mod tests {
         assert_eq!(err, BuildError::CredTooLong);
     }
 
-    // ── SOCKS4 check ───────────────────────────────────────────────
+    // SOCKS4 check.
 
     #[test]
     fn check_socks4_table() {
@@ -445,7 +443,7 @@ mod tests {
         }
     }
 
-    // ── SOCKS5 check ───────────────────────────────────────────────
+    // SOCKS5 check.
     // `_creds` param unused (dispatch on server's choice byte), so all
     // rows pass `None`. The v6 row's 24B layout is asserted inline.
 
@@ -483,7 +481,7 @@ mod tests {
         }
     }
 
-    // ── Roundtrip: prove the resplen math ──────────────────────────
+    // Roundtrip: prove the resplen math.
 
     #[test]
     fn roundtrip_socks5_v4_anon() {

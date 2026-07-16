@@ -208,7 +208,7 @@ pub(crate) fn read_ecdsa_public_key(
     confbase: &Path,
     name: &str,
 ) -> Option<[u8; PUBLIC_LEN]> {
-    // ─── Source 1: inline b64 config var (`:179-184`)
+    // Source 1: inline b64 config var.
     if let Some(e) = host_config.lookup("Ed25519PublicKey").next() {
         // Returns NULL if the b64 is bad. NO fallthrough to source
         // 2/3. A present-but-malformed inline key is a hard
@@ -218,7 +218,7 @@ pub(crate) fn read_ecdsa_public_key(
         return pubkey_from_b64(e.get_str());
     }
 
-    // ─── Source 2/3: file (`:186-189`)
+    // Source 2/3: file.
     // `Ed25519PublicKeyFile` if set, else `hosts/NAME`. The default
     // is "the same file we already parsed as config" — `read_pem`
     // skips lines until BEGIN.
@@ -230,7 +230,7 @@ pub(crate) fn read_ecdsa_public_key(
             |e| PathBuf::from(e.get_str()),
         );
 
-    // ─── Open + parse (`:191-211`)
+    // Open + parse.
     // C logs ERR on `fopen` fail (`:196-199`). We match. `:204` logs
     // ERR on parse fail too (unless `errno == ENOENT`, which means
     // `read_pem` got EOF before BEGIN).
@@ -421,7 +421,7 @@ mod tests {
         // 0o100400 — owner r only. Safe.
         assert_eq!(0o100_400 & !0o100_700, 0);
 
-        // ─── False positives (C-bug, ported)
+        // False positives (C-bug, ported).
         // 0o102600 — setgid + 600. NOT actually insecure (setgid on
         // a non-executable does nothing exploitable for a key file).
         // C warns anyway. We match.

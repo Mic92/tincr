@@ -97,7 +97,7 @@ pub(crate) fn read_invitation_key(confbase: &Path) -> Result<Option<SigningKey>,
     Ok(Some(SigningKey::from_blob(&arr)))
 }
 
-// ─── Hoisted from tinc-tools/src/cmd/join.rs ───────────────────────
+// Hoisted from tinc-tools/src/cmd/join.rs.
 
 /// Tokenizer for `Key = Value`. `Port = 655` → `("Port", "655")`.
 /// `Port` → `("Port", "")`.
@@ -248,7 +248,7 @@ pub(crate) fn chunk_file(contents: &[u8], chunk_size: usize) -> Vec<&[u8]> {
     contents.chunks(chunk_size).collect()
 }
 
-// ─── tests ─────────────────────────────────────────────────────────
+// tests.
 
 #[cfg(test)]
 mod tests {
@@ -273,7 +273,7 @@ mod tests {
 
     const WEEK: Duration = Duration::from_secs(604_800);
 
-    // ─── serve_cookie ──────────────────────────────────────────────
+    // serve_cookie.
 
     #[test]
     fn serve_cookie_roundtrip() {
@@ -382,7 +382,7 @@ mod tests {
         assert!(matches!(err, ServeError::BadInvitationFile(_)));
     }
 
-    // ─── finalize ──────────────────────────────────────────────────
+    // finalize.
 
     /// Valid 43-char tinc-base64 of a 32-byte pubkey.
     fn valid_pubkey_b64() -> String {
@@ -448,7 +448,7 @@ mod tests {
         assert_eq!(after, "Ed25519PublicKey = original\n");
     }
 
-    // ─── chunk_file ────────────────────────────────────────────────
+    // chunk_file.
 
     #[test]
     fn chunk_file_exact_multiple() {
@@ -476,7 +476,7 @@ mod tests {
         assert!(chunks.is_empty());
     }
 
-    // ─── read_invitation_key ───────────────────────────────────────
+    // read_invitation_key.
 
     #[test]
     fn read_invitation_key_missing() {
@@ -500,7 +500,7 @@ mod tests {
         assert_eq!(loaded.public_key(), key.public_key());
     }
 
-    // ─── split_var (hoisted parser sanity) ─────────────────────────
+    // split_var (hoisted parser sanity).
 
     #[test]
     fn split_var_forms() {

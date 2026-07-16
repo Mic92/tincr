@@ -232,7 +232,7 @@ impl Gateway {
     }
 }
 
-// ──── HTTP / parsing helpers ────────────────────────────────────
+// HTTP / parsing helpers.
 
 fn fetch_control_url(addr: SocketAddrV4, root_path: &str) -> Result<(String, String), String> {
     let req = format!(

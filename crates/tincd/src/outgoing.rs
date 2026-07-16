@@ -576,7 +576,7 @@ pub(crate) fn do_outgoing_pipe(
                 Err(io::Error::last_os_error())
             }
             0 => {
-                // ────── CHILD ──────
+                // CHILD.
                 // libc-only until exec. NO std (locks could be held).
 
                 // close(0), close(1), close(fd[0]),
@@ -601,7 +601,7 @@ pub(crate) fn do_outgoing_pipe(
                 libc::_exit(1);
             }
             pid => {
-                // ────── PARENT ──────
+                // PARENT.
                 // `c->socket = fd[0]; close(fd[1]); return`. Don't
                 // waitpid here — the child is detached. Register the
                 // pid with the script reaper so it's collected by
