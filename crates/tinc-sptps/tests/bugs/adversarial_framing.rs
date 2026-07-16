@@ -61,7 +61,6 @@ fn feed_stream_err(s: &mut Sptps, bytes: &[u8]) -> Option<SptpsError> {
     None
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Stream framing, pre-handshake (plaintext).
 
 /// Record type ≥ 129 is reserved (`BadRecord`). Type 0..127 before
@@ -154,7 +153,6 @@ fn stream_double_kex_is_err() {
     assert_eq!(feed_stream_err(&mut resp, &kex), Some(SptpsError::BadSig));
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Datagram framing, pre-handshake (plaintext).
 
 #[test]
@@ -190,7 +188,6 @@ fn datagram_short_and_malformed() {
     );
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Post-handshake: encrypted garbage. An on-path attacker flipping
 // bits, or a buggy peer.
 

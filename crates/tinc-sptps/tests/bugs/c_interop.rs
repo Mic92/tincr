@@ -116,8 +116,6 @@ fn dgram_rekey(alice: &mut Sptps, bob: &mut CSptps<'_>, rng: &mut SeedRng) {
     assert_eq!(o, vec![Output::HandshakeDone]);
 }
 
-// ────────────────────────────────────────────────────────────────────
-
 /// Datagram in-band rekey, Rust→C: wire seqno must stay monotone so
 /// C's `sptps_check_seqno` doesn't reject post-rekey traffic as replay.
 /// Exercised by C tincd via `send_key_changed()` → `sptps_force_kex`.

@@ -1,9 +1,6 @@
-//! The state machine. Ported function-by-function from `sptps.c`.
-//!
-//! Reading guide: every `fn` here corresponds to a `static bool` in the C.
-//! Where the C calls `error(s, errno, "...")` and returns `false`, we
-//! return `Err(SptpsError::...)`. Where the C calls `s->send_data(...)` we
-//! push to `out: &mut Vec<Output>`. Otherwise the logic is line-for-line.
+//! The SPTPS state machine. Errors are returned as `SptpsError`;
+//! outgoing wire data is pushed to `out: &mut Vec<Output>` instead of
+//! being sent via callbacks.
 //!
 //! The two places where ordering matters more than it looks:
 //!
@@ -106,7 +103,6 @@ pub const SEAL_KEY_LIMIT: u64 = (1u64 << 32) - (1u64 << 16);
 /// safety net. See [`Sptps::rekey_due`].
 pub const SEAL_REKEY_THRESHOLD: u64 = SEAL_KEY_LIMIT / 2;
 
-// ────────────────────────────────────────────────────────────────────
 // Public types
 
 /// Why the state machine refused to make progress.
@@ -238,7 +234,6 @@ impl core::fmt::Debug for Output {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Internal state
 
 /// `sptps_state_t` in C. The four reachable states of `receive_handshake`'s
@@ -312,18 +307,16 @@ impl ReplayWindow {
         self.check(seqno, true)
     }
 
-    /// `sptps_check_seqno`. The `update` flag is `update_state` in C:
-    /// `verify_datagram` calls with `false` to peek without committing.
+    /// Replay-window check. With `update = false` the packet is only
+    /// peeked at (no state committed) — used by datagram verification.
     ///
     /// Returns `Ok(())` if the packet is acceptable, `Err` for
-    /// replay/out-of-window. Doesn't distinguish the cases — C doesn't
-    /// either (both go to `error(EIO, ...)`).
+    /// replay/out-of-window (the cases aren't distinguished).
     ///
-    /// The arithmetic is reproduced verbatim from C, integer types and all.
-    /// The replay window is one of the places where being clever in
-    /// translation creates a subtle interop bug: a peer that accepts
-    /// packets the C rejects (or vice versa) is a connection that flaps
-    /// under packet loss. Match the C bit-for-bit.
+    /// The arithmetic deliberately matches C tinc bit-for-bit,
+    /// integer types and all: a peer that accepts packets the other
+    /// implementation rejects (or vice versa) is a connection that
+    /// flaps under packet loss.
     #[expect(clippy::cast_possible_truncation)] // late.len() is replay-window bytes (≪ u32::MAX); seqno arith is mod 2^32
     fn check(&mut self, seqno: u32, update: bool) -> Result<(), SptpsError> {
         let win = self.late.len() as u32;
@@ -398,22 +391,20 @@ struct StreamBuf {
     reclen: u16,
 }
 
-// ────────────────────────────────────────────────────────────────────
 // The struct
 
 /// One end of an SPTPS session.
 ///
 /// Create with [`Sptps::start`], pump bytes with [`receive`](Self::receive),
 /// send app data with [`send_record`](Self::send_record). Every call returns
-/// a `Vec<Output>` because the C callbacks fire re-entrantly: a single
+/// a `Vec<Output>` because one input can produce several events: a single
 /// `receive` of buffered handshake bytes can yield SIG-out, then
 /// `HandshakeDone`, then ACK-out — three events, one call.
 ///
-/// **Stream mode processes one record per `receive` call.** This is
-/// *deliberate fidelity to a C oddity*: `sptps_receive_data` has no outer
-/// loop, it returns `total_read < len` and `protocol.c` calls it again with
-/// the tail. Mimicking that lets the differential test be strict about how
-/// many bytes each call reports consumed.
+/// **Stream mode processes one record per `receive` call.** The caller
+/// re-invokes with the unconsumed tail; keeping this shape lets the
+/// differential test against C tinc be strict about how many bytes
+/// each call reports consumed.
 ///
 /// Not `Send`/`Sync` — `SigningKey` zeroizes on drop and we don't want
 /// surprises. The daemon runs one SPTPS per connection, on one thread.
@@ -422,7 +413,7 @@ pub struct Sptps {
     framing: Framing,
     state: State,
 
-    // ─── Reassembly / replay ───
+    // Reassembly / replay
     stream: StreamBuf, // unused in datagram mode (zero-sized buf)
     // `Arc<Mutex<_>>`: shard hand-off. The daemon's single-thread path
     // never contends (one writer); `lock()` on an uncontended `Mutex`
@@ -434,7 +425,7 @@ pub struct Sptps {
     // about to tear the session down anyway (the shard is dead).
     replay: Arc<Mutex<ReplayWindow>>,
 
-    // ─── Crypto state ───
+    // Crypto state
     // `instate`/`outstate` in C are bools that gate encryption. Rust models
     // that with Option: `None` = plaintext, `Some(cipher)` = encrypted.
     // The seqnos live alongside even when None because they tick during
@@ -445,7 +436,7 @@ pub struct Sptps {
     outcipher: Option<SptpsCipher>,
     // `Arc<AtomicU64>`: shard hand-off. `fetch_add(n, Relaxed)` from
     // any thread allocates a contiguous run; the truncation to u32 at
-    // use is the same wrap C's unsigned overflow gives. Wider counter
+    // use gives the mod-2^32 wrap the wire expects. Wider counter
     // doesn't change wire semantics: `(prev + n) as u32 ==
     // (prev as u32).wrapping_add(n)` for all values. The `Arc` lets
     // [`outseqno_handle`] hand a clone to a shard. `Relaxed` is
@@ -457,7 +448,7 @@ pub struct Sptps {
     /// [`SEAL_KEY_LIMIT`].
     out_key_base: u64,
 
-    // ─── Handshake-transient state ───
+    // Handshake-transient state
     // mykex/hiskex/ecdh/key are all heap-allocated in C, freed at specific
     // points in the handshake. Same lifecycle here as Options.
     //
@@ -490,7 +481,7 @@ pub struct Sptps {
     /// only consumed when we know the peer is ready). Freed there.
     key: Option<Zeroizing<[u8; 2 * CIPHER_KEY_LEN]>>,
 
-    // ─── Static config ───
+    // Static config
     mykey: SigningKey,
     hiskey: [u8; SIGN_PUBLIC_LEN],
     label: Vec<u8>,
@@ -538,12 +529,11 @@ impl Sptps {
     ///
     /// `rng` is consumed for 64 bytes (32 nonce, 32 ECDH seed). Pass
     /// `OsRng` in production. The differential tests pass a seeded
-    /// `ChaCha20Rng` so the bytes match the C harness's seeded
-    /// `randomize()`.
+    /// `ChaCha20Rng` so the bytes match the C harness's seeded RNG.
     ///
-    /// `replaywin` is the datagram replay window in *bytes* (default 16
-    /// = 128 packets per `sptps_replaywin` in C). Ignored in stream mode
-    /// — pass 0 if you like, but matching the C default is harmless.
+    /// `replaywin` is the datagram replay window in *bytes* (16 = 128
+    /// packets, the default both implementations use). Ignored in
+    /// stream mode.
     pub fn start(
         role: Role,
         framing: Framing,
@@ -593,9 +583,8 @@ impl Sptps {
         let kd = kex.discriminator();
         let cd = aead.discriminator();
         if kd != 0 || cd != 0 {
-            // Suffix, not prefix: the C label format is
-            // `"tinc TCP key expansion <a> <b>\0"`; appending after
-            // the NUL keeps the human-readable prefix intact in
+            // Suffix, not prefix: appending after the NUL of the
+            // standard label keeps the human-readable prefix intact in
             // packet captures while still perturbing every byte of
             // PRF output.
             label.push(kd);
@@ -630,24 +619,22 @@ impl Sptps {
         (s, out)
     }
 
-    // ────────────────────────────────────────────────────────────────
+    //
     // Send path
 
-    /// `send_record_priv` + `send_record_priv_datagram`.
+    /// Send one record; handles both stream and datagram framing.
     ///
-    /// One function does both framings; the C splits them for `alloca`
-    /// hygiene. The `outseqno++` happens here unconditionally — yes, even
-    /// during plaintext handshake records. That's load-bearing for the
-    /// differential test: C ticks the seqno on every send, encrypted or not.
-    /// The first encrypted record's seqno is therefore 2 (after KEX=0 and
-    /// SIG=1), not 0.
+    /// The seqno increment happens here unconditionally — even for
+    /// plaintext handshake records. That matches the wire protocol:
+    /// the seqno ticks on every send, encrypted or not, so the first
+    /// encrypted record's seqno is 2 (after KEX=0 and SIG=1), not 0.
     ///
     /// Hot-path note: this is the ONE per-packet allocation on the SPTPS
     /// send side. One right-sized `Vec`, one `extend_from_slice(body)`
     /// inside `seal_into`, encrypt-in-place.
     fn send_record_priv(&mut self, ty: u8, body: &[u8], out: &mut Vec<Output>) {
-        // u64 -> u32 truncate: same wrap as C's `s->outseqno++`
-        // unsigned overflow. fetch_add returns the *previous* value.
+        // u64 -> u32 truncate: the wire seqno is mod 2^32.
+        // fetch_add returns the *previous* value.
         #[expect(clippy::cast_possible_truncation)]
         // wire seqno IS 4 bytes; mod-2^32 is the protocol
         let seqno = self.outseqno.fetch_add(1, Ordering::Relaxed) as u32;
@@ -697,8 +684,8 @@ impl Sptps {
     /// `InvalidState` if called before [`Output::HandshakeDone`], if
     /// `record_type >= 128` (those are reserved for handshake records),
     /// or if `body.len() > 65535` in stream mode (the wire framing has
-    /// a `u16` length header — the C silently truncates with a
-    /// `uint16_t` cast and the receiver desyncs; we'd rather refuse).
+    /// a `u16` length header; a truncated length would desync the
+    /// receiver, so refuse instead).
     pub fn send_record(&mut self, record_type: u8, body: &[u8]) -> Result<Vec<Output>, SptpsError> {
         if !self.app_send_ready() || record_type >= REC_HANDSHAKE || self.needs_rekey() {
             return Err(SptpsError::InvalidState);
@@ -728,10 +715,8 @@ impl Sptps {
     /// across packets. After the first call it has grown to `headroom +
     /// body.len() + 21`; subsequent same-size calls do zero heap ops.
     ///
-    /// This pre-padding optimization was a long-standing upstream TODO.
-    /// It never landed there because `alloca` made the prepend-memcpy
-    /// cheap enough; our heap-Vec equivalent showed up at 1.6% alloc + 1.5%
-    /// memmove in the profile.
+    /// Without the pre-padding, the heap-Vec prepend showed up at
+    /// 1.6% alloc + 1.5% memmove in the profile.
     ///
     /// vs [`send_record`]: bypasses the `Vec<Output>` push/match (one alloc,
     /// one move), the wire `Vec` alloc (one alloc), and the daemon-side
@@ -768,9 +753,8 @@ impl Sptps {
 
     /// Reserve a contiguous run of `n` outgoing sequence numbers.
     /// Returns the base; caller assigns `base.wrapping_add(i)` to
-    /// chunk `i`. The wrap is correct: seqno is u32 on the wire,
-    /// wraps at ~4G records per session, and the C wraps too
-    /// (`s->outseqno++` is unsigned overflow there).
+    /// chunk `i`. The wrap is correct: seqno is u32 on the wire and
+    /// wraps at ~4G records per session.
     ///
     /// Par-encrypt's serial preamble: one thread bumps `outseqno`;
     /// N workers then call [`seal_with_seqno`] (`&self`) with
@@ -1196,7 +1180,7 @@ impl Sptps {
     /// # Errors
     ///
     /// `InvalidState` unless we're in `SecondaryKex` (handshake done,
-    /// no rekey already in flight). C: `if(!outstate || state != SECONDARY_KEX)`.
+    /// no rekey already in flight).
     pub fn force_kex(
         &mut self,
         rng: &mut (impl RngCore + CryptoRng),
@@ -1210,7 +1194,7 @@ impl Sptps {
         Ok(out)
     }
 
-    // ────────────────────────────────────────────────────────────────
+    //
     // Receive path: handshake records
 
     /// Both KEX blobs, asserted present. The state machine only reaches
@@ -1263,12 +1247,12 @@ impl Sptps {
     /// PRF seed: `"key expansion" ‖ initiator_nonce ‖ responder_nonce ‖ label`.
     /// Note the nonce order: *initiator's nonce first*, regardless of which
     /// side we are. Both sides must compute the same key, so the seed must
-    /// be role-symmetric. C: `(initiator ? mykex : hiskex)->nonce` first.
+    /// be role-symmetric.
     ///
     /// `kem_hash` is appended after `label`: empty in classical mode
     /// (seed byte-identical to C tinc), `kem_transcript_hash` in hybrid.
     fn generate_key_material(&mut self, shared: &[u8], kem_hash: &[u8]) {
-        // No NUL: C does `sizeof("key expansion") - 1`.
+        // No trailing NUL in the seed prefix (wire-compat).
         const PREFIX: &[u8] = b"key expansion";
 
         let (mykex, hiskex) = self.kex_pair();
@@ -1310,7 +1294,8 @@ impl Sptps {
             self.aead,
             key_half(&*key, self.role.is_initiator(), false),
         ));
-        // Replay window kept across rekey: C seqno is session-monotone.
+        // Replay window kept across rekey: the seqno is
+        // session-monotone, not per-key.
         Ok(())
     }
 
@@ -1322,14 +1307,10 @@ impl Sptps {
     ///
     /// ## Why a return value, not `self.outcipher.is_some()` after the call?
     ///
-    /// The C struct keeps `outstate: bool` and `outcipher: ctx*` separately.
-    /// `receive_sig` sets the new `outcipher` but doesn't touch `outstate`;
-    /// `receive_handshake` then checks `if(s->outstate)` — which is the *old*
-    /// value, because `outstate = true` only happens on line 423, after the
-    /// check. Collapsing those into one `Option<ChaPoly>` loses that bit of
-    /// state. Threading it through as a return value keeps the C semantics
-    /// without inventing a second field that exists only to mirror C's
-    /// historical accident of having two.
+    /// `receive_handshake` needs the value from *before* this call
+    /// (was a rekey already in progress?), and this call sets
+    /// `outcipher`. Returning it avoids a second field that would
+    /// exist only to remember the pre-call state.
     ///
     /// ## The ordering, and why it's that way
     ///
@@ -1342,12 +1323,10 @@ impl Sptps {
     /// 5. If was_rekey: `send_ack` — encrypted with **OLD** outcipher.
     /// 6. **Now** switch `outcipher` to the new key.
     ///
-    /// A natural Rust structure would set the key first then send. That'd
-    /// produce different wire bytes (the SIG and ACK would encrypt under
-    /// the new key) and the differential test would fail. The C ordering is
-    /// correct *for the protocol* too — the peer hasn't switched its
-    /// `incipher` yet (that happens on `receive_ack`), so sending under the
-    /// new key would be undecryptable on their end.
+    /// Setting the key first and then sending would encrypt the SIG
+    /// and ACK under the new key — but the peer hasn't switched its
+    /// `incipher` yet (that happens on `receive_ack`), so they would be
+    /// undecryptable. The old-key ordering is a protocol requirement.
     fn receive_sig(&mut self, body: &[u8], out: &mut Vec<Output>) -> Result<bool, SptpsError> {
         if body.len() != sig_len(self.kex) {
             return Err(SptpsError::BadSig);
@@ -1419,7 +1398,7 @@ impl Sptps {
             }
         }
 
-        // ─── ORDER-SENSITIVE FROM HERE ───────────────────────────────
+        // ORDER-SENSITIVE FROM HERE
         // C lines 357..375. Don't reorder without re-reading the doc
         // comment above and `rust_vs_c_rekey` in tests/vs_c.rs.
 
@@ -1529,13 +1508,11 @@ impl Sptps {
                     // safely switch our incipher.
                     self.state = State::Ack;
                 } else {
-                    // C lines 422-428. Initial handshake: no ACK on the
-                    // wire, just a synthetic one. The order here matters
-                    // for the event sequence even though there's no wire
-                    // output between the steps — the C fires
-                    // `receive_record(HANDSHAKE, NULL, 0)` *after*
-                    // receive_ack runs, so HandshakeDone comes after the
-                    // incipher switch.
+                    // Initial handshake: no ACK on the wire, just a
+                    // synthetic one. The order matters for the event
+                    // sequence even though there's no wire output
+                    // between the steps: HandshakeDone must come after
+                    // the incipher switch.
                     self.receive_ack(&[]).expect("synthetic ack body is empty");
                     match self.kex {
                         SptpsKex::X25519 => {
@@ -1572,7 +1549,7 @@ impl Sptps {
         }
     }
 
-    // ────────────────────────────────────────────────────────────────
+    //
     // Receive path: framing
 
     /// `sptps_receive_data`. Stream mode reassembles; datagram expects
