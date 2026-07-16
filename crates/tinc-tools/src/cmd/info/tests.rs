@@ -109,10 +109,8 @@ fn cascade_row(
 /// `Reachability::from_row` cascade table. An if-else-if chain.
 /// ORDER matters: a row satisfying multiple arms picks the
 /// FIRST. Five-for-five on read-the-spec-before-coding: the
-/// first cut had `Unreachable` before `Myself` ("self is
-/// reachable by definition, so order doesn't matter") — wrong.
-/// Upstream does MYSELF first, the strcmp fires before the
-/// bit-read.
+/// The MYSELF check must come before the reachable-bit check; this
+/// table pins that ordering.
 #[test]
 fn cascade_table() {
     let rv = StatusBit::REACHABLE.0 | StatusBit::VALIDKEY.0;
@@ -260,10 +258,9 @@ fn nodeinfo_format_golden() {
 
     let out = info.format("alice");
 
-    // Byte-exact. The column widths (count the spaces) are
-    // upstream's. `Status:` and `Options:` and `Edges:`/
-    // `Subnets:` are 13 chars (label + spaces); values have
-    // leading space. Everything else is 14 chars; values don't.
+    // Byte-exact against C tinc's output. `Status:`/`Options:`/`Edges:`/
+    // `Subnets:` labels are 13 chars and their values carry a leading
+    // space; everything else is 14 chars.
     //
     // Precondition: status bits are what we said.
     assert_eq!(
@@ -354,9 +351,8 @@ Edges:       \nSubnets:     \n";
     assert_eq!(out, expected);
 }
 
-/// Status bits print in upstream order (which is `node.h`
-/// declaration order, NOT alphabetical, NOT bit-position-with-
-/// gaps).
+/// Status bits print in the daemon's field-declaration order (not
+/// alphabetical, no gaps).
 #[test]
 fn nodeinfo_status_order() {
     // ALL six bits set.
@@ -379,14 +375,14 @@ fn nodeinfo_status_order() {
         subnets: vec![],
     };
     let out = info.format("x");
-    // The order is upstream's printf order. NOT alphabetical.
+    // Fixed print order, not alphabetical.
     assert!(
         out.contains("Status:       validkey visited reachable indirect sptps udp_confirmed\n")
     );
 }
 
-/// Double-space between `packets` and bytes. `diff` against
-/// upstream would catch one space.
+/// Double-space between `packets` and bytes — part of the byte-exact
+/// output format.
 #[test]
 fn nodeinfo_traffic_double_space() {
     let row = cascade_row("MYSELF", StatusBit::REACHABLE.0, "x", 0, "x", -1);

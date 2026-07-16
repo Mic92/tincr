@@ -257,10 +257,8 @@ pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verifi
 
     // Parse header
     // Split on single spaces, expect exactly 5 fields:
-    // `["Signature", "=", name, t, sig]`. Stricter than upstream's
-    // sscanf (which accepts extra/missing whitespace), but sign
-    // always emits the canonical form. The only way to get a
-    // non-canonical header is hand-editing; the answer is "don't".
+    // `["Signature", "=", name, t, sig]`. Sign always emits this
+    // canonical form; non-canonical spacing only comes from hand-editing.
     let header =
         std::str::from_utf8(header).map_err(|_| CmdError::BadInput("Invalid input".into()))?;
     let mut fields = header.split(' ');
@@ -280,8 +278,7 @@ pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verifi
         return Err(CmdError::BadInput("Invalid input".into()));
     }
 
-    // `parse()` rejects trailing garbage. Same outcome as upstream
-    // (non-digit after time is rejected), different layer.
+    // parse() rejects trailing garbage after the timestamp.
     let t: i64 = t_str
         .parse()
         .map_err(|_| CmdError::BadInput("Invalid input".into()))?;

@@ -148,8 +148,8 @@ fn departed_node_stays_dim() {
     assert_eq!(s.display_order.len(), 2); // also never shrinks
 }
 
-/// u64 - u64 wraps on counter decrease (daemon restart).
-/// `wrapping_sub`. The spike is upstream's behavior.
+/// u64 - u64 wraps on counter decrease (daemon restart); the spike is
+/// intentional (see module doc).
 #[test]
 fn counter_decrease_wraps() {
     let mut s = Stats::default();
@@ -350,9 +350,8 @@ fn render_row_attribute_logic() {
     // Bytes-only nonzero → NORMAL
     // The check is on PACKETS rate, not bytes. "Nonzero bytes
     // implies nonzero packets" is true for real traffic. But
-    // synthetic stats can have bytes!=0, packets==0 (impossible
-    // in nature, possible here). Test that we replicate the
-    // upstream check, not the "obvious" check.
+    // synthetic stats can have bytes!=0, packets==0. Pin that the
+    // check looks at packet rates, not byte rates.
     let bytes_only = NodeStats {
         known: true,
         in_bytes_rate: 1000.0,

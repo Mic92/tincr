@@ -118,11 +118,10 @@ pub fn export_one(paths: &Paths, name: &str, mut out: impl Write) -> Result<(), 
     writeln!(out, "Name = {name}").map_err(io_err("<stdout>"))?;
 
     for line in content.lines() {
-        // Skip any line whose `split_kv` key is `Name` (case-
-        // insensitive): `Name = foo`, `Name=foo`, `name\tfoo`, but
-        // not `Namespace = ` nor ` Name = foo` (leading space — a
-        // harmless upstream quirk we keep for fidelity; the config
-        // parser would lstrip, this filter doesn't).
+        // Skip any line whose `split_kv` key is `Name` (case-insensitive):
+        // `Name = foo`, `Name=foo`, `name\tfoo`, but not `Namespace =` nor
+        // ` Name = foo` — unlike the config parser, this filter does not
+        // lstrip, matching C tinc's export output.
         if is_name_line(line) {
             continue;
         }
@@ -270,8 +269,7 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
     let mut firstline = true;
 
     // `lines()` strips the newline; the separator match adjusts.
-    // We don't truncate long lines (upstream's 4096 buffer would).
-    // No real host file has lines that long anyway.
+    // Long lines are not truncated.
     for line in inp.lines() {
         let line = line.map_err(io_err("<stdin>"))?;
 
@@ -337,12 +335,9 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
             firstline = false;
         }
 
-        // Separator → skip
-        // `lines()` strips the newline, so compare sans newline.
-        // Tiny upstream difference: a separator at EOF without a
-        // trailing newline would be content there but skipped here.
-        // Export always writes the trailing newline; not worth
-        // replicating for hand-crafted input.
+        // Separator → skip. `lines()` strips the newline, so compare sans
+        // newline; a separator at EOF without a trailing newline is also
+        // skipped (export always writes the trailing newline anyway).
         if line == SEPARATOR {
             continue;
         }
@@ -385,7 +380,7 @@ mod tests {
         assert!(is_name_line("NAME\tfoo"));
         assert!(!is_name_line("Namespace = foo")); // stop=9
         assert!(!is_name_line("Named = foo")); // stop=5
-        assert!(!is_name_line(" Name = foo")); // stop=0, the upstream bug
+        assert!(!is_name_line(" Name = foo")); // leading space is not stripped
         assert!(!is_name_line("")); // stop=0
         assert!(!is_name_line("Nam")); // stop=3
     }

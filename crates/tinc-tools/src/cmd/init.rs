@@ -16,18 +16,14 @@
 //! That's it. Five files/dirs. The user then `tinc edit tinc.conf` to
 //! add `ConnectTo`, runs `tinc-up` setup, and `tincd` is good to go.
 //!
-//! ## Intentional deviations from upstream
+//! ## Intentional limitations
 //!
-//! Deliberate, not bugs to fix later.
-//!
-//! - **No interactive name prompt.** The prompt only exists for the
-//!   interactive `tinc> ` shell mode, which we don't have. When shell
-//!   mode lands the prompt becomes a shell-layer concern.
-//! - **No `check_port`.** Upstream tries to bind 655 and picks a
-//!   random high port if busy. Dropped: pulls in socket code, and the
-//!   random pick is often wrong (firewall/NAT). Better to fail loudly
-//!   at first daemon start.
-//! - **No RSA keygen.** `DISABLE_LEGACY` is permanently on.
+//! - **No interactive name prompt.** The name is a required argument;
+//!   there is no interactive shell mode.
+//! - **No port-availability probe.** Picking a random high port when 655
+//!   is busy is usually wrong (firewall/NAT); better to fail loudly at
+//!   first daemon start.
+//! - **No RSA keygen.** Legacy crypto is permanently disabled.
 //!
 //! ## File mode subtlety
 //!

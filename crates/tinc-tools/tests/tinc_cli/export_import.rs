@@ -123,12 +123,12 @@ fn export_all_import_workflow() {
     assert!(!alice_at_charlie.contains("#-"));
 }
 
-/// Cross-impl: Rust `tinc export` → same blob as we'd parse with the
-/// upstream `sscanf("Name = %s")`. Tested by feeding Rust export output back
+/// Cross-impl: Rust `tinc export` must produce a blob C tinc's import
+/// (`sscanf("Name = %s")`) accepts. Tested by feeding Rust export output back
 /// into Rust import (above) AND by checking the format manually here.
 ///
-/// We can't easily run the upstream `tinc import` (no upstream binary in the
-/// fixture), but we *can* prove the format matches: the export blob
+/// The C `tinc import` binary isn't available in the fixture, but the
+/// format can still be proven to match: the export blob
 /// must start with literally `Name = alice\n` — that's what C
 /// `sscanf("Name = %4095s")` matches. If the Rust output were
 /// `Name=alice\n` (no spaces) or `name = alice\n` (lowercase),
@@ -144,8 +144,8 @@ fn export_format_matches_c_sscanf() {
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
 
-    // The exact byte sequence the upstream `sscanf("Name = %s")` matches.
-    // Uppercase N, space, equals, space.
+    // The exact byte sequence C tinc's `sscanf("Name = %s")` matches:
+    // uppercase N, space, equals, space.
     let first_line = stdout.lines().next().unwrap();
     assert_eq!(first_line, "Name = node1");
     // sscanf %s stops at whitespace; node1 has none.

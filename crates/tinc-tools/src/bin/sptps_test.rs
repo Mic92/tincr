@@ -465,9 +465,8 @@ fn run(args: &Args, mut sock: Sock, mut s: Sptps) -> io::Result<()> {
                 continue;
             }
 
-            // Type 0 always — we dropped the `--special` type-1 hack.
-            // Upstream sends an *empty* record for a bare newline; we
-            // don't bother, bare newline is one byte of data.
+            // Always record type 0; a bare newline is sent as one byte of
+            // data.
             match s.send_record(0, &buf[..n]) {
                 Ok(outputs) => drain(outputs, &mut sock, &mut stdout, &mut established)?,
                 Err(e) => {

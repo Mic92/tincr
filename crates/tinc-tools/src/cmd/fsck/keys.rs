@@ -43,9 +43,8 @@ pub(super) fn check_keypairs(
         .map_or_else(|| paths.ed25519_private(), |e| PathBuf::from(e.get_str()));
 
     let Ok(sk) = keypair::read_private(&priv_path) else {
-        // We single-print where upstream double-prints (its inner
-        // helper also logs). ENOENT vs bad-PEM aren't distinguished
-        // at the fsck level — both are "no private key found".
+        // ENOENT vs bad-PEM aren't distinguished at the fsck level —
+        // both are "no private key found".
         findings.push(Finding::NoPrivateKey { path: priv_path });
         return false;
     };

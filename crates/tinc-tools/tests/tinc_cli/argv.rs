@@ -88,9 +88,8 @@ fn help_subcommand_same_as_option() {
 // CONFDIR /etc/tinc, can't fake from integration test)
 //
 
-/// `tinc network NAME` → error with `-n` advice. Deliberate
-/// Upstream-behavior-drop #2. The upstream `switch_network` mutates globals
-/// for the readline loop; we have no loop.
+/// `tinc network NAME` → error with `-n` advice; switch mode is not
+/// supported without an interactive shell.
 #[test]
 fn network_switch_rejected() {
     let out = tinc(&["network", "foo"]);

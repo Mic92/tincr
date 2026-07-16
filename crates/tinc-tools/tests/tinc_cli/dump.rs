@@ -19,10 +19,10 @@ fn config_init(name: &str) -> (tempfile::TempDir, String, String) {
 
 /// `tinc dump nodes` against a fake daemon. The daemon sends a
 /// 22-field row in the daemon's wire format. Our binary parses it
-/// and prints exactly what upstream `tinc dump nodes` would.
+/// and prints exactly what C tinc's `tinc dump nodes` would.
 ///
-/// THE seam: this is daemon-wire-compat. If this passes, Rust
-/// `tinc` works against an upstream `tincd`.
+/// This is the daemon-wire-compat seam: if this passes, Rust `tinc`
+/// works against a C `tincd`.
 #[test]
 fn dump_nodes_against_fake() {
     use std::io::{BufRead, Write};
@@ -77,9 +77,9 @@ fn dump_nodes_against_fake() {
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "stdout: {stdout:?}");
 
-    // Assert: byte-for-byte upstream `tinc dump nodes` output
-    // `status %04x` (0x12 → "0012"). The `rtt 1.500` suffix appears
-    // because udp_ping_rtt != -1.
+    // Assert: byte-for-byte C tinc `tinc dump nodes` output.
+    // status is zero-padded (0x12 → "0012"); the `rtt 1.500` suffix
+    // appears because udp_ping_rtt != -1.
     assert_eq!(
         lines[0],
         "alice id 0a1b2c3d4e5f at 10.0.0.1 port 655 cipher 0 digest 0 \

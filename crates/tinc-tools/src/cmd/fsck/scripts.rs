@@ -70,9 +70,8 @@ fn scan_scripts_in(dir: &Path, kind: ScriptDir, force: bool, findings: &mut Vec<
             continue;
         };
 
-        // Empty-prefix case: a file literally named `-up`.
-        // `strip_suffix` returns `""` → not in the allowlist →
-        // unknown script. Same outcome as upstream.
+        // Empty-prefix case: a file literally named `-up` gives an empty
+        // prefix → not in the allowlist → unknown script.
 
         let full_path = dir.join(fname);
 

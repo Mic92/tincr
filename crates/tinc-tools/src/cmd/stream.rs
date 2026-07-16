@@ -134,18 +134,15 @@ const DEBUG_UNSET: i32 = -1;
 /// escapes look like garbage in less without `-R`.
 /// `isatty(stdout)` is false then → no color.
 ///
-/// Why not check `NO_COLOR` env var (the modern convention):
-/// upstream doesn't. `script -c "tinc log"` is the answer (PTY in
-/// between). Same as every isatty-gated colorizer.
+/// `NO_COLOR` is not honored; force color via a PTY (`script -c "tinc
+/// log"`) if needed.
 fn use_ansi_escapes_stdout() -> bool {
     use std::io::IsTerminal;
     if !std::io::stdout().is_terminal() {
         return false;
     }
-    // Empty string is "set" in the getenv sense (non-NULL for
-    // `TERM=`). `env::var` returns `Ok("")` for that, which is
-    // `!= "dumb"`, so colors on. Probably wrong (TERM= means "no
-    // terminfo"), but upstream-compat.
+    // An empty `TERM=` still enables color (it's != "dumb"). Arguably
+    // wrong, but matches C tinc's behavior.
     match std::env::var("TERM") {
         Ok(term) => term != "dumb",
         Err(_) => false, // unset, or non-UTF-8 (unlikely)
@@ -214,9 +211,7 @@ where
         // by 10000×.
         buf.clear();
         buf.resize(len, 0);
-        // Mid-data EOF → bubble (slightly noisier than upstream,
-        // but the daemon dying mid-stream is rare and a message
-        // helps).
+        // Mid-data EOF (daemon died mid-stream) bubbles up as an error.
         ctl.recv_data(&mut buf)?;
 
         // The data is the FORMATTED log line (priority prefix,
@@ -239,10 +234,8 @@ where
 
 /// CLI entry: `tinc log [LEVEL]`.
 ///
-/// `LEVEL` is `atoi`'d upstream; `atoi("garbage")` is 0 (silently).
-/// We use `parse::<i32>()` which errors. STRICTER, but `tinc log
-/// abc` succeeding-with-level-0 is a footgun. The change is
-/// observable but only for invalid input.
+/// `LEVEL` is parsed strictly: `tinc log abc` errors instead of silently
+/// meaning level 0.
 ///
 /// The SIGINT handler is NOT here (see module doc). Ctrl-C kills
 /// the process; exit 130. Daemon doesn't care.
@@ -455,10 +448,8 @@ where
 
 /// CLI entry: `tinc pcap [SNAPLEN]`.
 ///
-/// `SNAPLEN`: `atoi`'d upstream. We `parse::<u32>()`. Stricter
-/// (rejects negative — `atoi("-5")` is `-5` then assigned to a
-/// `uint32_t` arg which wraps to a huge number; daemon then never
-/// clips). `tinc pcap -5` failing is better.
+/// `SNAPLEN` is parsed as `u32`, so negative or garbage input errors
+/// instead of wrapping to a huge snaplen.
 ///
 /// # Errors
 /// Same as `run_log`.

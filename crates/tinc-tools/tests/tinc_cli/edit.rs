@@ -75,12 +75,8 @@ fn edit_echo_shows_resolved_path() {
 /// `EDITOR="echo arg"` (with space) → shell tokenizes →
 /// `argv = [echo, arg, <path>]` → stdout `"arg <path>"`.
 ///
-/// THE proof that `sh -c '$TINC_EDITOR "$@"'` word-splits the
-/// editor. The upstream `system("\"%s\" ...")` does NOT: it builds
-/// `"echo arg" "filename"`, the shell parses `"echo arg"` as ONE
-/// token (double-quoted = no word splitting), and `exec("echo arg")`
-/// fails ENOENT. We support it via unquoted `$TINC_EDITOR` —
-/// stricter-better than C.
+/// Proof that `sh -c '$TINC_EDITOR "$@"'` word-splits the editor, so
+/// `EDITOR="echo arg"` (a command with flags) works.
 #[test]
 fn edit_spacey_editor_tokenized() {
     let (confbase, out) = run_edit("echo extraarg", "alice");
@@ -92,11 +88,8 @@ fn edit_spacey_editor_tokenized() {
 }
 
 /// `EDITOR=echo`, file with `$` in the name — NOT expanded.
-/// THE shell-safety proof: `"$@"` quotes the arg.
-///
-/// The upstream `system("\"echo\" \"$HOME\"")` would expand `$HOME`
-/// (it's inside double-quotes IN THE SHELL). We don't: `$`
-/// stays literal in stdout.
+/// Shell-safety proof: `"$@"` quotes the filename, so `$` in a path
+/// stays literal instead of being expanded by the shell.
 #[test]
 fn edit_dollar_in_filename_not_expanded() {
     let (_dir, _confbase, cb) = init_dir("node1");

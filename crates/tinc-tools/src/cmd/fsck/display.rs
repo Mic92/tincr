@@ -4,9 +4,9 @@ use std::fmt;
 
 use super::Finding;
 
-/// Phrasing preserved from upstream for the same reason as
-/// `CmdError::Display` — users grep error strings, forum posts
-/// reference them. Minor deviations noted inline.
+/// Phrasing matches C tinc for the same reason as `CmdError::Display` —
+/// users grep error strings, forum posts reference them. Minor deviations
+/// noted inline.
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Finding as F;
@@ -42,9 +42,8 @@ impl fmt::Display for Finding {
                 write!(f, "{e}")
             }
             F::NoPrivateKey { path } => {
-                // Path added — upstream doesn't print it (it's
-                // implied), but it's free here and the user might have
-                // set `Ed25519PrivateKeyFile` to something surprising.
+                // The path is printed because the user might have set
+                // `Ed25519PrivateKeyFile` to something surprising.
                 write!(f, "No Ed25519 private key found at {}.", path.display())
             }
             F::NoPublicKey { host_file } => {
@@ -71,9 +70,8 @@ impl fmt::Display for Finding {
                 mode,
                 uid_match,
             } => {
-                // The mode is added — upstream doesn't show it but
-                // `0640` vs `0644` tells you if it's group-read or
-                // world-read at a glance.
+                // The mode is shown: `0640` vs `0644` tells you if it's
+                // group-read or world-read at a glance.
                 if *uid_match {
                     write!(
                         f,
@@ -114,9 +112,8 @@ impl fmt::Display for Finding {
                 write!(f, "cannot read directory {}: {err}", path.display())
             }
             F::ObsoleteVar { name, source } => {
-                // Our `Source` Display is "on line N while reading
-                // config file PATH" — slightly more verbose than
-                // upstream's "%s line %d", same information.
+                // `Source`'s Display is "on line N while reading config
+                // file PATH".
                 write!(f, "obsolete variable {name} {source}")
             }
             F::HostVarInServer { name, source } => {

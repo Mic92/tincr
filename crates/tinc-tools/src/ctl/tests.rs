@@ -29,7 +29,6 @@ fn pidfile_parse() {
 }
 
 /// Pidfile validation: cookie must be exactly 64 hex chars.
-/// We tighten over upstream here.
 #[test]
 fn pidfile_cookie_validated() {
     let dir = tempfile::tempdir().unwrap();
@@ -512,8 +511,7 @@ fn recv_row_eof_mid_dump() {
     daemon.join().unwrap();
 }
 
-/// Wrong code (`"19 3 ..."`) → error. We tighten over upstream:
-/// a non-18 prefix is corruption.
+/// Wrong code (`"19 3 ..."`) → error: a non-18 prefix is corruption.
 #[test]
 fn recv_row_bad_code() {
     let cookie = "4".repeat(64);

@@ -9,30 +9,13 @@
 //! | 3 | Script executability: `*-up`/`*-down` have `+x` | `chmod 0755` |
 //! | 4 | Private key file mode: `0600` | `chmod & ~077` |
 //!
-//! ## What we drop vs upstream
-//!
-//! - **All RSA** — `DISABLE_LEGACY` is permanent. The RSA pubkey
-//!   check, the RSA roundtrip test, the RSA fix prompt, the
-//!   `KEY_RSA`/`KEY_BOTH` enum branches: gone. ~150 LOC.
-//!
-//! - **The interactive prompt** — upstream reads `y/n` from stdin.
-//!   Same deviation as `init`/`genkey`: we never prompt; the prompt
-//!   collapses to `force`. Upstream gates on `isatty(0) && isatty(1)`
-//!   so it also never prompts under a test harness — same observable
-//!   behavior.
-//!
-//! - **The "private key does not work" branch** — the helper it
-//!   guards is `xmalloc` + `b64encode` and cannot fail; the check is
-//!   dead code. Dropped.
-//!
-//! - **`exe_name`/`print_tinc_cmd` reconstruction** — upstream
-//!   reconstructs the invocation from globals. We take an opaque
-//!   `cmd_prefix: &str` the binary constructs once.
+//! Legacy RSA is not supported and there is no interactive y/n prompt:
+//! fixes are gated solely on `force`. The suggested-command messages use
+//! an opaque `cmd_prefix: &str` that the binary constructs once.
 //!
 //! ## The testable seam: `Finding` + `Report`
 //!
-//! Upstream interleaves `fprintf(stderr, ...)` with `chmod`/append.
-//! We collect findings into a `Vec` so tests can assert without
+//! Findings are collected into a `Vec` so tests can assert without
 //! parsing stderr. Fixes still apply during the scan (later checks
 //! may read the changed state) and are also recorded as `Finding`s.
 //! `Finding` is NOT `PartialEq` (`PathBuf` equality is fragile);
@@ -87,7 +70,6 @@ use scripts::check_scripts;
 
 // Finding — one diagnostic or fix-result.
 //
-// Variants map roughly to upstream `fprintf(stderr, ...)` call sites.
 // The goal is enough structure for tests to `matches!()` on without
 // going stringly-typed, but not so much that adding a check means
 // three new variants. Paths are carried for the variants that mention

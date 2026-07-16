@@ -86,7 +86,7 @@ fn top_stdin_not_tty_fails_after_connect() {
 //
 // Unlike `top`, these don't need a tty. The fake daemon can drive
 // the full path: subscribe, push records, close. Client should
-// produce exactly what upstream `tinc log` / `tinc pcap` would.
+// produce exactly what C tinc's `tinc log` / `tinc pcap` would.
 //
 // THE seam: subscribe wire → daemon, header wire ← daemon.
 // Both halves of the wire-compat are pinned.

@@ -52,10 +52,8 @@ fn info_node_against_fake() {
 
         // Round 1: DUMP_NODES
         // Request includes `bob` as a dead third arg. The daemon
-        // doesn't read it (just dispatches on REQ_DUMP_NODES). We
-        // assert it
-        // arrives anyway — wire-compat with what upstream `tinc info`
-        // sends.
+        // doesn't read it (just dispatches on REQ_DUMP_NODES). Assert it
+        // arrives anyway — wire-compat with what C tinc's `tinc info` sends.
         let mut req = String::new();
         br.read_line(&mut req).unwrap();
         assert_eq!(req.trim_end(), "18 3 bob", "dead third arg should be sent");

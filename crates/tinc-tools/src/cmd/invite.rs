@@ -28,21 +28,16 @@
 //!   leak the cookie. The daemon recomputes the hash from the cookie
 //!   it receives.
 //!
-//! ## What we drop from upstream
+//! ## Limitations
 //!
-//! - Daemon name-uniqueness check: best-effort upstream, degrades to
-//!   no-op when daemon's down. The `hosts/NAME` exists check (kept)
-//!   covers the disk case.
-//! - Daemon reload: we always print the "please restart" warning.
-//!   `invite` is `needs_daemon: false`. **TODO(chunk-8)**: wire
-//!   best-effort reload.
-//! - `get_my_hostname` HTTP probe: hand-crafted `GET /host.cgi` to
-//!   `tinc-vpn.org:80` to discover our IP. We require `Address` to be
-//!   set instead.
-//! - `get_my_hostname` tty prompt: same "no prompts" deviation as
-//!   init/genkey/fsck.
-//! - `execute_script("invitation-created")`: user hook. **TODO**:
-//!   lifts to `tinc-tools::script` with daemon's `execute_script`.
+//! - Name uniqueness is only checked against `hosts/NAME` on disk, not
+//!   against a running daemon.
+//! - No automatic daemon reload; the "please restart" warning is always
+//!   printed. **TODO**: wire best-effort reload.
+//! - The URL host comes from the `Address` config variable; there is no
+//!   HTTP probe or tty prompt to discover it.
+//! - No `invitation-created` script hook. **TODO**: add once a shared
+//!   script runner exists.
 //!
 //! ## What we tighten
 //!
@@ -143,11 +138,8 @@ pub fn invite(
         )));
     }
 
-    // Get our address (for the URL host part)
-    // Done early so failure happens BEFORE we create files. Upstream
-    // does it late, which leaves a 0-byte invitation file behind on
-    // no-Address failure (it sits in invitations/ until expiry).
-    // Ordering it here is cleaner.
+    // Get our address (for the URL host part) early, so a no-Address
+    // failure happens before any files are created.
     let address = get_my_address(paths, &myname)?;
 
     // makedirs(DIR_INVITATIONS)
@@ -289,9 +281,8 @@ fn sweep_expired(inv_dir: &Path, now: SystemTime) -> Result<u32, CmdError> {
 
 /// Write the invitation private key.
 ///
-/// `OpenOptions::mode(0600)` sets the mode atomically at create time
-/// (upstream does `fopen("w")` then `chmod` after, with a race window
-/// where the file is 0644).
+/// `OpenOptions::mode(0600)` sets the mode atomically at create time,
+/// so there is no window where the key is world-readable.
 ///
 /// NOT `O_EXCL` — we just unlinked it (or it didn't exist).
 fn write_invitation_key(path: &Path, sk: &SigningKey) -> Result<(), CmdError> {
@@ -383,10 +374,9 @@ fn copy_mesh_vars(paths: &Paths, out: &mut String) -> Result<(), CmdError> {
     let cfg =
         Config::read(&tc).map_err(|e| CmdError::BadInput(format!("{}: {e}", tc.display())))?;
 
-    // Just two vars. `lookup` is case-insensitive. Upstream copies
-    // every matching line; we copy first only — the daemon's config
-    // reader takes first-wins, so duplicates are noise (and an fsck
-    // warning anyway).
+    // Just two vars; `lookup` is case-insensitive. Only the first match
+    // is copied — the daemon's config reader takes first-wins, so
+    // duplicates would be noise (and an fsck warning).
     for var in &["Mode", "Broadcast"] {
         if let Some(entry) = cfg.lookup(var).next() {
             out.push_str(var);
@@ -460,9 +450,8 @@ fn copy_host_replacing_port(
 
 /// Our address for the URL host part. `host[:port]` formatted.
 ///
-/// Upstream's `get_my_hostname` is 190 lines: scan host file → scan
-/// tinc.conf → read pidfile → HTTP probe → tty prompt. We do the
-/// first two and bail with a clear message.
+/// Looks for `Address` in the host file, then tinc.conf, and bails with a
+/// clear message if neither has it.
 ///
 /// The pidfile read is for `Port = 0` resolution: the daemon writes
 /// its actual bound port there. Without a daemon connection we can't
@@ -929,9 +918,8 @@ mod tests {
         };
         assert!(msg.contains("No Address"));
 
-        // **Nothing created.** Upstream would have made invitations/
-        // and possibly written a key by this point. Our reorder
-        // means a no-Address failure leaves no trace.
+        // Nothing created: a no-Address failure must leave no trace
+        // (the address is resolved before any files are written).
         assert!(
             !confbase.join("invitations").exists(),
             "no-Address failure should not create invitations/"

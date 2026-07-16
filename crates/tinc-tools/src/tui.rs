@@ -141,10 +141,8 @@ pub(crate) fn winsize() -> Winsize {
 /// user's shell is left in raw mode — no echo, no line buffering,
 /// `stty sane` to recover.
 ///
-/// Ctrl-C → SIGINT → process death → kernel doesn't restore
-/// termios. KNOWN GAP. The fix is a `signal_hook` SIGINT handler
-/// that drops the guard; deferred until someone Ctrl-C's it and
-/// complains.
+/// Ctrl-C → SIGINT → process death → kernel doesn't restore termios.
+/// Known gap; the fix would be a SIGINT handler that drops the guard.
 ///
 /// We don't hold a `StdoutLock` — it would block cooked-mode
 /// `read_line`. Writes lock per-call via `print!`; fine at 1Hz.

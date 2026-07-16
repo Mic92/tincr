@@ -31,7 +31,7 @@ fn parse_var_expr_ok() {
         // dots in value, not key: `.` scan is key-slice-only
         ("Address = 10.0.0.1",      (None, "Address", "10.0.0.1")),
         // No separator + dots → whole thing is key → `node=10, var=0.0.1`.
-        // Weird but it's what upstream does (`0.0.1` fails `vars::lookup` later).
+        // Weird, but `0.0.1` fails `vars::lookup` later anyway.
         ("10.0.0.1",                (Some("10"), "0.0.1", "")),
     ];
     for (input, expected) in cases {
