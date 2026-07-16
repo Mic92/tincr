@@ -332,8 +332,8 @@ mod tests {
         );
     }
 
-    /// `-----BEGIN RSA PRIVATE KEY-----` is NOT matched.
-    /// We dropped the RSA branch entirely.
+    /// `-----BEGIN RSA PRIVATE KEY-----` is not matched — RSA keys are
+    /// not handled at all.
     #[test]
     fn disable_ignores_rsa() {
         let (_dir, path) = testutil::scratch_file(

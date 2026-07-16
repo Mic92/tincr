@@ -159,9 +159,8 @@ fn invite_missing_arg() {
 // are TODO. The pieces below that path — URL parse, preflight,
 // `finalize_join`, `server_receive_cookie` — are all unit-covered.
 
-/// Bad URL → exit 1 with the C's exact message, no TCP attempted.
-/// The "Invalid invitation URL." message is the C error; matching
-/// it means existing docs/forum posts apply.
+/// Bad URL → exit 1, no TCP attempted. The "Invalid invitation URL."
+/// message matches C tinc so existing docs/forum posts apply.
 #[test]
 fn join_bad_url() {
     let (_dir, cb) = bare_dir();

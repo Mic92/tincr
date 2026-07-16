@@ -301,8 +301,8 @@ fn pcap_against_fake() {
     assert_eq!(stdout.len(), 44);
 }
 
-/// `tinc pcap -5` — negative snaplen rejected. C's `atoi("-5")`
-/// is `-5` cast to `uint32_t` (huge); we error.
+/// `tinc pcap -5` — negative snaplen rejected instead of wrapping to a
+/// huge value.
 #[test]
 fn pcap_negative_snaplen_rejected() {
     let out = tinc(&["pcap", "-5"]);
@@ -310,8 +310,8 @@ fn pcap_negative_snaplen_rejected() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     // `-5` is flag-shaped: the argv parser may eat it as a short
     // flag ("Unknown option") before pcap sees it ("Invalid
-    // snaplen"). Either rejection is correct — the C's silent
-    // wraparound is what we forbid.
+    // snaplen"). Either rejection is correct; silent wraparound is what
+    // this test forbids.
     assert!(
         stderr.contains("Invalid") || stderr.contains("Unknown"),
         "stderr: {stderr}"

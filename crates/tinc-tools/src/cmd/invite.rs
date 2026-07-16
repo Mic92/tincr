@@ -418,8 +418,8 @@ fn copy_host_replacing_port(
     //
     // Subtlety: token stops at TAB or SPACE but NOT at `=`. So
     // `Port=655` has token "Port=655" (8 chars), doesn't match.
-    // `Port=655` passes through unchanged. We replicate; init writes
-    // `Port = X` form anyway.
+    // `Port=655` passes through unchanged; init writes the `Port = X`
+    // form anyway.
     //
     // `split_inclusive('\n')`: each chunk includes its trailing `\n`
     // (if there was one). Same fidelity as a `read_line` loop.

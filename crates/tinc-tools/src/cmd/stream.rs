@@ -28,15 +28,12 @@
 //! start of the data block; see `ctl.rs`'s `CtlSocket` doc-comment
 //! for why `BufReader` is the shared buffer.
 //!
-//! ## The SIGINT handler — NOT ported
+//! ## No SIGINT handler
 //!
-//! Upstream installs a SIGINT handler that `shutdown(fd, SHUT_RDWR)`s
-//! so the loop exits cleanly with code 0 instead of 130. NOT ported:
-//! the daemon doesn't care (kernel closes the socket either way,
-//! connection-reaper handles it), `tinc log` is interactive so
-//! nobody checks `$?`, and the static-fd signal-handler dance has
-//! hairy failure modes. Exit codes for streaming commands aren't a
-//! contract.
+//! Ctrl-C exits with 130 instead of shutting the socket down for a clean
+//! exit 0. The daemon doesn't care (the kernel closes the socket either
+//! way), `tinc log` is interactive so nobody checks `$?`, and a
+//! static-fd signal handler has hairy failure modes.
 //!
 //! ## pcap headers: native-endian
 //!

@@ -63,10 +63,8 @@ pub(super) fn parse_greeting_line1(line: &str) -> Result<(), CmdError> {
     if !check_id(his_name) {
         return Err(bad());
     }
-    // `hismajor` must equal PROT_MAJOR. Minor is don't-care: the
-    // sscanf `%d.%d` on "17\0" stops at the `.` mismatch but still
-    // returns 3 (the mismatch is after 3 conversions). So minor is
-    // optional. We replicate: parse `MAJOR` or `MAJOR.MINOR`.
+    // The major version must equal PROT_MAJOR; the minor is optional and
+    // ignored, so both `MAJOR` and `MAJOR.MINOR` are accepted.
     let ver = tok.next().ok_or_else(bad)?;
     let major: u32 = ver
         .split('.')
