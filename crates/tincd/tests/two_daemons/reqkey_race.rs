@@ -62,7 +62,7 @@ fn reqkey_race_fd() {
     let mut alice_ctl = alice.ctl();
     let mut bob_ctl = bob.ctl();
 
-    // ─── wait for meta handshake (both reachable) ───────────────
+    // wait for meta handshake (both reachable)
     let meta = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         poll_until(Duration::from_secs(10), || {
             let a = alice_ctl.dump(3);
@@ -79,7 +79,7 @@ fn reqkey_race_fd() {
         panic!("meta handshake timed out;\n=== alice ===\n{al}\n=== bob ===\n{bl}");
     }
 
-    // ─── THE SIMULTANEOUS KICK ──────────────────────────────────
+    // THE SIMULTANEOUS KICK
     // Write an IP packet to BOTH test-end fds before either daemon
     // polls. Both daemons' event loops will see device-readable on
     // the next epoll and hit try_tx → send_req_key simultaneously.
@@ -93,7 +93,7 @@ fn reqkey_race_fd() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // ─── observation window ─────────────────────────────────────
+    // observation window
     // Sample validkey every 200 ms. Track when both sides first
     // have validkey (steady state), then watch for flaps.
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -121,7 +121,7 @@ fn reqkey_race_fd() {
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    // ─── collect logs and assert ────────────────────────────────
+    // collect logs and assert
     drop(alice_ctl);
     drop(bob_ctl);
     drop(alice_tun);

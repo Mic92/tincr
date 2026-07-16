@@ -194,7 +194,7 @@ fn upnp_miniupnpd_gateway_igd_only() {
 }
 
 fn run(test_name: &str, natpmp: bool, expect_via: &str) {
-    // ─── feature-detect BEFORE bwrap ─────────────────────────────
+    // feature-detect BEFORE bwrap
     if std::env::var_os("BWRAP_INNER").is_none() {
         let Ok(bin) = which("miniupnpd") else {
             eprintln!("SKIP {test_name}: miniupnpd not on PATH");
@@ -218,7 +218,7 @@ fn run(test_name: &str, natpmp: bool, expect_via: &str) {
 
     let tmp = tmp!("portmap");
 
-    // ─── topology ────────────────────────────────────────────────
+    // topology
     let mut sleepers = [make_child_netns("alice"), make_child_netns("gw")];
     // ifnames must be unique in the outer ns at create time (both
     // ends exist there until the per-end `netns` move).
@@ -252,7 +252,7 @@ fn run(test_name: &str, natpmp: bool, expect_via: &str) {
     // gw: forward on. MASQUERADE installed by the nft ruleset below.
     nsexec("gw", &["sysctl", "-w", "net.ipv4.ip_forward=1"]);
 
-    // ─── miniupnpd (nft chains + spawn) ──────────────────────────
+    // miniupnpd (nft chains + spawn)
     let Some(mut upnpd) = Miniupnpd::spawn(tmp.path(), &miniupnpd_bin, natpmp) else {
         for s in &mut sleepers {
             let _ = s.kill();
@@ -281,7 +281,7 @@ fn run(test_name: &str, natpmp: bool, expect_via: &str) {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    // ─── alice host firewall (nixos-fw shape) ────────────────────
+    // alice host firewall (nixos-fw shape)
     // Stateful `policy drop` on input: reproduces the real-world
     // failure where the SSDP multicast query creates a conntrack
     // entry for (us↔239.255.255.250:1900) but the IGD's *unicast*
@@ -321,7 +321,7 @@ fn run(test_name: &str, natpmp: bool, expect_via: &str) {
         return;
     }
 
-    // ─── alice tincd ─────────────────────────────────────────────
+    // alice tincd
     let confbase = tmp.path().join("alice");
     let pidfile = tmp.path().join("alice.pid");
     let socket = tmp.path().join("alice.socket");
@@ -348,7 +348,7 @@ fn run(test_name: &str, natpmp: bool, expect_via: &str) {
         alice.kill_and_log()
     );
 
-    // ─── (a) journal: Portmapped TCP 655 → 10.77.0.2:NNNN ────────
+    // (a) journal: Portmapped TCP 655 → 10.77.0.2:NNNN
     // 20 s budget: NAT-PMP is sub-second; if that path fails for
     // any reason the IGD fallback's SSDP discover wait is ~5 s.
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -378,7 +378,7 @@ fn run(test_name: &str, natpmp: bool, expect_via: &str) {
     };
     eprintln!("portmapped: 10.77.0.2:{ext_port} → 192.168.77.2:6550");
 
-    // ─── (b) gw-ns nft shows the dnat rule ───────────────────────
+    // (b) gw-ns nft shows the dnat rule
     let nat = nsexec(
         "gw",
         &[
@@ -395,7 +395,7 @@ fn run(test_name: &str, natpmp: bool, expect_via: &str) {
         "dnat rule for alice:6550 not found in prerouting_miniupnpd:\n{nat}"
     );
 
-    // ─── (c) outer-ns can reach the mapped port ──────────────────
+    // (c) outer-ns can reach the mapped port
     // Don't depend on `nc`: a bare `TcpStream::connect` from the
     // outer bwrap netns is the same probe and saves a devshell dep.
     let probe = std::net::TcpStream::connect_timeout(
@@ -524,7 +524,7 @@ fn upnp_gateway_ip_change() {
         alice.kill_and_log()
     );
 
-    // ─── first Portmapped (LAN .2) ────────────────────────────────
+    // first Portmapped (LAN .2)
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if alice.log_snapshot().contains("Portmapped Tcp 6550") {
@@ -538,7 +538,7 @@ fn upnp_gateway_ip_change() {
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    // ─── swap alice's LAN IP .2 → .3 ─────────────────────────────
+    // swap alice's LAN IP .2 → .3
     // Deleting the only on-link addr also drops the default route
     // (no more nexthop source); re-add both. The daemon's listener
     // is bound to 0.0.0.0 so it survives the renumber.
@@ -555,7 +555,7 @@ fn upnp_gateway_ip_change() {
         &["ip", "route", "add", "default", "via", "192.168.77.1"],
     );
 
-    // ─── (a) route-change INFO + (b) second Portmapped ──────────
+    // (a) route-change INFO + (b) second Portmapped
     // periodic tick is 5 s and the worker refresh is 2 s, so the
     // re-emitted event surfaces within one tick after the next
     // refresh round — budget 20 s for slop.
@@ -578,7 +578,7 @@ fn upnp_gateway_ip_change() {
         "route-change line missing old/new IPs:\n{log}"
     );
 
-    // ─── (c) miniupnpd's DNAT now targets .3 ─────────────────────
+    // (c) miniupnpd's DNAT now targets .3
     let nat = nsexec(
         "gw",
         &[
@@ -620,7 +620,7 @@ fn upnp_rogue_gateway_ext_addr_rejected() {
     }
     let tmp = tmp!("portmap-rogue");
 
-    // ── topology: outer bwrap ns = rogue gateway 192.168.77.1,
+    // topology: outer bwrap ns = rogue gateway 192.168.77.1,
     //    child ns "alice" = victim 192.168.77.2, default → .1.
     let mut sleeper = make_child_netns("alice");
     run_ip(&[
@@ -639,15 +639,15 @@ fn upnp_rogue_gateway_ext_addr_rejected() {
         &["ip", "route", "add", "default", "via", "192.168.77.1"],
     );
 
-    // ── rogue HTTP/SOAP on the gw addr ─────────────────────────
+    // rogue HTTP/SOAP on the gw addr
     let http = TcpListener::bind(("192.168.77.1", 0)).unwrap();
     let http_port = http.local_addr().unwrap().port();
 
-    // ── rogue SSDP on the gw addr (unicast pre-punch lands here).
+    // rogue SSDP on the gw addr (unicast pre-punch lands here).
     //    First reply tries the SSRF (`LOCATION` → 127.0.0.1); after
     //    that, hand back the real gw URL so the IGD path proceeds
     //    far enough to exercise the ext-addr filter.
-    // ── rogue PCP on the gw addr: echo the request's nonce, return
+    // rogue PCP on the gw addr: echo the request's nonce, return
     //    assigned-ext = `::ffff:127.0.0.1`, port = 0. Daemon tries
     //    PCP before IGD; `check_ext` must reject and fall through.
     let pcp = UdpSocket::bind(("192.168.77.1", 5351)).expect("bind :5351");
@@ -749,7 +749,7 @@ fn upnp_rogue_gateway_ext_addr_rejected() {
         }
     });
 
-    // ── victim daemon ─────────────────────────────────────────
+    // victim daemon
     let confbase = tmp.path().join("alice");
     write_alice_config(&confbase, 5);
     let pidfile = tmp.path().join("alice.pid");
@@ -776,7 +776,7 @@ fn upnp_rogue_gateway_ext_addr_rejected() {
         alice.kill_and_log()
     );
 
-    // ── wait for the worker to complete one IGD round ──────────
+    // wait for the worker to complete one IGD round
     let deadline = Instant::now() + Duration::from_secs(25);
     let log = loop {
         let log = alice.log_snapshot();

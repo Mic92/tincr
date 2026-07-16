@@ -23,7 +23,7 @@
 //!
 //! ## Skipped vs the Python
 //!
-//! - `:53` invitee address cached after `INVITATION_ACCEPTED` —
+//! - Invitee address cached after `INVITATION_ACCEPTED` —
 //!   the invite path is covered by `tinc_join_against_real_daemon`
 //!   and the cache-on-invite is a 1-line `add_recent` we have no
 //!   clean hook to assert separately.
@@ -155,8 +155,6 @@ fn write_host_up_script(confbase: &Path, peer: &str, log: &Path) {
     std::fs::set_permissions(&path, perm).unwrap();
 }
 
-// ═══════════════════════════════════════════════════════════════════
-
 /// `address_cache.py` port. Four assertions, two restarts.
 ///
 /// The mechanism (`addrcache.rs`):
@@ -183,7 +181,7 @@ fn restart_dials_from_cache() {
     let alice_log = tmp.path().join("alice.connected.log");
     let cache_file = alice.confbase.join("addrcache").join("bob");
 
-    // ─── Round 1: connect with `Address =` in hosts/ ────────────────
+    // Round 1: connect with `Address =` in hosts/
     // Normal config. Alice dials bob. Bob listens.
     bob.write_config(Some(&alice), false, /*addr_in_hosts*/ true);
     alice.write_config(Some(&bob), true, /*addr_in_hosts*/ true);
@@ -211,7 +209,7 @@ fn restart_dials_from_cache() {
         panic!("round 1: alice never connected to bob\n--- alice ---\n{a}\n--- bob ---\n{b}");
     }
 
-    // ─── Assert: alice cached bob's address ─────────────────────────
+    // Assert: alice cached bob's address
     // address_cache.py:67. The file exists. Contents: one line,
     // `127.0.0.1:BOBPORT` (SocketAddr::Display format).
     //
@@ -229,7 +227,7 @@ fn restart_dials_from_cache() {
     let expected = format!("tinc-addrcache 1\n127.0.0.1:{}\n", bob.port);
     assert_eq!(contents, expected, "cache file should have bob's address");
 
-    // ─── Assert: bob did NOT cache alice's outgoing address ─────────
+    // Assert: bob did NOT cache alice's outgoing address
     // address_cache.py:70. Bob is listener; alice dialed FROM an
     // ephemeral port. `on_ack` (`connect.rs`) only caches when
     // `conn.outgoing` is `Some`. Bob has no Outgoing for alice. No
@@ -246,7 +244,7 @@ fn restart_dials_from_cache() {
         );
     }
 
-    // ─── Round 2: delete cache dir, reconnect, dir recreated ────────
+    // Round 2: delete cache dir, reconnect, dir recreated
     // address_cache.py:80. Same config — `Address =` still present.
     // Just proves `save()` does `create_dir_all`.
     std::fs::remove_dir_all(alice.confbase.join("addrcache")).unwrap();
@@ -280,7 +278,7 @@ fn restart_dials_from_cache() {
         "cache dir should be recreated by save() create_dir_all"
     );
 
-    // ─── Round 3: NO `Address =` in hosts/. Dial from cache. ────────
+    // Round 3: NO `Address =` in hosts/. Dial from cache.
     // address_cache.py:87-96. THE assertion. Rewrite alice's
     // `hosts/bob` without the `Address =` line. ConnectTo stays.
     // `resolve_config_addrs()` returns empty.

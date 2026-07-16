@@ -38,8 +38,8 @@ use super::node::*;
 ///
 /// ## The first packet is dropped
 ///
-/// `send_sptps_packet:684` (`if(!validkey) return`). The C buffers
-/// nothing; the first packet kicks `send_req_key` and is dropped. We
+/// Without validkey nothing is buffered; the first packet kicks
+/// `send_req_key` and is dropped. We
 /// wait for `validkey` (poll `dump nodes` for status bit 1), THEN
 /// send the packet that actually crosses.
 #[test]
@@ -49,13 +49,13 @@ fn first_packet_across_tunnel() {
     let alice = Node::new(tmp.path(), "alice", 0xA7);
     let bob = Node::new(tmp.path(), "bob", 0xB7);
 
-    // ─── socketpairs: one per daemon ────────────────────────────
+    // socketpairs: one per daemon
     // [0] = test end (we read/write IP packets), [1] = daemon end
     // (FdTun wraps it). SOCK_SEQPACKET for datagram boundaries.
     let (alice_tun, alice_far) = sockpair_datagram();
     let (bob_tun, bob_far) = sockpair_datagram();
 
-    // ─── configs: subnets pin route() decisions ────────────────
+    // configs: subnets pin route() decisions
     // alice owns 10.0.0.1/32; bob owns 10.0.0.2/32. A packet to
     // 10.0.0.2 routes Forward{to: bob} on alice's side, then
     // Forward{to: myself} on bob's side.
@@ -64,7 +64,7 @@ fn first_packet_across_tunnel() {
     bob.write_config(&alice, false);
     alice.write_config(&bob, true);
 
-    // ─── spawn ──────────────────────────────────────────────────
+    // spawn
     let mut bob_child = bob.spawn_with_fd(&bob_far);
     assert!(
         wait_for_file(&bob.socket),
@@ -83,7 +83,7 @@ fn first_packet_across_tunnel() {
     }
     drop(alice_far);
 
-    // ─── wait for meta-conn handshake (chunk-6 milestone) ────────
+    // wait for meta-conn handshake
     let mut alice_ctl = alice.ctl();
     let mut bob_ctl = bob.ctl();
 
@@ -97,7 +97,7 @@ fn first_packet_across_tunnel() {
         if a_ok && b_ok { Some(()) } else { None }
     });
 
-    // ─── kick the per-tunnel handshake ──────────────────────────
+    // kick the per-tunnel handshake
     // Send one packet to alice's TUN. `route()` says Forward{to:
     // bob}; `send_sptps_packet`'s PACKET 17 short-circuit fires
     // (direct conn, minmtu=0) so the kick is DELIVERED, not dropped.
@@ -111,7 +111,7 @@ fn first_packet_across_tunnel() {
     let kick_pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"kick");
     write_fd(&alice_tun, &kick_pkt);
 
-    // ─── wait for validkey ──────────────────────────────────────
+    // wait for validkey
     // Status bit 1 (validkey) = per-tunnel SPTPS handshake done.
     // BOTH sides need it (bob is responder; his `HandshakeDone`
     // fires when he gets alice's SIG via ANS_KEY). The handshake
@@ -141,7 +141,7 @@ fn first_packet_across_tunnel() {
     let kicked = poll_until(Duration::from_secs(5), || read_fd_nb(&bob_tun));
     assert_eq!(kicked, kick_pkt, "kick packet went via PACKET 17");
 
-    // ─── THE PACKET ─────────────────────────────────────────────
+    // THE PACKET
     // Now validkey is set. Send a packet; it crosses.
     let payload = b"hello from alice";
     let ip_pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], payload);
@@ -165,7 +165,7 @@ fn first_packet_across_tunnel() {
     // The payload is at the IP-header offset (20 bytes).
     assert_eq!(&recv[20..], payload);
 
-    // ─── traffic counters bumped ────────────────────────────────
+    // traffic counters bumped
     // alice: out_packets/out_bytes for bob ≥ 1. bob: in_packets/
     // in_bytes for alice ≥ 1. The kick packet also counts (it was
     // counted at `send_packet:1582` BEFORE the validkey gate at
@@ -199,7 +199,7 @@ fn first_packet_across_tunnel() {
         "bob in counters: {b_in_p}/{b_in_b}; nodes: {b_nodes:?}"
     );
 
-    // ─── REQ_DUMP_TRAFFIC ────────────────────────────────────────
+    // REQ_DUMP_TRAFFIC
     // Format-is-contract: `"18 13 NAME in_p in_b out_p out_b"`. Same counters as the dump-nodes tail
     // (both read `n->in_packets` etc) so cross-check exact values.
     // Row count = node count (C iterates `node_tree`: includes
@@ -242,11 +242,9 @@ fn first_packet_across_tunnel() {
     // udp_confirmed (bit 7) is NOT asserted: with the
     // `data.len() > minmtu(=0)` gate now wired, → PACKET 17 over
     // the meta-conn, not UDP. minmtu only goes nonzero after PMTU
-    // converges (separate from validkey). The C would do the same.
-    // The previous assert relied on the PACKET 17 send path being
-    // stubbed (every pre-PMTU packet went UDP-SPTPS instead).
+    // converges (separate from validkey).
 
-    // ─── stderr: the SPTPS-key-exchange-successful log ──────────
+    // stderr: the SPTPS-key-exchange-successful log
     drop(alice_ctl);
     drop(bob_ctl);
     drop(alice_tun);
@@ -317,7 +315,7 @@ fn compression_roundtrip() {
     let mut alice_ctl = alice.ctl();
     let mut bob_ctl = bob.ctl();
 
-    // ─── reachable + validkey, same dance as first_packet ────────
+    // reachable + validkey, same dance as first_packet
     poll_until(Duration::from_secs(10), || {
         let a = alice_ctl.dump(3);
         let b = bob_ctl.dump(3);
@@ -349,7 +347,7 @@ fn compression_roundtrip() {
         panic!("validkey timed out;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
     }
 
-    // ─── negotiated levels in dump_nodes ──────────────────────────
+    // negotiated levels in dump_nodes
     // The `compression` column (body token 8) is `n->outcompression`
     // — the level the PEER asked for. alice's row for bob = 12 (LZ4,
     // bob's `Compression = 12`); bob's row for alice = 6 (zlib).
@@ -378,7 +376,7 @@ fn compression_roundtrip() {
         "bob should compress towards alice at zlib-6; rows:\n{b_nodes:#?}"
     );
 
-    // ─── alice → bob: LZ4-compressed on the wire ──────────────────
+    // alice → bob: LZ4-compressed on the wire
     // 200 zeros: LZ4 crushes to ~20 bytes. `compressed.len() <
     // origlen` triggers; PKT_COMPRESSED is set; bob decompresses
     // at incompression=12.
@@ -395,7 +393,7 @@ fn compression_roundtrip() {
         recv.len()
     );
 
-    // ─── bob → alice: zlib-6 compressed on the wire ───────────────
+    // bob → alice: zlib-6 compressed on the wire
     // The reverse direction. Bob compresses at 6 (alice's ask);
     // alice decompresses at incompression=6.
     let ip_pkt2 = mk_ipv4_pkt([10, 0, 0, 2], [10, 0, 0, 1], &payload);
@@ -457,7 +455,7 @@ fn ipv6_unreachable_builds_icmpv6() {
     }
     drop(alice_far);
 
-    // ─── craft a minimal IPv6 packet ───────────────────────────
+    // craft a minimal IPv6 packet
     // FdTun reads RAW IP bytes (no ether, no tun_pi); it synthesizes
     // the ether header from byte 0's version nibble. So we send a
     // 40-byte IPv6 header + payload.
@@ -479,11 +477,11 @@ fn ipv6_unreachable_builds_icmpv6() {
 
     write_fd(&alice_tun, &ipv6);
 
-    // ─── read back the ICMP reply ──────────────────────────────
+    // read back the ICMP reply
     // FdTun::write strips the 14-byte ether header. We get raw IP.
     let reply = poll_until(Duration::from_secs(5), || read_fd_nb(&alice_tun));
 
-    // ─── assert: it's ICMPv6 ───────────────────────────────────
+    // assert: it's ICMPv6
     // IPv6 header: byte 0 = 0x6?, byte 6 = next-header.
     // ICMPv6 next-header = 58 (RFC 4443).
     // ICMPv6 message starts at byte 40: type, code, checksum.
@@ -610,12 +608,12 @@ fn keyexpire_forces_rekey() {
     // Drain the kick (PACKET 17 delivers it via meta-conn).
     let _ = poll_until(Duration::from_secs(5), || read_fd_nb(&bob_tun));
 
-    // ─── wait past KeyExpire (1s) + rekey RTT ──────────────────
+    // wait past KeyExpire (1s) + rekey RTT
     // Timer fires at +1s; `on_keyexpire` → `send_req_key` (fresh
     // handshake, ~ms on loopback).
     std::thread::sleep(Duration::from_secs(2));
 
-    // ─── packet crosses under the NEW key ──────────────────────
+    // packet crosses under the NEW key
     // KeyExpire=1 keeps re-firing; retry the write so it can't land
     // in the brief `!validkey` window.
     let pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"post-rekey");
@@ -625,7 +623,7 @@ fn keyexpire_forces_rekey() {
     });
     assert_eq!(recv, pkt, "post-rekey packet body mismatch");
 
-    // ─── stderr: the timer fired, the rekey happened ───────────
+    // stderr: the timer fired, the rekey happened
     drop(alice_ctl);
     drop(bob_ctl);
     drop(alice_tun);

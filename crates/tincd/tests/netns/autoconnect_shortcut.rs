@@ -3,7 +3,7 @@
 //!
 //! `alice — {mid,mid2,mid3} — bob` with bob's UDP blackholed: alice's
 //! data to bob rides `SPTPS_PACKET` over TCP through mid at 2× RTT,
-//! forever, because upstream `do_autoconnect` is satisfied at
+//! forever, because plain autoconnect is satisfied at
 //! degree ≥3 and never looks at the data plane.
 //!
 //! Three hubs (not one) so alice reaches `nc=3` and the shortcut arm
@@ -135,7 +135,7 @@ fn autoconnect_shortcut_promotes_hot_relay() {
 
     let mut alice_ctl = alice.ctl();
 
-    // ─── mesh up: bob reachable (via mid), alice at nc≥3 ────────
+    // mesh up: bob reachable (via mid), alice at nc≥3
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         poll_until(Duration::from_secs(10), || {
             let a = alice_ctl.dump(3);
@@ -166,7 +166,7 @@ fn autoconnect_shortcut_promotes_hot_relay() {
         "precondition: alice must not be directly connected to bob yet"
     );
 
-    // ─── flood alice→bob above RELAY_HI (32 KiB/s) ──────────────
+    // flood alice→bob above RELAY_HI (32 KiB/s)
     // 0.01s × 1000B payload ≈ 100 KiB/s. Runs in background.
     let mut flood = Command::new("ping")
         .args(["-i", "0.01", "-s", "1000", "-q", "10.42.0.2"])
@@ -197,7 +197,7 @@ fn autoconnect_shortcut_promotes_hot_relay() {
         );
     }
 
-    // ─── flood stopped → shortcut dropped ───────────────────────
+    // flood stopped → shortcut dropped
     // min_hold (60s post-activation) must elapse first, then
     // tx_rate decays ×0.7/tick; from ~100 KiB/s to <4 KiB/s ≈ 9
     // ticks ≈ 45s. nc=4>D_LO so the idle-reap arm fires.
@@ -349,7 +349,7 @@ fn shortcut_survives_traffic_gap() {
     }
     assert!(!has_direct_conn(&mut alice_ctl, "bob"));
 
-    // ─── flood → shortcut activates ──────────────────────────────
+    // flood → shortcut activates
     let mut flood = Command::new("ping")
         .args(["-i", "0.01", "-s", "1000", "-q", "10.42.0.2"])
         .stdout(Stdio::null())
@@ -376,7 +376,7 @@ fn shortcut_survives_traffic_gap() {
         );
     }
 
-    // ─── 30s gap (no traffic) ───────────────────────────────────
+    // 30s gap (no traffic)
     // Shorter than min_hold (60s) — the conn must stay up the whole
     // time. Poll the conn list so a flap is caught immediately, not
     // just inferred from the activation count at the end.
@@ -390,7 +390,7 @@ fn shortcut_survives_traffic_gap() {
         std::thread::sleep(Duration::from_millis(500));
     }
 
-    // ─── resume flood briefly ────────────────────────────────────
+    // resume flood briefly
     let mut flood2 = Command::new("ping")
         .args(["-i", "0.01", "-s", "1000", "-q", "-w", "10", "10.42.0.2"])
         .stdout(Stdio::null())

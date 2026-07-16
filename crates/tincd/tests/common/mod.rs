@@ -44,7 +44,7 @@ macro_rules! tmp {
     };
 }
 
-// ═══════════════════════════ tempdir ═══════════════════════════════
+// tempdir
 
 /// Hand-rolled tempdir. Thread id + PID in the name → parallel
 /// tests (across threads AND across `cargo nextest`'s per-test
@@ -93,7 +93,7 @@ impl Drop for TmpGuard {
     }
 }
 
-// ═══════════════════════════ tiny utilities ════════════════════════
+// tiny utilities
 
 /// `CARGO_BIN_EXE_tincd` — the binary cargo just built.
 pub fn tincd_bin() -> PathBuf {
@@ -224,7 +224,7 @@ pub fn read_tcp_addr(pidfile: &Path) -> std::net::SocketAddr {
     format!("{host}:{port}").parse().expect("parseable v4 addr")
 }
 
-// ═══════════════════════════ polling ═══════════════════════════════
+// polling
 
 /// Poll for a file to exist. The daemon writes the control socket
 /// in `setup()`; this is the readiness signal. 5s default — typical
@@ -261,7 +261,7 @@ pub fn poll_until<T>(timeout: Duration, mut f: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-// ═══════════════════════════ crypto bits ═══════════════════════════
+// crypto bits
 
 /// Derive the public key from a seed without keeping a `SigningKey`
 /// around. The cross-registration in every `write_config` does
@@ -288,10 +288,10 @@ pub fn write_ed25519_privkey(confbase: &Path, seed: &[u8; 32]) {
     tinc_conf::write_pem(&mut w, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();
 }
 
-// ═══════════════════════════ control client ════════════════════════
+// control client
 
 /// Control-socket client. Same wire protocol both Rust and C tincd
-/// (ours was transcribed from the C's `control.c`).
+/// (identical to the C tincd control protocol).
 ///
 /// Decoupled from any `Node` struct: each test file has a different
 /// `Node`, but they all expose `socket: PathBuf` and `pidfile:
@@ -400,7 +400,7 @@ pub fn node_status(rows: &[String], name: &str) -> Option<u32> {
     })
 }
 
-// ═══════════════════════════ SPTPS peer fixture ═══════════════════
+// SPTPS peer fixture
 //
 // Shared by `stop.rs::{peer_ack_exchange, peer_edge_triggers_
 // reachable, pcap_captures_tcp_packet}`. The first ~130 lines of
@@ -501,7 +501,7 @@ impl PeerFixture {
         let pidfile = tmp.path().join("tinc.pid");
         let socket = tmp.path().join("tinc.socket");
 
-        // ─── config: daemon's tinc.conf + our hosts/testpeer ───
+        // config: daemon's tinc.conf + our hosts/testpeer
         let daemon_pub = write_conf(&confbase);
         let our_key = SigningKey::from_seed(&[0x77; 32]);
         let our_pub = *our_key.public_key();
@@ -512,7 +512,7 @@ impl PeerFixture {
         )
         .unwrap();
 
-        // ─── spawn daemon (RUST_LOG=tincd=info captures the
+        // spawn daemon (RUST_LOG=tincd=info captures the
         //     "handshake completed" / "became reachable" lines) ───
         let mut child = tincd_at(&confbase, &pidfile, &socket)
             .env("RUST_LOG", "tincd=info")
@@ -528,7 +528,7 @@ impl PeerFixture {
 
         let tcp_addr = read_tcp_addr(&pidfile);
 
-        // ─── TCP connect + send ID line ───────────────────────────
+        // TCP connect + send ID line
         // `"%d %s %d.%d"` — we are testpeer, version 17.7. The
         // `&TcpStream` Read+Write impls handle the duplex; bind
         // immutable, use `(&stream).read()` / `(&stream).write_all()`.
@@ -538,7 +538,7 @@ impl PeerFixture {
             .unwrap();
         writeln!(&stream, "0 testpeer 17.7").unwrap();
 
-        // ─── recv daemon's ID line ────────────────────────────────
+        // recv daemon's ID line
         // CAN'T use BufReader.read_line: it buffers PAST the `\n`
         // and swallows the daemon's KEX bytes. Read raw, find `\n`.
         let mut buf = Vec::with_capacity(256);
@@ -553,7 +553,7 @@ impl PeerFixture {
         };
         assert_eq!(&buf[..id_end], b"0 testnode 17.7", "daemon ID reply");
 
-        // ─── SPTPS start: WE are the initiator ───────────────────
+        // SPTPS start: WE are the initiator
         // Label: `"tinc TCP key expansion <initiator> <responder>\0"`.
         // We connected (outgoing) → we are the initiator. The NUL
         // terminator matters — same construction as `proto::tcp_label`.
@@ -575,7 +575,7 @@ impl PeerFixture {
             }
         }
 
-        // ─── pump: feed daemon ↔ sptps until HandshakeDone + ACK ──
+        // pump: feed daemon ↔ sptps until HandshakeDone + ACK
         // Daemon's SIG arrives in the same flush as its `send_ack`;
         // both might land in one read or two. Loop until we have
         // BOTH `HandshakeDone` AND the first `Record` (the ACK).
@@ -736,7 +736,7 @@ impl PeerFixture {
     }
 }
 
-// ═══════════════════════════ stderr drain ══════════════════════════
+// stderr drain
 
 /// Child + background stderr drain. The C tincd at `-d5` floods
 /// stderr; with `PingTimeout = 1` it logs the full SPTPS dump
@@ -824,7 +824,7 @@ impl Drop for KillOnDrop {
     }
 }
 
-// ═══════════════════════════ linux netns helpers ═══════════════════
+// linux netns helpers
 // Only used by netns/crossimpl/throughput, all of which are already
 // `#![cfg(target_os = "linux")]`. cfg-gating here too keeps the
 // compile clean if someone ever drops the file-level cfg.
@@ -868,7 +868,7 @@ pub mod linux {
     }
 }
 
-// ═══════════════════════ macos utun helpers ═══════════════════════
+// macos utun helpers
 // Used by `macos_smoke.rs` and `benches/throughput_macos.rs`.
 
 #[cfg(target_os = "macos")]

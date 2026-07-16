@@ -412,7 +412,7 @@ impl Simulation {
     }
 }
 
-// ──────────────────────────── tests ─────────────────────────────
+// tests
 
 /// Timing-gap scenario that triggered issue #4.
 ///

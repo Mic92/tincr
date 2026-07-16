@@ -5,7 +5,7 @@
 //! works; `tinc-sptps`'s KAT vectors prove our crypto matches the C
 //! crypto byte-for-byte. None of that proves the WHOLE stack —
 //! ID/SPTPS-meta/ACK/ADD_EDGE/REQ_KEY/ANS_KEY/per-tunnel-SPTPS/
-//! UDP-packet-format — speaks the C's dialect end to end. This does.
+//! UDP-packet-format — interoperates with C tinc end to end. This does.
 //!
 //! ## Gate
 //!
@@ -41,11 +41,10 @@
 //!   `SigningKey::to_blob()` is exactly that). `Node::write_
 //!   config` is verbatim from `netns.rs`.
 //!
-//! - The C's control protocol is the SAME (it's where ours was
-//!   transcribed FROM). `Ctl::connect` against the C's socket works:
-//!   same `0 ^COOKIE 0` greeting, same `18 SUBTYPE` dump request,
-//!   same `18 SUBTYPE` terminator. The dump-node ROW format is also
-//!   identical (`node.c:dump_nodes` — we wire-match it).
+//! - The control protocol is identical, so `Ctl::connect` against
+//!   the C daemon's socket works: same `0 ^COOKIE 0` greeting, same
+//!   `18 SUBTYPE` dump request and terminator, same dump-node row
+//!   format.
 //!
 //! ## What `rust_dials_c` proves
 //!
@@ -54,21 +53,19 @@
 //! 1. **ID exchange**: our greeting line, their `id_h` parses it.
 //!    Their greeting, our `id_h` parses it. The `^` for control vs
 //!    `0` for protocol-17.x — all matches.
-//! 2. **Meta-SPTPS handshake**: the NUL byte in the TCP label
-//!    (`conn.c::SPTPS_LABEL` is `b"tinc TCP key exchange\0"` — the
-//!    C's `sptps_start` includes the NUL because it's `sizeof`, not
-//!    `strlen`). Our `tinc-sptps` byte-identical-wire-output test
-//!    pinned this in isolation; THIS pins it through the full conn
-//!    setup with all the framing.
+//! 2. **Meta-SPTPS handshake**: the TCP label must include the
+//!    trailing NUL (`b"tinc TCP key exchange\0"`) or the handshake
+//!    fails. Our `tinc-sptps` byte-identical-wire-output test pinned
+//!    this in isolation; THIS pins it through the full conn setup
+//!    with all the framing.
 //! 3. **ACK + graph**: ACK fields parse on both sides. `ADD_EDGE`/
 //!    `ADD_SUBNET` flood. Our `dump nodes` shows bob reachable
 //!    (status bit 4).
 //! 4. **`REQ_KEY`/`ANS_KEY`**: the SPTPS-handshake-via-`ANS_KEY` path.
-//!    THE PARSER FIX: upstream sends literal `"-1 -1 -1"` for
-//!    cipher/digest/maclen. Our `Tok::lu` was strict-u64 and
-//!    rejected `-1`. Now it's glibc-strtoul-compatible (negate as
-//!    unsigned → `u64::MAX`). Without that fix, this test would die
-//!    right after the per-tunnel SPTPS record exchange.
+//!    C tinc sends literal `"-1 -1 -1"` for cipher/digest/maclen, so
+//!    `Tok::lu` must be strtoul-compatible (negate as unsigned →
+//!    `u64::MAX`) rather than strict-u64. Without that, this test
+//!    dies right after the per-tunnel SPTPS record exchange.
 //! 5. **Per-tunnel SPTPS**: the data-channel handshake. Label is
 //!    `b"tinc UDP key exchange\0"` (also with the NUL). Status bit 1
 //!    (validkey) flips on both.
@@ -96,7 +93,7 @@ use common::{
     write_ed25519_privkey,
 };
 
-// ═════════════════════════ the env gate ══════════════════════════════════
+// the env gate
 // Separate from the bwrap re-exec gate. The env var has to survive
 // the re-exec (bwrap passes the parent env through `--bind / /`
 // doesn't filter it; we don't `.env_clear()`). Checked AFTER
@@ -108,7 +105,7 @@ fn c_tincd_bin() -> Option<PathBuf> {
     std::env::var_os("TINC_C_TINCD").map(PathBuf::from)
 }
 
-// ═════════════════════════ bwrap re-exec ═════════════════════════════════
+// bwrap re-exec
 // Same as netns.rs::enter_netns. Can't factor into tests/common/ —
 // the `--exact <test_name>` re-exec means the test name has to be
 // known statically, and the SKIP messages want the test name too.
@@ -326,7 +323,7 @@ impl Drop for NetNs {
     }
 }
 
-// ═══════════════════════════ daemon plumbing ═══════════════════════════════
+// daemon plumbing
 
 fn rust_tincd_bin() -> PathBuf {
     common::tincd_bin()
@@ -385,11 +382,9 @@ impl Node {
         Ctl::connect(&self.socket, &self.pidfile)
     }
 
-    /// Same on-disk layout for both impls. The C defaults to
-    /// `CONFBASE/ed25519_key.priv` and reads a 96-byte PEM body —
-    /// exactly `SigningKey::to_blob()`. The C's `linux/device.c`
-    /// honors
-    /// `Interface = ...` for TUNSETIFF the same way ours does.
+    /// Same on-disk layout for both impls: `CONFBASE/ed25519_key.priv`
+    /// with a 96-byte PEM body (`SigningKey::to_blob()`), and
+    /// `Interface = ...` honored for TUNSETIFF by both.
     fn write_config(&self, other: &Node, connect_to: bool) {
         std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
 
@@ -542,7 +537,7 @@ impl Node {
     }
 }
 
-// ═══════════════════════════════ the tests ═════════════════════════════════
+// the tests
 
 /// Shared body. `alice_impl` dials `bob_impl`. Asserts: handshake,
 /// validkey, ping. The two `#[test]` fns below just permute who's
@@ -567,7 +562,6 @@ fn run_crossimpl(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
     bob.write_config(&alice, false);
     alice.write_config(&bob, true);
 
-    // ─── spawn ──────────────────────────────────────────────────
     // Bob (listener) first. The C tincd writes pidfile + socket
     // during `setup_network` before entering the event loop, same
     // as ours; `wait_for_file(socket)` is the readiness signal for
@@ -588,9 +582,8 @@ fn run_crossimpl(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
         );
     }
 
-    // ─── carrier (TUNSETIFF fired on both) ──────────────────────
-    // The C's `linux/device.c::setup_device` does the same
-    // TUNSETIFF as our `LinuxTun::open`. Carrier flips identically.
+    // Carrier: both impls perform TUNSETIFF at startup, so carrier
+    // flips identically.
     if !wait_for_carrier("tincX0", Duration::from_secs(2)) {
         let asd = alice_child.kill_and_log();
         let bs = bob_child.kill_and_log();
@@ -603,8 +596,7 @@ fn run_crossimpl(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
 
     netns.place_devices();
 
-    // ─── meta handshake ─────────────────────────────────────────
-    // PROVES: ID exchange, meta-SPTPS (the NUL!), ACK fields,
+    // Meta handshake proves: ID exchange, meta-SPTPS (the NUL!), ACK fields,
     // ADD_EDGE/ADD_SUBNET parse on both sides, graph() runs.
     // Status bit 4 = reachable.
     let mut alice_ctl = alice.ctl();
@@ -625,17 +617,16 @@ fn run_crossimpl(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
         panic!("meta handshake timed out;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
     }
 
-    // ─── kick the per-tunnel handshake ──────────────────────────
+    // Kick the per-tunnel handshake.
     let _ = Command::new("ping")
         .args(["-c", "1", "-W", "1", "10.43.0.2"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
 
-    // ─── validkey ───────────────────────────────────────────────
-    // PROVES: REQ_KEY ext (SPTPS init), ANS_KEY parse (THE -1 fix),
+    // Validkey proves: REQ_KEY ext (SPTPS init), ANS_KEY parse (the -1 fix),
     // per-tunnel SPTPS handshake. Status bit 1 = validkey, bit 7 =
-    // udp_confirmed (`node.h:41`). Polling for validkey alone races:
+    // udp_confirmed. Polling for validkey alone races:
     // bob's ICMP echo-reply goes via PACKET 17 (now routed correctly,
     // but the validkey-only race remains for the FIRST few packets
     // while UDP is still discovering). Wait for udp_confirmed for
@@ -659,8 +650,7 @@ fn run_crossimpl(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetNs) {
         );
     }
 
-    // ─── THE PING ───────────────────────────────────────────────
-    // PROVES: UDP packet format (id6 prefix), SPTPS record-in-UDP
+    // The ping proves: UDP packet format (id6 prefix), SPTPS record-in-UDP
     // framing, decrypt, route, TUN write, kernel ICMP reply, the
     // whole backflow. Kernel-computed checksums on both ends; off-
     // by-one anywhere → silent timeout, not a malformed-packet log.
@@ -776,11 +766,10 @@ fn rust_dials_c_bare_address_port() {
     drop(netns);
 }
 
-/// C dials, Rust listens. Tests our RESPONDER paths. The C's
-/// `do_outgoing_connection` (`net_socket.c`) initiates; our `id_h`
-/// gets the responder-side SPTPS role; our `req_key_h` parses the
-/// C's `REQ_KEY` ext-SPTPS init; our `ans_key_h` parses the C's
-/// `-1 -1 -1` line — THE direct exercise of the `Tok::lu` fix.
+/// C dials, Rust listens. Tests our responder paths: `id_h` takes
+/// the responder-side SPTPS role, `req_key_h` parses the C daemon's
+/// `REQ_KEY` ext-SPTPS init, and `ans_key_h` parses its `-1 -1 -1`
+/// line — the direct exercise of the strtoul-compatible `Tok::lu`.
 #[test]
 fn c_dials_rust() {
     let Some(netns) = enter_netns("c_dials_rust") else {
@@ -789,12 +778,12 @@ fn c_dials_rust() {
     run_crossimpl("cdr", Impl::C, Impl::Rust, netns);
 }
 
-// ═══════════════════════ TCPOnly cross-impl ════════════════════════════
-// `PACKET 17` data-plane wire-compat. With a direct meta-conn AND
-// `origpkt->len > minmtu` the C short-circuits
-// to `send_tcppacket` BEFORE per-tunnel SPTPS. With `TCPOnly = yes`,
-// `try_tx_sptps:1477` returns early so PMTU never runs → minmtu
-// stays 0 → every packet > 0 → always PACKET 17, never UDP.
+// TCPOnly cross-impl
+// `PACKET 17` data-plane wire-compat. With a direct meta-conn and a
+// packet larger than minmtu, the sender short-circuits to a TCP
+// packet before per-tunnel SPTPS. With `TCPOnly = yes`, PMTU never
+// runs → minmtu stays 0 → every packet is "too big" → always
+// PACKET 17, never UDP.
 //
 // What this proves over `rust_dials_c`:
 //
@@ -803,9 +792,8 @@ fn c_dials_rust() {
 //   encrypted — "we don't really care about end-to-end security
 //   since we're not sending the message through any intermediate
 //   nodes"). Route it.
-// - **Send PACKET 17** (`net.rs::send_sptps_packet` `n->connection`
-//   gate): without per-tunnel SPTPS validkey, the ONLY way to reply
-//   is PACKET 17 back. `300a8e96` (SPTPS_PACKET 21) does NOT cover
+// - **Send PACKET 17**: without per-tunnel SPTPS validkey, the only
+//   way to reply is PACKET 17 back. SPTPS_PACKET 21 does not cover
 //   this — 21 is for relays (no direct conn).
 //
 // SIMPLER than the router-mode tests: no validkey poll (per-tunnel
@@ -855,11 +843,10 @@ fn run_crossimpl_tcponly(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: Net
 
     netns.place_devices();
 
-    // ─── meta handshake (only readiness gate) ─────────────────────
-    // Status bit 4 = reachable. With TCPOnly + direct neighbor,
-    // `try_tx_sptps` returns early; per-tunnel SPTPS NEVER
-    // starts. validkey stays 0 forever. The data plane is PACKET 17
-    // exclusively, riding the meta-SPTPS — reachable IS the gate.
+    // Meta handshake is the only readiness gate here. Status bit 4 =
+    // reachable. With TCPOnly + direct neighbor, per-tunnel SPTPS
+    // never starts and validkey stays 0 forever; the data plane is
+    // PACKET 17 exclusively, riding the meta-SPTPS.
     let mut alice_ctl = alice.ctl();
     let mut bob_ctl = bob.ctl();
 
@@ -878,10 +865,9 @@ fn run_crossimpl_tcponly(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: Net
         panic!("meta handshake timed out;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
     }
 
-    // ─── THE PING ───────────────────────────────────────────────
-    // PROVES: PACKET 17 receive → forward_packet → TUN write →
-    // kernel ICMP reply → PACKET 17 send back. Both directions of
-    // the `n->connection` short-circuit. Any silent drop → timeout.
+    // The ping proves: PACKET 17 receive → forward_packet → TUN write →
+    // kernel ICMP reply → PACKET 17 send back, in both directions.
+    // Any silent drop → timeout.
     let ping = Command::new("ping")
         .args(["-c", "3", "-W", "2", "10.43.0.2"])
         .output()
@@ -909,8 +895,9 @@ fn run_crossimpl_tcponly(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: Net
 }
 
 /// Rust dials, C listens, `TCPOnly = yes`. Tests our PACKET 17
-/// SEND path: alice (Rust) originates the ICMP echo-req, no
-/// validkey, must hit the `n->connection` gate before bailing.
+/// send path: alice (Rust) originates the ICMP echo-req with no
+/// validkey, so it must fall back to PACKET 17 over the direct
+/// meta connection.
 #[test]
 fn rust_dials_c_tcponly() {
     let Some(netns) = enter_netns_with("rust_dials_c_tcponly", DevMode::TunTcpOnly) else {
@@ -920,9 +907,9 @@ fn rust_dials_c_tcponly() {
 }
 
 /// C dials, Rust listens, `TCPOnly = yes`. Tests our PACKET 17
-/// RECEIVE path: bob (Rust) gets the C's `PACKET 17 <len>` + raw
-/// frame inside the next meta-SPTPS record. THE regression test
-/// for the silent drop at `metaconn.rs::tcplen != 0`.
+/// receive path: bob (Rust) gets `PACKET 17 <len>` + raw frame
+/// inside the next meta-SPTPS record. Regression test for the
+/// silent drop in the `metaconn.rs` `tcplen != 0` handling.
 #[test]
 fn c_dials_rust_tcponly() {
     let Some(netns) = enter_netns_with("c_dials_rust_tcponly", DevMode::TunTcpOnly) else {
@@ -931,32 +918,23 @@ fn c_dials_rust_tcponly() {
     run_crossimpl_tcponly("cdrt", Impl::C, Impl::Rust, netns);
 }
 
-// ────────────────────────────────────────────────────────────────────
 // TODO(chunk-12-tcp-fallback): SPTPS_PACKET 21 cross-impl wire test
 //
-// Can't be done in 2-node form. `if(n->connection && origpkt->len >
-// n->minmtu) send_tcppacket()` short-circuits to `PACKET 17` for
-// direct neighbors before reaching
-// `sptps_send_record` → `send_sptps_data` → `:975` binary path.
-// With `TCPOnly = yes`, `try_tx_sptps:1477` also returns early so
-// `minmtu` stays 0 — every packet > 0, always PACKET 17.
-//
-// `SPTPS_PACKET 21` only fires when `n->connection == NULL` (no
-// direct meta-conn), i.e. 3-node alice → mid → bob with bob (C)
-// routing to alice through mid. Then bob's `:725` is false, bob's
-// `sptps_send_record` runs, the Wire callback hits `send_sptps_data`,
-// `:974` go_tcp (minmtu=0 or tcponly), `:975` binary path. Mid (Rust)
-// receives `21 LEN` + raw blob — the `feed()` do-while.
+// Can't be done in 2-node form: with a direct meta connection the
+// sender short-circuits to PACKET 17. SPTPS_PACKET 21 only fires
+// when there is no direct meta-conn, i.e. a 3-node alice → mid → bob
+// setup with bob (C) routing to alice through mid; mid (Rust) then
+// receives `21 LEN` + raw blob.
 //
 // The architectural fix (peek for "21 " inside `feed()`, eat raw blob
 // before next `sptps.receive()`) is unit-tested in `conn.rs::
-// feed_sptpslen_then_record` — the same chunk has [SPTPS-framed
+// feed_sptpslen_then_record`: a stream with [SPTPS-framed
 // "21 11\n" | 11 raw bytes | SPTPS-framed PING], asserts events =
 // [Blob(11), Record(PING)] without Dead. The wire-compat proof needs
 // the 3-node scaffold; same shape as `two_daemons.rs::three_daemon_
 // relay` but with C bob.
 
-// ═══════════════════════ RMODE_SWITCH cross-impl ════════════════════════
+// RMODE_SWITCH cross-impl
 // `route_mac.rs` daemon wire-up. The C side already works; this is
 // the wire-compat proof.
 //
@@ -965,10 +943,9 @@ fn c_dials_rust_tcponly() {
 // - **MAC learning gossip**: alice's kernel ARPs for 10.43.0.2 over
 //   the TAP. Our `route_mac` sees `from_myself=true`, returns
 //   `LearnAction::New(alice's-tap-mac)`. Daemon sends `ADD_SUBNET`
-//   with `Subnet::Mac{addr: ..., weight: 10}`. Bob (C) parses it
-//   (`add_subnet_h`), routes the ARP
-//   reply back to alice by MAC. Without correct `Subnet::Mac` wire
-//   format → ARP times out, no ping.
+//   with `Subnet::Mac{addr: ..., weight: 10}`. Bob (C) parses it and
+//   routes the ARP reply back to alice by MAC. Without correct
+//   `Subnet::Mac` wire format → ARP times out, no ping.
 // - **`Broadcast` dispatch**: the FIRST ARP request has dst-MAC
 //   ff:ff:ff:ff:ff:ff. `route_mac` returns `RouteResult::Broadcast`.
 //   Daemon `broadcast_packet`s it to bob.
@@ -1005,8 +982,7 @@ fn run_crossimpl_switch(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetN
         );
     }
 
-    // ─── meta handshake (mode-agnostic) ──────────────────────────
-    // BEFORE place_devices: TAP devices are still down (see
+    // Meta handshake before place_devices: TAP devices are still down (see
     // NetNs::setup), so neither kernel is emitting spontaneous
     // traffic. The meta handshake (TCP, ID/SPTPS/ACK/ADD_EDGE)
     // completes in peace.
@@ -1038,7 +1014,7 @@ fn run_crossimpl_switch(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetN
         panic!("alice carrier;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
     }
 
-    // ─── kick the per-tunnel handshake ──────────────────────────
+    // Kick the per-tunnel handshake:
     // alice's kernel ARPs for 10.43.0.2 → ARP frame to tincS0 →
     // forward_packet → route_mac → Broadcast → try_tx → REQ_KEY.
     // Only alice originates here (bob's TAP just came up in its
@@ -1051,7 +1027,7 @@ fn run_crossimpl_switch(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetN
         .stderr(Stdio::null())
         .status();
 
-    // ─── validkey + udp_confirmed (mode-agnostic) ───────────────
+    // Wait for validkey + udp_confirmed on both sides.
     let validkey = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         poll_until(Duration::from_secs(10), || {
             let a = alice_ctl.dump(3);
@@ -1068,8 +1044,7 @@ fn run_crossimpl_switch(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetN
         panic!("validkey/udp_confirmed timed out;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
     }
 
-    // ─── THE PING ───────────────────────────────────────────────
-    // Kernel ARPs (TAP) → route_mac sees ff:ff:ff:ff:ff:ff →
+    // The ping: kernel ARPs (TAP) → route_mac sees ff:ff:ff:ff:ff:ff →
     // Broadcast → bob's kernel replies → ADD_SUBNET gossip →
     // ICMP unicast routes by MAC. Any Subnet::Mac wire mismatch →
     // ARP times out → ping fails.
@@ -1097,8 +1072,7 @@ fn run_crossimpl_switch(tag: &str, alice_impl: Impl, bob_impl: Impl, netns: NetN
 
     eprintln!("{}", String::from_utf8_lossy(&ping.stdout));
 
-    // ─── Prove learn_mac fired ──────────────────────────────────
-    // Ctl dump 5 = subnets (`REQ_DUMP_SUBNETS`).
+    // Prove learn_mac fired. Ctl dump 5 = subnets (`REQ_DUMP_SUBNETS`).
     // MAC subnets format with single colons (xx:xx:xx:xx:xx:xx);
     // IPv6 has double-colons. Filter for `:` without `::`. After a
     // successful ping there should be at least one MAC subnet
@@ -1132,10 +1106,10 @@ fn rust_dials_c_switch() {
     run_crossimpl_switch("rds", Impl::Rust, Impl::C, netns);
 }
 
-/// C dials, Rust listens. Switch mode. Tests our RESPONDER-side
-/// `route_mac` broadcast (the C's first ARP arrives over the wire;
-/// our `forward_packet` with `from = Some(peer)` must echo to TAP
-/// AND forward to the MST — which is just back to C in 2-node).
+/// C dials, Rust listens. Switch mode. Tests our responder-side
+/// `route_mac` broadcast: the peer's first ARP arrives over the
+/// wire; our `forward_packet` with `from = Some(peer)` must echo to
+/// TAP AND forward to the MST (just back to the peer in 2-node).
 #[test]
 fn c_dials_rust_switch() {
     let Some(netns) = enter_netns_with("c_dials_rust_switch", DevMode::Tap) else {

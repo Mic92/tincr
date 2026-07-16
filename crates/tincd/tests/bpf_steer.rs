@@ -46,7 +46,7 @@ use std::time::Duration;
 use tinc_device::{Device, DeviceConfig, Mode, Tun, VNET_HDR_LEN};
 use tincd::shard::bpf::{open_reuseport_group, tunsetsteeringebpf};
 
-// ════════════════════════ bwrap re-exec wrapper ══════════════════════
+// bwrap re-exec wrapper
 
 fn enter_netns(test_name: &str) -> bool {
     if std::env::var_os("BWRAP_INNER").is_some() {
@@ -112,7 +112,7 @@ fn run_ip(args: &[&str]) {
     assert!(status.success(), "ip {args:?} failed: {status:?}");
 }
 
-// ═══════════ Test 1: cBPF steers by src_id6 prefix ═══════════════════
+// Test 1: cBPF steers by src_id6 prefix
 //
 // The cBPF prog loads a 4-byte word at payload offset 6. `BPF_LD|
 // BPF_W|BPF_ABS` does ntohl: A = (p[6]<<24)|(p[7]<<16)|(p[8]<<8)|p[9].
@@ -139,7 +139,7 @@ fn cbpf_steers_by_src_id6() {
          cBPF prog: A = ntohl(*(u32*)(payload+6)); return A % {N}"
     );
 
-    // ── sender: 100 packets, [dst_id6:6][src_id6:6][seq:1] ──────────
+    // sender: 100 packets, [dst_id6:6][src_id6:6][seq:1]
     // src_id6 = [0,0,0,i,r,r] so ntohl(word @6) = u32::from(i).
     // The word stops at byte 9; bytes 10–11 (the rest of src_id6)
     // are noise the prog never reads — set them to non-zero to
@@ -155,7 +155,7 @@ fn cbpf_steers_by_src_id6() {
     }
     std::thread::sleep(Duration::from_millis(50));
 
-    // ── drain each socket, record which packets landed where ────────
+    // drain each socket, record which packets landed where
     let mut by_sock: Vec<Vec<u8>> = vec![Vec::new(); N as usize];
     let mut buf = [0u8; 64];
     for (k, sock) in group.socks.iter().enumerate() {
@@ -173,7 +173,7 @@ fn cbpf_steers_by_src_id6() {
     }
     drop(group);
 
-    // ── Assert: packet i landed on socket (i % N), exactly. ─────────
+    // Assert: packet i landed on socket (i % N), exactly.
     let mut total = 0;
     let mut mismatches = Vec::new();
     for (k, received) in by_sock.iter().enumerate() {
@@ -210,7 +210,7 @@ fn cbpf_steers_by_src_id6() {
     );
 }
 
-// ══════════════ TUN hairpin echo helper ═════════════════════════════
+// TUN hairpin echo helper
 //
 // One netns, one TUN, no peer. Route 10.77.0.0/24 via the TUN; a
 // userspace echo reads any queue, swaps IPv4 src↔dst + TCP
@@ -259,7 +259,7 @@ impl HairpinEcho {
                     }
                     ecnt[k].fetch_add(1, Ordering::Relaxed);
 
-                    // ── swap IPv4 src↔dst, TCP sport↔dport ──────────
+                    // swap IPv4 src↔dst, TCP sport↔dport
                     let mut tmp = [0u8; 4];
                     tmp.copy_from_slice(&buf[ip + 12..ip + 16]);
                     buf.copy_within(ip + 16..ip + 20, ip + 12);
@@ -273,7 +273,7 @@ impl HairpinEcho {
                         buf[tcp + 2..tcp + 4].copy_from_slice(&tmp2);
                     }
 
-                    // ── write to the FIXED queue ────────────────────
+                    // write to the FIXED queue
                     // tun_get_user → tun_flow_update(rxhash, queue=
                     // write_queue). The kernel learns. Next TX on
                     // this flow: tun_automq_select_queue finds the
@@ -353,7 +353,7 @@ fn drive_tcp(port: u16, bytes: usize) -> bool {
     ok
 }
 
-// ═════════ Test 2: automq learns flow→queue from our writes ══════════
+// Test 2: automq learns flow→queue from our writes
 //
 // Echo writes EVERYTHING to queue 1. After the first SYN/SYN-ACK
 // roundtrip, the kernel has learned both 4-tuples → queue 1. All
@@ -429,7 +429,7 @@ fn automq_learns_from_write() {
     );
 }
 
-// ════════ Test 3: cold miss → write back → converged ════════════════
+// Test 3: cold miss → write back → converged
 //
 // Echo writes back to whichever queue it READ from (the natural
 // shard behavior: shard k decrypts → writes tun_fd[k]). Two
@@ -504,7 +504,7 @@ fn automq_cold_miss_converges() {
         drop(dups);
     });
 
-    // ── flow A: cold ────────────────────────────────────────────────
+    // flow A: cold
     let a_ok = drive_tcp(19992, 32 * 1024);
     assert!(a_ok, "flow A handshake failed");
     let [a_q0, a_q1] = [
@@ -512,7 +512,7 @@ fn automq_cold_miss_converges() {
         read_count[1].load(Ordering::Relaxed),
     ];
 
-    // ── flow B: also cold (different port → different rxhash) ───────
+    // flow B: also cold (different port → different rxhash)
     let b_ok = drive_tcp(19993, 32 * 1024);
     assert!(b_ok, "flow B handshake failed");
     std::thread::sleep(Duration::from_millis(100));

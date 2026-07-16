@@ -5,9 +5,9 @@
 //!
 //! These tests pin the protocol's **security boundary** — the cases
 //! where `id_h` MUST drop the connection rather than trust adversarial
-//! input. Chunk 4a landed all the gates (`dispatch.rs::handle_id`):
-//! own-ID rejection (`:495`), unknown-identity (`:587`), version
-//! rollback (`:606`). `stop.rs::peer_wrong_key_fails_sig` is the
+//! input. The gates live in `dispatch.rs::handle_id`: own-ID
+//! rejection, unknown-identity, version
+//! rollback. `stop.rs::peer_wrong_key_fails_sig` is the
 //! one existing S1 negative case (SIG verify); these add the
 //! pre-SPTPS gates.
 //!
@@ -170,20 +170,17 @@ fn assert_dropped(daemon: OneDaemon, id_line: &str, expect_reply: bool) -> Strin
     drain_stderr(daemon.child)
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // security.py ports
 
 /// Reject ID claiming our own name. Gate: `dispatch.rs::handle_id`
 /// `if name == ctx.my_name`.
 ///
 /// The daemon sees `"0 testnode 17.7\n"` — its OWN name. The
-/// peer-is-us check fires before `send_id` (the C orders the check
-/// at `:376`, BEFORE the version check at `:398` and `send_id` at
-/// `:451`). We get nothing back.
+/// peer-is-us check fires before `send_id`, so we get nothing back.
 ///
 /// Why this gate exists: a self-loop in the meta-graph would make
 /// every `ADD_EDGE` we broadcast come back via this peer, get
-/// re-broadcast, infinite. C rejects early.
+/// re-broadcast, infinite.
 #[test]
 fn own_id_rejected() {
     let d = OneDaemon::spawn("own-id", "");
@@ -206,15 +203,10 @@ fn own_id_rejected() {
 /// `dispatch.rs::handle_id` pubkey-load fails (the
 /// `let Some(ecdsa) = ecdsa else` arm).
 ///
-/// The C distinguishes "file missing" (`:428`) vs "file has no key"
-/// (the `read_ecdsa_public_key` fail). We collapse both into one
-/// error — see the comment at the `host_config` parse in `handle_id`.
-/// Either way: drop.
-///
-/// **Timing nuance**: the C's `:428` check is BEFORE the version
-/// check; our pubkey-load is AFTER the version check and AFTER
-/// `conn.name = name`. But still BEFORE the `send_id` reply. So:
-/// same observable behavior — no reply.
+/// "File missing" and "file has no key" collapse into one error —
+/// see the comment at the `host_config` parse in `handle_id`.
+/// Either way: drop before the `send_id` reply, so the observable
+/// behavior is no reply.
 #[test]
 fn unknown_id_rejected() {
     let d = OneDaemon::spawn("unknown-id", "");
@@ -235,13 +227,13 @@ fn unknown_id_rejected() {
 /// legacy entirely (`DISABLE_LEGACY` equivalent). The relevant
 /// gate is the version-minor check.
 ///
-/// We're stricter than upstream: `minor < 2` is reject (we don't
+/// We are stricter than C tinc: `minor < 2` is rejected (we don't
 /// speak legacy at any minor). The daemon never
 /// gets to the METAKEY line.
 ///
-/// **The catch**: the python sends to `foo` (the daemon's own name)
-/// AND `17.0`. Two gates fire; the C's `check_id` is first. We send a
-/// KNOWN peer name with `17.0` to isolate the version gate.
+/// **The catch**: the python sends the daemon's own name AND `17.0`,
+/// so two gates could fire. We send a KNOWN peer name with `17.0`
+/// to isolate the version gate.
 #[test]
 fn legacy_minor_rejected() {
     let tmp = tmp!("legacy-minor");
@@ -336,7 +328,7 @@ fn id_timeout_half_open_survives() {
     });
     let tcp_addr = read_tcp_addr(&pidfile);
 
-    // ─── connect, send ID, drain the reply, then DO NOTHING ───
+    // connect, send ID, drain the reply, then DO NOTHING
     let stream = TcpStream::connect(tcp_addr).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
@@ -371,7 +363,7 @@ fn id_timeout_half_open_survives() {
         String::from_utf8_lossy(&got[..got.len().min(40)])
     );
 
-    // ─── wait for the sweep to reap us ─────────────────────────
+    // wait for the sweep to reap us
     // PingTimeout=1; the sweep ticks every 1s. The pre-edge
     // timeout fires when `now - last_ping_time > pingtimeout`.
     // `last_ping_time` was set at accept time. After ~1s the conn
@@ -387,7 +379,7 @@ fn id_timeout_half_open_survives() {
     };
     assert!(eof, "sweep should have reaped the half-open conn");
 
-    // ─── daemon still alive + responsive after the reap ────────
+    // daemon still alive + responsive after the reap
     // The terminate path itself mustn't wedge the loop.
     assert!(
         child.try_wait().unwrap().is_none(),
@@ -406,7 +398,6 @@ fn id_timeout_half_open_survives() {
     let _ = child.wait();
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // splice.py / splice.c port
 
 /// `splice.py` / `splice.c` — the MITM relay. Two daemons (alice,
@@ -453,7 +444,7 @@ fn splice_mitm_rejected() {
 
     let tmp = tmp!("splice");
 
-    // ─── two-daemon setup (no ConnectTo on either side) ────────
+    // two-daemon setup (no ConnectTo on either side)
     // Same shape as `two_daemons.rs::Node` but inlined: we need
     // BOTH daemons to be PASSIVE (the relay is the initiator).
     // Pre-allocate ports so each daemon can bind a known port,
@@ -518,7 +509,7 @@ fn splice_mitm_rejected() {
     )
     .unwrap();
 
-    // ─── spawn both ────────────────────────────────────────────
+    // spawn both
     let mut alice_child = spawn_daemon(&alice.confbase, &alice.pidfile, &alice.socket);
     let mut bob_child = spawn_daemon(&bob.confbase, &bob.pidfile, &bob.socket);
 
@@ -539,7 +530,7 @@ fn splice_mitm_rejected() {
         ))
     });
 
-    // ─── the splice: connect to both, lie about identity ───────
+    // the splice: connect to both, lie about identity
     // To alice: pretend to be bob. To bob: pretend to be alice.
     // The cross-over.
     let to_alice = TcpStream::connect(("127.0.0.1", alice.port)).expect("connect alice");
@@ -554,7 +545,7 @@ fn splice_mitm_rejected() {
     writeln!(&to_alice, "0 bob 17.7").unwrap();
     writeln!(&to_bob, "0 alice 17.7").unwrap();
 
-    // ─── consume ID replies (read until '\n') ───────────────────
+    // consume ID replies (read until '\n')
     // Read byte-by-byte until `\n` — can't use BufReader (it
     // buffers past the `\n` into KEX bytes which
     // we then can't proxy). Same gotcha as `stop.rs:1028`.
@@ -562,7 +553,6 @@ fn splice_mitm_rejected() {
         let mut out = Vec::new();
         let mut b = [0u8; 1];
         loop {
-            // EXACT match for splice.c `:116`: `recv(sock[i], buf, 1, 0)`.
             match s.read(&mut b) {
                 Ok(0) => panic!("daemon closed before ID reply; got: {out:?}"),
                 Ok(_) => {
@@ -580,8 +570,7 @@ fn splice_mitm_rejected() {
     assert_eq!(alice_id, b"0 alice 17.7", "alice ID reply");
     assert_eq!(bob_id, b"0 bob 17.7", "bob ID reply");
 
-    // ─── proxy: spawn two threads, copy bytes each direction ────
-    // splice.c `:125-157` is a select() loop. Rust: two threads.
+    // Proxy: two threads copy bytes in each direction.
     // `TcpStream` impls Read/Write for `&TcpStream`; clone the
     // streams for the duplex split.
     //
@@ -635,7 +624,7 @@ fn splice_mitm_rejected() {
     let _ = t_ab.join();
     let _ = t_ba.join();
 
-    // ─── ASSERT: dump nodes on each shows 1 row (self only) ────
+    // ASSERT: dump nodes on each shows 1 row (self only)
     // `splice.py:85-86`. `REQ_DUMP_NODES = 3`. Row format
     // (`gossip.rs::dump_nodes`): `"18 3 NAME ID HOST port PORT ..."`.
     // Terminator: bare `"18 3"`.
@@ -692,7 +681,6 @@ fn splice_mitm_rejected() {
     );
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Adversarial-input regression: malformed protocol lines after ACK.
 //
 // `security.py` and the tests above probe the *pre-auth* gates
@@ -731,10 +719,10 @@ fn assert_malformed_record_drops_conn(tag: &str, body: &[u8]) {
     // sees only the close.
     let _ = fx.drain_records(300);
 
-    // ─── the malformed line ───
+    // the malformed line
     fx.send_record(body);
 
-    // ─── (a) connection dropped: EOF on the TCP stream ───
+    // (a) connection dropped: EOF on the TCP stream
     // The daemon may flush a few queued bytes before close (e.g.
     // a pending Wire frame); read until EOF or timeout.
     fx.stream
@@ -763,7 +751,7 @@ fn assert_malformed_record_drops_conn(tag: &str, body: &[u8]) {
         "{tag}: daemon did not drop conn after malformed record {body:?}"
     );
 
-    // ─── (b) process still alive ───
+    // (b) process still alive
     // Panic in a handler → process abort → try_wait returns Some.
     assert!(
         fx.child.try_wait().unwrap().is_none(),
@@ -771,7 +759,7 @@ fn assert_malformed_record_drops_conn(tag: &str, body: &[u8]) {
         fx.kill_and_stderr()
     );
 
-    // ─── (c) event loop still serving: fresh control dump works ───
+    // (c) event loop still serving: fresh control dump works
     let nodes = Ctl::connect(&fx.socket, &fx.pidfile).dump(3);
     assert!(
         nodes.iter().any(|r| r.contains("testnode")),

@@ -25,7 +25,7 @@ fn count_fds(pid: u32) -> usize {
         .unwrap_or(0)
 }
 
-// ═══════════════════════════════ 1. link flap ═════════════════════════════
+// 1. link flap
 
 /// Bring `lo` (the daemon↔daemon transport) down for 3s, back up.
 ///
@@ -60,7 +60,7 @@ fn stress_link_flap() {
         .expect("spawn ping");
     assert!(p.status.success(), "pre-flap ping failed");
 
-    // ─── flap ────────────────────────────────────────────────────
+    // flap
     // `lo down` blackholes 127.0.0.1. The kernel doesn't RST
     // existing TCP sessions on link-down; it just stops delivering.
     // The daemons must detect this themselves (PING timeout).
@@ -95,7 +95,7 @@ fn stress_link_flap() {
     run_ip(&["link", "set", "lo", "up"]);
     eprintln!("lo UP");
 
-    // ─── recover ─────────────────────────────────────────────────
+    // recover
     // alice's ConnectTo=bob outgoing re-fires (MaxTimeout=2 → next
     // attempt within 2s of the failed one). Then full handshake
     // again. Budget: 15s (2s backoff + handshake + udp_confirmed
@@ -139,7 +139,7 @@ fn stress_link_flap() {
         "post-flap ping failed;\n=== alice ===\n{alice_stderr}\n=== bob ===\n{bob_stderr}"
     );
 
-    // ─── log sequence ────────────────────────────────────────────
+    // log sequence
     // The expected trail. Substrings, not order: stderr is two
     // daemons interleaved by the kernel pipe scheduler.
     assert!(
@@ -159,7 +159,7 @@ fn stress_link_flap() {
     );
 }
 
-// ════════════════════════════ 2. asymmetric MTU ═══════════════════════════
+// 2. asymmetric MTU
 
 /// `lo` MTU clamped to 1400. The daemons' UDP traverses lo, so
 /// their PMTU discovery should converge to ≤ 1400 - 20 - 8 - 12 -
@@ -280,7 +280,7 @@ fn stress_asymmetric_mtu() {
     );
 }
 
-// ═══════════════════════ 3. handshake under loss ══════════════════════════
+// 3. handshake under loss
 
 /// 20% loss on `lo` BEFORE the daemons are up. `chaos.rs` applies
 /// netem AFTER validkey; this test does the opposite: prove the
@@ -424,7 +424,7 @@ fn stress_handshake_under_loss() {
     drop(netns);
 }
 
-// ════════════════════════ 4. rapid reconnect storm ════════════════════════
+// 4. rapid reconnect storm
 
 /// Kill+restart bob 10× in quick succession. alice is the observer.
 ///
@@ -449,7 +449,7 @@ fn stress_rapid_reconnect_storm() {
     let tmp = tmp!("storm");
     let mut rig = ChaosRig::setup_with(netns, &tmp, "PingInterval = 1\nMaxTimeout = 2\n");
 
-    // ─── baselines ──────────────────────────────────────────────
+    // baselines
     let alice_pid = rig.alice_pid();
     let fd_baseline = count_fds(alice_pid);
     eprintln!("alice fd baseline: {fd_baseline}");
@@ -459,7 +459,7 @@ fn stress_rapid_reconnect_storm() {
         "expected 2 edges at baseline (alice↔bob); got {edge_baseline}"
     );
 
-    // ─── the storm ──────────────────────────────────────────────
+    // the storm
     for i in 0..10 {
         eprintln!("── churn {i} ──");
         let _ = rig.kill_bob();
@@ -489,7 +489,7 @@ fn stress_rapid_reconnect_storm() {
         }
     }
 
-    // ─── settle + check ─────────────────────────────────────────
+    // settle + check
     // Let any in-flight terminate()/DEL_EDGE drain.
     std::thread::sleep(Duration::from_millis(500));
 
@@ -520,7 +520,7 @@ fn stress_rapid_reconnect_storm() {
     );
 }
 
-// ═════════════════════ 5. three-node relay, mid restart ═══════════════════
+// 5. three-node relay, mid restart
 
 /// alice ↔ mid ↔ bob (no direct alice↔bob). Real TUN on alice and
 /// bob (so we can ping); mid is `DeviceType = dummy`. Kill mid →
@@ -584,7 +584,7 @@ fn stress_relay_mid_restart() {
 
     let mut alice_ctl = alice.ctl();
 
-    // ─── mesh up ────────────────────────────────────────────────
+    // mesh up
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         poll_until(Duration::from_secs(10), || {
             let a = alice_ctl.dump(3);
@@ -642,7 +642,7 @@ fn stress_relay_mid_restart() {
         );
     }
 
-    // ─── kill mid ───────────────────────────────────────────────
+    // kill mid
     let _ = mid_child.kill();
     let mid_stderr1 = drain_stderr(mid_child);
     eprintln!("mid killed");
@@ -667,7 +667,7 @@ fn stress_relay_mid_restart() {
         );
     }
 
-    // ─── restart mid ────────────────────────────────────────────
+    // restart mid
     std::fs::remove_file(&mid.socket).ok();
     let mut mid_child = mid.spawn_with_log(log);
     assert!(
@@ -744,7 +744,7 @@ fn stress_relay_mid_restart() {
     drop(netns);
 }
 
-// ═════════════════════════ 6. idle PMTU convergence ═══════════════════════
+// 6. idle PMTU convergence
 
 /// Two directly-connected nodes, NO data traffic, only the
 /// keepalive `try_tx(.., mtu=false)` from `on_ping_tick`. After
@@ -829,7 +829,7 @@ fn stress_idle_pmtu_convergence() {
             .then_some(())
     });
 
-    // ─── idle ───────────────────────────────────────────────────
+    // idle
     // 12s. on_ping_tick runs try_tx(bob, false) each second
     // (validkey gate now passes). try_udp sends MIN_PROBE_SIZE
     // keepalives. mtu=false → p.tick() never runs → mtu stays 0.

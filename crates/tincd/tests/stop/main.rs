@@ -56,12 +56,11 @@ use common::write_ed25519_privkey;
 ///
 /// `Port` is HOST-tagged. Goes in `hosts/testnode`. The daemon's `read_host_config` merges it.
 ///
-/// `ed25519_key.priv` is required since chunk 4a (`net_setup.c`:803
-/// loads it; we forbid the legacy fallback). The key is deterministic
+/// `ed25519_key.priv` is required at setup (there is no legacy
+/// fallback). The key is deterministic
 /// (seeded from a constant) so tests are reproducible. Mode 0600 to
 /// avoid the perm warning. The daemon never USES this key in tests
-/// that don't peer-connect, but `setup()` loads it unconditionally
-/// (the C does too — you can't run tincd without a key).
+/// that don't peer-connect, but `setup()` loads it unconditionally.
 ///
 /// Returns the daemon's PUBLIC key. Tests that don't peer-connect
 /// ignore it; `peer_handshake_reaches_done` needs it for the SPTPS

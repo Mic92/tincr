@@ -171,10 +171,9 @@ fn mst_kat() {
     }
 }
 
-/// Delete-phase KAT: build, delete the listed edges (matching the C
-/// `edge_del` on the same indices), re-run sssp+mst, diff against the
-/// C's second snapshot. Regression-tests `del_edge` against the real
-/// `splay_delete` semantics.
+/// Delete-phase KAT: build, delete the listed edges, re-run
+/// sssp+mst, diff against the reference implementation's second
+/// snapshot. Regression-tests `del_edge`.
 #[test]
 fn del_kat() {
     let cases = cases();
