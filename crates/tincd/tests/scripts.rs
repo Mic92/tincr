@@ -120,7 +120,6 @@ impl Node {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Script appender + log parsing
 
 /// Write a 3-line shell appender. ALL scripts write to one log file:
@@ -224,7 +223,6 @@ where
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Test 1: tinc-up THEN subnet-up for OWN subnets at startup.
 //
 // `device_enable()` (= tinc-up) THEN subnet-up for every
@@ -259,7 +257,7 @@ fn tinc_up_then_own_subnet_up() {
         drain_stderr(alice_child)
     );
 
-    // ─── Event 0: tinc-up
+    // Event 0: tinc-up
     // Base env only: NAME + INTERFACE (`periodic.rs::run_script`).
     // NODE/SUBNET/WEIGHT/REMOTEADDRESS unset → empty.
     assert_eq!(events[0].script, "tinc-up", "first event must be tinc-up");
@@ -269,7 +267,7 @@ fn tinc_up_then_own_subnet_up() {
     assert_eq!(events[0].env["NODE"], "");
     assert_eq!(events[0].env["SUBNET"], "");
 
-    // ─── Events 1..3: subnet-up for OWN subnets
+    // Events 1..3: subnet-up for OWN subnets
     // NODE = our own name (`periodic.rs::run_subnet_script` sets
     // NODE=owner; here owner==myself). REMOTEADDRESS unset (the
     // `if owner != self.name` guard in `run_subnet_script` skips it).
@@ -295,7 +293,7 @@ fn tinc_up_then_own_subnet_up() {
         "events: {events:#?}"
     );
     // WEIGHT: per-subnet. 10.0.1.0/24#5 → "5"; fec0::/64 → "10"
-    // (we always pass the integer; the C passes "" for default,
+    // (we always pass the integer, even for the default weight —
     // doc'd at `run_subnet_script`).
     for ev in &subnet_ups {
         match ev.env["SUBNET"].as_str() {
@@ -308,13 +306,12 @@ fn tinc_up_then_own_subnet_up() {
     let _ = drain_stderr(alice_child);
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Test 2: host-up → hosts/NAME-up → subnet-up ORDER on connect.
 //
 // When a node becomes reachable:
-//   1. execute_script("host-up")
-//   2. execute_script("hosts/NAME-up")
-//   `:294`  subnet_update(n, NULL, true)  ─ loops subnet-up
+//   1. host-up
+//   2. hosts/NAME-up
+//   3. subnet-up for each of its subnets
 //
 // Our `gossip.rs` BecameReachable arm matches: `run_host_script`
 // (which fires both host-up AND hosts/NAME-up, in that order —
@@ -372,7 +369,7 @@ fn host_up_order_on_connect() {
         .position(|e| e.script == "subnet-up" && e.env["NODE"] == "bob")
         .unwrap_or_else(|| panic!("no subnet-up for bob; events: {events:#?}"));
 
-    // ─── ORDER
+    // ORDER
     assert!(
         host_up_idx < per_node_idx,
         "host-up must precede hosts/bob-up; got idx {host_up_idx} vs {per_node_idx}"
@@ -382,7 +379,7 @@ fn host_up_order_on_connect() {
         "hosts/bob-up must precede subnet-up; got idx {per_node_idx} vs {bob_subnet_idx}"
     );
 
-    // ─── host-up env (`periodic.rs::run_host_script`)
+    // host-up env (`periodic.rs::run_host_script`)
     let h = &events[host_up_idx];
     assert_eq!(h.env["NAME"], "alice");
     assert_eq!(h.env["NODE"], "bob");
@@ -392,13 +389,13 @@ fn host_up_order_on_connect() {
     assert_eq!(h.env["REMOTEADDRESS"], "127.0.0.1");
     assert_eq!(h.env["REMOTEPORT"], bob.port.to_string());
 
-    // ─── hosts/bob-up: same env as host-up (`run_host_script` reuses it)
+    // hosts/bob-up: same env as host-up (`run_host_script` reuses it)
     let p = &events[per_node_idx];
     assert_eq!(p.env["NODE"], "bob");
     assert_eq!(p.env["REMOTEADDRESS"], "127.0.0.1");
     assert_eq!(p.env["REMOTEPORT"], bob.port.to_string());
 
-    // ─── subnet-up for bob's subnet
+    // subnet-up for bob's subnet
     let s = &events[bob_subnet_idx];
     assert_eq!(s.env["NODE"], "bob");
     assert_eq!(s.env["SUBNET"], "10.0.2.0/24");
@@ -409,7 +406,6 @@ fn host_up_order_on_connect() {
     assert_eq!(s.env["REMOTEPORT"], bob.port.to_string());
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Test 3: host-down → hosts/NAME-down → subnet-down on disconnect.
 //
 // Same path, `reachable=false`. Our gossip.rs BecameUnreachable arm: `run_host_script(false, ...)` then subnet
@@ -479,7 +475,7 @@ fn host_down_order_on_disconnect() {
         .position(|e| e.script == "subnet-down" && e.env["NODE"] == "bob")
         .unwrap_or_else(|| panic!("no subnet-down for bob; down events: {down_events:#?}"));
 
-    // ─── ORDER
+    // ORDER
     assert!(
         host_down_idx < per_node_idx,
         "host-down must precede hosts/bob-down; idx {host_down_idx} vs {per_node_idx}"
@@ -489,7 +485,7 @@ fn host_down_order_on_disconnect() {
         "hosts/bob-down must precede subnet-down; idx {per_node_idx} vs {subnet_down_idx}"
     );
 
-    // ─── host-down env
+    // host-down env
     let h = &down_events[host_down_idx];
     assert_eq!(h.env["NODE"], "bob");
     // REMOTEADDRESS on host-down: BecameUnreachable reads the addr
@@ -502,13 +498,12 @@ fn host_down_order_on_disconnect() {
     // the deliberate choice to OMIT rather than pass `"unknown"`.)
     assert_eq!(h.env["REMOTEADDRESS"], "127.0.0.1");
 
-    // ─── subnet-down env
+    // subnet-down env
     let s = &down_events[subnet_down_idx];
     assert_eq!(s.env["NODE"], "bob");
     assert_eq!(s.env["SUBNET"], "10.0.2.0/24");
 }
 
-// ═══════════════════════════════════════════════════════════════════
 // Test 4: subnet-down for OWN subnets THEN tinc-down on shutdown.
 //
 // On shutdown (`close_network_connections`):
@@ -562,7 +557,7 @@ fn tinc_down_on_shutdown() {
         .position(|e| e.script == "tinc-down")
         .unwrap_or_else(|| panic!("no tinc-down; events: {down_events:#?}"));
 
-    // ─── ORDER: own subnet-down BEFORE tinc-down
+    // ORDER: own subnet-down BEFORE tinc-down
     // (subnet-down may `ip route del`; tinc-down brings the iface
     // down — routes referencing a downed iface vanish anyway, but
     // the C order is subnet-down first and that's what scripts in
@@ -572,13 +567,13 @@ fn tinc_down_on_shutdown() {
         "subnet-down must precede tinc-down; idx {subnet_down_idx} vs {tinc_down_idx}; events: {down_events:#?}"
     );
 
-    // ─── subnet-down env: NODE=self, SUBNET=ours.
+    // subnet-down env: NODE=self, SUBNET=ours.
     let s = &down_events[subnet_down_idx];
     assert_eq!(s.env["NODE"], "alice");
     assert_eq!(s.env["SUBNET"], "10.0.1.0/24");
     assert_eq!(s.env["REMOTEADDRESS"], "");
 
-    // ─── tinc-down env: base only.
+    // tinc-down env: base only.
     let t = &down_events[tinc_down_idx];
     assert_eq!(t.env["NAME"], "alice");
     assert_eq!(t.env["INTERFACE"], "dummy");

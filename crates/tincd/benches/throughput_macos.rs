@@ -84,7 +84,7 @@ mod bench {
         TmpGuard::new("thrmac", tag)
     }
 
-    // ═══════════════════════════ daemon plumbing ═════════════════════════════
+    // daemon plumbing
 
     /// Config both impls accept on Darwin: C `bsd/device.c` needs
     /// `DeviceType = utun` + `Device = utunN` (else falls through to
@@ -152,7 +152,7 @@ mod bench {
         ChildWithLog::spawn(child)
     }
 
-    // ═══════════════════════════ tunnel lifecycle ════════════════════════════
+    // tunnel lifecycle
 
     /// Two daemons + two configured utuns. Drop kills daemons
     /// (closing the kern-control fd reaps utun + its routes) and
@@ -205,7 +205,7 @@ mod bench {
         write_macos_config(&bob, &alice, BOB_IFACE, &format!("{BOB_IP}/32"), false);
         write_macos_config(&alice, &bob, ALICE_IFACE, &format!("{ALICE_IP}/32"), true);
 
-        // ─── spawn ──────────────────────────────────────────────────
+        // spawn
         let bob_child = spawn(&bob, bob_impl);
         let bob_pid = bob_child.pid();
         assert!(
@@ -233,7 +233,7 @@ mod bench {
             bob_pid,
         };
 
-        // ─── utun up + addresses + crossed host routes ─────────────
+        // utun up + addresses + crossed host routes
         if !wait_for_utun(ALICE_IFACE, Duration::from_secs(3)) {
             let a = handle.alice_log();
             let b = handle.bob_log();
@@ -255,7 +255,7 @@ mod bench {
         #[rustfmt::skip]
         run(&["/sbin/route", "-qn", "add", "-host", ALICE_IP, "-interface", BOB_IFACE]);
 
-        // ─── handshake: reachable → validkey+udp_confirmed ──────────
+        // handshake: reachable → validkey+udp_confirmed
         let meta = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             poll_until(Duration::from_secs(10), || {
                 let a = handle.alice_ctl.dump(3);
@@ -295,7 +295,7 @@ mod bench {
             panic!("validkey/udp_confirmed timed out;\n=== alice ===\n{a}\n=== bob ===\n{b}");
         }
 
-        // ─── PMTU convergence ──────────────────────────────────────
+        // PMTU convergence
         // Until `minmtu` clears the full-MSS threshold, big packets
         // fall back to TCP-tunnelled SPTPS_PACKET (~100× slower).
         // utun MTU is 1500 → the synthetic eth frame the daemon
@@ -330,7 +330,7 @@ mod bench {
         handle
     }
 
-    // ═══════════════════════════ iperf3 measurement ═══════════════════════════
+    // iperf3 measurement
 
     /// Returns `(received_bps, received_bytes)`. `-B` pins the source
     /// so the return path matches the crossed route; the host-route
@@ -420,7 +420,7 @@ mod bench {
         );
     }
 
-    // ═══════════════════════════ latency (optional) ═══════════════════════════
+    // latency (optional)
 
     /// `/sbin/ping -c N -i 0.01`. macOS ping has no `-D`; `-i <1s`
     /// needs root (which we are).
@@ -441,7 +441,7 @@ mod bench {
         stats
     }
 
-    // ═══════════════════════════ sample(1) profiler ═══════════════════════════
+    // sample(1) profiler
 
     /// `sample PID SECS -f OUT`. Runs for a fixed duration then exits
     /// on its own (no SIGINT dance like `perf record`). `TINCD_PERF=1`.
@@ -492,7 +492,7 @@ mod bench {
         }
     }
 
-    // ═══════════════════════════ pairings ════════════════════════════════════
+    // pairings
 
     struct Pairing {
         name: &'static str,
@@ -555,7 +555,7 @@ mod bench {
         drop(tunnel);
     }
 
-    // ═══════════════════════════ main ════════════════════════════════════════
+    // main
 
     pub fn main() {
         let filters: Vec<String> = std::env::args()

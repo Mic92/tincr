@@ -5,7 +5,7 @@ use std::time::Duration;
 use super::common::linux::run_ip;
 pub(crate) use super::common::node::Node;
 
-// ═════════════════════════ the bwrap re-exec wrapper ══════════════════════
+// the bwrap re-exec wrapper
 
 /// Re-exec the current test binary inside bwrap. See module doc.
 ///
@@ -29,7 +29,7 @@ pub(crate) fn enter_bwrap(test_name: &str) -> bool {
         return true;
     }
 
-    // ─── feature-detect ────────────────────────────────────────────
+    // feature-detect
     // `bwrap --unshare-user --bind / / true`: cheapest probe. Non-
     // zero → either no bwrap (ENOENT on spawn) or userns disabled
     // (bwrap prints "needs unprivileged user namespaces" or
@@ -62,7 +62,7 @@ pub(crate) fn enter_bwrap(test_name: &str) -> bool {
         return false;
     }
 
-    // ─── spawn bwrap ───────────────────────────────────────────────
+    // spawn bwrap
     // Each flag explained:
     //
     //   --unshare-net      New netns. Starts empty (just `lo`, DOWN).
@@ -226,7 +226,7 @@ impl NetNs {
     pub(crate) fn setup() -> Self {
         // lo up + /run/netns mkdir: done by `enter_bwrap`.
 
-        // ─── persistent TUN devices ──────────────────────────────
+        // persistent TUN devices
         // `ip tuntap add` sets the TUN_PERSIST flag: the device
         // outlives the fd that created it. The daemon's TUNSETIFF
         // with `ifr_name = "tinc0"` then ATTACHES to the existing
@@ -251,7 +251,7 @@ impl NetNs {
         run_ip(&["link", "set", "tinc0", "up"]);
         run_ip(&["link", "set", "tinc1", "up"]);
 
-        // ─── child netns for bob's TUN ───────────────────────────
+        // child netns for bob's TUN
         // `ip netns add` wants `mount --make-shared /run/netns`
         // which our CAP_SYS_ADMIN-in-userns can't do (shared
         // propagation needs real-root). Manual: spawn `unshare -n
@@ -269,7 +269,7 @@ impl NetNs {
     /// its UP state and flushes addresses, so configure AFTER move.
     #[expect(clippy::unused_self)] // method form keeps the call ordered after NetNs::setup
     pub(crate) fn place_devices(&self) {
-        // ─── move tinc1 into bobside ─────────────────────────────
+        // move tinc1 into bobside
         // The fd→device binding survives. Bob's daemon (in the
         // OUTER netns) keeps writing to its fd; packets surface
         // in the CHILD netns. Kernel: `tun_chr_write_iter` finds
@@ -277,7 +277,7 @@ impl NetNs {
         // which netns the device migrated to.
         run_ip(&["link", "set", "tinc1", "netns", "bobside"]);
 
-        // ─── configure tinc0 (alice, outer ns) ───────────────────
+        // configure tinc0 (alice, outer ns)
         // /24 on the device → kernel installs a connected route
         // for 10.42.0.0/24 via tinc0. The /32 in tinc.conf's
         // `Subnet =` is a SEPARATE thing: that's what the daemon's
@@ -286,7 +286,7 @@ impl NetNs {
         run_ip(&["addr", "add", "10.42.0.1/24", "dev", "tinc0"]);
         run_ip(&["link", "set", "tinc0", "up"]);
 
-        // ─── configure tinc1 (bob, inner ns) ─────────────────────
+        // configure tinc1 (bob, inner ns)
         run_ip(&[
             "netns",
             "exec",
@@ -311,7 +311,7 @@ impl Drop for NetNs {
     }
 }
 
-// ═══════════════════════════ daemon plumbing ═══════════════════════════════
+// daemon plumbing
 
 /// netns-shaped node: real TUN attach + /32 subnet.
 pub(crate) fn tun_node(

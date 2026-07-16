@@ -55,7 +55,7 @@ fn sighup_reload_subnets() {
         }
     });
 
-    // ─── baseline: bob sees alice's 10.0.0.0/24 ──────────────
+    // baseline: bob sees alice's 10.0.0.0/24
     poll_until(Duration::from_secs(5), || {
         if has_subnet(&bob_ctl.dump(5), "10.0.0.0/24", "alice") {
             Some(())
@@ -69,7 +69,7 @@ fn sighup_reload_subnets() {
         "baseline should NOT have 10.1.0.0/24 yet: {baseline:?}"
     );
 
-    // ─── step 1: ADD a subnet ───────────────────────────────
+    // step 1: ADD a subnet
     // Rewrite alice's hosts/alice with BOTH subnets. Port stays.
     // Sleep 1.1s before write: `conns_to_terminate` uses
     // `mtime > last_config_check` (strict, second-granularity);
@@ -117,7 +117,7 @@ fn sighup_reload_subnets() {
         "alice should have new subnet locally: {a_subnets:?}"
     );
 
-    // ─── step 2: REMOVE a subnet ────────────────────────────
+    // step 2: REMOVE a subnet
     std::thread::sleep(Duration::from_millis(1100));
     std::fs::write(
         alice.confbase.join("hosts").join("alice"),
@@ -136,7 +136,7 @@ fn sighup_reload_subnets() {
         }
     });
 
-    // ─── cleanup ───────────────────────────────────────────────
+    // cleanup
     drop(alice_ctl);
     drop(bob_ctl);
     let _ = bob_child.kill();
@@ -184,7 +184,7 @@ fn tinc_join_against_real_daemon() {
     let tmp = tmp!("join");
     let alice = Node::new(tmp.path(), "alice", 0xAA);
 
-    // ─── alice's basic config (no peer; she just listens) ──────
+    // alice's basic config (no peer; she just listens)
     {
         std::fs::create_dir_all(alice.confbase.join("hosts")).unwrap();
         std::fs::write(
@@ -209,7 +209,7 @@ fn tinc_join_against_real_daemon() {
         write_ed25519_privkey(&alice.confbase, &alice.seed);
     }
 
-    // ─── invitation key + invitation file ───────────────────────
+    // invitation key + invitation file
     let inv_dir = alice.confbase.join("invitations");
     std::fs::create_dir_all(&inv_dir).unwrap();
     let inv_key = SigningKey::from_seed(&[0x11; 32]);
@@ -238,7 +238,7 @@ fn tinc_join_against_real_daemon() {
     );
     std::fs::write(inv_dir.join(&inv_filename), &inv_body).unwrap();
 
-    // ─── spawn alice ────────────────────────────────────────────
+    // spawn alice
     let alice_child = alice.spawn();
     assert!(
         wait_for_file(&alice.socket),
@@ -246,7 +246,7 @@ fn tinc_join_against_real_daemon() {
         drain_stderr(alice_child)
     );
 
-    // ─── build URL + run join ──────────────────────────────────
+    // build URL + run join
     // URL = `host:port/slug`. slug = b64(key_hash) || b64(cookie).
     let slug = build_slug(inv_key.public_key(), &cookie);
     let url = format!("127.0.0.1:{}/{slug}", alice.port);
@@ -266,7 +266,7 @@ fn tinc_join_against_real_daemon() {
         panic!("join failed: {e:?}\nalice stderr:\n{stderr}");
     }
 
-    // ─── verify join() wrote bob's config ──────────────────────
+    // verify join() wrote bob's config
     let bob_tinc_conf = std::fs::read_to_string(bob_confbase.join("tinc.conf"))
         .expect("join should write bob/tinc.conf");
     assert!(
@@ -292,7 +292,7 @@ fn tinc_join_against_real_daemon() {
         "join should generate bob's identity key"
     );
 
-    // ─── verify daemon wrote alice/hosts/bob ───────────────────
+    // verify daemon wrote alice/hosts/bob
     // The type-1 record carried bob's pubkey; finalize() wrote it.
     // Poll: the daemon's epoll loop processes records on the next
     // turn; might lag by a few ms after join() returns.
@@ -310,7 +310,7 @@ fn tinc_join_against_real_daemon() {
         "alice/hosts/bob: {hosts_bob_content}"
     );
 
-    // ─── verify .used file was unlinked ────────────────────────
+    // verify .used file was unlinked
     // The original invitation file was renamed to .used by
     // serve_cookie, then unlinked by dispatch_invitation_outputs
     // after the file chunks were sent. Neither should exist.
@@ -323,7 +323,7 @@ fn tinc_join_against_real_daemon() {
         ".used file should be unlinked after serving"
     );
 
-    // ─── single-use: second join fails ─────────────────────────
+    // single-use: second join fails
     // Same cookie, fresh confbase. serve_cookie's rename hits
     // ENOENT → NonExisting → daemon terminates the conn → join
     // gets EOF mid-handshake.
@@ -338,7 +338,7 @@ fn tinc_join_against_real_daemon() {
         "second join with same cookie should fail (single-use); got: {result2:?}"
     );
 
-    // ─── cleanup ───────────────────────────────────────────────
+    // cleanup
     let alice_stderr = drain_stderr(alice_child);
     assert!(
         alice_stderr.contains("Invitation") || alice_stderr.contains("invitation"),

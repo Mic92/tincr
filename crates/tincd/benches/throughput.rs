@@ -106,7 +106,7 @@ mod bench {
         TmpGuard::new("thr", tag)
     }
 
-    // ═════════════════════════ bwrap re-exec ═══════════════════════════════════
+    // bwrap re-exec
     // Copy of crossimpl.rs::enter_netns. See netns.rs module doc for the
     // flag-by-flag explanation. No libtest — the inner re-exec just
     // forwards argv so the filter survives the bwrap boundary.
@@ -225,7 +225,7 @@ mod bench {
         }
     }
 
-    // ═════════════════════════ daemon plumbing ═════════════════════════════════
+    // daemon plumbing
 
     struct Node {
         name: &'static str,
@@ -339,7 +339,7 @@ mod bench {
                     .expect("spawn rust tincd"),
                 Impl::C(bin) => Command::new(bin)
                     .arg("-D")
-                    // `-d0`: no per-packet logs. The C's `-d5` floods at
+                    // `-d0`: no per-packet logs. `-d5` floods at
                     // line rate same as our `debug`.
                     .arg("-d0")
                     .arg("-c")
@@ -354,7 +354,7 @@ mod bench {
         }
     }
 
-    // ═══════════════════════════ tunnel lifecycle ══════════════════════════════
+    // tunnel lifecycle
 
     /// One alice↔bob tunnel: persistent TUN devices, two daemons, the
     /// netns move, addresses, full handshake. Drop tears it ALL down so
@@ -424,7 +424,7 @@ mod bench {
         const VALIDKEY: u32 = 0x02;
         const UDP_CONFIRMED: u32 = 0x80;
 
-        // ─── fresh persistent TUN devices ──────────────────────────
+        // fresh persistent TUN devices
         run_ip(&["tuntap", "add", "mode", "tun", "name", "tincT0"]);
         run_ip(&["tuntap", "add", "mode", "tun", "name", "tincT1"]);
         run_ip(&["link", "set", "tincT0", "up"]);
@@ -444,7 +444,7 @@ mod bench {
         bob.write_config(&alice, false);
         alice.write_config(&bob, true);
 
-        // ─── spawn ──────────────────────────────────────────────────
+        // spawn
         let bob_child = bob.spawn();
         let bob_pid = bob_child.pid();
         assert!(
@@ -472,7 +472,7 @@ mod bench {
             bob_pid,
         };
 
-        // ─── carrier, move, addresses ───────────────────────────────
+        // carrier, move, addresses
         if !wait_for_carrier("tincT0", Duration::from_secs(2)) {
             let a = handle.alice_log();
             let b = handle.bob_log();
@@ -501,7 +501,7 @@ mod bench {
             "netns", "exec", "tbobside", "ip", "link", "set", "tincT1", "up",
         ]);
 
-        // ─── handshake ──────────────────────────────────────────────
+        // handshake
         let mut alice_ctl = alice.ctl();
         let mut bob_ctl = bob.ctl();
 
@@ -592,7 +592,7 @@ mod bench {
         handle
     }
 
-    // ═══════════════════════════ iperf3 measurement ════════════════════════════
+    // iperf3 measurement
 
     /// Run iperf3 server in tbobside, client in the outer ns. 5s, JSON.
     ///
@@ -606,7 +606,7 @@ mod bench {
     /// `--one-off`: server exits after one client. Otherwise it leaks
     /// across the three configs and the second `iperf3 -s` gets EADDRINUSE.
     fn measure(handle: &mut TunnelHandle) -> f64 {
-        // ─── server in bob's netns ─────────────────────────────────
+        // server in bob's netns
         let mut server = Command::new("ip")
             .args(["netns", "exec", "tbobside", "iperf3", "-s", "--one-off"])
             .stdout(Stdio::null())
@@ -621,7 +621,7 @@ mod bench {
         // 200ms is generous and dwarfed by the 5s measurement.
         std::thread::sleep(Duration::from_millis(200));
 
-        // ─── client in outer ns (= test process's ns) ──────────────
+        // client in outer ns (= test process's ns)
         // `-t 5`: 5 seconds. Short enough for fast turnaround, long
         // enough for ChaCha20 to warm caches and TCP to ramp up. If
         // variance is too high on a loaded CI box, bump to `-t 10` or
@@ -662,7 +662,7 @@ mod bench {
         parse_iperf(&client.stdout).end.sum_received.bits_per_second
     }
 
-    // ═══════════════════════════ latency measurement ══════════════════════════════
+    // latency measurement
     // Batched decrypt makes frame 0 wait for the
     // whole batch before route fires. Throughput doesn't see that —
     // it's a tail-latency cost. Idle ping won't trigger batching
@@ -815,7 +815,7 @@ mod bench {
         (idle, load)
     }
 
-    // ═══════════════════════════ perf record ═══════════════════════════════════
+    // perf record
 
     /// `perf trace -s -p PID`: exact syscall counts and per-call latency,
     /// RAII-stopped. Unlike `perf record` (statistical sampling, output
@@ -1039,7 +1039,7 @@ mod bench {
         eprintln!("  full report: perf report -i {}", data.display());
     }
 
-    // ═══════════════════════════════ pairings ══════════════════════════════════
+    // pairings
 
     /// One named pairing. `name` is what `cargo bench -- <substr>`
     /// matches against. `perf_tag` names the perf.data / trace files
@@ -1090,7 +1090,7 @@ mod bench {
         bps
     }
 
-    // ═════════════════════════════════ main ════════════════════════════════════
+    // main
 
     pub fn main() {
         // Substring filter, cargo bench convention. `cargo bench --bench
@@ -1186,7 +1186,7 @@ mod bench {
 
         let [baseline, rust, mixed] = results;
 
-        // ─── hot-symbol report ─────────────────────────────────────
+        // hot-symbol report
         // Before the gate. If it fails, the next thing anyone does is
         // open the profile; if it passes, the profile is the baseline
         // for the next regression. Only when perf actually ran —
@@ -1204,7 +1204,7 @@ mod bench {
             eprintln!("perf data: {}", perf_out.display());
         }
 
-        // ─── ratios ────────────────────────────────────────────────
+        // ratios
         // No exit(1) gate: we're already at ~135% of C; a hard 95%
         // threshold would never fire and the dev-profile 1% "is the
         // tunnel dead" check is better caught by netns.rs::ping.
@@ -1230,7 +1230,7 @@ mod bench {
             }
         }
 
-        // ─── latency summary ───────────────────────────────────────
+        // latency summary
         // The Rust-vs-C p99-under-load delta is the par-crypto cost
         // isolated: same kernel, same iperf3, only the daemon differs.
         // Diagnostic, not a gate — absolute latency varies wildly

@@ -48,9 +48,7 @@ fn auth(stream: &UnixStream, cookie: &str) -> BufReader<UnixStream> {
     r
 }
 
-// ══════════════════════════════════════════════════════════════════════
 // BUG REPRO
-// ══════════════════════════════════════════════════════════════════════
 
 /// `tinc purge` before any peer/SSSP run must ack and keep the daemon
 /// alive (snapshot-refresh path before first `run_graph_and_log`).
@@ -87,9 +85,7 @@ fn req_purge_on_fresh_daemon() {
     assert!(!stderr.contains("panicked"), "daemon panicked:\n{stderr}");
 }
 
-// ══════════════════════════════════════════════════════════════════════
 // PROBE (negative results — passes)
-// ══════════════════════════════════════════════════════════════════════
 
 /// Exercise the corners listed in the bug-hunt brief: every control
 /// verb with bad args, oversized request, request before auth, partial
@@ -102,7 +98,7 @@ fn control_abuse_probe() {
     let (mut child, pidfile, socket) = spawn(&tmp);
     let cookie = read_cookie(&pidfile);
 
-    // ── 1. CONTROL before auth → conn terminated, no reply ──
+    // 1. CONTROL before auth → conn terminated, no reply
     {
         let s = UnixStream::connect(&socket).unwrap();
         (&s).write_all(b"18 0\n").unwrap();
@@ -111,7 +107,7 @@ fn control_abuse_probe() {
         assert!(buf.is_empty(), "pre-auth CONTROL should yield bare EOF");
     }
 
-    // ── 2. partial / wrong / empty cookie → conn terminated ──
+    // 2. partial / wrong / empty cookie → conn terminated
     for bad in [&cookie[..32], "deadbeef", ""] {
         let s = UnixStream::connect(&socket).unwrap();
         writeln!(&s, "0 ^{bad} 0").unwrap();
@@ -120,7 +116,7 @@ fn control_abuse_probe() {
         assert!(buf.is_empty(), "bad cookie {bad:?} should yield bare EOF");
     }
 
-    // ── 3. oversized request line (>MAXBUFSIZE) → conn terminated ──
+    // 3. oversized request line (>MAXBUFSIZE) → conn terminated
     {
         let s = UnixStream::connect(&socket).unwrap();
         let mut r = auth(&s, &cookie);
@@ -132,13 +128,13 @@ fn control_abuse_probe() {
         let _ = r.read_to_end(&mut buf);
     }
 
-    // ── 4. every verb with garbage 3rd token, conn survives ──
+    // 4. every verb with garbage 3rd token, conn survives
     {
         let s = UnixStream::connect(&socket).unwrap();
         let mut r = auth(&s, &cookie);
         // Excluded: 0 (STOP — would shut the daemon down),
         // 9 (SET_DEBUG — terminates the conn on unparseable level by
-        //    design, matching C `control.c:82`).
+        //    design).
         for sub in [1, 3, 4, 5, 6, 8, 10, 12, 13, 14, 15, 99, -1] {
             writeln!(&s, "18 {sub} !!garbage!!").unwrap();
         }
@@ -160,7 +156,7 @@ fn control_abuse_probe() {
         assert!(seen_term, "daemon stopped responding after verb fuzz");
     }
 
-    // ── 5. disconnect mid-reply: ask for dumps, drop without reading ──
+    // 5. disconnect mid-reply: ask for dumps, drop without reading
     for _ in 0..10 {
         let s = UnixStream::connect(&socket).unwrap();
         let _r = auth(&s, &cookie);
@@ -168,7 +164,7 @@ fn control_abuse_probe() {
         drop(s);
     }
 
-    // ── daemon still alive and serving ──
+    // daemon still alive and serving
     let mut ctl = Ctl::connect(&socket, &pidfile);
     let rows = ctl.dump(3);
     assert!(!rows.is_empty(), "daemon dead after abuse");

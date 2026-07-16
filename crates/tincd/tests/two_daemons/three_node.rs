@@ -6,46 +6,27 @@ use super::common::*;
 use super::fd_tunnel::*;
 use super::node::*;
 
-/// **THREE DAEMONS, RELAY PATH.** alice ← mid → bob, NO direct
-/// alice↔bob `ConnectTo`. Alice's packet to bob's subnet routes
-/// `Forward{to: bob}`; `send_sptps_data`'s relay decision sends
-/// it via `mid` (the nexthop). Mid's `on_udp_recv` sees
-/// `dst_id == bob`, calls `send_sptps_data_relay(to=bob, from=
-/// alice)`. Bob receives, decrypts with the alice↔bob per-tunnel
-/// SPTPS, writes to TUN.
+/// Three daemons, relay path: alice ← mid → bob, no direct
+/// alice↔bob `ConnectTo`. Alice's packet to bob's subnet is
+/// forwarded via mid (the nexthop); mid re-prefixes and relays
+/// the opaque UDP packet without decrypting; bob decrypts with
+/// the alice↔bob per-tunnel SPTPS and writes to TUN.
 ///
-/// Exercises the full chunk-9b chain:
-/// - `REQ_KEY/ANS_KEY` relay (`on_req_key`/`on_ans_key` `to !=
-///   myself`): alice's `REQ_KEY` for bob goes via mid's meta-conn.
-/// - `send_sptps_data_relay` `:967` `relay = nexthop` (since
-///   `via == myself` for alice — bob is reachable but indirect
-///   only via the SSSP path through mid).
-/// - UDP relay receive (`on_udp_recv` `dst != null && dst !=
-///   myself`): mid forwards. The packet carries bob's `dst_id6`.
-/// - The `[dst_id6][src_id6]` prefix on the wire (`direct=false`
-///   ⇒ `dst = to->id`, not nullid).
+/// Covers:
+/// - `REQ_KEY`/`ANS_KEY` relay: alice's `REQ_KEY` for bob goes
+///   via mid's meta connection.
+/// - UDP relay receive: mid forwards packets whose `dst_id6` is
+///   another node.
+/// - The `[dst_id6][src_id6]` prefix on the wire for indirect
+///   packets.
 ///
-/// What this DOESN'T test: `via != myself` (the static-relay
-/// path, set by `IndirectData = yes`). With three nodes connected
-/// linearly, SSSP gives `via=bob` for bob (`via` is the LAST
-/// direct node — and bob IS the destination, reached via mid's
-/// edge). So `via_nid == myself` is false... actually no, `via`
-/// for a node is the last NON-indirect hop. With no `IndirectData`,
-/// every edge is direct, so `via == nid` for every node. The relay
-/// here happens because `nexthop != to` (mid is the first hop).
+/// Not covered: the static-relay path enabled by
+/// `IndirectData = yes`. Without it every edge is direct; the
+/// relay here happens only because mid is the nexthop.
 ///
-/// ## TCP-tunneled handshake, possibly TCP-tunneled data
-///
-/// alice↔bob have no direct TCP connection. Their per-tunnel SPTPS
-/// handshake goes via `REQ_KEY/ANS_KEY` relayed by mid. That's the
-/// `to != myself` arms in `on_req_key`/`on_ans_key`.
-///
-/// The DATA path: until `mid`'s `minmtu` is discovered (which
-/// requires probes from alice→mid), the `too_big` gate would force
-/// TCP. But chunk-9b's gate is `relay_minmtu > 0 && origlen >
-/// minmtu` — `minmtu==0` ⇒ go UDP optimistically. So data goes
-/// UDP. EMSGSIZE would correct if the loopback MTU is small, but
-/// it's 65536 on Linux loopback so no problem.
+/// Data path note: while mid's `minmtu` is still 0 (undiscovered),
+/// packets go UDP optimistically instead of falling back to TCP;
+/// Linux loopback MTU is 65536, so EMSGSIZE never triggers here.
 #[test]
 fn three_daemon_relay() {
     let tmp = tmp!("relay3");
@@ -67,8 +48,8 @@ fn three_daemon_relay() {
     // bob: ConnectTo=mid, owns 10.0.0.2/32. Knows alice's pubkey.
     bob.write_config_multi(&[&mid, &alice], &["mid"]);
 
-    // ─── spawn: mid first (the hub everyone connects to) ─────────
-    // mid runs at debug-level so we can assert the relay log lines.
+    // Spawn mid first (the hub); debug logging so the relay log
+    // lines can be asserted.
     let mut mid_child = tincd_at(&mid.confbase, &mid.pidfile, &mid.socket)
         .env("RUST_LOG", "tincd=debug")
         .stderr(Stdio::piped())
@@ -95,7 +76,6 @@ fn three_daemon_relay() {
     }
     drop(alice_far);
 
-    // ─── wait for full mesh reachability ────────────────────────
     let mut alice_ctl = alice.ctl();
     let mut bob_ctl = bob.ctl();
     let _mid_ctl = mid.ctl();
@@ -124,9 +104,8 @@ fn three_daemon_relay() {
         );
     }
 
-    // ─── nexthop check: alice's route to bob goes via mid ────────
-    // dump_nodes body tokens 11/12 are nexthop/via. For alice's
-    // bob row: nexthop should be "mid".
+    // Nexthop check: alice's route to bob must go via mid.
+    // dump_nodes body tokens 11/12 are nexthop/via.
     let node_nexthop = |rows: &[String], name: &str| -> Option<String> {
         rows.iter().find_map(|r| {
             let body = r.strip_prefix("18 3 ")?;
@@ -145,11 +124,8 @@ fn three_daemon_relay() {
         "alice's nexthop for bob should be mid; nodes:\n{a_nodes:#?}"
     );
 
-    // ─── kick the per-tunnel handshake ──────────────────────────
-    // alice's REQ_KEY for bob goes via `nexthop->connection` =
-    // alice's mid-conn. mid's `on_req_key` sees `to != myself`,
-    // forwards verbatim to bob via mid's bob-conn. Bob starts
-    // responder SPTPS, ANS_KEY back via mid.
+    // Kick the per-tunnel handshake: alice's REQ_KEY for bob is
+    // relayed by mid; bob answers with ANS_KEY back via mid.
     let kick = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"kick");
     write_fd(&alice_tun, &kick);
 
@@ -172,20 +148,16 @@ fn three_daemon_relay() {
         panic!("validkey timed out;\n=== alice ===\n{asd}\n=== mid ===\n{ms}\n=== bob ===\n{bs}");
     }
 
-    // ─── THE PACKET ─────────────────────────────────────────────
-    // alice → mid (UDP, dst_id6=bob) → bob. mid's `on_udp_recv`
-    // sees dst != null && dst != myself, calls `send_sptps_data_
-    // relay`. The ciphertext is the alice↔bob SPTPS record; mid
-    // can't decrypt it (and doesn't try — just re-prefixes and
-    // forwards). bob decrypts.
+    // The relayed packet: alice → mid (UDP, dst_id6=bob) → bob.
+    // The ciphertext is the alice↔bob SPTPS record; mid only
+    // re-prefixes and forwards it.
     //
-    // Security audit `2f72c2ba` relay gate: mid drops UDP relay
-    // packets from senders it hasn't UDP-confirmed. validkey (alice↔bob tunnel) and udp_confirmed
-    // (alice@mid) race — the kick above drove `try_tx(bob)` → PMTU
-    // probe to mid, but the probe-reply may not have landed yet.
-    // Resend the data packet on each poll: each send drives `try_
-    // tx` again, and once mid confirms alice (via the probe), the
-    // next packet relays. The first ones drop at mid's gate.
+    // mid drops UDP relay packets from senders it hasn't
+    // UDP-confirmed. validkey (alice↔bob tunnel) and udp_confirmed
+    // (alice@mid) race — the kick above triggered a PMTU probe to
+    // mid, but the probe reply may not have landed yet. Resend the
+    // data packet on each poll: once mid confirms alice, the next
+    // packet relays; earlier ones drop at mid's gate.
     let payload = b"relayed via mid";
     let ip_pkt = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], payload);
 
@@ -223,8 +195,8 @@ fn three_daemon_relay() {
     );
     assert_eq!(&recv[20..], payload);
 
-    // ─── dump nodes: indirect node shows learned UDP addr ───────
-    // bob is NOT a direct meta-neighbor of alice (no NodeState
+    // dump nodes: an indirect node must show its learned UDP addr.
+    // bob is not a direct meta-neighbor of alice (no NodeState
     // entry), but alice learned bob's UDP address via the relay-
     // appended ANS_KEY field (`tunnels[bob].udp_addr`). Before the
     // fix, dump_nodes_rows only consulted NodeState.edge_addr and
@@ -243,7 +215,6 @@ fn three_daemon_relay() {
          not 'unknown port unknown'; row: {bob_row}"
     );
 
-    // ─── mid stderr: the relay log ──────────────────────────────
     drop(alice_ctl);
     drop(bob_ctl);
     drop(alice_tun);
@@ -287,10 +258,6 @@ fn three_daemon_relay() {
 ///   only hub; alice can't reach bob through it without explicit
 ///   config.
 ///
-/// `net.py::test_tunnel_server` checks the dump only; asserting
-/// the ICMP is BETTER (proves the data-plane consequence, not just
-/// the control-plane state).
-///
 /// Timing: poll until alice sees 2 nodes STABILIZE (poll, sleep
 /// 50ms, poll again, same answer) — otherwise we might catch the
 /// moment before mid's edge arrives at alice and get a false pass
@@ -308,16 +275,12 @@ fn three_daemon_tunnelserver() {
     // mid: hub. dummy device, no subnet, no ConnectTo. Knows both
     // spokes' pubkeys (for the meta-SPTPS auth).
     mid.write_config_multi(&[&alice, &bob], &[]);
-    // mid: append `Subnet =` to hosts/{alice,bob}. With
-    // `:880 strictsubnets|=tunnelserver`, mid's `load_all_nodes`
-    // preloads these; bob's gossip'd ADD_SUBNET hits the `:93`
-    // lookup-first noop. Without preload, mid hits `:109` ("we
-    // should already know all allowed subnets") and DROPS bob's
-    // subnet — mid can't route to bob. The C requires this preload
-    // for tunnelserver hubs; our pre-strictsubnets code accepted
-    // gossip without it (the `:109` gate didn't exist), so the
-    // test predates the requirement. `write_config_multi` only
-    // writes pubkey to hosts/PEER, so append.
+    // mid: append `Subnet =` to hosts/{alice,bob}. TunnelServer
+    // implies strict subnets, so mid preloads these at setup and
+    // bob's gossiped ADD_SUBNET is a lookup-first noop. Without the
+    // preload, mid drops bob's subnet and can't route to him.
+    // `write_config_multi` only writes the pubkey to hosts/PEER, so
+    // append.
     let mid_hosts = mid.confbase.join("hosts");
     {
         use std::io::Write;
@@ -342,7 +305,6 @@ fn three_daemon_tunnelserver() {
     let bob = bob.subnet("10.0.0.2/32");
     bob.write_config_multi(&[&mid, &alice], &["mid"]);
 
-    // ─── spawn: mid first (the hub) ──────────────────────────────
     let mut mid_child = tincd_at(&mid.confbase, &mid.pidfile, &mid.socket)
         .env("RUST_LOG", "tincd=debug")
         .stderr(Stdio::piped())
@@ -372,8 +334,8 @@ fn three_daemon_tunnelserver() {
     let mut bob_ctl = bob.ctl();
     let mut mid_ctl = mid.ctl();
 
-    // ─── wait for alice↔mid and bob↔mid to settle ────────────────
-    // mid sees both spokes as active connections. Once that's
+    // Wait for alice↔mid and bob↔mid to settle: mid sees both
+    // spokes as active connections. Once that's
     // true, all the gossip that's going to happen HAS happened
     // (each ACK fires `send_everything` + `send_add_edge`; with
     // tunnelserver, mid's send_everything is empty and the
@@ -385,8 +347,7 @@ fn three_daemon_tunnelserver() {
         (a_ok && b_ok).then_some(())
     });
 
-    // ─── the count assertions, with stabilization ──────────────
-    // alice should see EXACTLY 2 nodes. NOT 3. Poll until stable
+    // Count assertions, with stabilization: alice should see EXACTLY 2 nodes. NOT 3. Poll until stable
     // (two consecutive reads agree) to rule out catching the
     // pre-mid-edge moment.
     let alice_stable = poll_until(Duration::from_secs(5), || {
@@ -485,12 +446,10 @@ fn three_daemon_tunnelserver() {
          and on_add_subnet doesn't forward bob's; got: {a_subnets:?}"
     );
 
-    // ─── the data-plane consequence: ICMP unreachable ──────────
-    // A packet from alice to 10.0.0.2 (bob's subnet) hits alice's
-    // `route()` → NO subnet match (alice doesn't have bob's
-    // subnet) → `Unreachable{ICMP_DEST_UNREACH, ICMP_NET_UNKNOWN}`
-    // → ICMP synth → written BACK to alice's TUN. The TEST end of
-    // the socketpair reads it.
+    // Data-plane consequence: a packet from alice to 10.0.0.2 has
+    // no matching subnet, so alice synthesizes an ICMP DEST_UNREACH
+    // written back to her own TUN; the test end of the socketpair
+    // reads it.
     //
     // ICMP layout (FdTun strips/adds ether so we see raw IP):
     // bytes [0..20] = IPv4 header (proto=1 ICMP at byte 9),
@@ -515,7 +474,6 @@ fn three_daemon_tunnelserver() {
         "ICMP code should be NET_UNKNOWN (6); got: {icmp:02x?}"
     );
 
-    // ─── mid stderr: tunnelserver send_everything log ──────────
     drop(alice_ctl);
     drop(bob_ctl);
     drop(mid_ctl);
@@ -559,10 +517,10 @@ fn three_daemon_tunnelserver() {
 /// 3. mid `dump subnets` DOES have `10.0.0.2` (mid isn't strict).
 /// 4. ping `10.0.0.2` from alice → ICMP `NET_UNKNOWN` (no route).
 /// 5. Append `Subnet = 10.0.0.2/32` to alice's `hosts/bob`, restart
-///    alice → `load_all_nodes` preloads it → `ADD_SUBNET` gossip
-///    arrives, `subnets.contains` finds it (the `:93` lookup-first),
-///    silent noop → `dump subnets` now shows it. (Restart not
-///    SIGHUP; reload diff is `TODO(chunk-12-strictsubnets-reload)`.)
+///    alice → the subnet is preloaded, so the arriving `ADD_SUBNET`
+///    gossip is a silent noop → `dump subnets` now shows it.
+///    (Restart, not SIGHUP; reload diff is
+///    `TODO(chunk-12-strictsubnets-reload)`.)
 ///
 /// Regression-first: before the gate exists, step 2 fails (alice
 /// wrongly accepts the gossip).
@@ -589,7 +547,6 @@ fn three_daemon_strictsubnets() {
     // bob: ConnectTo=mid, owns 10.0.0.2/32. dummy device.
     bob.write_config_multi(&[&mid, &alice], &["mid"]);
 
-    // ─── spawn: mid first ────────────────────────────────────────
     let mut mid_child = mid.spawn();
     assert!(
         wait_for_file(&mid.socket),
@@ -612,7 +569,7 @@ fn three_daemon_strictsubnets() {
     let mut alice_ctl = alice.ctl();
     let mut mid_ctl = mid.ctl();
 
-    // ─── wait: mid sees both spokes active ───────────────────────
+    // Wait until mid sees both spokes active.
     poll_until(Duration::from_secs(10), || {
         let m = mid_ctl.dump(6);
         (has_active_peer(&m, "alice") && has_active_peer(&m, "bob")).then_some(())
@@ -639,8 +596,7 @@ fn three_daemon_strictsubnets() {
         "alice should see bob in node list (topology unfiltered): {alice_nodes:?}"
     );
 
-    // ─── the gate: alice does NOT have bob's subnet ──────────────
-    // mid DOES (proves the gossip propagated; alice's gate is
+    // The gate: alice must NOT have bob's subnet. mid DOES (proves the gossip propagated; alice's gate is
     // alice-local). Wait for mid to receive it first.
     poll_until(Duration::from_secs(5), || {
         let m = mid_ctl.dump(5);
@@ -665,8 +621,8 @@ fn three_daemon_strictsubnets() {
         "alice's own subnet should still be there: {a_subnets:?}"
     );
 
-    // ─── data plane: ICMP NET_UNKNOWN ────────────────────────────
-    // Same shape as tunnelserver: no route → synth ICMP unreachable.
+    // Data plane: no route → synthesized ICMP NET_UNKNOWN, same as
+    // in the tunnelserver test.
     let probe = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"nowhere");
     write_fd(&alice_tun, &probe);
     let icmp = poll_until(Duration::from_secs(5), || read_fd_nb(&alice_tun));
@@ -675,11 +631,10 @@ fn three_daemon_strictsubnets() {
     assert_eq!(icmp[20], 3, "ICMP type DEST_UNREACH: {icmp:02x?}");
     assert_eq!(icmp[21], 6, "ICMP code NET_UNKNOWN: {icmp:02x?}");
 
-    // ─── restart with authorized hosts/bob ────────────────────────
-    // Append `Subnet = 10.0.0.2/32` to alice's hosts/bob. Restart
-    // alice. `load_all_nodes` preloads it; the ADD_SUBNET gossip
-    // hits the `:93` lookup-first → already-have-it → noop. The
-    // subnet appears.
+    // Restart alice with an authorized hosts/bob: append
+    // `Subnet = 10.0.0.2/32`. The preloaded subnet makes the
+    // arriving ADD_SUBNET gossip a noop, and the subnet appears in
+    // dump subnets.
     drop(alice_ctl);
     let alice_stderr1 = drain_stderr(alice_child);
     assert!(
@@ -726,7 +681,6 @@ fn three_daemon_strictsubnets() {
         has_subnet(&a, "10.0.0.2", "bob").then_some(())
     });
 
-    // ─── cleanup ─────────────────────────────────────────────────
     drop(alice_ctl2);
     drop(mid_ctl);
     drop(alice_tun2);
@@ -755,16 +709,15 @@ fn read_udp_port(ctl: &mut Ctl, name: &str) -> u16 {
     panic!("no MYSELF row for {name}; rows: {rows:#?}");
 }
 
-/// Security audit `2f72c2ba` regression: `handle_incoming_vpn_packet`
+/// Security regression (audit `2f72c2ba`): `handle_incoming_vpn_packet`
 /// must NOT relay a packet from an unauthenticated UDP sender.
 ///
 /// Three-node mesh, mid is the relay hub. After alice/bob both reach
 /// validkey via mid, an unauthenticated socket sends a crafted UDP
 /// packet to mid's port: `[dst_id6=sha512("bob")[:6]][src_id6=
-/// sha512("alice")[:6]][garbage]`. The `if(!n) return` gate drops
-/// this; before the fix, our relay branch
-/// trusted the SRCID and forwarded the garbage to bob (whose SPTPS
-/// rejects it, kicking the `REQ_KEY` restart timer).
+/// sha512("alice")[:6]][garbage]`. mid must drop it; before the fix,
+/// the relay branch trusted the SRCID and forwarded the garbage to
+/// bob (whose SPTPS rejects it, kicking the `REQ_KEY` restart timer).
 ///
 /// **Assertions**: mid's stderr has "unauthenticated UDP sender";
 /// bob's `in_packets` for alice does NOT bump from the garbage
@@ -843,8 +796,8 @@ fn udp_relay_gate_unauthenticated_sender() {
     let b_nodes_before = bob_ctl.dump(3);
     let bob_in_before = node_in_packets(&b_nodes_before, "alice");
 
-    // ─── craft the spoofed packet ───────────────────────────────
-    // [dst_id6][src_id6][garbage]. dst=bob (relay target), src=alice
+    // Craft the spoofed packet: [dst_id6][src_id6][garbage].
+    // dst=bob (relay target), src=alice
     // (a name mid knows from gossip). The 12-byte prefix is what
     // `handle_incoming_vpn_packet` parses. NodeId6 = sha512(name)[:6].
     let dst_id = tincd::node_id::NodeId6::from_name("bob");
@@ -854,8 +807,8 @@ fn udp_relay_gate_unauthenticated_sender() {
     spoof.extend_from_slice(src_id.as_bytes());
     spoof.extend_from_slice(&[0xAA; 100]); // garbage ciphertext
 
-    // Send from a fresh UDP socket — NOT one mid has confirmed.
-    // mid's `n` scan (the `lookup_node_udp` equivalent) won't match.
+    // Send from a fresh UDP socket — not one mid has confirmed, so
+    // mid's sender lookup won't match.
     let attacker = std::net::UdpSocket::bind("127.0.0.1:0").expect("attacker bind");
     attacker
         .send_to(&spoof, ("127.0.0.1", mid_udp_port))
@@ -864,15 +817,10 @@ fn udp_relay_gate_unauthenticated_sender() {
     // Give mid a turn to process.
     std::thread::sleep(Duration::from_millis(200));
 
-    // ─── assert: bob's in-packets did NOT bump ──────────────────
-    // Before fix: mid relays the garbage; bob's `on_udp_recv` runs,
-    // SPTPS decrypt fails, but `in_packets` bumps in `dispatch_
-    // tunnel_outputs`? No — `in_packets` bumps only on successful
-    // SPTPS Record. BUT: bob's stderr would have "Failed to decode
-    // UDP packet from alice" AND mid's stderr would have "Relaying
-    // UDP packet from alice to bob" instead of the gate line. The
-    // counter check is belt-and-braces; the stderr check is the
-    // primary assertion.
+    // Assert bob's in-packets did not bump. `in_packets` only bumps
+    // on a successful SPTPS record, so this counter check is
+    // belt-and-braces; the stderr check below is the primary
+    // assertion.
     let b_nodes_after = bob_ctl.dump(3);
     let bob_in_after = node_in_packets(&b_nodes_after, "alice");
     assert_eq!(
@@ -881,7 +829,7 @@ fn udp_relay_gate_unauthenticated_sender() {
          mid relayed unauthenticated traffic"
     );
 
-    // ─── assert: mid logged the gate ────────────────────────────
+    // Assert mid logged the gate.
     drop(alice_ctl);
     drop(bob_ctl);
     drop(mid_ctl);
@@ -906,8 +854,8 @@ fn udp_relay_gate_unauthenticated_sender() {
     );
 }
 
-/// Gap audit `bcc5c3e3`: `Forwarding = off` was parsed (`daemon.
-/// rs:1244`) but never read in `dispatch_route_result`. An operator
+/// Gap audit `bcc5c3e3`: `Forwarding = off` was parsed but never
+/// read in `dispatch_route_result`. An operator
 /// who set it to opt out of being a transit relay got transit
 /// traffic anyway.
 ///
@@ -951,11 +899,10 @@ fn three_daemon_forwarding_off_drops_transit() {
     // bob: ConnectTo=mid, owns 10.0.0.2/32, fd device.
     bob.write_config_multi(&[&mid, &alice], &["mid"]);
 
-    // alice's hosts/mid: claim 10.0.0.0/24. With StrictSubnets,
-    // `load_all_nodes` preloads this; bob's gossiped /32 is
-    // rejected (`:116-122` gate). alice's longest-prefix match
-    // for 10.0.0.2 → mid. write_config_multi only writes pubkey,
-    // so append.
+    // alice's hosts/mid: claim 10.0.0.0/24. With StrictSubnets it
+    // is preloaded and bob's gossiped /32 is rejected, so alice's
+    // longest-prefix match for 10.0.0.2 → mid. write_config_multi
+    // only writes the pubkey, so append.
     {
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new()
@@ -968,7 +915,6 @@ fn three_daemon_forwarding_off_drops_transit() {
         // write_config_multi already wrote that one).
     }
 
-    // ─── spawn: mid first ────────────────────────────────────────
     // mid runs at debug so we can assert the gate's log line.
     let mut mid_child = tincd_at(&mid.confbase, &mid.pidfile, &mid.socket)
         .env("RUST_LOG", "tincd=debug")
@@ -997,7 +943,6 @@ fn three_daemon_forwarding_off_drops_transit() {
     let mut alice_ctl = alice.ctl();
     let mut mid_ctl = mid.ctl();
 
-    // ─── wait: mesh up, mid knows bob's subnet ───────────────────
     poll_until(Duration::from_secs(10), || {
         let m = mid_ctl.dump(6);
         (has_active_peer(&m, "alice") && has_active_peer(&m, "bob")).then_some(())
@@ -1021,8 +966,7 @@ fn three_daemon_forwarding_off_drops_transit() {
         "alice's StrictSubnets should reject bob's /32; got: {a_subnets:?}"
     );
 
-    // ─── kick the alice↔mid tunnel ───────────────────────────────
-    // alice routes 10.0.0.2 → mid → REQ_KEY for mid → per-tunnel
+    // Kick the alice↔mid tunnel: alice routes 10.0.0.2 → mid → REQ_KEY for mid → per-tunnel
     // SPTPS handshake. validkey settles.
     let kick = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"kick");
     write_fd(&alice_tun, &kick);
@@ -1033,8 +977,7 @@ fn three_daemon_forwarding_off_drops_transit() {
             .then_some(())
     });
 
-    // ─── THE PROBE ────────────────────────────────────────────────
-    // alice encrypts for mid → mid decrypts → forward_packet(...,
+    // The probe: alice encrypts for mid → mid decrypts → forward_packet(...,
     // Some(alice)) → route_ipv4 → Forward{to: bob} → gate fires.
     // Spam (each iteration drives try_tx); drain bob's TUN. The
     // negative assertion: bob NEVER sees the payload.

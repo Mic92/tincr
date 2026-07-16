@@ -22,7 +22,7 @@ use super::common::*;
 use super::fd_tunnel::*;
 use super::node::*;
 
-// ── tiny DNS wire helpers (RFC 1035) ────────────────────────────────
+// tiny DNS wire helpers (RFC 1035)
 // Duplicated from the `dns.rs` unit-test helpers on purpose: those
 // are `#[cfg(test)]`-private to the lib crate, and re-exporting test
 // scaffolding through the public API just for an integration test
@@ -139,7 +139,7 @@ fn dns_stub_fd() {
     let dns6: Ipv6Addr = "fd00::53".parse().unwrap();
     let me6: Ipv6Addr = "fd00::1".parse().unwrap();
 
-    // ═══ A: bob.tinc.internal → 10.42.0.2 ════════════════════════
+    // A: bob.tinc.internal → 10.42.0.2
     let q = mk_query("bob.tinc.internal", TYPE_A);
     let frame = mk_ipv4_pkt(me4, dns4.octets(), &mk_udp(54321, &q));
     let reply = roundtrip(&tun, &frame);
@@ -164,7 +164,7 @@ fn dns_stub_fd() {
     // A rdata is the trailing 4 bytes (no compression, single RR).
     assert_eq!(&dns[dns.len() - 4..], &[10, 42, 0, 2], "A rdata = bob /32");
 
-    // ═══ PTR: 2.0.42.10.in-addr.arpa → bob.tinc.internal. ════════
+    // PTR: 2.0.42.10.in-addr.arpa → bob.tinc.internal.
     let q = mk_query("2.0.42.10.in-addr.arpa", TYPE_PTR);
     let frame = mk_ipv4_pkt(me4, dns4.octets(), &mk_udp(54322, &q));
     let reply = roundtrip(&tun, &frame);
@@ -174,7 +174,7 @@ fn dns_stub_fd() {
     let want = encode_name("bob.tinc.internal");
     assert_eq!(&dns[dns.len() - want.len()..], &want[..], "PTR rdata");
 
-    // ═══ NXDOMAIN: wrong suffix, no forwarding ═══════════════════
+    // NXDOMAIN: wrong suffix, no forwarding
     let q = mk_query("google.com", TYPE_A);
     let frame = mk_ipv4_pkt(me4, dns4.octets(), &mk_udp(54323, &q));
     let reply = roundtrip(&tun, &frame);
@@ -186,7 +186,7 @@ fn dns_stub_fd() {
     );
     assert_eq!(u16::from_be_bytes([dns[6], dns[7]]), 0, "ANCOUNT=0");
 
-    // ═══ AAAA over IPv6 transport: bob → fd00::2 ═════════════════
+    // AAAA over IPv6 transport: bob → fd00::2
     let q = mk_query("bob.tinc.internal", TYPE_AAAA);
     let frame = mk_ipv6_pkt(me6, dns6, &mk_udp(54324, &q));
     let reply = roundtrip(&tun, &frame);
@@ -203,7 +203,7 @@ fn dns_stub_fd() {
     let want: Ipv6Addr = "fd00::2".parse().unwrap();
     assert_eq!(&dns[dns.len() - 16..], &want.octets(), "AAAA rdata");
 
-    // ═══ PTR over IPv6: 32-nibble ip6.arpa → bob ═════════════════
+    // PTR over IPv6: 32-nibble ip6.arpa → bob
     let arpa = "2.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.d.f.ip6.arpa";
     let q = mk_query(arpa, TYPE_PTR);
     let frame = mk_ipv6_pkt(me6, dns6, &mk_udp(54325, &q));
@@ -213,7 +213,7 @@ fn dns_stub_fd() {
     let want = encode_name("bob.tinc.internal");
     assert_eq!(&dns[dns.len() - want.len()..], &want[..], "v6 PTR rdata");
 
-    // ═══ log: intercept fired ════════════════════════════════════
+    // log: intercept fired
     drop(tun);
     let stderr = drain_stderr(alice_child);
     let hits = stderr.matches("tincd::dns").count();

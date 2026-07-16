@@ -3,9 +3,7 @@ use std::time::{Duration, Instant};
 use super::common::*;
 use super::node::*;
 
-// ═══════════════════════════════════════════════════════════════════
-// SOCKS5 proxy roundtrip (chunk-11-proxy)
-// ═══════════════════════════════════════════════════════════════════
+// SOCKS5 proxy roundtrip
 
 /// In-process anonymous SOCKS5 server. Reads the RFC 1928 greeting +
 /// CONNECT request, replies, then relays bytes bidirectionally to the
@@ -24,7 +22,7 @@ fn fake_socks5_server() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
     let handle = std::thread::spawn(move || {
         let (mut client, _) = listener.accept().expect("socks5 accept");
 
-        // ─── Greeting (RFC 1928 §3) ────────────────────────────────
+        // Greeting (RFC 1928 §3)
         // tinc sends [05][01][00] (1 method: anonymous). socks.rs:182.
         let mut greet = [0u8; 3];
         client.read_exact(&mut greet).expect("read greet");
@@ -34,7 +32,7 @@ fn fake_socks5_server() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
         // Reply: [05][00] (chose anonymous).
         client.write_all(&[5, 0]).expect("write choice");
 
-        // ─── CONNECT (RFC 1928 §4) ─────────────────────────────────
+        // CONNECT (RFC 1928 §4)
         // [05][01][00][atyp][addr][port]. tinc sends atyp=01 (IPv4)
         // for our 127.0.0.1 target. socks.rs:213-216.
         let mut hdr = [0u8; 4];
@@ -57,7 +55,7 @@ fn fake_socks5_server() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
             .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
             .expect("write conn reply");
 
-        // ─── Bidirectional relay ───────────────────────────────────
+        // Bidirectional relay
         // Two threads, copy each direction. Shutdown the write half
         // when one side closes its read; the other thread's read
         // returns 0 and it exits too.
@@ -165,9 +163,7 @@ fn socks5_proxy_roundtrip() {
     // what it needs to (active conns through the proxy).
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// HTTP CONNECT proxy roundtrip (chunk-12-http-proxy)
-// ═══════════════════════════════════════════════════════════════════
+// HTTP CONNECT proxy roundtrip
 
 /// Minimal HTTP CONNECT proxy. Reads until `\r\n\r\n`, parses the
 /// CONNECT line, dials upstream, sends 200, bidirectional relay.
@@ -188,7 +184,7 @@ fn fake_http_proxy() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
         let (client, _) = listener.accept().expect("http proxy accept");
         let mut reader = BufReader::new(client.try_clone().unwrap());
 
-        // ─── Read CONNECT line ──────────────────────────────────────
+        // Read CONNECT line
         // `CONNECT 127.0.0.1:PORT HTTP/1.1\r\n`
         let mut connect_line = String::new();
         reader.read_line(&mut connect_line).expect("read CONNECT");
@@ -205,17 +201,17 @@ fn fake_http_proxy() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
             .parse()
             .unwrap_or_else(|e| panic!("parse {target:?}: {e}"));
 
-        // ─── Read until blank line (just `\r\n`) ────────────────────
+        // Read until blank line (just `\r\n`)
         // tinc sends `CONNECT ... HTTP/1.1\r\n\r\n` — one CONNECT
         // line + immediate blank. No intermediate headers.
         let mut line = String::new();
         reader.read_line(&mut line).expect("read blank");
         assert_eq!(line, "\r\n", "expected blank line, got {line:?}");
 
-        // ─── Dial upstream ──────────────────────────────────────────
+        // Dial upstream
         let upstream = TcpStream::connect(target).expect("upstream connect");
 
-        // ─── Reply: status + blank line, NO headers ─────────────────
+        // Reply: status + blank line, NO headers
         // Same as proxy.py:155. Upstream only works with this
         // minimal form (upstream bug).
         //
@@ -232,7 +228,7 @@ fn fake_http_proxy() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
             (&upstream).write_all(&leftover).expect("forward leftover");
         }
 
-        // ─── Bidirectional relay ────────────────────────────────────
+        // Bidirectional relay
         // Same as fake_socks5_server.
         let mut c_r = client.try_clone().unwrap();
         let mut u_w = upstream.try_clone().unwrap();

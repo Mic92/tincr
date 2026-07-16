@@ -90,7 +90,7 @@ fn udp_asymmetric_meta_confirm() {
     let mut alice_ctl = alice.ctl();
     let mut bob_ctl = bob.ctl();
 
-    // ─── mesh + validkey ────────────────────────────────────────
+    // mesh + validkey
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         poll_until(Duration::from_secs(10), || {
             let a = alice_ctl.dump(3);
@@ -119,7 +119,7 @@ fn udp_asymmetric_meta_confirm() {
         );
     }
 
-    // ─── (1) alice's view of bob: udp_confirmed via meta-ack ────
+    // (1) alice's view of bob: udp_confirmed via meta-ack
     // Drive try_tx(mtu=true) with traffic so PMTU probes go out;
     // bob receives them, acks the size over meta, alice's minmtu
     // climbs. Want minmtu past a 1400-byte payload before assert 3.
@@ -136,7 +136,7 @@ fn udp_asymmetric_meta_confirm() {
             (st & 0x80 != 0 && minmtu >= 1400).then_some(minmtu)
         })
     }));
-    // ─── (2) bob's view of alice: snapshot BEFORE kill ──────────
+    // (2) bob's view of alice: snapshot BEFORE kill
     let b = bob_ctl.dump(3);
     drop(bob_ctl);
     drop(alice_ctl);
@@ -162,7 +162,7 @@ fn udp_asymmetric_meta_confirm() {
         "bob→alice minmtu must stay 0 (his UDP path is filtered); rows: {b:?}"
     );
 
-    // ─── (3) alice→bob big ping rides UDP ───────────────────────
+    // (3) alice→bob big ping rides UDP
     // bob's stderr (already drained) must show the meta-ack send;
     // alice's stderr must show "confirmed via meta". The actual
     // UDP-vs-TCP transport check: bob logged "Got UDP probe

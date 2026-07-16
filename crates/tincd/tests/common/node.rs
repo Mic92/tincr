@@ -53,7 +53,7 @@ impl Node {
         }
     }
 
-    // ── chainable builder setters ────────────────────────────────
+    // chainable builder setters
     #[must_use]
     pub fn with_conf(mut self, extra: &str) -> Self {
         self.extra_conf.push_str(extra);
@@ -75,7 +75,7 @@ impl Node {
         self
     }
 
-    // ── derived ─────────────────────────────────────────────────
+    // derived
     pub fn pubkey(&self) -> [u8; 32] {
         pubkey_from_seed(&self.seed)
     }
@@ -83,7 +83,7 @@ impl Node {
         Ctl::connect(&self.socket, &self.pidfile)
     }
 
-    // ── config emission ─────────────────────────────────────────
+    // config emission
 
     /// Two-peer shorthand. The dominant test shape (~20 callers).
     pub fn write_config(&self, other: &Node, connect_to: bool) {
@@ -132,7 +132,7 @@ impl Node {
         write_ed25519_privkey(&self.confbase, &self.seed);
     }
 
-    // ── spawn ───────────────────────────────────────────────────
+    // spawn
 
     pub fn spawn(&self) -> Child {
         self.spawn_with_log("tincd=info")
@@ -162,7 +162,7 @@ impl Node {
     }
 }
 
-// ── ctl-dump row helpers (shared by two_daemons + netns) ─────────
+// ctl-dump row helpers (shared by two_daemons + netns)
 
 /// Row format: `"18 6 NAME HOST port P OPTS_HEX FD STATUS_HEX"`.
 /// Status bit 1 (`0x2`) is `active` (past ACK). Control conn has

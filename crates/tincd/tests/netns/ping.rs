@@ -44,7 +44,7 @@ fn real_tun_ping() {
     bob.write_config(&alice, false);
     alice.write_config(&bob, true);
 
-    // ─── spawn ──────────────────────────────────────────────────
+    // spawn
     // Bob first (listener); alice has ConnectTo. Same ordering
     // rationale as two_daemons.rs (avoid the 5s retry backoff).
     let mut bob_child = bob.spawn_with_log("tincd=debug");
@@ -60,7 +60,7 @@ fn real_tun_ping() {
         panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
     }
 
-    // ─── wait for carrier (proves TUNSETIFF fired) ──────────────
+    // wait for carrier (proves TUNSETIFF fired)
     // The precreated devices are `NO-CARRIER` until TUNSETIFF.
     // Daemon's `Tun::open` runs in `Daemon::setup` which finishes
     // before the socket file appears, so usually carrier is
@@ -76,12 +76,12 @@ fn real_tun_ping() {
         "bob TUNSETIFF didn't bring carrier up"
     );
 
-    // ─── move bob's TUN, configure addresses ────────────────────
+    // move bob's TUN, configure addresses
     // AFTER both daemons attached. The fd binding survives the
     // move; bob's daemon doesn't notice (no event on the fd).
     netns.place_devices();
 
-    // ─── meta-conn handshake ────────────────────────────────────
+    // meta-conn handshake
     // Status bit 4 (reachable) on both → ACK + graph() done. Same
     // poll as first_packet_across_tunnel.
     let mut alice_ctl = alice.ctl();
@@ -95,7 +95,7 @@ fn real_tun_ping() {
         if a_ok && b_ok { Some(()) } else { None }
     });
 
-    // ─── kick the per-tunnel handshake ──────────────────────────
+    // kick the per-tunnel handshake
     // First packet hits `send_sptps_packet` with `!validkey` →
     // dropped, but kicks `send_req_key`. ICMP echo is the kick:
     // `ping -c 1 -W 1` sends one, waits 1s, fails. We don't care
@@ -106,7 +106,7 @@ fn real_tun_ping() {
         .stderr(Stdio::null())
         .status();
 
-    // ─── wait for validkey (status bit 1) ───────────────────────
+    // wait for validkey (status bit 1)
     // Per-tunnel SPTPS done on BOTH sides. catch_unwind: on
     // timeout, dump both daemons' captured stderr (it's piped;
     // never read otherwise).
@@ -126,7 +126,7 @@ fn real_tun_ping() {
         panic!("validkey timed out;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
     }
 
-    // ─── THE PING ───────────────────────────────────────────────
+    // THE PING
     // validkey set. `ping -c 3` sends three echo requests; each
     // one: kernel writes `[vnet_hdr][ICMP]` into tinc0 → alice's
     // `Tun::drain` (gso_type=NONE: strip vnet_hdr, synth eth header
@@ -162,7 +162,7 @@ fn real_tun_ping() {
     // Show the ping output even on success (--nocapture).
     eprintln!("{}", String::from_utf8_lossy(&ping.stdout));
 
-    // ─── traffic counters ───────────────────────────────────────
+    // traffic counters
     // alice: out_packets ≥ 3 for bob (the kick ping + 3 echoes;
     // counted at `send_packet` BEFORE the validkey gate, so the
     // dropped kick still counts). bob: in_packets ≥ 3 for alice.
@@ -187,7 +187,7 @@ fn real_tun_ping() {
     );
     assert!(b_in_p >= 3, "bob in_packets={b_in_p}; nodes: {b_nodes:?}");
 
-    // ─── stderr: TUNSETIFF success log + SPTPS handshake ────────
+    // stderr: TUNSETIFF success log + SPTPS handshake
     drop(alice_ctl);
     drop(bob_ctl);
     let _ = bob_child.kill();
@@ -264,13 +264,13 @@ fn real_tun_unreachable() {
         drain_stderr(alice_child)
     );
 
-    // ─── configure tinc0 only (no bob, no child netns move) ────
+    // configure tinc0 only (no bob, no child netns move)
     // /24 on the device → kernel route for 10.42.0.0/24 via tinc0.
     // 10.42.0.99 is in that /24 but NOT in any daemon Subnet.
     run_ip(&["addr", "add", "10.42.0.1/24", "dev", "tinc0"]);
     run_ip(&["link", "set", "tinc0", "up"]);
 
-    // ─── THE PING ────────────────────────────────────────────────
+    // THE PING
     // `-c 2`: send 2 echoes. Stay under the 3/sec ICMP rate limit;
     // a 4th would silently time out instead of getting ICMP back.
     // `-W 2`: 2s per-packet timeout. The ICMP error is synchronous
@@ -307,7 +307,7 @@ fn real_tun_unreachable() {
         "ping should surface the synthesized ICMP error; got:\n{combined}"
     );
 
-    // ─── daemon stderr: the synth log ────────────────────────────
+    // daemon stderr: the synth log
     let alice_stderr = drain_stderr(alice_child);
     assert!(
         alice_stderr.contains("unreachable, sending ICMP"),
@@ -381,7 +381,7 @@ fn tso_ingest_stream_integrity() {
     bob.write_config(&alice, false);
     alice.write_config(&bob, true);
 
-    // ─── spawn (same dance as real_tun_ping) ────────────────────
+    // spawn (same dance as real_tun_ping)
     // `info` not `debug`: 8 MiB at MSS 1400 = ~6000 frames; the
     // per-packet `debug!("Sending packet of {len} bytes")` floods
     // the 64 KiB stderr pipe. The `tinc_device=info` part lets the
@@ -407,7 +407,7 @@ fn tso_ingest_stream_integrity() {
 
     netns.place_devices();
 
-    // ─── handshake ──────────────────────────────────────────────
+    // handshake
     let mut alice_ctl = alice.ctl();
     let mut bob_ctl = bob.ctl();
     poll_until(Duration::from_secs(10), || {
@@ -440,7 +440,7 @@ fn tso_ingest_stream_integrity() {
         panic!("validkey timed out;\n=== alice ===\n{asd}\n=== bob ===\n{bs}");
     }
 
-    // ─── generate test data + reference hash ────────────────────
+    // generate test data + reference hash
     // 8 MiB of random bytes. Written to a temp file so we can hash
     // it once and pipe it once (urandom would give different bytes
     // on each read).
@@ -464,7 +464,7 @@ fn tso_ingest_stream_integrity() {
         .to_owned();
     eprintln!("reference sha256: {ref_hash}");
 
-    // ─── receiver: socat TCP-LISTEN | sha256sum (in bobside) ───
+    // receiver: socat TCP-LISTEN | sha256sum (in bobside)
     // The hash is written to a file because piping back across
     // `ip netns exec` is finicky. We read the file after.
     let rx_hash_path = tmp.path().join("rx.sha256");
@@ -481,7 +481,7 @@ fn tso_ingest_stream_integrity() {
     // 200ms is generous on loopback.
     std::thread::sleep(Duration::from_millis(200));
 
-    // ─── sender: socat FILE TCP (in outer netns / alice's side) ─
+    // sender: socat FILE TCP (in outer netns / alice's side)
     // This is THE test. The kernel TCP stack writes data into
     // tinc0; with TSO advertised it writes ≤64KB super-segments.
     // alice's daemon `drain()` returns `Super{..}`, `tso_split`
@@ -513,7 +513,7 @@ fn tso_ingest_stream_integrity() {
         );
     }
 
-    // ─── wait for rx + compare hashes ──────────────────────────
+    // wait for rx + compare hashes
     // socat exits when it sees FIN. sha256sum exits when its stdin
     // closes. The rx Child completes when both are done.
     let rx_status = rx.wait_with_output().expect("wait for rx socat").status;
