@@ -15,7 +15,6 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-// ────────────────────────────────────────────────────────────────────
 // IDs
 
 /// Index into [`Graph`]'s node slab.
@@ -75,7 +74,6 @@ fn sticky_post_pass(
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Slab payloads. Minimal — just what the algorithms read.
 
 /// One node. This is the graph-relevant slice of the daemon's node
@@ -84,7 +82,8 @@ fn sticky_post_pass(
 /// in a parallel table keyed by `NodeId`.
 #[derive(Debug, Clone)]
 pub struct Node {
-    /// Tie-break key. The C splay trees sort on `strcmp(name)`.
+    /// Node name; also the tie-break key (matches C tinc's
+    /// name-ordered trees so route tie-breaks agree across the mesh).
     pub name: String,
 
     /// Outgoing edges, sorted by destination name. A sorted `Vec`
@@ -124,8 +123,7 @@ pub struct Edge {
     to_name: String,
 }
 
-// ────────────────────────────────────────────────────────────────────
-// SSSP output. Side table — the C writes into `node_t` directly.
+// SSSP output, kept as a side table.
 
 /// SSSP routing for one node, or `None` if unreachable from `myself`.
 ///
@@ -160,7 +158,6 @@ pub struct Route {
     pub options: u32,
 }
 
-// ────────────────────────────────────────────────────────────────────
 // The graph
 
 /// Node + edge slabs, plus the weight-ordered edge index Kruskal walks.
@@ -251,7 +248,6 @@ impl Graph {
         let id = EdgeId(alloc_slot(&mut self.edges, &mut self.edge_free));
 
         // Find reverse: an edge from `to` whose destination is `from`.
-        // C does `lookup_edge(to, from)` via `to.edge_tree`.
         let reverse = slot!(self.nodes, to)
             .edges
             .iter()
@@ -289,12 +285,11 @@ impl Graph {
     /// Delete an edge. Unlinks the twin's `reverse`, removes from the
     /// per-node sorted list and `weight_order`, frees the slot.
     ///
-    /// Returns `None` if the slot was already freed. The C would
-    /// dereference a dangling pointer (UB); we no-op. Chosen over
-    /// panic because daemon teardown can hit double-delete races
-    /// (connection close + `del_edge_h` arriving close together) and
-    /// a no-op is the conservative choice. Callers that care can
-    /// check the return.
+    /// Returns `None` if the slot was already freed (no-op). Chosen
+    /// over panic because daemon teardown can hit double-delete races
+    /// (connection close + DEL_EDGE arriving close together) and a
+    /// no-op is the conservative choice. Callers that care can check
+    /// the return.
     ///
     /// # Panics
     /// If the edge is live but its `from` node is freed, or its
@@ -318,7 +313,7 @@ impl Graph {
 
         // Per-node list is sorted by `to_name`; binary-search the slot
         // out. The `from` node must be live — deleting an edge whose
-        // origin is gone is a caller bug (and the C would crash too).
+        // origin is gone is a caller bug.
         let edges = &self.edges;
         let from_edges = &mut slot!(mut self.nodes, from).edges;
         let pos = from_edges
@@ -341,11 +336,10 @@ impl Graph {
     /// Delete a node. Cascades: deletes all the node's outgoing edges
     /// first (their twins become reverseless), then frees the slot.
     ///
-    /// Does **not** hunt down *incoming* edges. The C doesn't either:
-    /// `node_del` walks `n->edge_tree` only. Any edge with `to ==`
+    /// Does **not** hunt down *incoming* edges. Any edge with `to ==`
     /// this node becomes a dangling reference; the protocol layer
-    /// (`del_edge_h`) is responsible for deleting both halves of a
-    /// pair before the node itself is purged. That said, the cascade
+    /// (DEL_EDGE handling) is responsible for deleting both halves of
+    /// a pair before the node itself is purged. That said, the cascade
     /// nulls the twin's `reverse`, and `sssp`/`mst` skip reverseless
     /// edges — so a dangling `to` is invisible to the algorithms.
     ///
@@ -476,9 +470,8 @@ impl Graph {
     /// dependency. Slab order is one pass over `Vec<Option<Edge>>`,
     /// no per-node indirection.
     ///
-    /// Each direction is its own `Edge` (the C has separate `edge_t`s
-    /// for `a→b` and `b→a`), so a bidi link yields two items here —
-    /// matches `dump_edges`' per-direction `send_request`.
+    /// Each direction is its own `Edge`, so a bidi link yields two
+    /// items here — matches the per-direction rows in the edge dump.
     pub fn edge_iter(&self) -> impl Iterator<Item = (EdgeId, &Edge)> + '_ {
         self.edges.iter().enumerate().filter_map(|(i, slot)| {
             #[expect(clippy::cast_possible_truncation)] // slab is u32-bounded
@@ -496,7 +489,6 @@ impl Graph {
             .map_or(&[], |node| node.edges.as_slice())
     }
 
-    // ────────────────────────────────────────────────────────────────
     // sssp_bfs
 
     /// `sssp_bfs`. Returns one `Option<Route>` per node, indexed by
@@ -564,20 +556,15 @@ impl Graph {
             nexthop: myself,
             via: myself,
             prevedge: None,
-            options: 0, // C never writes myself->options in sssp; reads stale
+            options: 0, // never meaningful for myself
         });
 
-        // The C uses a `list_t` and the `list_each` macro that
-        // re-reads `node->next` after the body — so `list_insert_tail`
-        // mid-iteration works. `VecDeque` push_back during pop_front
-        // is the same.
         let mut todo = VecDeque::new();
         todo.push_back(myself);
 
         while let Some(n) = todo.pop_front() {
             // The body needs `route[n]` immutable while writing
             // `route[e.to]` mutable. Snapshot the bits we read.
-            // (C just deref's pointers; we have to convince borrowck.)
             let (n_distance, n_wdist, n_indirect, n_nexthop, n_via) = {
                 let r = route[n.0 as usize].as_ref().unwrap();
                 (
@@ -592,12 +579,12 @@ impl Graph {
             for &eid in &slot!(self.nodes, n).edges {
                 let e = slot!(self.edges, eid);
 
-                // C line 159: `if(!e->reverse || e->to == myself) continue;`
+                // Skip half-edges and edges back to ourselves.
                 if e.reverse.is_none() || e.to == myself {
                     continue;
                 }
 
-                // C line 178: indirect propagates, OPTION_INDIRECT adds.
+                // Indirect propagates; OPTION_INDIRECT adds.
                 let indirect = n_indirect || (e.options & OPTION_INDIRECT) != 0;
 
                 let cand_hops = n_distance + 1;
@@ -638,12 +625,14 @@ impl Graph {
                     }
                 }
 
-                // C lines 188-191: nexthop and weighted_distance update
-                // only if first visit OR (same hop, lighter weight).
-                // The indirect→direct upgrade case *doesn't* update
-                // nexthop — it keeps the old one. But it *does* update
+                // nexthop and weighted_distance update only if first
+                // visit OR (same hop, lighter weight). The
+                // indirect→direct upgrade case *doesn't* update nexthop
+                // — it keeps the old one. But it *does* update
                 // distance, prevedge, via, options. Yes, this means
-                // distance can go *up* and nexthop stays. The KAT pins it.
+                // distance can go *up* and nexthop stays; matching
+                // C tinc's routing exactly matters for mesh-wide
+                // consistency, and the KAT pins it.
                 let prev = route[e.to.0 as usize].as_ref();
                 let update_nexthop = prev.is_none()
                     || (prev.unwrap().distance == cand_hops
@@ -656,10 +645,9 @@ impl Graph {
                     (p.nexthop, p.weighted_distance)
                 };
 
-                // C lines 193-198: unconditional. `distance` is
-                // *always* set to `n->distance + 1` here, even if the
-                // old one was smaller. `via` is propagated or fresh
-                // depending on `indirect`.
+                // Unconditional: `distance` is *always* set to the
+                // candidate hop count, even if the old one was smaller.
+                // `via` is propagated or fresh depending on `indirect`.
                 route[e.to.0 as usize] = Some(Route {
                     indirect,
                     distance: cand_hops,
@@ -670,18 +658,10 @@ impl Graph {
                     options: e.options,
                 });
 
-                // C line 200-202 (`update_node_udp`): daemon side-effect,
-                // suppressed here — we don't track addresses.
-
-                // C line 204: re-enqueue. `list_insert_tail` — the
-                // `list_each` macro picks it up because it re-reads
-                // `next` after the body. We get the same with
-                // `push_back` into a deque drained from the front.
-                //
-                // This *can* enqueue a node multiple times (e.g. on
-                // indirect→direct upgrade, after it's already been
-                // dequeued once). The C does the same; the second
-                // visit's edge loop will mostly hit the skip branch.
+                // Re-enqueue. This *can* enqueue a node multiple times
+                // (e.g. on indirect→direct upgrade, after it's already
+                // been dequeued once); the second visit's edge loop
+                // will mostly hit the skip branch.
                 todo.push_back(e.to);
             }
         }
@@ -693,17 +673,16 @@ impl Graph {
         route
     }
 
-    // ────────────────────────────────────────────────────────────────
     // mst_kruskal
 
     /// `mst_kruskal`. Returns the set of edges whose `connection_t`
     /// would have `status.mst = true`.
     ///
-    /// The C is Kruskal without union-find — it walks edges in weight
-    /// order, takes each edge that connects an unvisited node to a
-    /// visited one (a "safe edge" in the textbook sense), and *rewinds
-    /// to the start* whenever it makes progress after a skip. That
-    /// rewind is the key trick: a light edge between two unvisited
+    /// The algorithm is Kruskal without union-find — it walks edges in
+    /// weight order, takes each edge that connects an unvisited node to
+    /// a visited one (a "safe edge" in the textbook sense), and
+    /// *rewinds to the start* whenever it makes progress after a skip.
+    /// That rewind is the key trick: a light edge between two unvisited
     /// nodes gets skipped on the first pass, then picked up after a
     /// heavier edge connects one of them.
     ///
@@ -775,7 +754,6 @@ impl Graph {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Unit tests for invariants. KAT differential tests live in
 // tests/kat.rs.
 
@@ -839,7 +817,6 @@ mod tests {
         assert!(r[1].is_none()); // b unreachable
     }
 
-    // ────────────────────────────────────────────────────────────────
     // Deletion
 
     /// Triangle a-b-c, all bidi. Handy for delete tests.
@@ -925,7 +902,6 @@ mod tests {
 
     #[test]
     fn del_edge_on_freed_slot_is_noop() {
-        // The C would deref a dangling pointer here. We return None.
         // Rationale in `del_edge` doc: teardown races make panic
         // unhelpful.
         let (mut g, _, [ab, ..]) = triangle();
@@ -989,7 +965,6 @@ mod tests {
         assert_eq!(live, vec![a, c]);
     }
 
-    // ────────────────────────────────────────────────────────────────
     // edge_iter + update_edge
 
     #[test]
@@ -1075,7 +1050,6 @@ mod tests {
         assert!(!mst.contains(&ab));
     }
 
-    // ────────────────────────────────────────────────────────────────
     // sssp_sticky
 
     /// Diamond src─r1─dst / src─r2─dst. Both paths 2 hops; weight
@@ -1203,13 +1177,12 @@ mod tests {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // `graph()` glue: SSSP result → reachability transitions.
 //
 // `sssp` runs the BFS and returns `Vec<Option<Route>>` — `Some` =
-// `n->status.visited`, `None` = unvisited. The C then walks
-// `node_tree` and diffs `visited` against the *previous* `reachable`
-// bit. A flip in either direction is a transition: log line,
+// visited, `None` = unvisited. We then diff visited against the
+// *previous* `reachable` bit per node. A flip in either direction is
+// a transition: log line,
 // host-up/host-down script, subnet-up/down, SPTPS reset, MTU probe
 // timer reset.
 //
@@ -1391,7 +1364,7 @@ mod glue_tests {
         let routes = g.sssp(a);
         let t = diff_reachability(&mut g, a, &routes);
         assert!(t.is_empty());
-        // Untouched — the `continue` is before `:251`.
+        // Untouched — the `continue` skips the update.
         assert!(!g.node(a).unwrap().reachable);
     }
 
@@ -1423,8 +1396,7 @@ mod glue_tests {
         let (t, mst, _routes) = run_graph(&mut g, a, &[]);
 
         // Order is `node_ids()` order (slot order = insertion order
-        // here). C order is splay-tree-on-name; both are stable, but
-        // the C doesn't depend on transition order so neither do we.
+        // here); nothing depends on transition order.
         assert_eq!(
             t,
             vec![

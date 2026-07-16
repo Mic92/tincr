@@ -141,7 +141,7 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
     // address` builds a stack-local; can't copy what isn't cached.
     let (dst, sock) = handles.udp_addr.lock().unwrap().clone()?;
 
-    // ─── ALL GATES PASSED. The one side effect: burn `count` seqnos. ──
+    // ALL GATES PASSED. The one side effect: burn `count` seqnos.
     // The `Arc<AtomicU64>` is shared with the control-side `Sptps`;
     // both see the same counter. `Relaxed`: uniqueness is the only
     // requirement; the peer's replay window does the ordering.

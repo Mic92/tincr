@@ -65,7 +65,7 @@ impl SeenRequests {
     /// %d"`.
     ///
     /// C condition is `p->firstseen + pinginterval <= now.tv_sec`
-    /// (`:219`); we keep the `<=` boundary: an entry exactly
+    ///; we keep the `<=` boundary: an entry exactly
     /// `max_age` old is evicted.
     ///
     /// `saturating_duration_since` not `duration_since`: an entry

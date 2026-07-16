@@ -264,7 +264,7 @@ impl Daemon {
         self.contradicting_add_edge = 0;
         self.contradicting_del_edge = 0;
 
-        // ─── off-thread DNS drain. See `drain_dns_worker`.
+        // off-thread DNS drain. See `drain_dns_worker`.
         self.drain_dns_worker();
 
         if self.settings.autoconnect && self.node_ids.len() > 1 {
@@ -272,7 +272,7 @@ impl Daemon {
             self.execute_auto_action(action);
         }
 
-        // ─── PCP/UPnP portmapper drain. Non-blocking; the refresh
+        // PCP/UPnP portmapper drain. Non-blocking; the refresh.
         // thread already did the protocol work. The v4 TCP mapping
         // feeds `discovery.set_portmapped_tcp` so the next BEP44
         // publish carries a `tcp=` peers can dial without a punch;
@@ -328,7 +328,7 @@ impl Daemon {
             }
         }
 
-        // ─── DHT discovery poll (Rust extension). tick() is
+        // DHT discovery poll (Rust extension). tick() is.
         // non-blocking: every mainline call (info/to_bootstrap/
         // put_mutable/get_mutable) runs on the tinc-dht thread; here
         // we only drain its result channel and read cached state.
@@ -585,7 +585,7 @@ impl Daemon {
         }
     }
 
-    // ─── signal handlers
+    // signal handlers.
 
     /// SIGTERM/SIGHUP/SIGALRM handlers.
     pub(super) fn on_signal(&mut self, s: SignalWhat) {
@@ -729,7 +729,7 @@ impl Daemon {
             }
         }
 
-        // ─── subnet diff
+        // subnet diff.
         let current_subnets: HashSet<Subnet> =
             self.subnets.owned_by(&self.name).into_iter().collect();
         let new_subnets = parse_subnets_from_config(&config, &self.name);
@@ -770,7 +770,7 @@ impl Daemon {
         // SIGHUP-reload is rare; unconditional refresh is fine.
         self.tx_snap_refresh_subnets();
 
-        // ─── ConnectTo diff
+        // ConnectTo diff.
         let current_ct: BTreeSet<String> = self
             .outgoings
             .iter()
@@ -827,7 +827,7 @@ impl Daemon {
             self.setup_outgoing_connection(oid);
         }
 
-        // ─── host file mtime check
+        // host file mtime check.
         let conn_names: Vec<String> = self
             .conns
             .values()
@@ -899,5 +899,5 @@ impl Daemon {
         );
     }
 
-    // ─── io handlers
+    // io handlers.
 }

@@ -427,7 +427,7 @@ impl Daemon {
         }
     }
 
-    // ─── outgoing connections
+    // outgoing connections.
 
     /// Non-blocking drain of the off-thread resolver into
     /// `dns_hints` / `proxy_addrs`, plus an `extend_resolved` push
@@ -595,7 +595,7 @@ impl Daemon {
             };
             let name = outgoing.node_name.clone();
 
-            // ─── PROXY_EXEC
+            // PROXY_EXEC.
             // Walk addr cache for env vars; fd is socketpair half
             // (no probe).
             if let Some(ProxyConfig::Exec { cmd }) = &proxy {
@@ -649,7 +649,7 @@ impl Daemon {
                 return;
             }
 
-            // ─── SOCKS/HTTP: connect to PROXY addr.
+            // SOCKS/HTTP: connect to PROXY addr.
             // Addr cache still walks PEER addrs (CONNECT target
             // varies).
             let proxy_hp = proxy.as_ref().and_then(ProxyConfig::proxy_addr);

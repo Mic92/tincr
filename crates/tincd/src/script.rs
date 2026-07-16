@@ -11,14 +11,14 @@
 //! [`std::process::Command::envs`] — per-spawn env, no process
 //! mutation, no cleanup. The whole `unputenv` dance evaporates.
 //!
-//! `environment_exit` (`:137-142`) — free the `char**` arena. Drop.
+//! `environment_exit` — free the `char**` arena. Drop.
 //!
 //! `environment_update` — overwrite a slot by index. Only caller
 //! mutates `SUBNET=` and `WEIGHT=` inside a loop. The Rust call
 //! site builds a fresh
 //! `ScriptEnv` per iteration instead (chunk-8 wiring). Not ported.
 //!
-//! Windows `PATHEXT` search (`:156-199`). `#[cfg(windows)]` stubbed.
+//! Windows `PATHEXT` search. `#[cfg(windows)]` stubbed.
 //!
 //! ## Behavior differences vs C tincd
 //!
@@ -68,12 +68,12 @@ impl ScriptEnv {
     /// `environment_init`. Base vars every script gets. We take
     /// them as args (upstream reads from globals).
     ///
-    /// `NETNAME` / `DEVICE` / `INTERFACE` are conditional in C
-    /// (`:113,121,125` — `if(netname)` etc). `Option<&str>` here.
+    /// `NETNAME` / `DEVICE` / `INTERFACE` are only exported when
+    /// set; `Option<&str>` here.
     /// `NAME` is always set by the time scripts run (set from
     /// `Name=`); required `&str` here.
     ///
-    /// `DEBUG` is `if(debug_level >= 0)` (`:129`). `debug_level`
+    /// `DEBUG` is `if(debug_level >= 0)`. `debug_level`
     /// is signed in C; `-1` means "don't set". We take `Option<i32>`
     /// and the caller passes `None` for that case.
     #[must_use]
@@ -129,7 +129,7 @@ pub(crate) enum ScriptResult {
     /// `NotFound` so the log says WHY — a `host-up` that silently
     /// no-ops at high should be discoverable.
     Sandboxed,
-    /// Ran, exit non-zero or killed by signal (`:231-247`). C logs
+    /// Ran, exit non-zero or killed by signal. C logs
     /// `LOG_ERR` and returns `false`; callers ignore the `false`.
     /// Carries [`ExitStatus`] so the daemon can format
     /// `WEXITSTATUS` / `WTERMSIG` to match the C log message.
@@ -190,9 +190,9 @@ fn retry_txtbsy<T>(mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
 /// `execute_script`.
 ///
 /// Builds `<confbase>/<name>` (e.g. `/etc/tinc/foo/host-up`).
-/// If it doesn't exist (`:201-203` `access(F_OK)`): returns
+/// If it doesn't exist: returns
 /// [`ScriptResult::NotFound`] — NOT an error. If it runs and exits
-/// non-zero (`:231-238`): [`ScriptResult::Failed`] — daemon logs a
+/// non-zero: [`ScriptResult::Failed`] — daemon logs a
 /// warning, doesn't abort.
 ///
 /// # Errors
@@ -204,11 +204,11 @@ fn retry_txtbsy<T>(mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
 /// the epoll thread; a slow tinc-up stalls the whole daemon. Same
 /// in C. (Upstream wants async script spawn — out of scope.)
 ///
-/// `interpreter` is the `ScriptInterpreter` setting (`:215-219`):
+/// `interpreter` is the `ScriptInterpreter` setting:
 /// if `Some`, run `<interpreter> <script>`; else run `<script>`
 /// directly. See module doc for the shebang caveat.
 ///
-/// `scriptextension` (`:152`) is empty on Unix (`names.c`). Not a
+/// `scriptextension` is empty on Unix (`names.c`). Not a
 /// parameter.
 pub(crate) fn execute(
     confbase: &Path,
@@ -224,10 +224,10 @@ pub(crate) fn execute(
         Err(r) => return Ok(r),
     };
 
-    // `:221` system(). status() is fork+exec+waitpid. Blocks.
+    // system. status is fork+exec+waitpid. Blocks.
     let status = retry_txtbsy(|| cmd.status())?;
 
-    // `:228-247`. WIFEXITED+WEXITSTATUS==0 → Ok, else Failed.
+    //. WIFEXITED+WEXITSTATUS==0 → Ok, else Failed.
     // ExitStatus::success() is exactly that check on Unix.
     if status.success() {
         Ok(ScriptResult::Ok)

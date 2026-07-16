@@ -162,14 +162,13 @@ fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError
         .map(|e| e.get_str().to_ascii_lowercase());
     let device: Box<dyn Device> = match device_type.as_deref() {
         None => {
-            // Upstream defaults to the platform tun/tap driver. We
-            // keep `dummy` as the default so the integration-test
-            // suite (and `tinc fsck`/CI dry-runs) can boot the daemon
-            // unprivileged without `/dev/net/tun`. But a fresh
-            // `tinc init` + `tincd` then "works" with peers connected
-            // and zero packets flowing, which is a baffling failure
-            // mode — so shout about it. `warn!` lands in the default
-            // log output; users following the quickstart will see it.
+            // Default is `dummy` so the integration-test suite (and
+            // `tinc fsck`/CI dry-runs) can boot the daemon unprivileged
+            // without `/dev/net/tun`. But a fresh `tinc init` + `tincd`
+            // then "works" with peers connected and zero packets
+            // flowing, which is a baffling failure mode — so shout
+            // about it. `warn!` lands in the default log output; users
+            // following the quickstart will see it.
             log::warn!(target: "tincd",
                        "DeviceType not set; using dummy device — NO packets will flow. \
                         Set `DeviceType = tun` (or tap) in tinc.conf for a real tunnel.");
@@ -193,8 +192,7 @@ fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError
                 .parse()
                 .map_err(|_| SetupError::Config(format!("Device = {dev_str} is not a valid fd")))?;
             // Negative fd numbers don't exist; reject before the
-            // unsafe wrap. C logs strerror(errno) which is garbage
-            // here (sscanf doesn't set errno).
+            // unsafe wrap.
             if raw < 0 {
                 return Err(SetupError::Config(format!(
                     "Device = {raw}: inherited fd is negative"
@@ -398,7 +396,7 @@ fn register_timers(
     timers: &mut Timers<TimerWhat>,
     settings: &DaemonSettings,
 ) -> (TimerId, TimerId, TimerId, TimerId) {
-    // ─── ping timer
+    // ping timer
     // Initial fire is `pingtimeout` seconds from now; the handler
     // re-arms at +1s. tinc-event re-arm is EXPLICIT - the match
     // arm calls `timers.set(pingtimer, ...)`.
@@ -408,20 +406,20 @@ fn register_timers(
         Duration::from_secs(u64::from(settings.pingtimeout)),
     );
 
-    // ─── age_past_requests timer
+    // age_past_requests timer
     // Re-arms +10s. The eviction window is `pinginterval` (the
     // cache key TTL); the timer's 10s is just the sweep frequency.
     let age_timer = timers.add(TimerWhat::AgePastRequests);
     timers.set(age_timer, super::intervals::HOUSEKEEP_SWEEP);
 
-    // ─── periodic timer
+    // periodic timer
     // Arm +5s directly: no contradictions exist at setup, counters
     // are zero, an immediate first call would just halve sleeptime
     // (10 → 5 → floored to 10) and re-arm.
     let periodictimer = timers.add(TimerWhat::Periodic);
     timers.set(periodictimer, super::intervals::PERIODIC_TICK);
 
-    // ─── keyexpire timer
+    // keyexpire timer
     // Arm unconditionally: SPTPS needs the rekey to bound the
     // ChaCha20 nonce counter (see `keylifetime` doc).
     let keyexpire_timer = timers.add(TimerWhat::KeyExpire);
@@ -455,8 +453,7 @@ fn register_signals(
     signals.add(Signal::SIGHUP as i32, SignalWhat::Reload)?;
     signals.add(Signal::SIGALRM as i32, SignalWhat::Retry)?;
 
-    // USR1/USR2/WINCH: ignore. C tinc 1.1 sets these to SIG_IGN in
-    // detach() (process.c:205-207). Older 1.0.x dumped state on
+    // USR1/USR2/WINCH: ignore. Old tinc 1.0.x dumped state on
     // USR1/USR2; that moved to the control socket. Left at default
     // disposition they terminate the process — a stray `kill -USR1`
     // from a monitoring script expecting the old behaviour would
@@ -505,8 +502,6 @@ fn add_broadcast_subnets(subnets: &mut SubnetTree, config: &tinc_conf::Config) {
     }
 }
 
-// Daemon — the C-global state + the loop
-
 impl Daemon {
     /// `confbase` is the `-c` argument (or `CONFDIR/tinc[/NETNAME]`
     /// resolved by main.rs). `pidfile`/`socket` are the runtime paths.
@@ -530,16 +525,16 @@ impl Daemon {
         cmdline_conf: &tinc_conf::Config,
         socket_activation: Option<usize>,
     ) -> Result<Self, SetupError> {
-        // ─── read tinc.conf
+        // read tinc.conf
         let mut config = tinc_conf::read_server_config(confbase)
             .map_err(|e| SetupError::Config(format!("{e}")))?;
 
-        // ─── cmdline -o overrides
+        // cmdline -o overrides
         // Merge order doesn't matter: Source::Cmdline sorts before
         // Source::File regardless. Empty cmdline_conf is a no-op.
         config.merge(cmdline_conf.entries().iter().cloned());
 
-        // ─── Name
+        // Name
         let name = config
             .lookup("Name")
             .next()
@@ -548,7 +543,7 @@ impl Daemon {
         let name = expand_name(name).map_err(SetupError::Config)?;
         log::info!(target: "tincd", "tincd starting, name={name}");
 
-        // ─── read host config
+        // read host config
         // Merge hosts/NAME into the same tree as tinc.conf. HOST-tagged
         // vars (Port, Subnet, PublicKey, etc) live there. Missing
         // hosts/NAME is not fatal: the only var we read from it here
@@ -565,7 +560,7 @@ impl Daemon {
             }
         }
 
-        // ─── private key
+        // private key
         // Missing key is FATAL: we forbid legacy, so there is no RSA
         // fallback. The error message includes the gen-keys hint so
         // the user knows what to do.
@@ -578,7 +573,7 @@ impl Daemon {
             SetupError::Config(format!("{e}{hint}"))
         })?;
 
-        // ─── surface unknown keys
+        // surface unknown keys
         // The daemon never consults VARS for lookup (it asks for
         // specific names), so a typo'd key is otherwise just inert —
         // "typo ≡ unset" with no hint why. Warn once at startup.
@@ -590,10 +585,10 @@ impl Daemon {
             }
         }
 
-        // ─── settings
+        // settings
         let settings = load_settings(&config, confbase)?;
 
-        // ─── device
+        // device
         let device = open_device(&config)?;
         // Captured BEFORE the Box goes into the Daemon struct: the
         // `&dyn` trait borrow makes `&mut self` script call sites
@@ -612,7 +607,7 @@ impl Daemon {
         // the kernel, the ARP/NDP snatch then keeps it fresh.
         let mymac = device.mac().unwrap_or([0xFE, 0xFD, 0, 0, 0, 0]);
 
-        // ─── event loop scaffolding
+        // event loop scaffolding
         // tinc-event constructors. EventLoop::new can fail (epoll_
         // create); the others can't (BTreeMap, pipe).
         let mut ev = EventLoop::new().map_err(|e| SetupError::io("create event loop", e))?;
@@ -620,22 +615,22 @@ impl Daemon {
         let mut signals =
             SelfPipe::new().map_err(|e| SetupError::io("create signal self-pipe", e))?;
 
-        // ─── signals
+        // signals
         register_signals(&mut signals, &mut ev)
             .map_err(|e| SetupError::io("register signal handlers", e))?;
 
-        // ─── device fd
+        // device fd
         // Dummy returns None; Tun/Fd/Raw/Bsd return Some(BorrowedFd).
         if let Some(fd) = device.fd() {
             ev.add(fd, Io::Read, IoWhat::Device)
                 .map_err(|e| SetupError::io("register device fd with event loop", e))?;
         }
 
-        // ─── timers (ping, age_past_requests, periodic, keyexpire)
+        // timers (ping, age_past_requests, periodic, keyexpire)
         let (pingtimer, age_timer, periodictimer, keyexpire_timer) =
             register_timers(&mut timers, &settings);
 
-        // ─── sd_notify WATCHDOG timer
+        // sd_notify WATCHDOG timer
         // Driven from the event loop, NOT a free thread: a hung
         // loop must stop pinging so systemd's WatchdogSec actually
         // catches a wedge. No-op when WATCHDOG_USEC unset.
@@ -645,7 +640,7 @@ impl Daemon {
             (tid, iv)
         });
 
-        // ─── listeners
+        // listeners
         // Socket activation BYPASSES BindToAddress/ListenAddress
         // entirely (the .socket unit IS the bind config). Otherwise
         // walk BindToAddress, then ListenAddress, else wildcard.
@@ -681,7 +676,7 @@ impl Daemon {
         // the dispatch arm can index back for the accept.
         let listener_slots = register_listeners(listeners, &mut ev)?;
 
-        // ─── init_control
+        // init_control
         // Bind (the AlreadyRunning check) BEFORE writing the pidfile,
         // so a second tincd fails before clobbering the live cookie.
         let control = ControlSocket::bind(socket).map_err(|e| match e {
@@ -699,7 +694,7 @@ impl Daemon {
         ev.add(control.as_fd(), Io::Read, IoWhat::UnixListener)
             .map_err(|e| SetupError::io("register control socket with event loop", e))?;
 
-        // ─── graph: add myself
+        // graph: add myself
         // `Graph::add_node` defaults `reachable = true`.
         let mut graph = Graph::new();
         let myself = graph.add_node(&name);
@@ -708,7 +703,7 @@ impl Daemon {
         let mut id6_table = NodeId6Table::new();
         id6_table.add(&name, myself);
 
-        // ─── Subnet
+        // Subnet
         // OUR subnets from `hosts/NAME` (HOST-tagged). `route()`
         // needs these to recognize packets destined for us. Parse
         // failures are logged + skipped (the bad subnet just isn't
@@ -718,23 +713,23 @@ impl Daemon {
             subnets.add(s, name.clone());
         }
 
-        // ─── DNS stub (Rust-only)
+        // DNS stub (Rust-only)
         // Tailscale-style TUN intercept. Off unless BOTH
         // `DNSAddress=` and `DNSSuffix=` are set. The magic IP must
         // also be added to the TUN in `tinc-up`. `DNSAddress` can be
         // repeated for v4+v6.
         let dns = load_dns_config(&config)?;
 
-        // ─── BroadcastSubnet
+        // BroadcastSubnet
         add_broadcast_subnets(&mut subnets, &config);
 
-        // ─── ConnectTo
+        // ConnectTo
         // Collect names here; the actual connect is done below (it
         // needs `&mut self`). The mark-sweep (terminate connections
         // whose ConnectTo was removed) only matters on SIGHUP-reload.
         let connect_to = parse_connect_to_from_config(&config, &name);
 
-        // ─── invitation key
+        // invitation key
         // `Ok(None)` if the file doesn't exist - not an error, just
         // no invites issued yet. `Err` for corrupt PEM.
         let invitation_key = invitation_serve::read_invitation_key(confbase)
@@ -861,12 +856,12 @@ impl Daemon {
             tunnel_handles: IntHashMap::default(),
         };
 
-        // ─── proxy host pre-resolve. Non-blocking; literal IPs
+        // proxy host pre-resolve. Non-blocking; literal IPs
         // short-circuit so `Proxy = socks5 127.0.0.1 9050` works on
         // the very first dial without waiting one tick.
         daemon.request_proxy_resolve();
 
-        // ─── try_outgoing_connections - the actual setup
+        // try_outgoing_connections - the actual setup
         // Done HERE (not above) because it needs `&mut self` for the
         // slotmap + graph + EventLoop.
         for peer in connect_to {
@@ -892,18 +887,18 @@ impl Daemon {
         // removed) is in `reload_configuration`. setup() never has
         // stale outgoings (it's first boot).
 
-        // ─── load_all_nodes
+        // load_all_nodes
         // Done after the ConnectTo loop - both add to the same
         // graph, order doesn't matter for correctness, but doing it
         // last keeps the "load every name from disk" step in one place.
         daemon.load_all_nodes();
 
-        // ─── DHT discovery spawn (Rust extension). After listeners
+        // DHT discovery spawn (Rust extension). After listeners
         // (need `my_udp_port` resolved) and the ConnectTo loop
         // (preresolve gates on `outgoings.is_empty()`). Non-fatal.
         daemon.spawn_dht_discovery();
 
-        // ─── PCP/UPnP portmapper. After listeners (need the
+        // PCP/UPnP portmapper. After listeners (need the
         // resolved port), before drop_privs (PCP/SSDP send from
         // unprivileged sockets, spawn alongside DHT for symmetry so
         // the first refresh runs while tinc-up is still configuring
@@ -923,7 +918,7 @@ impl Daemon {
             ));
         }
 
-        // ─── tinc-up
+        // tinc-up
         // The script typically does `ip addr add` / `ip link set up`
         // on the TUN. Base env only (no NODE/SUBNET). When standby,
         // the FIRST BecameReachable in `run_graph_and_log` fires it
@@ -940,7 +935,7 @@ impl Daemon {
             daemon.run_subnet_script_sync(true, &daemon.name, s);
         }
 
-        // ─── TX fast-path snapshot. Built post-load_all_nodes so
+        // TX fast-path snapshot. Built post-load_all_nodes so
         // `subnets` has our own configured subnets. routes/ns/tunnels
         // are still empty — tx_probe returns None at route_of()? until
         // the first run_graph_and_log refreshes them. That first call

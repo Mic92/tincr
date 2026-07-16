@@ -63,7 +63,7 @@ pub(super) fn is_udp_unreachable_errno(e: &std::io::Error) -> bool {
         101 // ENETUNREACH
         | 113 // EHOSTUNREACH
         | 97  // EAFNOSUPPORT
-        | 99  // EADDRNOTAVAIL
+        | 99 // EADDRNOTAVAIL
     )
 }
 

@@ -37,7 +37,7 @@ fn mkctx(cookie: &str) -> IdCtx<'_> {
 
 use rand_core::OsRng;
 
-// ─── check_gate
+// check_gate.
 
 /// `DispatchError` isn't `PartialEq`-friendly; gate only yields these.
 #[derive(Debug, PartialEq)]
@@ -54,24 +54,24 @@ fn gate_cases() {
     use GateExpect::{Ok, Unauthorized, UnknownRequest};
     #[rustfmt::skip]
     let cases: &[(Option<Request>, &[u8], GateExpect)] = &[
-        // ─── allows expected
+        // allows expected.
         // new_control sets allow_request = Some(Id).
         (Some(Request::Id), b"0 ^abc 0",   Ok(Request::Id)),
-        // ─── blocks unexpected
+        // blocks unexpected.
         // Fresh conn allows only ID (0). CONTROL (18) is gated.
         (Some(Request::Id), b"18 0",       Unauthorized),
-        // ─── None = ALL
+        // None = ALL.
         (None,              b"18 0",       Ok(Request::Control)),
         (None,              b"0 foo 17.7", Ok(Request::Id)),
         (None,              b"8",          Ok(Request::Ping)),
-        // ─── empty: `atoi("")` → 0 in C, but the `*request ==
+        // empty: `atoi("")` → 0 in C, but the `*request ==.
         // '0'` check fails. We reject too: empty first token.
         (Some(Request::Id), b"",           UnknownRequest),
         (Some(Request::Id), b"  ",         UnknownRequest),
-        // ─── out of range
+        // out of range.
         (None,              b"99 foo",     UnknownRequest),
         (None,              b"-1 foo",     UnknownRequest),
-        // ─── STRICTER: `"18foo"` rejected; `atoi` would parse 18
+        // STRICTER: `"18foo"` rejected; `atoi` would parse 18.
         (None,              b"18foo bar",  UnknownRequest),
     ];
     for (i, (allow, line, expected)) in cases.iter().enumerate() {
@@ -87,7 +87,7 @@ fn gate_cases() {
     }
 }
 
-// ─── handle_id
+// handle_id.
 //
 // Happy-path control auth covered by `tests/stop.rs::spawn_connect_stop`.
 // Rejection paths only
@@ -171,7 +171,7 @@ fn id_early_rejects() {
     }
 }
 
-// ─── id_h peer branch
+// id_h peer branch.
 
 /// Tempdir + hosts/ layout for peer-branch tests.
 struct PeerSetup {
@@ -302,7 +302,7 @@ fn id_peer_no_dot_minor_zero() {
     assert_eq!(c.protocol_minor, 0);
 }
 
-// ─── invitation `?` branch
+// invitation `?` branch.
 //
 // Happy path covered by `tests/two_daemons.rs::tinc_join_against_real_daemon`.
 
@@ -341,7 +341,7 @@ fn invite_label_no_nul() {
     assert!(!INVITE_LABEL.contains(&0));
 }
 
-// ─── tcp_label (the NUL)
+// tcp_label (the NUL).
 
 /// WIRE-COMPAT. gcc-verified: `labellen=33`, byte 32 = 0x00. Miss
 /// the NUL → `BadSig` against C tincd. Fast fail vs 100ms+
@@ -396,7 +396,7 @@ fn id_bumps_ping_time() {
     assert!(c.last_ping_time > now + std::time::Duration::from_secs(3000));
 }
 
-// ─── handle_control
+// handle_control.
 //
 // `"18 0"` → Stop covered by `tests/stop.rs::spawn_connect_stop`.
 
@@ -567,7 +567,7 @@ fn proto_version_pin() {
     assert_eq!(CTL_VERSION, 0);
 }
 
-// ─── send_ack / parse_ack
+// send_ack / parse_ack.
 
 /// All-defaults: `0x0700000c`.
 #[test]
@@ -603,9 +603,9 @@ fn myself_options_empty_config() {
 }
 
 /// `TCPOnly = yes` sets TCPONLY
-/// and INDIRECT (`:391` implication), and `:442` `choice =
+/// and INDIRECT (implied), and `choice =
 /// !(options & OPTION_TCPONLY)` makes the PMTU default off.
-/// `ClampMSS` unaffected (`:449` default on).
+/// `ClampMSS` unaffected (default on).
 #[test]
 fn myself_options_tcponly_implies_indirect_clears_pmtu() {
     let opts = myself_options_from_config(&cfg(&["TCPOnly = yes"]));
@@ -618,8 +618,8 @@ fn myself_options_tcponly_implies_indirect_clears_pmtu() {
 }
 
 /// `IndirectData = yes` standalone: only INDIRECT, defaults
-/// otherwise. PMTU default `:442` is `!(options & TCPONLY)` =
-/// true; `ClampMSS` `:449` true.
+/// otherwise. PMTU default is `!(options & TCPONLY)` =
+/// true; `ClampMSS` true.
 #[test]
 fn myself_options_indirect_only() {
     let opts = myself_options_from_config(&cfg(&["IndirectData = yes"]));

@@ -9,7 +9,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use crate::packet::{ETH_P_ARP, ETH_P_IP};
 use crate::subnet_tree::SubnetTree;
 
-// ── Wire constants ─────────────────────────────────────────────────
+// Wire constants.
 
 const ETHER_SIZE: usize = 14;
 const IP_SIZE: usize = 20;
@@ -46,7 +46,6 @@ const ND_NEIGHBOR_SOLICIT: u8 = 135;
 const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_ICMPV6: u8 = 58;
 
-// ────────────────────────────────────────────────────────────────────
 // RouteResult
 
 /// What to do with a packet. `route.c`'s side-effect calls, reified.
@@ -78,7 +77,6 @@ pub(crate) enum RouteResult<T> {
     TooShort { need: usize, have: usize },
 }
 
-// ────────────────────────────────────────────────────────────────────
 // route_ipv4
 
 /// Reads `ip_dst`, looks up in `subnets`, returns the owner.
@@ -140,7 +138,6 @@ pub(crate) fn route_ipv4<T>(
     RouteResult::Forward { to }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // route_ipv6
 
 /// Same shape as [`route_ipv4`]; differences: dst at offset 38,
@@ -203,27 +200,26 @@ pub(crate) fn route_ipv6<T>(
     RouteResult::Forward { to }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // decrement_ttl
 
 /// `do_decrement_ttl` outcome. Upstream returns bool + side-effects;
 /// we reify the four exits.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TtlResult {
-    /// `:365,384,386`: TTL>1 decremented (or unknown ethertype).
+    /// : TTL>1 decremented (or unknown ethertype).
     Decremented,
-    /// `:344-347,376-379`: TTL≤1 AND already ICMP-time-exceeded.
+    /// : TTL≤1 AND already ICMP-time-exceeded.
     /// Silent drop (storm guard).
     DropSilent,
-    /// `:345,377`: TTL≤1, not already time-exceeded. Daemon bounces.
+    /// : TTL≤1, not already time-exceeded. Daemon bounces.
     SendIcmp { icmp_type: u8, icmp_code: u8 },
-    /// `:339-341,368-370`: checklength failed.
+    /// : checklength failed.
     TooShort,
 }
 
 /// `do_decrement_ttl`. In-place TTL/hop-limit decrement + IPv4
 /// checksum adjust (RFC 1624 incremental: `csum +=
-/// old + ~new` then fold — `:354-360`). v6 has no IP checksum.
+/// old + ~new` then fold —). v6 has no IP checksum.
 pub(crate) fn decrement_ttl(data: &mut [u8]) -> TtlResult {
     // Read ethertype, skip 8021Q tag if present.
     if data.len() < ETHER_SIZE {
@@ -315,7 +311,6 @@ pub(crate) fn decrement_ttl(data: &mut [u8]) -> TtlResult {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // extract_tos
 
 /// Read the inner packet's TOS/TC byte for `PriorityInheritance`.
@@ -343,7 +338,6 @@ pub(crate) fn extract_tos(data: &[u8]) -> Option<u8> {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // route — top-level dispatch
 
 /// Ethertype dispatch (`RMODE_ROUTER` only).
@@ -380,8 +374,6 @@ pub(crate) fn route<T>(
         },
     }
 }
-
-// ════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -537,7 +529,6 @@ mod tests {
         assert_eq!(r, RouteResult::TooShort { need: 14, have: 10 });
     }
 
-    // ────────────────────────────────────────────────────────────────
     // route_ipv6
 
     fn ipv6_packet(dst: Ipv6Addr) -> Vec<u8> {
@@ -636,7 +627,6 @@ mod tests {
         assert!(matches!(r, RouteResult::Unreachable { .. }));
     }
 
-    // ────────────────────────────────────────────────────────────────
     // decrement_ttl
 
     use crate::packet::inet_checksum;
@@ -748,7 +738,6 @@ mod tests {
         assert_eq!(p[ETHER_SIZE + 4 + 8], 63);
     }
 
-    // ────────────────────────────────────────────────────────────────
     // extract_tos
 
     /// v4 TOS at byte 15.

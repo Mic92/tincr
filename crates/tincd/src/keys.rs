@@ -196,8 +196,8 @@ pub(crate) fn read_ecdsa_private_key(
 /// 3. `hosts/NAME` PEM block (`cmd_exchange` writes)
 ///
 /// `host_config` is the peer's; caller already loaded it. Returns
-/// `None` on failure: `id_h` treats it as "downgrade to legacy"
-/// (then rejected at `:443-447`).
+/// `None` on failure: the caller rejects the peer (legacy protocol
+/// is not supported).
 ///
 /// Source-order subtlety: if `hosts/NAME` has BOTH the var and a
 /// PEM block, the var wins silently (early return). No consistency
@@ -208,7 +208,7 @@ pub(crate) fn read_ecdsa_public_key(
     confbase: &Path,
     name: &str,
 ) -> Option<[u8; PUBLIC_LEN]> {
-    // ─── Source 1: inline b64 config var (`:179-184`)
+    // Source 1: inline b64 config var.
     if let Some(e) = host_config.lookup("Ed25519PublicKey").next() {
         // Returns NULL if the b64 is bad. NO fallthrough to source
         // 2/3. A present-but-malformed inline key is a hard
@@ -218,7 +218,7 @@ pub(crate) fn read_ecdsa_public_key(
         return pubkey_from_b64(e.get_str());
     }
 
-    // ─── Source 2/3: file (`:186-189`)
+    // Source 2/3: file.
     // `Ed25519PublicKeyFile` if set, else `hosts/NAME`. The default
     // is "the same file we already parsed as config" — `read_pem`
     // skips lines until BEGIN.
@@ -230,10 +230,8 @@ pub(crate) fn read_ecdsa_public_key(
             |e| PathBuf::from(e.get_str()),
         );
 
-    // ─── Open + parse (`:191-211`)
-    // C logs ERR on `fopen` fail (`:196-199`). We match. `:204` logs
-    // ERR on parse fail too (unless `errno == ENOENT`, which means
-    // `read_pem` got EOF before BEGIN).
+    // Open + parse. Errors are logged; a missing PEM block is
+    // silently treated as "no key".
     let f = match File::open(&path) {
         Ok(f) => f,
         Err(e) => {
@@ -421,7 +419,7 @@ mod tests {
         // 0o100400 — owner r only. Safe.
         assert_eq!(0o100_400 & !0o100_700, 0);
 
-        // ─── False positives (C-bug, ported)
+        // False positives (C-bug, ported).
         // 0o102600 — setgid + 600. NOT actually insecure (setgid on
         // a non-executable does nothing exploitable for a key file).
         // C warns anyway. We match.
@@ -575,9 +573,9 @@ mod tests {
         assert_eq!(loaded, pk);
     }
 
-    /// `hosts/NAME` exists but has no PEM and no inline var. C
-    /// `:204`'s `errno == ENOENT` suppression: `read_pem` returns
-    /// `PemError::NotFound`, we map to None silently.
+    /// `hosts/NAME` exists but has no PEM and no inline var:
+    /// `read_pem` returns `PemError::NotFound`, mapped to None
+    /// silently.
     ///
     /// This is the "fresh `tinc init` followed by manual `hosts/peer`
     /// edit" case. The user added Port/Subnet but forgot the key.

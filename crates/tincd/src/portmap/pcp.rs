@@ -95,13 +95,13 @@ fn build_map_request(
     suggest_ext: [u8; 16],
 ) -> [u8; MAP_LEN] {
     let mut b = [0u8; MAP_LEN];
-    // ── common request header (§7.1) ─────────────────────────────
+    // common request header (§7.1).
     b[0] = VERSION;
     b[1] = OP_MAP; // R=0 (request)
     // b[2..4] reserved = 0
     b[4..8].copy_from_slice(&lifetime.to_be_bytes());
     b[8..24].copy_from_slice(&client);
-    // ── MAP opcode payload (§11.1, Figure 9) ─────────────────────
+    // MAP opcode payload (§11.1, Figure 9).
     b[24..36].copy_from_slice(nonce);
     b[36] = ip_proto(proto);
     // b[37..40] reserved = 0

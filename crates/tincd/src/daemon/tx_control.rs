@@ -116,7 +116,7 @@ impl Daemon {
             return self.send_udp_probe_reply(peer, peer_name, body_len);
         }
 
-        // ─── reply (type 1 or 2) ────────────────────────────────
+        // reply (type 1 or 2).
         // type-2 carries probed length in bytes [1..3] (reply itself
         // is MIN_PROBE_SIZE on wire — saves bandwidth).
         #[expect(clippy::cast_possible_truncation)] // body ≤ MTU
@@ -248,7 +248,7 @@ impl Daemon {
             }
         }
 
-        // ─── try_sptps ──────────────────────────────────────────
+        // try_sptps.
         // send_sptps_packet does the FIRST REQ_KEY; this catches the
         // 10-second restart.
         let now = self.timers.now();
@@ -273,7 +273,7 @@ impl Daemon {
             }
         }
 
-        // ─── via deref ───────────────────────────────────────────
+        // via deref.
         // Static-relay recursion. Two-phase borrow: copy NodeId,
         // drop, recurse.
         {
@@ -300,10 +300,10 @@ impl Daemon {
         // `target` from caller; nodes never deleted in tincd.
         let target_name = self.node_log_name(target).to_owned();
 
-        // ─── try_udp ────────────────────────────────────────────
+        // try_udp.
         let mut nw = self.try_udp(target, &target_name, now);
 
-        // ─── try_mtu ────────────────────────────────────────────
+        // try_mtu.
         // Don't probe MTU until UDP confirmed.
         if mtu {
             // Re-seed maxmtu just before discovery starts. The peer
@@ -382,7 +382,7 @@ impl Daemon {
 
         let tunnel = self.dp.tunnels.entry(target).or_default();
 
-        // ─── UDP-discovery timeout ──────────────────────────────────
+        // UDP-discovery timeout.
         // Outstanding keepalive probe unanswered for
         // `udp_discovery_timeout` → path is silently dead (NAT
         // rebind, firewall reload). Drop `udp_confirmed` so we fall
@@ -406,7 +406,7 @@ impl Daemon {
 
         let udp_confirmed = tunnel.pmtu.as_ref().is_some_and(|p| p.udp_confirmed);
 
-        // ─── gratuitous reply keepalive ──────────────────────────
+        // gratuitous reply keepalive.
         // Type-2 reply at largest recently-seen size tells PEER
         // their PMTU is still good (their on_probe_reply rewinds
         // mtuprobes to -1).
@@ -429,7 +429,7 @@ impl Daemon {
             }
         }
 
-        // ─── meta-side udp-rx ack ────────────────────────────────
+        // meta-side udp-rx ack.
         // Drain `udp_rx_maxlen` into an MTU_INFO 4th-field ack.
         // Deferred from `udp_probe_h` (no meta-send on the UDP rx
         // path). Separate from `send_mtu_info`: that gates on
@@ -438,7 +438,7 @@ impl Daemon {
         // — so we need a path that DOES send to direct peers.
         nw |= self.send_udp_rx_ack(target, target_name, now);
 
-        // ─── probe request ──────────────────────────────────────
+        // probe request.
         // Seed pmtu if needed (we read udp_ping_sent).
         let tunnel = self.dp.tunnels.entry(target).or_default();
         let p = tunnel.pmtu.get_or_insert_with(|| PmtuState::new(now, MTU));
@@ -593,7 +593,7 @@ impl Daemon {
             })
     }
 
-    // ─── load_all_nodes ─────────────────────────────────────────
+    // load_all_nodes.
 
     /// Walk `confbase/hosts/`, add every valid-named file to the
     /// graph, populate `has_address`.
@@ -667,7 +667,7 @@ impl Daemon {
         }
     }
 
-    // ─── autoconnect ────────────────────────────────────────────
+    // autoconnect.
 
     /// Build snapshot, call `autoconnect::decide`. Nodes sorted by
     /// name: `decide()` indexes by position (`prng(count)` then walk-
@@ -679,7 +679,7 @@ impl Daemon {
     pub(super) fn decide_autoconnect(&mut self) -> AutoAction {
         let now = self.timers.now();
 
-        // ─── EWMA update (cold path, ~5s cadence) ────────────────
+        // EWMA update (cold path, ~5s cadence).
         // α=0.3 ⇒ τ≈15s at the 5s tick. dt is wall-clock between
         // ticks (the contradicting-edge backoff can stretch it). On
         // the very first tick we have no prev sample → seed prev to
@@ -899,7 +899,7 @@ impl Daemon {
         }
     }
 
-    // ─── UDP_INFO / MTU_INFO send ───────────────────────────────
+    // UDP_INFO / MTU_INFO send.
 
     /// Gates in `udp_info::should_send_udp_info`; this gathers state,
     /// builds wire, queues on nexthop conn. `from_is_myself` is true
@@ -1166,7 +1166,7 @@ impl Daemon {
         conn.send(format_args!("{}", msg.format()))
     }
 
-    // ─── UDP_INFO / MTU_INFO receive ────────────────────────────
+    // UDP_INFO / MTU_INFO receive.
 
     /// Err only on parse failure (→ teardown); semantic drops are
     /// Ok(false).
@@ -1239,7 +1239,7 @@ impl Daemon {
         // `from_conn` came from dispatch THIS turn; live.
         let conn_name = self.conn(from_conn).name.clone();
 
-        // ─── udp_rx_len meta-ack (Rust extension) ────────────────
+        // udp_rx_len meta-ack (Rust extension).
         // `from` says "I received your UDP probe of length N". If
         // we're `to` and our UDP-reply path to `from` is dead
         // (inbound filter on our side), this is the ONLY way we
@@ -1297,14 +1297,11 @@ impl Daemon {
                 Ok(false)
             }
             MtuInfoAction::ClampAndForward { from, to, new_mtu } => {
-                // C-parity guard: C's `send_mtu_info` never emits to
-                // a directly-connected `to`, so C's `mtu_info_h`
-                // never sees a direct-peer-originated `mtu`. Our
-                // `send_udp_rx_ack` does (intentionally, for the
-                // 4th-field ack). The `mtu` field in that case is
-                // the SENDER's compile-time MTU — not a relay
-                // measurement of our→from path — so don't adopt it
-                // as a provisional.
+                // Direct peers only send MTU_INFO to us via
+                // `send_udp_rx_ack` (the 4th-field ack); the `mtu`
+                // field there is the SENDER's compile-time MTU — not
+                // a relay measurement of our→from path — so don't
+                // adopt it as a provisional.
                 let from_direct = self.nodes.get(&from).and_then(|ns| ns.conn).is_some();
                 if on_path && !from_direct {
                     // Provisional mtu (probing will overwrite). Only
@@ -1377,7 +1374,7 @@ impl Daemon {
         let listener_addrs: Vec<SocketAddr> =
             self.listeners.iter().map(|s| s.listener.local).collect();
 
-        // ─── send_locally override ───────────────────────────────
+        // send_locally override.
         let send_locally = self
             .dp
             .tunnels
@@ -1402,7 +1399,7 @@ impl Daemon {
             // Fall through if no local address found.
         }
 
-        // ─── reflexive (stashed udp_addr) ────────────────────────
+        // reflexive (stashed udp_addr).
         if let Some(t) = self.dp.tunnels.get(&to_nid)
             && let Some(addr) = t.udp_addr
         {
@@ -1420,7 +1417,7 @@ impl Daemon {
             }
         }
 
-        // ─── edge's reverse->address ─────────────────────────────
+        // edge's reverse->address.
         // Direct-neighbor fast path first (NodeState.edge_addr is
         // the peer-ACK addr); else walk node_edges → reverse →
         // edge_addrs. Without the walk a transitive non-INDIRECT

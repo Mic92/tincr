@@ -213,7 +213,7 @@ impl NodeId6Table {
 mod tests {
     use super::*;
 
-    // ─── KAT: NodeId6::from_name vs C sha512 ─────────────────────
+    // KAT: NodeId6::from_name vs C sha512.
 
     /// Vectors from `kat/gen_node_id.c`, which links the actual
     /// `src/ed25519/sha512.c` (LibTomCrypt) and emits `buf[0..6]`
@@ -265,7 +265,7 @@ mod tests {
         assert_eq!(NodeId6::NULL.to_string(), "000000000000");
     }
 
-    // ─── NodeId6Table ────────────────────────────────────────────
+    // NodeId6Table.
 
     #[test]
     fn table_roundtrip() {

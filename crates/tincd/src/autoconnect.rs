@@ -33,7 +33,7 @@
 //!
 //! - `prng()` is `&mut impl RngCore` so tests seed deterministically.
 //! - One action per tick: C may do drop+cancel+connect in one tick;
-//!   we return the first non-`Noop`, ~15s convergence vs C's ~5s
+//!   we return the first non-`Noop`, ~15s convergence vs C tincd's ~5s
 //!   when over-connected.
 
 #![forbid(unsafe_code)]
@@ -58,17 +58,12 @@ pub(crate) enum AutoAction {
     Disconnect { name: String, origin: OutOrigin },
     /// Cancel a between-retries pending outgoing.
     ///
-    /// **`ConnectTo`-seeded slots are NOT exempt.** This matches
-    /// upstream `drop_superfluous_pending_connections` (`autoconnect.c
-    /// :150-168`), which walks the whole `outgoing_list` and deletes
-    /// any entry lacking a `connection_t` — it does not check whether
-    /// the slot came from `ConnectTo` or from autoconnect. Once we hit
-    /// ≥3 active conns, a `ConnectTo` target that is currently
-    /// unreachable stops being retried until SIGHUP re-reads the
-    /// config. SIGALRM (`retry()`) only resets backoff on *existing*
-    /// slots, so it does not resurrect the entry either. Intentional
-    /// upstream behaviour, not a port bug; `OutOrigin` is now plumbed
-    /// so this can be tightened later if desired.
+    /// **`ConnectTo`-seeded slots are NOT exempt** (matches C tinc):
+    /// once we hit ≥3 active conns, a `ConnectTo` target that is
+    /// currently unreachable stops being retried until SIGHUP re-reads
+    /// the config. SIGALRM (`retry()`) only resets backoff on
+    /// *existing* slots, so it does not resurrect the entry either.
+    /// `OutOrigin` is plumbed so this can be tightened later.
     CancelPending { name: String },
     /// Nothing to do this tick.
     Noop,
@@ -79,16 +74,15 @@ pub(crate) enum AutoAction {
 ///
 /// ## `has_address`
 ///
-/// Upstream sets it in `load_all_nodes()`: walk `hosts/`, for each
-/// file with `Address =`, set the bit. **For this module: just a
-/// `bool`. How the daemon populates it is the daemon's problem.**
+/// Set by the daemon for nodes whose `hosts/NAME` has `Address =`.
+/// For this module it's just a `bool`.
 ///
 /// ## `edge_count` is per-node, not per-connection
 ///
 /// The *peer's* edge count from the gossiped graph. Dropping our conn
 /// to a peer with `edge_count < 2` would isolate it.
 #[derive(Debug, Clone)]
-#[expect(clippy::struct_excessive_bools)] // snapshot of independent flags; an enum would obscure the C parity
+#[expect(clippy::struct_excessive_bools)] // snapshot of independent flags
 pub(crate) struct NodeSnapshot {
     pub name: String,
     /// `n->status.reachable`. From sssp.
@@ -138,8 +132,8 @@ pub(crate) struct OutgoingSnapshot {
 }
 
 /// Tunables. NOT user-configurable — the struct exists so unit tests
-/// can isolate the upstream branches (`d_shortcut=0`) and probe band
-/// edges. The daemon always passes [`ShortcutKnobs::default`].
+/// can isolate the classic autoconnect branches (`d_shortcut=0`) and
+/// probe band edges. The daemon always passes [`ShortcutKnobs::default`].
 ///
 /// ## How the defaults were computed
 ///
@@ -210,8 +204,8 @@ impl Default for ShortcutKnobs {
 /// - `myself_name` — skip `n == myself`.
 /// - `nodes` — ALL known nodes, including indirect/unreachable. May
 ///   include `myself` (filtered). Order matters for
-///   `connect_to_unreachable` index-picking (the daemon sorts by
-///   name, matching C's splay tree).
+///   `connect_to_unreachable` index-picking (the daemon sorts by name
+///   so picks are deterministic).
 /// - `active_outgoing_conns` — OUTGOING conns past-ACK. Inbound conns
 ///   are someone else's choice; we don't unilaterally close them.
 /// - `pending_outgoings` — `Outgoing` slots with NO live conn
@@ -240,14 +234,14 @@ pub(crate) fn decide(
     now: Instant,
     rng: &mut (impl RngCore + rand_core::CryptoRng),
 ) -> AutoAction {
-    // C :174-179. Count ALL active meta conns (c->edge != NULL),
+    // Count ALL active meta conns (past ACK),
     // inbound + outbound.
     let nc = nodes
         .iter()
         .filter(|n| n.directly_connected && n.name != myself_name)
         .count();
 
-    // C :183-186. < D_LO → eagerly make a new one. EARLY RETURN.
+    // < D_LO → eagerly make a new one. EARLY RETURN.
     if nc < knobs.d_lo {
         return make_new_connection(myself_name, nodes, pending_outgoings, rng);
     }
@@ -261,7 +255,7 @@ pub(crate) fn decide(
         .filter_map(|n| n.nexthop.as_deref())
         .collect();
 
-    // ─── shortcut add ────────────────────────────────────────────
+    // shortcut add.
     // `max_by` (not random): the heaviest relay is the one most
     // worth collapsing; ties broken by name for determinism. Count
     // active+pending shortcut slots toward the cap so a 3rd hot peer
@@ -295,8 +289,8 @@ pub(crate) fn decide(
         }
     }
 
-    // ─── drop ────────────────────────────────────────────────────
-    // C :188-190. > D_HI → drop a superfluous outgoing.
+    // drop.
+    // > D_HI → drop a superfluous outgoing.
     if nc > knobs.d_hi {
         let act =
             drop_superfluous_outgoing(nodes, active_outgoing_conns, &hot_nexthops, knobs, rng);
@@ -331,12 +325,12 @@ pub(crate) fn decide(
         }
     }
 
-    // C :194. nc >= D_LO. Cancel pending outgoings. Exempt shortcut
+    // nc >= D_LO: cancel pending outgoings. Exempt shortcut
     // slots: at nc==D_LO the previous tick may have just returned
     // Connect{AutoShortcut}; the new slot is pending until the TCP
     // handshake completes, and cancelling it here would loop.
     // ConfigConnectTo slots are still cancellable — that's
-    // intentional upstream parity, see [`AutoAction::CancelPending`].
+    // see [`AutoAction::CancelPending`].
     if let Some(p) = pending_outgoings
         .iter()
         .find(|p| p.origin != OutOrigin::AutoShortcut)
@@ -346,7 +340,7 @@ pub(crate) fn decide(
         };
     }
 
-    // C :196. Heal partitions. Fires even at nc == D_LO.
+    // Heal partitions. Fires even at nc == D_LO.
     connect_to_unreachable(myself_name, nodes, pending_outgoings, rng)
 }
 
@@ -356,8 +350,6 @@ pub(crate) fn decide(
 /// `(has_address || reachable)`. The reachable-but-no-address case:
 /// the address can come from a learned `via` edge.
 ///
-/// C does count-then-re-walk (splay tree gives no random access). We
-/// collect+index. Same distribution.
 fn make_new_connection(
     myself_name: &str,
     nodes: &[NodeSnapshot],
@@ -374,8 +366,7 @@ fn make_new_connection(
         .collect();
 
     if eligible.is_empty() {
-        // C :41-43. The `< 3` branch is `return`, so step 4 does NOT
-        // fire. Mirror: Noop.
+        // No eligible node: nothing to do this tick.
         return AutoAction::Noop;
     }
 
@@ -383,8 +374,7 @@ fn make_new_connection(
     let r = (rng.next_u32() % (eligible.len() as u32)) as usize;
     let pick = eligible[r];
 
-    // C :59-71. Already pending? `break` — don't duplicate, don't
-    // re-roll. Noop this tick.
+    // Already pending? Don't duplicate, don't re-roll. Noop this tick.
     if pending_outgoings.iter().any(|p| p.name == pick.name) {
         return AutoAction::Noop;
     }
@@ -518,8 +508,8 @@ mod tests {
     }
 
     /// Legacy = `d_shortcut=0` so the shortcut-add and idle-drop arms
-    /// are dead and the four C branches run unmodified. Not
-    /// config-reachable; kept so the upstream-ported tests below stay
+    /// are dead and the classic branches run unmodified. Not
+    /// config-reachable; kept so the classic-behavior tests below stay
     /// independent of the new layer.
     const LEGACY: ShortcutKnobs = ShortcutKnobs {
         d_lo: 3,
@@ -548,7 +538,7 @@ mod tests {
         )
     }
 
-    // ═══════════════════════ legacy behaviour ════════════════════
+    // legacy behaviour.
 
     /// Exactly 3 conns, no pending, no unreachable → Noop.
     #[test]
@@ -813,7 +803,7 @@ mod tests {
         // Negative (`has_dht_key=false`) is `connect_skips_ineligible`.
     }
 
-    // ═══════════════════════ shortcut behaviour ══════════════════
+    // shortcut behaviour.
 
     fn dflt(
         myself: &str,
@@ -1154,7 +1144,7 @@ mod tests {
         );
     }
 
-    // ═══════════════════════ hot-nexthop guard ═══════════════════
+    // hot-nexthop guard.
 
     /// nc=8 (>`D_HI`), 5 outgoing all multi-homed, one is `nexthop`
     /// for a peer pushing 100 KiB/s → that one is never the random

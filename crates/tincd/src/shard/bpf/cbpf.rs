@@ -1,6 +1,6 @@
 //! `SO_ATTACH_REUSEPORT_CBPF`: UDP ingress steering. Unprivileged.
 //!
-//! ────────────────── Why cBPF, not eBPF `SK_REUSEPORT` ─────────────
+//! ## Why cBPF, not eBPF `SK_REUSEPORT`
 //!
 //! The plan's `bpf_sk_select_reuseport` + `BPF_MAP_TYPE_SOCKMAP`
 //! picks a socket by **explicit fd** stored in a map — bulletproof
@@ -24,7 +24,7 @@
 //! So: cBPF, `src_id6` hash, modulo N. Stateless, unprivileged,
 //! steers correctly on the first packet.
 //!
-//! ────────────────── What the prog sees ────────────────────────────
+//! ## What the prog sees
 //!
 //! `sock_reuseport.c:512` (`run_bpf_filter`): `pskb_pull(skb,
 //! hdr_len)` where `hdr_len = sizeof(udphdr) = 8` for UDP
@@ -32,7 +32,7 @@
 //! **first byte of UDP payload**. For tincd: that's `dst_id6[0]`.
 //! `src_id6` starts at offset 6.
 //!
-//! ────────────────── Hash choice ───────────────────────────────────
+//! ## Hash choice
 //!
 //! 6 bytes of `src_id6` → shard index. cBPF has 32-bit accumulator,
 //! no multiply. Options:
@@ -50,7 +50,7 @@
 //!
 //! Second option. Two insns: load word, modulo, return. Dead simple.
 //!
-//! ────────────────── Null `src_id6` (relay path) ───────────────────
+//! ## Null `src_id6` (relay path)
 //!
 //! `NodeId6::NULL` (six zero bytes) marks the relay forwarding path:
 //! the relay node forwards without setting `src_id6`. Word at offset 6
@@ -60,7 +60,7 @@
 //! shard 0 already handles "unknown stuff" (queue 0 catchall on the
 //! TUN side too).
 //!
-//! ────────────────── Handshake/KEX records ─────────────────────────
+//! ## Handshake/KEX records
 //!
 //! The first SPTPS handshake datagram doesn't have the 12-byte
 //! prefix — it's `[seq:4][type:1][data...]` raw. Word at offset 6

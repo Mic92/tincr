@@ -9,7 +9,7 @@
 //!   ALREADY WIRED (`daemon/gossip.rs:312`). Slow: b64 inflate × meta-conn-SPTPS encrypt × per-tunnel-SPTPS
 //!   encrypt. The 12.9 Mbps from `2b5dda45`'s commit body.
 //!
-//! - binary (`:975-986`): `"21 LEN\n"` then `LEN` raw bytes via
+//! - binary: `"21 LEN\n"` then `LEN` raw bytes via
 //!   `c->sptpslen`. proto-minor ≥ 7 only (so the receiver knows to
 //!   read raw blobs). WHAT THIS MODULE BUILDS/PARSES.
 //!
@@ -40,7 +40,7 @@ use rand_core::RngCore;
 
 use crate::node_id::NodeId6;
 
-// ─── frame build/parse ───────────────────────────────────────────────
+// frame build/parse.
 
 /// `dst_id ‖ src_id` header length. `if(len <
 /// sizeof(node_id_t) * 2)`.
@@ -62,7 +62,7 @@ pub(crate) fn build_frame(dst: NodeId6, src: NodeId6, ct: &[u8]) -> Vec<u8> {
     out
 }
 
-/// `:616-634`. Parse `dst_id`, `src_id`, return tail.
+/// Parse `dst_id`, `src_id`, return tail.
 ///
 /// `None` on `len < 12` (the C: `return false`, hard error — unlike
 /// the unknown-ID cases below which `return true` to keep the conn
@@ -78,7 +78,7 @@ pub(crate) fn parse_frame(blob: &[u8]) -> Option<(NodeId6, NodeId6, &[u8])> {
     ))
 }
 
-// ─── random early drop ───────────────────────────────────────────────
+// random early drop.
 
 /// Congestion gate for the TCP fallback. Higher outbuf fill →
 /// linearly higher drop probability above the half-max threshold.
@@ -114,7 +114,7 @@ pub(crate) fn random_early_drop<R: RngCore>(outbuf_len: usize, max: usize, rng: 
     excess > r
 }
 
-// ─── tests ────────────────────────────────────────────────────────────
+// tests.
 
 #[cfg(test)]
 mod tests {
@@ -123,7 +123,7 @@ mod tests {
 
     use super::*;
 
-    // ── frame ────────────────────────────────────────────────────────
+    // frame.
 
     #[test]
     fn build_roundtrip() {
@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(frame, expect);
     }
 
-    // ── RED ──────────────────────────────────────────────────────────
+    // RED.
 
     #[test]
     fn red_below_half_never_drops() {

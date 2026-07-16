@@ -14,7 +14,7 @@
 //! - **None**: no broadcast. The `RMODE_SWITCH` unknown-MAC fallback
 //!   then can't flood; switch learning still works for known MACs.
 //!
-//! C also checks `tunnelserver` (`:1622`) — MST might be invalid in
+//! C also checks `tunnelserver` — MST might be invalid in
 //! tunnelserver mode (filtered `ADD_EDGE`). Daemon-side gate.
 //!
 //! ## What's NOT here
@@ -50,7 +50,7 @@ pub enum BroadcastMode {
 ///
 /// `from_conn`: the connection the packet ARRIVED on
 /// (`from->nexthop->connection`). `None` for locally-originated
-/// broadcasts (`from == myself`; `:1616` `if(from != myself)` already
+/// broadcasts (`from == myself`; `if(from != myself)` already
 /// gave us a copy).
 pub(crate) fn mst_targets<C, E>(
     active_conns: impl Iterator<Item = (C, E)>,
@@ -78,15 +78,15 @@ where
 /// == n) || n->via == n`. In English: nodes we can reach in one hop (either directly UDP-dialable, or
 /// `via` themselves = self-relay = direct).
 ///
-/// `:1644-1646` `if(from != myself) break` — direct mode ONLY
+/// `if(from != myself) break` — direct mode ONLY
 /// broadcasts when WE originated. We take a `from_is_self: bool` and
 /// return empty if false.
 ///
 /// Generic over a node-view tuple `(NodeId, via, nexthop)`. Daemon
 /// builds from `last_routes`.
 ///
-/// `:1650` `n != myself` — we never include ourselves in the targets;
-/// the `send_packet(myself, ..)` at `:1617` already happened.
+/// `n != myself` — we never include ourselves in the targets;
+/// the send to ourselves already happened.
 pub(crate) fn direct_targets<N>(
     nodes: impl Iterator<Item = (N, Option<N>, Option<N>)>,
     myself: N,
