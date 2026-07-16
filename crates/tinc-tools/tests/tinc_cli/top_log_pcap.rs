@@ -112,7 +112,7 @@ fn log_against_fake() {
         let (stream, _) = listener.accept().unwrap();
         let (mut br, mut w) = serve_greeting(&stream, &cookie);
 
-        // ─── Receive subscription ─────────────────────────────────
+        // Receive subscription
         // We assert the EXACT wire — no parsing slack here, this
         // is the C-compat seam.
         let mut req = String::new();
@@ -124,7 +124,7 @@ fn log_against_fake() {
         // false). EXACT wire match.
         assert_eq!(req, "18 15 -1 0\n", "subscribe wire mismatch");
 
-        // ─── Push two records ─────────────────────────────────────
+        // Push two records
         // `send_request(c, "%d %d %lu", CONTROL, REQ_LOG, msglen)`
         // then `send_meta(c, pretty, msglen)`.
         // `send_meta` is RAW bytes, no \n.
@@ -136,7 +136,7 @@ fn log_against_fake() {
         w.write_all(b"18 15 5\nHello").unwrap();
         w.write_all(b"18 15 5\nWorld").unwrap();
 
-        // ─── Close ───────────────────────────────────────────────
+        // Close
         // Dropping `stream` closes. Client's `recv_line` returns
         // `None`, loop exits, `Ok(())`.
         //
@@ -155,7 +155,7 @@ fn log_against_fake() {
     let out = tinc(&["-c", &cb, "--pidfile", &pf, "log"]);
     daemon.join().unwrap();
 
-    // ─── Exit code ───────────────────────────────────────────────
+    // Exit code
     // Daemon closed cleanly → client exits Ok.
     assert!(
         out.status.success(),
@@ -163,7 +163,7 @@ fn log_against_fake() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // ─── Stdout ──────────────────────────────────────────────────
+    // Stdout
     // EXACT bytes: "Hello\nWorld\n". The trailing \n is added by
     // the CLI, not the daemon.
     assert_eq!(
@@ -257,7 +257,7 @@ fn pcap_against_fake() {
 
     let stdout = &out.stdout;
 
-    // ─── Global header (24 bytes) ─────────────────────────────────
+    // Global header (24 bytes)
     // The pcap magic identifies endianness; the test runs on
     // x86_64 (LE) so it's `d4 c3 b2 a1`. (BE CI
     // would see `a1 b2 c3 d4`; both are valid pcap.)
@@ -274,7 +274,7 @@ fn pcap_against_fake() {
         assert_eq!(&stdout[20..24], &[1, 0, 0, 0], "ll_type");
     }
 
-    // ─── Packet header (16 bytes at [24..40]) ────────────────────
+    // Packet header (16 bytes at [24..40])
     // tv_sec/tv_usec at [24..32]: real wall clock, can't pin.
     // Just sanity: tv_sec > 0 (we're past 1970).
     let tv_sec = u32::from_ne_bytes([stdout[24], stdout[25], stdout[26], stdout[27]]);
@@ -293,7 +293,7 @@ fn pcap_against_fake() {
         "packet origlen"
     );
 
-    // ─── Data (4 bytes at [40..44]) ───────────────────────────────
+    // Data (4 bytes at [40..44])
     // Passed through verbatim.
     assert_eq!(&stdout[40..44], b"ABCD", "packet data");
 

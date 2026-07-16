@@ -11,7 +11,7 @@ fn sign_verify_roundtrip_binary() {
     let data = b"hello world\nbinary: \x00\xff\n";
     std::fs::write(&payload, data).unwrap();
 
-    // ─── sign ───────────────────────────────────────────────────────
+    // sign
     let out = tinc(&["-c", &cb, "sign", payload.to_str().unwrap()]);
     assert!(out.status.success(), "{out:?}");
     let signed = out.stdout;
@@ -33,7 +33,7 @@ fn sign_verify_roundtrip_binary() {
     // Body is the original, byte-exact.
     assert_eq!(&signed[nl + 1..], data);
 
-    // ─── verify (file arg) ──────────────────────────────────────────
+    // verify (file arg)
     let signed_path = dir.path().join("signed");
     std::fs::write(&signed_path, &signed).unwrap();
     let out = tinc(&["-c", &cb, "verify", ".", signed_path.to_str().unwrap()]);
@@ -41,22 +41,22 @@ fn sign_verify_roundtrip_binary() {
     // stdout is the body, byte-exact.
     assert_eq!(out.stdout, data);
 
-    // ─── verify (stdin) ─────────────────────────────────────────────
+    // verify (stdin)
     let out = tinc_stdin(&["-c", &cb, "verify", "."], &signed);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(out.stdout, data);
 
-    // ─── verify with `*` (any signer) ───────────────────────────────
+    // verify with `*` (any signer)
     let out = tinc_stdin(&["-c", &cb, "verify", "*"], &signed);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(out.stdout, data);
 
-    // ─── verify with explicit name ──────────────────────────────────
+    // verify with explicit name
     let out = tinc_stdin(&["-c", &cb, "verify", "alice"], &signed);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(out.stdout, data);
 
-    // ─── verify with WRONG name → fail ─────────────────────────────
+    // verify with WRONG name → fail
     let out = tinc_stdin(&["-c", &cb, "verify", "bob"], &signed);
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();

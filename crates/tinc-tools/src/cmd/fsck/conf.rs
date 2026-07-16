@@ -17,7 +17,7 @@ use super::Finding;
 /// get that back. The waste is one extra pass over ~100 lines of
 /// config; not worth a refactor.
 pub(super) fn check_variables(paths: &Paths, findings: &mut Vec<Finding>) {
-    // ─── Server config
+    // Server config
     if let Ok(cfg) = read_server_config(&paths.confbase) {
         // `where_` for the duplicate message: literal string, not a
         // path. Slightly wrong if conf.d/*.conf is the source of the
@@ -28,7 +28,7 @@ pub(super) fn check_variables(paths: &Paths, findings: &mut Vec<Finding>) {
     // Read failure on server config → skip the var check. A
     // `ConfigReadFailed` was already pushed in Phase 1.
 
-    // ─── Each host file
+    // Each host file
     // The `check_id` filter skips `.`, `..`, and any `hosts/*` that
     // isn't a valid node name (`tinc init` only creates valid-named
     // files).
@@ -63,7 +63,7 @@ pub(super) fn check_variables(paths: &Paths, findings: &mut Vec<Finding>) {
 /// `where_`: `nodename` or `"tinc.conf"` — what to print in the
 /// duplicate message. NOT a path.
 fn check_conf(cfg: &Config, is_server: bool, where_: &str, findings: &mut Vec<Finding>) {
-    // ─── Per-entry pass: obsolete + wrong-file
+    // Per-entry pass: obsolete + wrong-file
     // Index = position in `VARS` (preserved from upstream — see
     // `vars.rs` module doc). `VARS.len()` is 74, asserted at compile
     // time.
@@ -114,7 +114,7 @@ fn check_conf(cfg: &Config, is_server: bool, where_: &str, findings: &mut Vec<Fi
         }
     }
 
-    // ─── Duplicate pass
+    // Duplicate pass
     // Second loop over `count[]`. Separate pass because the duplicate
     // warning is per-variable-NAME, not per-entry — it doesn't have a
     // single line number.

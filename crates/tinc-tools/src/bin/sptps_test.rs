@@ -381,7 +381,7 @@ fn run(args: &Args, mut sock: Sock, mut s: Sptps) -> io::Result<()> {
             continue;
         }
 
-        // ─── Socket readable
+        // Socket readable
         let sock_ready = fds[0].revents().is_some_and(|r| {
             r.intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR)
         });
@@ -441,7 +441,7 @@ fn run(args: &Args, mut sock: Sock, mut s: Sptps) -> io::Result<()> {
             }
         }
 
-        // ─── Stdin readable
+        // Stdin readable
         if stdin_ready {
             // 1460 is an MTU-ish chunk size so each stdin read becomes
             // one reasonably-sized datagram. Stream mode reads big.

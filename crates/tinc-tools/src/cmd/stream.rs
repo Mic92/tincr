@@ -184,7 +184,7 @@ where
     S: Read + Write,
     W: Write,
 {
-    // ─── Subscribe
+    // Subscribe
     // The bool prints as 0/1; the daemon reads as int and treats
     // nonzero as true. `i32::from(bool)` is 0/1.
     ctl.send_int2(
@@ -193,7 +193,7 @@ where
         i32::from(use_color),
     )?;
 
-    // ─── Receive loop
+    // Receive loop
     // Reused buffer; `clear` + `resize` per-iteration. `resize`
     // doesn't shrink capacity, so after the first message we never
     // re-alloc. `with_capacity` for the FIRST message: pre-size to
@@ -408,18 +408,18 @@ where
     W: Write,
     Clock: FnMut() -> SystemTime,
 {
-    // ─── Subscribe
+    // Subscribe
     #[expect(clippy::cast_possible_wrap)] // snaplen ≤ MTU; daemon reads %d (i32 wire)
     ctl.send_int(CtlRequest::Pcap, snaplen as i32)?;
 
-    // ─── Global header
+    // Global header
     // ONCE, before the loop. Wireshark reads this to know the
     // link-type and endianness.
     out.write_all(&pcap_global_header(snaplen))
         .map_err(CtlError::Io)?;
     out.flush().map_err(CtlError::Io)?;
 
-    // ─── Receive loop
+    // Receive loop
     // Same buffer-reuse as `log_loop`. Packets are bigger (up to
     // 9018), so the upfront capacity matters more.
     let mut buf: Vec<u8> = Vec::with_capacity(PCAP_DATA_MAX);

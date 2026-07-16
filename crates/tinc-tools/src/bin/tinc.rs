@@ -203,7 +203,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: Run::Any(cmd_join),
         help: "join INVITATION        Join a VPN using an invitation.",
     },
-    // ─── daemon RPC
+    // daemon RPC
     // `start`/`restart`: not really daemon-RPC (they *spawn* the
     // daemon) but `needs_daemon: true` gets us `resolve_runtime()`
     // — `cmd::start` needs `paths.pidfile()` and `paths.unix_socket()`
@@ -263,7 +263,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: Run::N1("node name", cmd::ctl_simple::disconnect),
         help: "disconnect NODE        Close meta connection with NODE.",
     },
-    // ─── cmd_config: get/set/add/del + the `config` umbrella
+    // cmd_config: get/set/add/del + the `config` umbrella
     // Five entries route to one function. Upstream does `if(strcasecmp(argv[0], "config")) { argv--; argc++; }`
     // — if you typed `tinc add Foo bar`, shift argv back so
     // `argv[1]` is `add` again, then dispatch on it. We do the
@@ -307,7 +307,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: Run::Any(cmd_config_umbrella),
         help: "",
     },
-    // ─── dump: nodes/edges/subnets/connections/graph/invitations
+    // dump: nodes/edges/subnets/connections/graph/invitations
     // `dump` and `list` both → cmd_dump.
     //
     // `needs_daemon: true` even though `dump invitations` is pure
@@ -360,7 +360,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: Run::Opt(cmd_pcap),
         help: "pcap [snaplen]              Dump traffic in pcap format [up to snaplen bytes per packet]",
     },
-    // ─── edit: spawn $EDITOR on a config file, then reload
+    // edit: spawn $EDITOR on a config file, then reload
     // `needs_daemon: true` so the pidfile path gets resolved (the
     // silent reload needs it). The connect-can-fail is INSIDE
     // cmd::edit::run.
@@ -370,7 +370,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: Run::N1("FILE", cmd::edit::run),
         help: "edit FILE                   Edit a config file with $VISUAL/$EDITOR/vi",
     },
-    // ─── version, help: trivial dispatchers
+    // version, help: trivial dispatchers
     // Help text is empty: listing `help` in `--help`'s output is
     // recursive; the user already found it.
     CmdEntry {
@@ -385,7 +385,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: Run::Any(cmd_help),
         help: "",
     },
-    // ─── network: list networks under confdir
+    // network: list networks under confdir
     // Upstream has TWO modes (list / switch); we only have list. The
     // switch is C-behavior-drop #2 — only useful in the readline
     // loop, which we don't have. `tinc network NAME` errors with
@@ -398,12 +398,10 @@ const COMMANDS: &[CmdEntry] = &[
     },
 ];
 
-// ─────────────────────────────────────────────────────────────────────
 // Adapters that can't point straight at a `cmd::*` function: they
 // read `Globals`, print to stdout/stderr, parse a sub-argument, or
 // have irregular arity. Everything else is wired directly in the
 // table above.
-// ─────────────────────────────────────────────────────────────────────
 
 /// Arity guard for the few `Run::Any` handlers that still want zero
 /// positionals but also need `&Globals`.

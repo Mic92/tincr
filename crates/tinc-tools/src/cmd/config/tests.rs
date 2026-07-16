@@ -11,24 +11,24 @@ fn parse_var_expr_ok() {
     #[expect(clippy::type_complexity)] // one-shot test table tuple; typedef just moves the noise
     #[rustfmt::skip]
     let cases: &[(&str, (Option<&str>, &str, &str))] = &[
-        // ─── bare var, no value ───
+        // bare var, no value
         ("Port",                    (None, "Port", "")),
-        // ─── separator variants: stop set is `\t =` ───
+        // separator variants: stop set is `\t =`
         ("Port = 655",              (None, "Port", "655")),
         ("Port=655",                (None, "Port", "655")),  // no-space-around-=
         ("Port\t655",               (None, "Port", "655")),  // tab separator
         ("Port 655",                (None, "Port", "655")),  // argv-join: `tinc set Port 655` → "Port 655"
-        // ─── multi-word value: only FIRST `\t /=` is key boundary ───
+        // multi-word value: only FIRST `\t /=` is key boundary
         // `tinc set Name $HOST` → `"Name = my host name"`. The strncat
         // loop preserves spaces; `args.join(" ")` does too.
         ("Name = host with spaces", (None, "Name", "host with spaces")),
-        // ─── node prefix ───
+        // node prefix
         ("alice.Port",              (Some("alice"), "Port", "")),
         ("alice.Port = 655",        (Some("alice"), "Port", "655")),
         ("alice.Port=655",          (Some("alice"), "Port", "655")),  // no-space + node prefix
-        // ─── value with embedded `=`: split on FIRST `=`/ws ───
+        // value with embedded `=`: split on FIRST `=`/ws
         ("Device = /dev/tun=x",     (None, "Device", "/dev/tun=x")),
-        // ─── dots in value, not key: `.` scan is key-slice-only ───
+        // dots in value, not key: `.` scan is key-slice-only
         ("Address = 10.0.0.1",      (None, "Address", "10.0.0.1")),
         // No separator + dots → whole thing is key → `node=10, var=0.0.1`.
         // Weird but it's what upstream does (`0.0.1` fails `vars::lookup` later).
@@ -70,20 +70,20 @@ fn parse_var_expr_err() {
 fn split_line_table() {
     #[rustfmt::skip]
     let cases: &[(&str, Option<(&str, &str)>)] = &[
-        // ─── separator variants ───
+        // separator variants
         ("Port = 655\n",   Some(("Port", "655"))),
         ("Port=655\n",     Some(("Port", "655"))),
         ("Port\t655\n",    Some(("Port", "655"))),
-        // ─── CRLF (Windows-edited): `\r` mustn't end up in value ───
+        // CRLF (Windows-edited): `\r` mustn't end up in value
         ("Port = 655\r\n", Some(("Port", "655"))),
-        // ─── trailing ws before newline: rstrip handles ───
+        // trailing ws before newline: rstrip handles
         ("Port = 655   \n", Some(("Port", "655"))),
         ("Port = 655\t\n", Some(("Port", "655"))),
-        // ─── blank → None: empty key → strcasecmp fails → copy-verbatim ───
+        // blank → None: empty key → strcasecmp fails → copy-verbatim
         ("\n",    None),
         ("",      None),
         ("   \n", None),
-        // ─── `#` comment: tokenizes as key="#", doesn't match any var → preserved ───
+        // `#` comment: tokenizes as key="#", doesn't match any var → preserved
         ("# Port = 655\n", Some(("#", "Port = 655"))),
     ];
     for (input, expected) in cases {

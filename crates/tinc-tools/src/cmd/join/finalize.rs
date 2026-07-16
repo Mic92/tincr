@@ -156,7 +156,7 @@ fn finalize_join_inner(
     let hosts_written = write_host_chunks(&mut lines, paths, &name, boundary, created)?;
     let pubkey_b64 = generate_node_key(paths, &mut files, created)?;
 
-    // ─── Write tinc-up placeholder (shared with `init`)
+    // Write tinc-up placeholder (shared with `init`)
     if let Some(p) = crate::cmd::init::write_tinc_up_placeholder(paths)? {
         created.push(p);
     }

@@ -93,7 +93,7 @@ pub fn start(paths: &Paths, extra_args: &[String]) -> Result<(), CmdError> {
 /// # Errors
 /// See [`start`].
 pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<(), CmdError> {
-    // ─── already running?
+    // already running?
     // Any connect error means "not running, proceed". PidfileMissing,
     // PidfileMalformed, DaemonDead, SocketConnect — all mean "go".
     if let Ok(ctl) = CtlSocket::connect(paths) {
@@ -101,7 +101,7 @@ pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<
         return Ok(());
     }
 
-    // ─── socketpair
+    // socketpair
     // `UnixStream::pair` wraps `socketpair(AF_UNIX, SOCK_STREAM, 0)`.
     // The catch: std sets CLOEXEC on both fds (sane default for
     // everything *except* deliberate inheritance). We clear it on
@@ -111,7 +111,7 @@ pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<
 
     let theirs_fd = theirs.as_raw_fd();
 
-    // ─── TINC_UMBILICAL value
+    // TINC_UMBILICAL value
     // "{fd} {colorize}". The fd number is stable across spawn —
     // exec preserves non-CLOEXEC fds at their current numbers. We
     // can format it here, in the parent, pre-spawn.
@@ -122,7 +122,7 @@ pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<
     let colorize = i32::from(use_ansi_escapes_stderr());
     let umbilical_val = format!("{theirs_fd} {colorize}");
 
-    // ─── spawn
+    // spawn
     // We don't replay our `-c`/`-n` — instead pass the *resolved*
     // paths as explicit `--pidfile`/`--socket`/`-c`. This is what
     // every test in `crates/tincd/tests/` does already.
@@ -163,12 +163,12 @@ pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<
         .spawn()
         .map_err(|e| CmdError::BadInput(format!("Error starting {}: {e}", tincd.display())))?;
 
-    // ─── close our copy of the child end
+    // close our copy of the child end
     // Critical: if we kept it open, the read loop below would never
     // see EOF (we'd be holding the write end open ourselves).
     drop(theirs);
 
-    // ─── drain the umbilical
+    // drain the umbilical
     // Everything before the final nul byte is teed to stderr (the
     // daemon's startup logs; in our case empty until log teeing
     // lands, but the loop works against the upstream tincd too).
@@ -198,7 +198,7 @@ pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<
         }
     }
 
-    // ─── reap the child
+    // reap the child
     // The daemon detaches by default — its `daemon(3)` call exits
     // the original child with status 0 immediately. So wait returns
     // fast and `status.success()`. The *grandchild* (the actual

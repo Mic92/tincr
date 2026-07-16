@@ -50,7 +50,7 @@ fn info_node_against_fake() {
         let (stream, _) = listener.accept().unwrap();
         let (mut br, mut w) = serve_greeting(&stream, &cookie);
 
-        // ─── Round 1: DUMP_NODES ────────────────────────────────
+        // Round 1: DUMP_NODES
         // Request includes `bob` as a dead third arg. The daemon
         // doesn't read it (just dispatches on REQ_DUMP_NODES). We
         // assert it
@@ -86,7 +86,7 @@ fn info_node_against_fake() {
         .unwrap();
         writeln!(w, "18 3").unwrap(); // terminator
 
-        // ─── Round 2: DUMP_EDGES ────────────────────────────────
+        // Round 2: DUMP_EDGES
         // Only fires AFTER the nodes terminator (sequential, not
         // pipelined). Dead third arg again.
         req.clear();
@@ -124,7 +124,7 @@ fn info_node_against_fake() {
         .unwrap();
         writeln!(w, "18 4").unwrap();
 
-        // ─── Round 3: DUMP_SUBNETS ──────────────────────────────
+        // Round 3: DUMP_SUBNETS
         req.clear();
         br.read_line(&mut req).unwrap();
         assert_eq!(req.trim_end(), "18 5 bob");
@@ -144,7 +144,7 @@ fn info_node_against_fake() {
 
     let stdout = String::from_utf8(out.stdout).unwrap();
 
-    // ─── Assert: byte-for-byte golden ──────────────────────────────
+    // Assert: byte-for-byte golden
     // status=0x52 = bit 1 (validkey) | bit 4 (reachable) | bit 6
     // (sptps). NOT visited/indirect/udp_confirmed.
     // options=0x07000004 = PMTU_DISCOVERY (bit 2) | version 7.
@@ -199,7 +199,7 @@ fn info_node_not_found_short_circuits() {
         .unwrap();
         writeln!(w, "18 3").unwrap();
 
-        // ─── Assert: NO second request ─────────────────────────
+        // Assert: NO second request
         // The CLI errors after the nodes terminator without sending
         // the EDGES request. If it DID send, this read would get
         // "18 4 dave\n". Instead the CLI's socket drops → EOF →

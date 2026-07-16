@@ -81,7 +81,7 @@ pub fn run(paths: &Paths) -> Result<(), CmdError> {
     let priv_path = paths.ed25519_private();
     let host_path = paths.host_file(&name);
 
-    // ─── disable_old_keys on both files
+    // disable_old_keys on both files
     // Run both up front, then both writes — "do all the mutating
     // reads before any mutating write" is a clearer flow.
     //
@@ -91,16 +91,16 @@ pub fn run(paths: &Paths) -> Result<(), CmdError> {
     disable_old_keys(&priv_path)?;
     disable_old_keys(&host_path)?;
 
-    // ─── Generate
+    // Generate
     eprintln!("Generating Ed25519 key pair:");
     let sk = keypair::generate();
     eprintln!("Done.");
 
-    // ─── Append private (PEM). 0600 is create-mode only; rotation
+    // Append private (PEM). 0600 is create-mode only; rotation
     // keeps whatever `disable_old_keys` preserved.
     super::write_private_key(&priv_path, &sk, super::OpenKind::Append)?;
 
-    // ─── Append public (config line, LSB-first b64)
+    // Append public (config line, LSB-first b64)
     {
         let mut f = open_append(&host_path, 0o666)?;
         let pubkey_b64 = b64::encode(sk.public_key());
@@ -142,7 +142,7 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
     let (tmp_guard, w) = super::TmpGuard::open(path, ".tmp")?;
     let tmp_path = tmp_guard.tmp_path().to_path_buf();
 
-    // ─── Copy with #-prefixing
+    // Copy with #-prefixing
     let mut r = BufReader::new(r);
     let mut w = BufWriter::new(w);
     let mut disabled = false;
@@ -190,7 +190,7 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
     w.flush().map_err(io_err(&tmp_path))?;
     drop(w); // close the fd before rename — not required on Unix, but clean
 
-    // ─── If nothing was disabled, leave the original alone
+    // If nothing was disabled, leave the original alone
     // We wrote a perfect copy, but renaming it over the original is
     // a no-op modulo inode/mtime — avoid the mtime bump.
     if !disabled {
@@ -200,7 +200,7 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
         return Ok(false);
     }
 
-    // ─── Preserve mode, then atomic rename
+    // Preserve mode, then atomic rename
     // See module doc "Mode preservation" for why we do this here
     // instead of at create.
     #[cfg(unix)]

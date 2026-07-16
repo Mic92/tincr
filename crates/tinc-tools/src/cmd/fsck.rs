@@ -102,7 +102,7 @@ use scripts::check_scripts;
 /// formats them to stderr. Tests `matches!` on the variant.
 #[derive(Debug)]
 pub enum Finding {
-    // ─── Fatal: no point continuing keypair check
+    // Fatal: no point continuing keypair check
     /// `tinc.conf` doesn't exist.
     TincConfMissing,
     /// `tinc.conf` exists but `access(R_OK)` failed. Message differs
@@ -121,7 +121,7 @@ pub enum Finding {
     /// distinguished at the fsck level.
     NoPrivateKey { path: PathBuf },
 
-    // ─── Keypair coherence
+    // Keypair coherence
     /// `hosts/NAME` has neither `Ed25519PublicKey =` nor a PEM block.
     /// Fixable.
     NoPublicKey { host_file: PathBuf },
@@ -135,7 +135,7 @@ pub enum Finding {
     /// `Ed25519PublicKeyFile` pointing elsewhere, theoretically).
     HostFileUnreadable { host_file: PathBuf },
 
-    // ─── File modes (Unix only)
+    // File modes (Unix only)
     /// Private key file has mode `& 077 != 0` — group/other readable.
     /// Fixable iff `uid_match` (you can't chmod a file you don't own
     /// without root).
@@ -145,7 +145,7 @@ pub enum Finding {
         uid_match: bool,
     },
 
-    // ─── Scripts
+    // Scripts
     /// `*-up`/`*-down` in confbase that isn't `tinc-`/`host-`/
     /// `subnet-`. Not fixable — fsck doesn't know what you intended.
     /// Upstream prints an explanation once (the `static bool
@@ -165,7 +165,7 @@ pub enum Finding {
     /// `!ok`.
     DirUnreadable { path: PathBuf, err: String },
 
-    // ─── Per-variable validity
+    // Per-variable validity
     /// `VAR_OBSOLETE` flag set. The four known: `GraphDumpFile`,
     /// `PrivateKey`, `PublicKey`, `PublicKeyFile`. Not fixable —
     /// fsck doesn't delete config lines.
@@ -186,7 +186,7 @@ pub enum Finding {
     /// whole file so there's no single line number to print.
     DuplicateVar { name: String, where_: String },
 
-    // ─── Fix results
+    // Fix results
     /// `chmod` succeeded.
     FixedMode { path: PathBuf },
     /// `disable_old_keys` + append-PEM-pubkey succeeded.
@@ -301,7 +301,7 @@ pub struct Report {
 pub fn run(paths: &Paths, force: bool) -> Result<Report, CmdError> {
     let mut findings = Vec::new();
 
-    // ─── Phase 0: tinc.conf existence + Name
+    // Phase 0: tinc.conf existence + Name
     // The `access(R_OK)` check distinguishes ENOENT (suggest `tinc
     // init`) from EACCES (suggest `sudo`). We check via metadata —
     // `access(2)` checks effective UID, `metadata` doesn't, but for
@@ -336,7 +336,7 @@ pub fn run(paths: &Paths, force: bool) -> Result<Report, CmdError> {
         });
     };
 
-    // ─── Phase 1: read full config tree
+    // Phase 1: read full config tree
     // `read_server_config && read_host_config`. The `&&`
     // short-circuits — if server config fails, host isn't read.
     //
@@ -351,7 +351,7 @@ pub fn run(paths: &Paths, force: bool) -> Result<Report, CmdError> {
     // Track keypair-phase success separately.
     let keypair_ok = match &config_result {
         Ok(cfg) => {
-            // ─── Phase 2: keypair check
+            // Phase 2: keypair check
             check_keypairs(paths, cfg, &host_file, force, &mut findings)
         }
         Err(e) => {
@@ -360,7 +360,7 @@ pub fn run(paths: &Paths, force: bool) -> Result<Report, CmdError> {
         }
     };
 
-    // ─── Phase 3+4: scripts + variables
+    // Phase 3+4: scripts + variables
     // **Bitwise `&`, not `&&`** — "this check does not require
     // working configuration, so run it always". Even if Phase 2
     // failed, we still want script/variable diagnostics. Scripts

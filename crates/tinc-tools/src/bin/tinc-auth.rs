@@ -455,7 +455,7 @@ fn main() -> ExitCode {
     let mut paths = Paths::for_cli(&args.input);
     paths.resolve_runtime(&args.input);
 
-    // ─── listener: socket activation OR --sockpath
+    // listener: socket activation OR --sockpath
     let listener = if let Some(n) = check_socket_activation() {
         if n != 1 {
             // Tailscale's nginx-auth spawns one goroutine per
@@ -502,7 +502,7 @@ fn main() -> ExitCode {
 
     eprintln!("tinc-auth: listening (net={netname})");
 
-    // ─── accept loop
+    // accept loop
     // Single-threaded, sequential. nginx auth_request subrequests
     // are tiny and the work per request is one ctl-socket roundtrip
     // (~1 ms). Threadpool when it profiles hot.

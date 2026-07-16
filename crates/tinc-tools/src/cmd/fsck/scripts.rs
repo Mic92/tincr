@@ -76,7 +76,7 @@ fn scan_scripts_in(dir: &Path, kind: ScriptDir, force: bool, findings: &mut Vec<
 
         let full_path = dir.join(fname);
 
-        // ─── Prefix validation (confbase only)
+        // Prefix validation (confbase only)
         // hosts/ skips this — any prefix is accepted as a node name.
         if matches!(kind, ScriptDir::Confbase) && !matches!(prefix, "tinc" | "host" | "subnet") {
             findings.push(Finding::UnknownScript { path: full_path });
@@ -85,7 +85,7 @@ fn scan_scripts_in(dir: &Path, kind: ScriptDir, force: bool, findings: &mut Vec<
             continue;
         }
 
-        // ─── Executability check
+        // Executability check
         // We don't have `access(2)` directly without the `nix`
         // `unistd` feature, but we can check via metadata mode bits —
         // for the *owner*. `access` checks effective UID against the

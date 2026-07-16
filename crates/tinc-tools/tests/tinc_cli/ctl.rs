@@ -105,13 +105,13 @@ fn ctl_full_connect_against_fake_daemon() {
     let pidfile = dir.path().join("tinc.pid");
     let sock = dir.path().join("tinc.socket");
 
-    // ─── Set up the fake daemon's state ────────────────────────────────
+    // Set up the fake daemon's state
     let cookie = "0123456789abcdef".repeat(4);
     // Our own pid — so kill(pid, 0) returns 0. Pid type: u32 fits.
     let our_pid = std::process::id();
     std::fs::write(&pidfile, format!("{our_pid} {cookie} 127.0.0.1 port 655\n")).unwrap();
 
-    // ─── Fake daemon thread: listen, accept, greet, serve ──────────
+    // Fake daemon thread: listen, accept, greet, serve
     let listener = UnixListener::bind(&sock).unwrap();
     let cookie_thr = cookie.clone();
     let daemon = std::thread::spawn(move || {
@@ -136,7 +136,7 @@ fn ctl_full_connect_against_fake_daemon() {
         // effect. Drop.
     });
 
-    // ─── Run the binary ─────────────────────────────────────────────
+    // Run the binary
     // `tinc.pid` → `tinc.socket` via the .pid → .socket suffix
     // surgery in `unix_socket()`. The fake bound to `tinc.socket`
     // above; the binary derives the same path.
@@ -210,4 +210,4 @@ fn ctl_reload_against_fake_daemon() {
     assert!(out.stdout.is_empty());
 }
 
-// ────────────────────────────────────────────────────────────────────
+//

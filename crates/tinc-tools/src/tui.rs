@@ -180,7 +180,7 @@ impl RawMode {
         // Snapshot BEFORE mutation.
         let original = termios::tcgetattr(fd)?;
 
-        // ─── Mutate
+        // Mutate
         let mut raw = original.clone();
         raw.local_flags &= !(LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::ISIG);
         // `VMIN=1, VTIME=0`: `read()` blocks for 1 byte. poll()
@@ -229,7 +229,7 @@ impl RawMode {
         // Lock held for f's duration only; released before re-raw.
         let result = f(&mut stdin.lock());
 
-        // ─── Re-raw (best-effort; same flags as enter())
+        // Re-raw (best-effort; same flags as enter())
         let mut raw = self.original.clone();
         raw.local_flags &= !(LocalFlags::ECHO | LocalFlags::ICANON | LocalFlags::ISIG);
         raw.control_chars[SpecialCharacterIndices::VMIN as usize] = 1;

@@ -17,7 +17,7 @@ fn sign_verify_roundtrip() {
     let mut signed = Vec::new();
     sign(&paths, Some(&input), 1_700_000_000, &mut signed).unwrap();
 
-    // ─── Shape check on the output
+    // Shape check on the output
     // First line is the header, rest is the body byte-exact.
     let nl = signed.iter().position(|&b| b == b'\n').unwrap();
     let header = std::str::from_utf8(&signed[..nl]).unwrap();
@@ -28,7 +28,7 @@ fn sign_verify_roundtrip() {
     // Body is the original data, byte-exact.
     assert_eq!(&signed[nl + 1..], data);
 
-    // ─── Verify
+    // Verify
     let v = verify_blob(&paths, &Signer::Named("alice".into()), &signed).unwrap();
     assert_eq!(v.signer, "alice");
     assert_eq!(v.body, data);
@@ -398,12 +398,12 @@ hello there\n";
     // Expected body (header stripped).
     const BODY: &[u8] = b"fake testing data\nhello there\n";
 
-    // ─── Set up confbase exactly as the Python does
+    // Set up confbase exactly as the Python does
     let cd = ConfDir::with_name("foo").with_host("foo", HOST);
     fs::write(cd.confbase().join("ed25519_key.priv"), PRIV_KEY).unwrap();
     let paths = cd.paths().clone();
 
-    // ─── Verify the upstream-signed blob
+    // Verify the upstream-signed blob
     // The Python tests `.` and `foo` and `*`. We do all three.
     // If ANY of them fails, format compat is broken.
     for signer in [
@@ -418,7 +418,7 @@ hello there\n";
         assert_eq!(v.body, BODY);
     }
 
-    // ─── Re-sign and confirm round-trip
+    // Re-sign and confirm round-trip
     // Ed25519 is deterministic given key+message. Same key, same
     // body, same time, same trailer → same sig. Prove it.
     let body_file = cd.path().join("body");

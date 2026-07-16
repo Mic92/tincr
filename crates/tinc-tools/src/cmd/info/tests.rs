@@ -1,6 +1,6 @@
 use super::*;
 
-// ─── fmt_localtime
+// fmt_localtime
 
 /// `0` → `"never"`. We've folded the guard into the function.
 #[test]
@@ -51,7 +51,7 @@ fn localtime_epoch_is_1970ish() {
     assert_eq!(&s[..7], "1970-01");
 }
 
-// ─── option_version
+// option_version
 
 /// Top 8 bits.
 #[test]
@@ -64,7 +64,7 @@ fn option_version_shifts_24() {
     assert_eq!(option_version(0x0000_000c), 0);
 }
 
-// ─── Reachability::from_row
+// Reachability::from_row
 //
 // Golden-input tests on hand-built NodeRows. The cascade order
 // is what's pinned: a row that's MYSELF + unreachable = MYSELF
@@ -136,7 +136,7 @@ fn cascade_table() {
         (cascade_row("1.1.1.1",  rv,                      "alice", 0,      "alice", -1),   Reachability::DirectTcp),
         // 7. else → Forwarded. minmtu=0, nexthop=bob (NOT alice).
         (cascade_row("1.1.1.1",  rv,                      "alice", 0,      "bob",   -1),   Reachability::Forwarded { nexthop: "bob".into() }),
-        // ─── ORDER tests: row satisfies multiple arms, FIRST wins ───
+        // ORDER tests: row satisfies multiple arms, FIRST wins
         // MYSELF + unreachable → still Myself. (Daemon should never produce
         // this, but the cascade admits it.)
         (cascade_row("MYSELF",   0,                       "alice", 0,      "-",     -1),   Reachability::Myself),
@@ -157,7 +157,7 @@ fn cascade_table() {
     }
 }
 
-// ─── Reachability Display
+// Reachability Display
 
 /// `DirectUdp` is multi-line. The `\n` is INSIDE the `{}`
 /// expansion.
@@ -212,7 +212,7 @@ fn reachability_display_zero_rtt() {
     assert!(r.to_string().contains("RTT:          0.000"));
 }
 
-// ─── NodeInfo::format — the full golden
+// NodeInfo::format — the full golden
 
 /// Build a known `NodeRow`, assert byte-exact output. This is the
 /// `diff <(tinc-c info bob) <(tinc-rs info bob)` test, in unit
@@ -404,7 +404,7 @@ fn nodeinfo_traffic_double_space() {
     assert!(!out.contains("packets   1024")); // not triple
 }
 
-// ─── StatusBit::REACHABLE etc — pin against node.h packing
+// StatusBit::REACHABLE etc — pin against node.h packing
 
 /// The bit positions are GCC's LSB-first packing of `node_status_t`.
 /// This test pins the assignment so a wrong copy is loud at test

@@ -64,18 +64,18 @@ fn export_import_workflow() {
     content.push_str("Address = 192.0.2.1\nSubnet = 10.0.1.0/24\n");
     std::fs::write(&alice_host, &content).unwrap();
 
-    // ─── alice exports ───────────────────────────────────────────
+    // alice exports
     let exported = tinc(&["-c", alice_base.to_str().unwrap(), "export"]);
     assert!(exported.status.success());
 
-    // ─── bob imports ─────────────────────────────────────────────
+    // bob imports
     let out = tinc_stdin(
         &["-c", bob_base.to_str().unwrap(), "import"],
         &exported.stdout,
     );
     assert!(out.status.success(), "{out:?}");
 
-    // ─── verify ──────────────────────────────────────────────────
+    // verify
     let imported = std::fs::read_to_string(bob_base.join("hosts/alice")).unwrap();
     assert_eq!(imported, content);
 }

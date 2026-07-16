@@ -159,11 +159,11 @@ pub struct JoinResult {
 // pump, accumulated blob). Upstream is one function for the same
 // reason — the steps share too much state to split cleanly.
 pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
-    // ─── Parse URL
+    // Parse URL
     let parsed =
         parse_url(url).ok_or_else(|| CmdError::BadInput("Invalid invitation URL.".into()))?;
 
-    // ─── Preflight: confbase must be fresh
+    // Preflight: confbase must be fresh
     // Do this BEFORE connecting — the cookie is single-use on the
     // daemon side (rename to .used). If we connect, send cookie,
     // daemon renames, then WE fail on "tinc.conf exists" — the
@@ -185,14 +185,14 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         )));
     }
 
-    // ─── Generate throwaway key
+    // Generate throwaway key
     // This key is ONLY for the SPTPS handshake; it's not the node's
     // identity. The daemon doesn't store it. (The real node key is
     // generated inside `finalize_join`.)
     let throwaway = keypair::generate();
     let throwaway_b64 = b64::encode(throwaway.public_key());
 
-    // ─── Connect
+    // Connect
     // `TcpStream::connect((host, port))` does the getaddrinfo loop
     // internally (resolves all addrs, tries each). We lose the
     // per-addr "Could not connect to X port Y" stderr lines, but
@@ -213,7 +213,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         .map_err(io_err("set_read_timeout"))?;
     eprintln!("Connected to {} port {}...", parsed.host, parsed.port);
 
-    // ─── Meta-greeting exchange
+    // Meta-greeting exchange
     // Two lines out, two lines in.
     //
     // OUT: "0 ?<throwaway-pubkey-b64> 17.1\n"
@@ -244,7 +244,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
     // Parse line 2. The fingerprint is everything after `"4 "`.
     let fingerprint = parse_greeting_line2(&line2)?;
 
-    // ─── Verify key_hash
+    // Verify key_hash
     // The whole point of the URL's first 24 chars: prove the daemon
     // holds the invitation key.
     //
@@ -270,7 +270,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         })
         .ok_or_else(|| CmdError::BadInput("Invalid pubkey from peer".into()))?;
 
-    // ─── Start SPTPS
+    // Start SPTPS
     // initiator=true (we connected), datagram=false (TCP stream).
     // replaywin=0 (stream mode ignores it; matches the test harness).
     let (mut sptps, init_out) = Sptps::start(
@@ -283,7 +283,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         &mut OsRng,
     );
 
-    // ─── SPTPS pump
+    // SPTPS pump
     // The upstream structure is callback-based: `invitation_send`
     // writes to sock, `invitation_receive` accumulates type-0, calls
     // `finalize_join` on type-1, sets `success=true` on type-2. We

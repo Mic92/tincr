@@ -38,7 +38,7 @@ fn dump_nodes_against_fake() {
         br.read_line(&mut req).unwrap();
         assert_eq!(req.trim_end(), "18 3");
 
-        // ─── Send: TWO node rows + terminator ──────────────────
+        // Send: TWO node rows + terminator
         // `%d %d %s %s %s %d %d %lu %d %x %x %s %s %d %d %d %d
         //  %ld %d %llu %llu %llu %llu`
         //
@@ -77,7 +77,7 @@ fn dump_nodes_against_fake() {
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "stdout: {stdout:?}");
 
-    // ─── Assert: byte-for-byte upstream `tinc dump nodes` output ─
+    // Assert: byte-for-byte upstream `tinc dump nodes` output
     // `status %04x` (0x12 → "0012"). The `rtt 1.500` suffix appears
     // because udp_ping_rtt != -1.
     assert_eq!(
@@ -198,7 +198,7 @@ fn dump_digraph_against_fake() {
         let (stream, _) = listener.accept().unwrap();
         let (mut br, mut w) = serve_greeting(&stream, &cookie);
 
-        // ─── Receive BOTH requests ────────────────────────────
+        // Receive BOTH requests
         // The CLI sends DUMP_NODES then DUMP_EDGES back-to-back.
         // TCP buffers; we read both before responding.
         let mut req1 = String::new();
@@ -208,7 +208,7 @@ fn dump_digraph_against_fake() {
         br.read_line(&mut req2).unwrap();
         assert_eq!(req2.trim_end(), "18 4"); // EDGES
 
-        // ─── Nodes response ───────────────────────────────────
+        // Nodes response
         // self (MYSELF → green, filled):
         writeln!(
             w,
@@ -223,7 +223,7 @@ fn dump_digraph_against_fake() {
         .unwrap();
         writeln!(w, "18 3").unwrap(); // FIRST terminator
 
-        // ─── Edges response ───────────────────────────────────
+        // Edges response
         // `%d %d %s %s %s %s %x %d`. Both addresses fused
         // (sockaddr2hostname).
         // Digraph emits both directions.
@@ -248,7 +248,7 @@ fn dump_digraph_against_fake() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     let lines: Vec<&str> = stdout.lines().collect();
 
-    // ─── Assert: DOT structure ──────────────────────────────────
+    // Assert: DOT structure
     // `digraph {\n`, then per-node DOT lines, per-edge DOT lines,
     // then `}\n`.
     assert_eq!(lines[0], "digraph {");

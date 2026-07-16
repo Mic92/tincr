@@ -51,7 +51,7 @@ fn invite_prints_url() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("restart or reload"), "stderr was: {stderr}");
 
-    // ─── fsck contract ───
+    // fsck contract
     // The invitation key + invitation file should NOT trip fsck.
     // fsck only checks the node's OWN key (ed25519_key.priv at
     // confbase root), not invitation keys. If fsck's path glob
@@ -144,9 +144,9 @@ fn invite_missing_arg() {
     assert!(stderr.contains("node name"));
 }
 
-// ────────────────────────────────────────────────────────────────────
+//
 // join through the binary
-// ────────────────────────────────────────────────────────────────────
+//
 //
 // What this proves over the unit tests in `cmd/join.rs`: argv
 // parsing (`tinc join URL` vs `echo URL | tinc join`), exit-code
