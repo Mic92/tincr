@@ -141,20 +141,9 @@ pub(crate) enum PrivKeyError {
     Pem(PathBuf, #[source] tinc_conf::PemError),
 }
 
-/// `read_ecdsa_private_key`.
-///
-/// Path resolution: `Ed25519PrivateKeyFile` config var if set, else
-/// `confbase/ed25519_key.priv`. (`Ed25519PrivateKeyFile` is in
-/// tinc.conf, not hosts/NAME — it's SERVER-tagged per `vars.rs`.
-/// The `config` here is the merged tree after `read_host_
-/// config`, but it doesn't matter — the lookup finds it wherever.)
-///
-/// Permission warning: `if(s.st_mode & ~0100700u)`. See module doc
-/// for why this is over-broad. Warning, not error.
-///
-/// Upstream's `keyfile` out-parameter is unused (caller passes
-/// NULL). We drop it. The path is in the error variant if you need
-/// it.
+/// Load the node's Ed25519 private key. Path resolution:
+/// `TINCR_ED25519_PRIVATE_KEY_FILE` env var, else the
+/// `Ed25519PrivateKeyFile` config var, else `confbase/ed25519_key.priv`.
 ///
 /// # Errors
 /// `Missing` if the file doesn't exist (caller prints the gen-keys
@@ -163,13 +152,18 @@ pub(crate) fn read_ecdsa_private_key(
     config: &Config,
     confbase: &Path,
 ) -> Result<SigningKey, PrivKeyError> {
-    // ─── path resolution (`:114-116`)
-    let path = config.lookup("Ed25519PrivateKeyFile").next().map_or_else(
-        || confbase.join("ed25519_key.priv"),
-        |e| PathBuf::from(e.get_str()),
+    // env override so service managers can inject the key without touching tinc.conf
+    // (e.g. systemd LoadCredential=).
+    let path = std::env::var_os("TINCR_ED25519_PRIVATE_KEY_FILE").map_or_else(
+        || {
+            config.lookup("Ed25519PrivateKeyFile").next().map_or_else(
+                || confbase.join("ed25519_key.priv"),
+                |e| PathBuf::from(e.get_str()),
+            )
+        },
+        PathBuf::from,
     );
 
-    // ─── open + perm check (`:118-144`)
     let f = File::open(&path).map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
             PrivKeyError::Missing(path.clone())
@@ -178,24 +172,7 @@ pub(crate) fn read_ecdsa_private_key(
         }
     })?;
 
-    // `fstat(fileno(fp), &s)` then `s.st_mode & ~0100700`. We use
-    // `f.metadata()` (also `fstat` under the hood
-    // — `File::metadata` calls `fstat` not `stat`, so symlink mode
-    // bits don't apply, slightly NARROWING the C bug. The C's `fstat`
-    // ALSO follows the symlink — `fopen` already did. So neither
-    // sees `S_IFLNK`. The "symlink false positive" in the module doc
-    // is wrong for `fstat`; only `lstat` would see it. But the
-    // setuid-bit case still stands.)
-    //
-    // metadata() failure is just logged in C (`:135-139`: returns
-    // false, but the actual key parse below will fail anyway). We
-    // skip the warn on metadata error — it's noise.
     if let Ok(meta) = f.metadata() {
-        // `~0100700` octal. `0o100700` is `S_IFREG | S_IRWXU`.
-        // `& !0o100700` flags any other bit: group/other perms,
-        // setuid/setgid/sticky, OR a non-regular-file type (which
-        // can't happen post-`open`-of-a-regular-file, but the C
-        // mask doesn't know that).
         let mode = meta.permissions().mode();
         if mode & !0o100_700 != 0 {
             log::warn!(target: "tincd::keys",
@@ -204,10 +181,7 @@ pub(crate) fn read_ecdsa_private_key(
         }
     }
 
-    // ─── parse
-    // `read_pem` returns exactly 96 bytes or errors.
     let blob = read_pem(f, TY_PRIVATE, PRIVATE_BLOB_LEN).map_err(|e| PrivKeyError::Pem(path, e))?;
-    // `read_pem` checked the length. Unwrap is the handoff.
     let mut arr = [0u8; PRIVATE_BLOB_LEN];
     arr.copy_from_slice(&blob);
     Ok(SigningKey::from_blob(&arr))
