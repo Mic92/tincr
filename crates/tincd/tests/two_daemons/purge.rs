@@ -59,7 +59,7 @@ fn purge_removes_unreachable_node() {
 
     let mut alice_ctl = alice.ctl();
 
-    // ─── wait: alice sees all three nodes, bob reachable ────────
+    // wait: alice sees all three nodes, bob reachable
     // bob is two hops away: alice—mid edge from alice's ACK,
     // mid—bob edge gossiped via ADD_EDGE from mid.
     poll_until(Duration::from_secs(10), || {
@@ -68,7 +68,7 @@ fn purge_removes_unreachable_node() {
         (nodes.len() == 3 && bob_reachable).then_some(())
     });
 
-    // ─── kill bob → mid gossips DEL_EDGE ─────────────────────
+    // kill bob → mid gossips DEL_EDGE
     // mid's `terminate()` sends DEL_EDGE for mid→bob and
     // bob→mid to alice. Alice's `on_del_edge` runs graph() →
     // bob unreachable. No auto-purge (removed to fix issue #4
@@ -85,7 +85,7 @@ fn purge_removes_unreachable_node() {
             .then_some(())
     });
 
-    // ─── REQ_PURGE: bob deleted ────────────────────────────
+    // REQ_PURGE: bob deleted
     // Without auto-purge, bob is unreachable but still in the
     // node list. Explicit REQ_PURGE deletes him: pass 1 gossips
     // DEL_EDGE/DEL_SUBNET (nothing for bob — no outgoing edges),
@@ -103,7 +103,7 @@ fn purge_removes_unreachable_node() {
         "bob should be gone after REQ_PURGE: {nodes:?}"
     );
 
-    // ─── REQ_PURGE again: idempotent ───────────────────────
+    // REQ_PURGE again: idempotent
     writeln!(alice_ctl.w, "18 8").unwrap();
     let mut ack2 = String::new();
     alice_ctl.r.read_line(&mut ack2).expect("purge ack 2");

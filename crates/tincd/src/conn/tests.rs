@@ -3,7 +3,7 @@ use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
 use nix::unistd::write;
 use rand_core::OsRng;
 
-// ─── LineBuf
+// LineBuf.
 
 #[test]
 fn linebuf_one_full_line() {
@@ -166,7 +166,7 @@ fn maxbufsize_matches_c() {
     assert_eq!(MAXBUFSIZE, expected);
 }
 
-// ─── Connection::send
+// Connection::send.
 
 fn devnull() -> OwnedFd {
     std::fs::File::open("/dev/null").unwrap().into()
@@ -209,7 +209,7 @@ fn send_second_doesnt_signal() {
     assert_eq!(c.outbuf.live(), b"0 a 17.7\n4 0 99\n");
 }
 
-// ─── take_rest
+// take_rest.
 
 /// Piggyback: ID line + SPTPS bytes in one buffer.
 #[test]
@@ -241,7 +241,7 @@ fn take_rest_empty_after_full_line() {
     assert!(b.take_rest().is_empty());
 }
 
-// ─── feed_sptps
+// feed_sptps.
 
 /// Panics if touched. Receive-only handshake doesn't `send_kex`.
 struct NoRng;
@@ -426,7 +426,7 @@ fn feed_sptps_decrypt_fail_is_dead() {
     assert!(matches!(r, FeedResult::Dead), "expected Dead, got {r:?}");
 }
 
-// ─── feed() sptpslen mechanism
+// feed() sptpslen mechanism.
 // Tested via socketpair: write chunk to one end, feed() reads other.
 
 /// Handshaked pair with bob as a Connection's sptps.

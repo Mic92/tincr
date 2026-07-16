@@ -44,19 +44,18 @@ pub(crate) enum InvitePhase {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ServeError {
-    /// `:217-223`. Single-use: already-used cookie → ENOENT here too.
+    /// Single-use: an already-used cookie shows up as ENOENT here too.
     #[error("non-existing or already-used invitation")]
     NonExisting,
-    /// `:230-237`.
     #[error("expired invitation")]
     Expired,
-    /// `:277`. First line isn't `Name = <valid-id>`, or name == myself.
+    /// First line isn't `Name = <valid-id>`, or name == myself.
     #[error("invalid invitation file: {0}")]
     BadInvitationFile(String),
-    /// `:125`. Newline in pubkey = config-injection attempt.
+    /// Newline in pubkey = config-injection attempt.
     #[error("invalid public key from invited node")]
     BadPubkey,
-    /// `:131`. Don't overwrite: would replace a known key.
+    /// Don't overwrite: would replace a known key.
     #[error("host config file {} already exists", .0.display())]
     HostFileExists(PathBuf),
     #[error("I/O error on {}: {err}", path.display())]
@@ -97,7 +96,7 @@ pub(crate) fn read_invitation_key(confbase: &Path) -> Result<Option<SigningKey>,
     Ok(Some(SigningKey::from_blob(&arr)))
 }
 
-// ─── Hoisted from tinc-tools/src/cmd/join.rs ───────────────────────
+// Hoisted from tinc-tools/src/cmd/join.rs.
 
 /// Tokenizer for `Key = Value`. `Port = 655` → `("Port", "655")`.
 /// `Port` → `("Port", "")`.
@@ -194,7 +193,7 @@ pub(crate) fn serve_cookie(
 /// Writes `hosts/{name}`. Addrcache/script/unlink/type-2 are daemon-side.
 ///
 /// # Errors
-/// - `BadPubkey` (`:125`): newline = config-injection (**security**).
+/// - `BadPubkey`: newline = config-injection (**security**).
 /// - `HostFileExists`: don't overwrite (**security**: attacker could
 ///   replace a known key). We use `O_CREAT|O_EXCL` (no TOCTOU).
 pub(crate) fn finalize(
@@ -248,7 +247,7 @@ pub(crate) fn chunk_file(contents: &[u8], chunk_size: usize) -> Vec<&[u8]> {
     contents.chunks(chunk_size).collect()
 }
 
-// ─── tests ─────────────────────────────────────────────────────────
+// tests.
 
 #[cfg(test)]
 mod tests {
@@ -273,7 +272,7 @@ mod tests {
 
     const WEEK: Duration = Duration::from_secs(604_800);
 
-    // ─── serve_cookie ──────────────────────────────────────────────
+    // serve_cookie.
 
     #[test]
     fn serve_cookie_roundtrip() {
@@ -382,7 +381,7 @@ mod tests {
         assert!(matches!(err, ServeError::BadInvitationFile(_)));
     }
 
-    // ─── finalize ──────────────────────────────────────────────────
+    // finalize.
 
     /// Valid 43-char tinc-base64 of a 32-byte pubkey.
     fn valid_pubkey_b64() -> String {
@@ -448,7 +447,7 @@ mod tests {
         assert_eq!(after, "Ed25519PublicKey = original\n");
     }
 
-    // ─── chunk_file ────────────────────────────────────────────────
+    // chunk_file.
 
     #[test]
     fn chunk_file_exact_multiple() {
@@ -476,7 +475,7 @@ mod tests {
         assert!(chunks.is_empty());
     }
 
-    // ─── read_invitation_key ───────────────────────────────────────
+    // read_invitation_key.
 
     #[test]
     fn read_invitation_key_missing() {
@@ -500,7 +499,7 @@ mod tests {
         assert_eq!(loaded.public_key(), key.public_key());
     }
 
-    // ─── split_var (hoisted parser sanity) ─────────────────────────
+    // split_var (hoisted parser sanity).
 
     #[test]
     fn split_var_forms() {

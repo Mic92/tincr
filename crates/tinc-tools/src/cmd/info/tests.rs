@@ -1,6 +1,6 @@
 use super::*;
 
-// ─── fmt_localtime
+// fmt_localtime
 
 /// `0` → `"never"`. We've folded the guard into the function.
 #[test]
@@ -51,7 +51,7 @@ fn localtime_epoch_is_1970ish() {
     assert_eq!(&s[..7], "1970-01");
 }
 
-// ─── option_version
+// option_version
 
 /// Top 8 bits.
 #[test]
@@ -64,7 +64,7 @@ fn option_version_shifts_24() {
     assert_eq!(option_version(0x0000_000c), 0);
 }
 
-// ─── Reachability::from_row
+// Reachability::from_row
 //
 // Golden-input tests on hand-built NodeRows. The cascade order
 // is what's pinned: a row that's MYSELF + unreachable = MYSELF
@@ -109,10 +109,8 @@ fn cascade_row(
 /// `Reachability::from_row` cascade table. An if-else-if chain.
 /// ORDER matters: a row satisfying multiple arms picks the
 /// FIRST. Five-for-five on read-the-spec-before-coding: the
-/// first cut had `Unreachable` before `Myself` ("self is
-/// reachable by definition, so order doesn't matter") — wrong.
-/// Upstream does MYSELF first, the strcmp fires before the
-/// bit-read.
+/// The MYSELF check must come before the reachable-bit check; this
+/// table pins that ordering.
 #[test]
 fn cascade_table() {
     let rv = StatusBit::REACHABLE.0 | StatusBit::VALIDKEY.0;
@@ -136,7 +134,7 @@ fn cascade_table() {
         (cascade_row("1.1.1.1",  rv,                      "alice", 0,      "alice", -1),   Reachability::DirectTcp),
         // 7. else → Forwarded. minmtu=0, nexthop=bob (NOT alice).
         (cascade_row("1.1.1.1",  rv,                      "alice", 0,      "bob",   -1),   Reachability::Forwarded { nexthop: "bob".into() }),
-        // ─── ORDER tests: row satisfies multiple arms, FIRST wins ───
+        // ORDER tests: row satisfies multiple arms, FIRST wins
         // MYSELF + unreachable → still Myself. (Daemon should never produce
         // this, but the cascade admits it.)
         (cascade_row("MYSELF",   0,                       "alice", 0,      "-",     -1),   Reachability::Myself),
@@ -157,7 +155,7 @@ fn cascade_table() {
     }
 }
 
-// ─── Reachability Display
+// Reachability Display
 
 /// `DirectUdp` is multi-line. The `\n` is INSIDE the `{}`
 /// expansion.
@@ -212,7 +210,7 @@ fn reachability_display_zero_rtt() {
     assert!(r.to_string().contains("RTT:          0.000"));
 }
 
-// ─── NodeInfo::format — the full golden
+// NodeInfo::format — the full golden
 
 /// Build a known `NodeRow`, assert byte-exact output. This is the
 /// `diff <(tinc-c info bob) <(tinc-rs info bob)` test, in unit
@@ -260,10 +258,9 @@ fn nodeinfo_format_golden() {
 
     let out = info.format("alice");
 
-    // Byte-exact. The column widths (count the spaces) are
-    // upstream's. `Status:` and `Options:` and `Edges:`/
-    // `Subnets:` are 13 chars (label + spaces); values have
-    // leading space. Everything else is 14 chars; values don't.
+    // Byte-exact against C tinc's output. `Status:`/`Options:`/`Edges:`/
+    // `Subnets:` labels are 13 chars and their values carry a leading
+    // space; everything else is 14 chars.
     //
     // Precondition: status bits are what we said.
     assert_eq!(
@@ -354,9 +351,8 @@ Edges:       \nSubnets:     \n";
     assert_eq!(out, expected);
 }
 
-/// Status bits print in upstream order (which is `node.h`
-/// declaration order, NOT alphabetical, NOT bit-position-with-
-/// gaps).
+/// Status bits print in the daemon's field-declaration order (not
+/// alphabetical, no gaps).
 #[test]
 fn nodeinfo_status_order() {
     // ALL six bits set.
@@ -379,14 +375,14 @@ fn nodeinfo_status_order() {
         subnets: vec![],
     };
     let out = info.format("x");
-    // The order is upstream's printf order. NOT alphabetical.
+    // Fixed print order, not alphabetical.
     assert!(
         out.contains("Status:       validkey visited reachable indirect sptps udp_confirmed\n")
     );
 }
 
-/// Double-space between `packets` and bytes. `diff` against
-/// upstream would catch one space.
+/// Double-space between `packets` and bytes — part of the byte-exact
+/// output format.
 #[test]
 fn nodeinfo_traffic_double_space() {
     let row = cascade_row("MYSELF", StatusBit::REACHABLE.0, "x", 0, "x", -1);
@@ -404,7 +400,7 @@ fn nodeinfo_traffic_double_space() {
     assert!(!out.contains("packets   1024")); // not triple
 }
 
-// ─── StatusBit::REACHABLE etc — pin against node.h packing
+// StatusBit::REACHABLE etc — pin against node.h packing
 
 /// The bit positions are GCC's LSB-first packing of `node_status_t`.
 /// This test pins the assignment so a wrong copy is loud at test

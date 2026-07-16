@@ -20,8 +20,8 @@ use super::rig::*;
 ///    confbase/host-up succeeds (Execute granted on confbase), but
 ///    the kernel's shebang-chase to /bin/sh hits a path NOT under
 ///    any `PathBeneath` rule → EACCES. This is the documented sharp
-///    edge (sandbox.rs module doc): we don't port C's `open_exec_
-///    paths` (/bin, /sbin, etc) because that's distro-specific.
+///    edge (sandbox.rs module doc): we deliberately don't allowlist
+///    exec paths like /bin or /sbin because that's distro-specific.
 ///    The test pins the behavior so it's intentional.
 ///
 /// **Self-skip if Landlock unavailable.** At `normal`, kernel-too-
@@ -54,7 +54,7 @@ fn sandbox_normal_ping() {
     perm.set_mode(0o755);
     std::fs::set_permissions(&host_up, perm).unwrap();
 
-    // ─── spawn (same as real_tun_ping) ────────────────────────
+    // spawn (same as real_tun_ping)
     let mut bob_child = bob.spawn_with_log("tincd=debug");
     assert!(
         wait_for_file(&bob.socket),
@@ -105,7 +105,7 @@ fn sandbox_normal_ping() {
         );
     }
 
-    // ─── THE PING (under Landlock) ─────────────────────────────
+    // THE PING (under Landlock)
     let ping = Command::new("ping")
         .args(["-c", "3", "-W", "2", "10.42.0.2"])
         .output()
@@ -125,7 +125,7 @@ fn sandbox_normal_ping() {
     );
     eprintln!("{}", String::from_utf8_lossy(&ping.stdout));
 
-    // ─── Landlock actually entered (not silently no-op'd) ──────
+    // Landlock actually entered (not silently no-op'd)
     // sandbox::enter_impl logs "Entered sandbox at level Normal"
     // on RulesetStatus::{Fully,Partially}Enforced. Absent → either
     // kernel too old or LSM not enabled → the rest of this test
@@ -144,7 +144,7 @@ fn sandbox_normal_ping() {
         "bob also under Landlock; stderr:\n{bob_stderr}"
     );
 
-    // ─── host-up spawn failed (EACCES on /bin/sh shebang) ─────
+    // host-up spawn failed (EACCES on /bin/sh shebang)
     // THE LANDLOCK PROOF. periodic.rs::log_script logs spawn
     // failure at Error level ("Script host-up spawn failed: ...").
     // The error is the kernel's EACCES from the shebang chase.

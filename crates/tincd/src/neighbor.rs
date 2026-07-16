@@ -8,8 +8,8 @@
 //! C inlines subnet-lookup; we split: `parse_*` returns target IP,
 //! daemon looks up, `build_*` synthesizes.
 //!
-//! `overwrite-mac` (`:970-973`, `:830-832`) and `source != myself`
-//! (`:964-967`, `:814-817`): handled at the daemon callsite
+//! `overwrite-mac` and `source != myself`: handled at the daemon
+//! callsite
 //! (`handle_arp`/`handle_ndp`); this module stays pure.
 
 #![forbid(unsafe_code)]
@@ -24,7 +24,7 @@ use crate::packet::{
     inet_checksum,
 };
 
-// ── Sizes ──────────────────────────────────────────────────────────
+// Sizes.
 
 const ETHER_SIZE: usize = 14;
 const ETH_ALEN: usize = 6;
@@ -34,14 +34,14 @@ const NS_SIZE: usize = 24; // icmp6_hdr(8) + in6_addr(16). ipv6.h:106
 const OPT_SIZE: usize = 2; // {type, len}. ipv6.h:115
 const IPPROTO_ICMPV6: u8 = 58;
 
-// ── NDP constants (RFC 4861) ───────────────────────────────────────
+// NDP constants (RFC 4861).
 
 pub(crate) const ND_NEIGHBOR_SOLICIT: u8 = 135;
 pub(crate) const ND_NEIGHBOR_ADVERT: u8 = 136;
 pub(crate) const ND_OPT_SOURCE_LINKADDR: u8 = 1;
 pub(crate) const ND_OPT_TARGET_LINKADDR: u8 = 2;
 
-// ── ARP ────────────────────────────────────────────────────────────
+// ARP.
 
 /// Returns `arp_tpa` iff `frame` is a valid Ethernet/IP ARP
 /// who-has. Caller does subnet lookup.
@@ -99,7 +99,7 @@ pub(crate) fn build_arp_reply(original: &[u8]) -> Vec<u8> {
     out
 }
 
-// ── NDP ────────────────────────────────────────────────────────────
+// NDP.
 
 /// Returns `nd_ns_target` iff: long enough, `ip6_nxt == ICMPV6`,
 /// type 135, opt-type ok, and **`ICMPv6` checksum verifies**.
@@ -161,9 +161,9 @@ pub(crate) fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
 /// Eth: dst←orig-src, src←orig-src⊕FF. Ip6: dst←orig-src,
 /// src←target (hlim untouched; kernel set 255, RFC 4861 §7.2.2).
 /// Icmp6: type←ADVERT, reserved←Solicited.
-/// Opt: `type←TARGET_LLADDR`, lladdr←fake MAC (`:904`).
+/// Opt: `type←TARGET_LLADDR`, lladdr←fake MAC.
 ///
-/// `:895` `decrement_ttl`: gated at the daemon callsite (`handle_ndp`)
+/// `decrement_ttl`: gated at the daemon callsite (`handle_ndp`)
 /// before this fn is called — keeps this module pure.
 #[must_use]
 pub(crate) fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
@@ -180,7 +180,7 @@ pub(crate) fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
 
     let mut out = original[..total].to_vec();
 
-    // ── Ethernet ─────────────────────────────────────────────────
+    // Ethernet.
     // memcpy leaves dst=src=orig-src, then XOR hits the src half.
     let eth_src: [u8; ETH_ALEN] = original[ETH_ALEN..ETH_ALEN * 2].try_into().ok()?;
     out[..ETH_ALEN].copy_from_slice(&eth_src);
@@ -188,7 +188,7 @@ pub(crate) fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
     out[ETH_ALEN * 2 - 1] ^= 0xFF;
     let fake_mac: [u8; ETH_ALEN] = out[ETH_ALEN..ETH_ALEN * 2].try_into().ok()?;
 
-    // ── IPv6 ─────────────────────────────────────────────────────
+    // IPv6.
     let ip6_off = ETHER_SIZE;
     let ip6_bytes: &[u8; IP6_SIZE] = original[ip6_off..ip6_off + IP6_SIZE].try_into().ok()?;
     let mut ip6 = Ipv6Hdr::read_from_bytes(ip6_bytes).ok()?;
@@ -200,7 +200,7 @@ pub(crate) fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
     ip6.ip6_src = target; //       :903
     out[ip6_off..ip6_off + IP6_SIZE].copy_from_slice(ip6.as_bytes());
 
-    // ── ICMPv6 / NS ──────────────────────────────────────────────
+    // ICMPv6 / NS.
     // [type][code][cksum:2][reserved:4][target:16]
     out[ns_off] = ND_NEIGHBOR_ADVERT;
     out[ns_off + 2] = 0; // :909
@@ -208,14 +208,14 @@ pub(crate) fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
     // :911 Solicited flag (spec says R|S|O for proxy; tinc sets S only).
     out[ns_off + 4..ns_off + 8].copy_from_slice(&0x4000_0000u32.to_be_bytes());
 
-    // ── Option ───────────────────────────────────────────────────
+    // Option.
     if has_opt {
         let opt_off = ns_off + NS_SIZE;
         out[opt_off] = ND_OPT_TARGET_LINKADDR; // :912
         out[opt_off + OPT_SIZE..opt_off + OPT_SIZE + ETH_ALEN].copy_from_slice(&fake_mac); // :905-907
     }
 
-    // ── Checksum ─────────────────────────────────────────────────
+    // Checksum.
     let mut pseudo = Ipv6Pseudo::default();
     pseudo.ip6_src = ip6.ip6_src;
     pseudo.ip6_dst = ip6.ip6_dst;
@@ -229,7 +229,7 @@ pub(crate) fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-// ── Tests ──────────────────────────────────────────────────────────
+// Tests.
 
 #[cfg(test)]
 mod tests {
@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(arp.ea_hdr.pro(), ETH_P_IP);
     }
 
-    // ── NDP fixtures ──────────────────────────────────────────────
+    // NDP fixtures.
 
     /// Valid NS with `SOURCE_LLADDR` opt + correct checksum.
     fn mk_ndp_solicit(target: Ipv6Addr) -> Vec<u8> {

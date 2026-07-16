@@ -17,7 +17,7 @@ fn sign_verify_roundtrip() {
     let mut signed = Vec::new();
     sign(&paths, Some(&input), 1_700_000_000, &mut signed).unwrap();
 
-    // ─── Shape check on the output
+    // Shape check on the output
     // First line is the header, rest is the body byte-exact.
     let nl = signed.iter().position(|&b| b == b'\n').unwrap();
     let header = std::str::from_utf8(&signed[..nl]).unwrap();
@@ -28,7 +28,7 @@ fn sign_verify_roundtrip() {
     // Body is the original data, byte-exact.
     assert_eq!(&signed[nl + 1..], data);
 
-    // ─── Verify
+    // Verify
     let v = verify_blob(&paths, &Signer::Named("alice".into()), &signed).unwrap();
     assert_eq!(v.signer, "alice");
     assert_eq!(v.body, data);
@@ -351,15 +351,14 @@ fn binary_body_roundtrip() {
     assert_eq!(v.body, data);
 }
 
-/// **Golden vector from upstream's test suite.** `test/integration/
-/// cmd_sign_verify.py` has a blob produced with a fixed key and
-/// fixed time `1653397516`. If `verify_blob` accepts it, the
-/// format is byte-compatible. The artifact IS the test — no
-/// upstream binary needed.
+/// **Golden vector from C tinc's test suite** (`test/integration/
+/// cmd_sign_verify.py`): a blob produced with a fixed key and fixed time
+/// `1653397516`. If `verify_blob` accepts it, the format is
+/// byte-compatible — no C binary needed.
 ///
 /// This proves, simultaneously:
 /// - The trailer format (` foo 1653397516`, leading space) matches
-/// - The header parse accepts what upstream emits
+/// - The header parse accepts what C tinc emits
 /// - tinc-b64 encoding matches (sig decodes to 64 bytes)
 /// - The Ed25519 verify matches (`tinc-crypto::sign::verify`)
 /// - `load_host_pubkey` parses the `Ed25519PublicKey =` line
@@ -367,11 +366,9 @@ fn binary_body_roundtrip() {
 /// If any one of those is wrong, this test fails.
 #[test]
 fn golden_upstream_vector() {
-    // Transcribed from `test/integration/cmd_sign_verify.py:12-29`.
-    // The PEM has leading/trailing newlines in the Python (it's a
-    // triple-quoted string starting with `\n`); read_pem skips
-    // pre-BEGIN lines so they're harmless. Transcribed exactly to
-    // make `diff cmd_sign_verify.py cmd/sign.rs` line up.
+    // Transcribed from cmd_sign_verify.py. The PEM has leading/trailing
+    // newlines in the Python triple-quoted string; read_pem skips
+    // pre-BEGIN lines so they're harmless.
     const PRIV_KEY: &str = "\
 -----BEGIN ED25519 PRIVATE KEY-----
 4Q8bJqfN60s0tOiZdAhAWLgB9+o947cta2WMXmQIz8mCdBdcphzhp23Wt2vUzfQ6
@@ -398,14 +395,13 @@ hello there\n";
     // Expected body (header stripped).
     const BODY: &[u8] = b"fake testing data\nhello there\n";
 
-    // ─── Set up confbase exactly as the Python does
+    // Set up confbase exactly as the Python does
     let cd = ConfDir::with_name("foo").with_host("foo", HOST);
     fs::write(cd.confbase().join("ed25519_key.priv"), PRIV_KEY).unwrap();
     let paths = cd.paths().clone();
 
-    // ─── Verify the upstream-signed blob
-    // The Python tests `.` and `foo` and `*`. We do all three.
-    // If ANY of them fails, format compat is broken.
+    // Verify the C-tinc-signed blob with all three signer forms
+    // (`foo`, `*`, `.`); any failure means format compat is broken.
     for signer in [
         Signer::Named("foo".into()),
         Signer::Any,
@@ -418,7 +414,7 @@ hello there\n";
         assert_eq!(v.body, BODY);
     }
 
-    // ─── Re-sign and confirm round-trip
+    // Re-sign and confirm round-trip
     // Ed25519 is deterministic given key+message. Same key, same
     // body, same time, same trailer → same sig. Prove it.
     let body_file = cd.path().join("body");
@@ -426,10 +422,9 @@ hello there\n";
     let mut resigned = Vec::new();
     sign(&paths, Some(&body_file), 1_653_397_516, &mut resigned).unwrap();
 
-    // **Byte-identical to upstream's output.** This is the
-    // strongest possible compat statement: not just "our verify
-    // accepts upstream's sign", but "our sign IS upstream's sign".
-    assert_eq!(resigned, SIGNED, "Rust sign output != upstream sign output");
+    // Byte-identical to C tinc's output: not just "our verify accepts
+    // C tinc's sign", but "our sign produces the same bytes".
+    assert_eq!(resigned, SIGNED, "Rust sign output != C tinc sign output");
 }
 
 /// Empty body. Degenerate but valid — you can sign nothing.

@@ -141,7 +141,7 @@ pub fn sign(paths: &Paths, input: Option<&Path>, t: i64, out: impl Write) -> Res
     // `LoadError` → `BadInput`: leaf-level — the caller
     // is the binary, which prints + exits.
 
-    // ─── Slurp input
+    // Slurp input
     let data = slurp(input)?;
 
     let msg = signed_message(&data, &name, t);
@@ -153,7 +153,7 @@ pub fn sign(paths: &Paths, input: Option<&Path>, t: i64, out: impl Write) -> Res
     // problem is in `tinc-crypto::b64`, not here.
     debug_assert_eq!(sig_b64.len(), SIG_B64_LEN);
 
-    // ─── Emit
+    // Emit
     // The body is the *original* `data`, NOT `msg` (which has the
     // trailer). Load-bearing.
     let mut out = out;
@@ -241,7 +241,7 @@ pub struct Verified {
 /// (Distinct from `Io` — the file opened fine, the contents are
 /// wrong.)
 pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verified, CmdError> {
-    // ─── Find the header line
+    // Find the header line
     // No newline, or header too long → fail.
     let nl = blob
         .iter()
@@ -255,12 +255,10 @@ pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verifi
     let header = &blob[..nl];
     let body = &blob[nl + 1..];
 
-    // ─── Parse header
+    // Parse header
     // Split on single spaces, expect exactly 5 fields:
-    // `["Signature", "=", name, t, sig]`. Stricter than upstream's
-    // sscanf (which accepts extra/missing whitespace), but sign
-    // always emits the canonical form. The only way to get a
-    // non-canonical header is hand-editing; the answer is "don't".
+    // `["Signature", "=", name, t, sig]`. Sign always emits this
+    // canonical form; non-canonical spacing only comes from hand-editing.
     let header =
         std::str::from_utf8(header).map_err(|_| CmdError::BadInput("Invalid input".into()))?;
     let mut fields = header.split(' ');
@@ -280,8 +278,7 @@ pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verifi
         return Err(CmdError::BadInput("Invalid input".into()));
     }
 
-    // `parse()` rejects trailing garbage. Same outcome as upstream
-    // (non-digit after time is rejected), different layer.
+    // parse() rejects trailing garbage after the timestamp.
     let t: i64 = t_str
         .parse()
         .map_err(|_| CmdError::BadInput("Invalid input".into()))?;
@@ -295,7 +292,7 @@ pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verifi
         return Err(CmdError::BadInput("Invalid input".into()));
     }
 
-    // ─── Match signer
+    // Match signer
     let resolved_signer = match signer {
         Signer::Any => signer_name,
         Signer::Named(n) => {
@@ -308,11 +305,11 @@ pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verifi
         }
     };
 
-    // ─── Load public key
+    // Load public key
     let host_path = paths.host_file(resolved_signer);
     let pubkey = load_host_pubkey(&host_path)?;
 
-    // ─── Decode sig + reconstruct trailer + verify
+    // Decode sig + reconstruct trailer + verify
     // Both b64-decode failure and Ed25519 verify failure map to
     // "Invalid signature".
     let sig_raw =

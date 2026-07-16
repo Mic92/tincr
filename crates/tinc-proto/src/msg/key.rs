@@ -9,26 +9,21 @@
 //!   (`REQ_KEY`/`REQ_PUBKEY`/`ANS_PUBKEY`/`SPTPS_PACKET`), fifth is
 //!   sub-type-specific (a base64 SPTPS record, or a base64 pubkey).
 //!
-//! `req_key_h` parses with `< 2` (not `!= 2`), so the third `%d` is
-//! optional and defaults to 0 (the C local `int reqno = 0`). When
-//! `reqno != 0`, control passes to `req_key_ext_h` which does *another*
-//! `sscanf` skipping four fields to grab the payload.
-//!
-//! We model this as `ReqKey { from, to, ext: Option<ReqKeyExt> }` where
-//! `ReqKeyExt` is the (sub-type, optional-payload) pair. The Rust
-//! daemon dispatches on `ext` instead of re-scanning.
+//! The sub-request field is optional on the wire (legacy peers omit
+//! it). We model this as `ReqKey { from, to, ext: Option<ReqKeyExt> }`
+//! where `ReqKeyExt` is the (sub-type, optional-payload) pair; the
+//! daemon dispatches on `ext`.
 //!
 //! ## `KEY_CHANGED` doesn't `check_id`
 //!
-//! `key_changed_h` parses the name but doesn't call `check_id` on it —
-//! just `lookup_node(name)`, which fails harmlessly if the name is
-//! garbage. We don't add a check the C doesn't have.
+//! The name in `KEY_CHANGED` is not validated — an unknown or garbage
+//! name simply fails the node lookup later, which is harmless, and
+//! rejecting it here would be stricter than what peers expect.
 
 use crate::Request;
 use crate::addr::AddrStr;
 use crate::tok::{ParseError, Tok};
 
-// ────────────────────────────────────────────────────────────────────
 // KEY_CHANGED
 
 /// Body of `KEY_CHANGED`. Flooded broadcast: a node has rekeyed,
@@ -62,7 +57,6 @@ impl KeyChanged {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // REQ_KEY
 
 /// Extended `REQ_KEY` sub-request. The fourth field, when present.
@@ -85,10 +79,9 @@ pub struct ReqKeyExt {
     /// LSB-first variant). Decoding is the daemon's job — at this layer
     /// it's an opaque token.
     ///
-    /// `REQ_PUBKEY` (19) has no payload; the others do. We don't
-    /// enforce that pairing here — `req_key_ext_h` does
-    /// `if(sscanf(...) == 1)` per sub-type, so the C also treats
-    /// payload presence as soft.
+    /// `REQ_PUBKEY` (19) has no payload; the others do. That pairing
+    /// isn't enforced here — peers treat payload presence as soft, so
+    /// rejecting would be stricter than the wire protocol.
     pub payload: Option<String>,
 }
 
@@ -116,15 +109,12 @@ pub struct ReqKey {
 }
 
 impl ReqKey {
-    /// `req_key_h` + `req_key_ext_h` parse, fused.
+    /// Parse both the legacy and extended forms.
     ///
-    /// `sscanf("%*d %s %s %d", from, to, &reqno)` with `< 2` — so `reqno`
-    /// is optional, defaults to the C local's 0. We use `Option` instead
-    /// of 0-as-sentinel: cleaner, and 0 is `Request::Id` which would be
-    /// a confusing accidental collision.
-    ///
-    /// Then if `reqno` was present, peel off one more optional `%s`
-    /// (the `req_key_ext_h` `sscanf("%*d %*s %*s %*d %s", buf)`).
+    /// `reqno` is optional on the wire; `Option` is used instead of a
+    /// 0-as-sentinel because 0 is `Request::Id`, which would be a
+    /// confusing accidental collision. If `reqno` is present, one more
+    /// optional payload token follows.
     ///
     /// # Errors
     /// Too few tokens (< 2 names) or bad name.
@@ -187,7 +177,6 @@ impl ReqKey {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // ANS_KEY
 
 /// Body of `ANS_KEY`. The session-key reply. Seven mandatory fields,
@@ -217,20 +206,12 @@ pub struct AnsKey {
 }
 
 impl AnsKey {
-    /// `ans_key_h`: `sscanf("%*d %s %s %s %d %d %lu %d %s %s")`, `< 7`.
+    /// Parse `ANS_KEY`: 7 mandatory fields + optional trailing
+    /// addr/port pair.
     ///
-    /// 7 mandatory + 2 optional. Unlike `ADD_EDGE`, the C *doesn't*
-    /// reject 8 (one optional present, one not) — `sscanf` returning 8
-    /// satisfies `< 7 → false`, and the handler only checks
-    /// `!*address` (zero-init buffer) to decide whether to use the
-    /// addr. Port is used unconditionally if addr is non-empty. So
-    /// receiving exactly addr-but-no-port would be a NULL deref in the
-    /// C... except `sscanf` reads `%s` greedily and there's nothing
-    /// after, so it can't actually happen on a well-formed line.
-    ///
-    /// We treat the pair as atomic anyway (both or neither). If a peer
-    /// somehow sends 8 fields, the C is in UB territory; we reject
-    /// cleanly.
+    /// The trailing pair is treated as atomic (both or neither); a
+    /// well-formed peer never sends exactly one, and rejecting the
+    /// half-pair cleanly is safer than guessing.
     ///
     /// # Errors
     /// Fewer than 7 fields, bad name, malformed int, or exactly one

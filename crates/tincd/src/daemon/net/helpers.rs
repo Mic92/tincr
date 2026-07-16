@@ -63,7 +63,7 @@ pub(super) fn is_udp_unreachable_errno(e: &std::io::Error) -> bool {
         101 // ENETUNREACH
         | 113 // EHOSTUNREACH
         | 97  // EAFNOSUPPORT
-        | 99  // EADDRNOTAVAIL
+        | 99 // EADDRNOTAVAIL
     )
 }
 
@@ -187,7 +187,7 @@ mod tests {
                 "errno {raw} should NOT be classified as udp-unreachable"
             );
         }
-        let e = io::Error::new(io::ErrorKind::Other, "synthetic");
+        let e = io::Error::other("synthetic");
         assert!(!is_udp_unreachable_errno(&e));
     }
 
@@ -197,8 +197,10 @@ mod tests {
         let mut tunnels: IntHashMap<NodeId, TunnelState> = IntHashMap::default();
         let tunnel_handles: IntHashMap<NodeId, Arc<TunnelHandles>> = IntHashMap::default();
         let nid = NodeId(42);
-        let mut t = TunnelState::default();
-        t.udp_addr = Some("10.0.0.1:655".parse().unwrap());
+        let mut t = TunnelState {
+            udp_addr: Some("10.0.0.1:655".parse().unwrap()),
+            ..TunnelState::default()
+        };
         let lo: SocketAddr = "127.0.0.1:1234".parse().unwrap();
         t.udp_addr_cached = Some((SockAddr::from(lo), 0));
         t.status.udp_confirmed = true;

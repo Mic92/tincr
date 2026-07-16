@@ -25,10 +25,8 @@ pub struct ParsedUrl {
 /// `[v6]/SLUG`. Port defaults to `"655"`. Slug is exactly 48 b64-url
 /// chars.
 ///
-/// Upstream does this with destructive `strchr` + `*p++ = 0` walking.
-/// We slice. Same accept set: rejects garbage at every step.
-/// `goto invalid` upstream → `None` here. The caller maps `None` to
-/// `CmdError::BadInput("Invalid invitation URL.")`.
+/// Rejects garbage at every step by returning `None`, which the caller
+/// maps to `CmdError::BadInput("Invalid invitation URL.")`.
 ///
 /// Doesn't validate that `host` is a real hostname or that `port`
 /// is numeric — `getaddrinfo`/`TcpStream::connect` will fail on
@@ -61,12 +59,10 @@ pub fn parse_url(url: &str) -> Option<ParsedUrl> {
         };
         (host.to_owned(), port.to_owned())
     } else {
-        // Non-bracketed: split on FIRST colon. `1.2.3.4:655` works.
-        // Unbracketed `::1/slug` would split at the first `:` and
-        // treat `:1` as the port — broken, same as upstream. Use
-        // brackets.
+        // Non-bracketed: split on first colon (`1.2.3.4:655` works).
+        // Unbracketed `::1/slug` splits at the first `:` and treats `:1`
+        // as the port — use brackets for IPv6.
         // `host:` (empty port) and `host` (no colon) both default.
-        // Upstream does both; unusual but harmless.
         match addr_part.split_once(':') {
             Some((h, p)) if !p.is_empty() => (h.to_owned(), p.to_owned()),
             Some((h, _empty)) => (h.to_owned(), String::from("655")),

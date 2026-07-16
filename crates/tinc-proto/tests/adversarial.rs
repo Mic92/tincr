@@ -30,7 +30,6 @@ use tinc_proto::msg::{
 };
 use tinc_proto::{MAX_STRING, Request, Subnet, check_id};
 
-// ────────────────────────────────────────────────────────────────────
 // Table-driven reject cases.
 //
 // Each table entry is a line that MUST NOT panic. Most are expected
@@ -95,7 +94,7 @@ fn check_id_garbage() {
 fn add_edge_adversarial() {
     #[rustfmt::skip]
     let cases: &[(&str, bool)] = &[
-        // ─── truncation ───
+        // truncation
         ("",                                                false),
         ("12",                                              false),
         ("12 0",                                            false),
@@ -104,7 +103,7 @@ fn add_edge_adversarial() {
         ("12 0 a b 1.1.1.1",                                false),
         ("12 0 a b 1.1.1.1 655",                            false),
         ("12 0 a b 1.1.1.1 655 0",                          false),
-        // ─── integer overflow / wrong type ───
+        // integer overflow / wrong type
         ("12 0 a b 1.1.1.1 655 0 99999999999999999999",     false), // weight > i64
         ("12 0 a b 1.1.1.1 655 0 2147483648",               false), // weight = i32::MAX+1
         ("12 0 a b 1.1.1.1 655 ffffffffffffffff 1",         false), // options > u32
@@ -112,14 +111,14 @@ fn add_edge_adversarial() {
         ("12 0 a b 1.1.1.1 655 0 +1",                       true),  // Rust i32 parse accepts +
         ("12 0 a b 1.1.1.1 655 0 1.5",                      false), // float weight
         ("12 0 a b 1.1.1.1 655 -1 1",                       false), // negative hex
-        // ─── extra / odd tokens ───
+        // extra / odd tokens
         ("12 0 a b 1.1.1.1 655 0 1 la lp extra",            true),  // 9th token ignored (sscanf compat)
         ("12 0 a b 1.1.1.1 655 0 1 lonelylocal",            false), // 7-token reject (already KAT'd; here for completeness)
-        // ─── name validation ───
+        // name validation
         ("12 0 a\0x b 1.1.1.1 655 0 1",                     false), // embedded NUL
         ("12 0 .. b 1.1.1.1 655 0 1",                       false), // path traversal
         ("12 0 a a 1.1.1.1 655 0 1",                        false), // self-loop
-        // ─── whitespace variants ───
+        // whitespace variants
         ("12\t0\ta\tb\t1.1.1.1\t655\t0\t1",                 true),  // tabs split like spaces
         ("12  0  a  b  1.1.1.1  655  0  1",                 true),  // double-space
         ("  12 0 a b 1.1.1.1 655 0 1  ",                    true),  // leading/trailing
@@ -260,7 +259,6 @@ fn misc_msgs_adversarial() {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Blind fuzz: arbitrary bytes → every parser. No result assertion;
 // only that nothing panics. `from_utf8_lossy` because the parsers
 // take &str — non-UTF-8 is handled one layer up (tincd's

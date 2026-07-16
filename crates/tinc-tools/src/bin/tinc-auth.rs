@@ -134,11 +134,9 @@ fn read_request(stream: &UnixStream) -> Option<Request> {
         // colon, optional whitespace, value. We only want one
         // header so we don't bother building a map.
         //
-        // `Remote-Port`: Tailscale's nginx-auth requires it
-        // (`nginx-auth.go:37-42` returns 400 if either header is
-        // unset), then immediately joins host:port and... never
-        // looks at the port again. `WhoIs` is keyed by IP only
-        // (the addrport parse is just validation). tinc subnet
+        // `Remote-Port`: Tailscale's nginx-auth requires it (400 if
+        // either header is unset) but never actually uses the port —
+        // its lookup is keyed by IP only. tinc subnet
         // lookup is also IP-only — there's no per-port routing.
         // We don't read it. nginx configs that set it work fine;
         // configs that don't, also fine.
@@ -455,14 +453,12 @@ fn main() -> ExitCode {
     let mut paths = Paths::for_cli(&args.input);
     paths.resolve_runtime(&args.input);
 
-    // ─── listener: socket activation OR --sockpath
+    // listener: socket activation OR --sockpath
     let listener = if let Some(n) = check_socket_activation() {
         if n != 1 {
-            // Tailscale's nginx-auth spawns one goroutine per
-            // listener (`nginx-auth.go:114-119`). We could iterate
-            // 3..3+n the same way. We don't: the unit file ships
-            // one ListenStream, anything else is misconfiguration.
-            // Failing loud beats silently ignoring extras.
+            // The unit file ships exactly one ListenStream; anything else
+            // is misconfiguration. Failing loud beats silently ignoring
+            // extra sockets.
             eprintln!("tinc-auth: expected exactly 1 socket from systemd, got {n}");
             return ExitCode::FAILURE;
         }
@@ -502,16 +498,16 @@ fn main() -> ExitCode {
 
     eprintln!("tinc-auth: listening (net={netname})");
 
-    // ─── accept loop
+    // accept loop
     // Single-threaded, sequential. nginx auth_request subrequests
     // are tiny and the work per request is one ctl-socket roundtrip
     // (~1 ms). Threadpool when it profiles hot.
     //
     // No graceful shutdown handling: SIGTERM kills the process,
     // systemd restarts it on the next subrequest (socket activation
-    // means systemd holds the socket open across restarts; nginx
-    // never sees ECONNREFUSED). Tailscale's "let it crash, it will
-    // come back" comment (`nginx-auth.go:108-112`) — same posture.
+    // means systemd holds the socket open across restarts; nginx never
+    // sees ECONNREFUSED). Same "let it crash, it will come back" posture
+    // as Tailscale's nginx-auth.
     for stream in listener.incoming() {
         match stream {
             Ok(s) => handle(&s, &paths, &netname),

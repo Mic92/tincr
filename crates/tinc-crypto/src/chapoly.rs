@@ -110,14 +110,13 @@ impl ChaPoly {
 
     /// Derive the per-record Poly1305 key and a cipher positioned at block 1.
     ///
-    /// Factored out so seal/open share the exact same setup — the C code
-    /// duplicates these ~6 lines, which is fine in C but in Rust we'd rather
-    /// have one place to get the nonce endianness wrong. Returning the cipher
-    /// (rather than re-initing for the body) saves one key-schedule per
-    /// record; measurable at ~800 k records/s.
+    /// Factored out so seal/open share the exact same setup — one place
+    /// to get the nonce endianness wrong. Returning the cipher (rather
+    /// than re-initing for the body) saves one key-schedule per record;
+    /// measurable at ~800 k records/s.
     #[inline]
     fn record_state(&self, seqno: u64) -> ([u8; 32], ChaCha20Legacy) {
-        // Big-endian, matching `put_u64` in the C source. ChaCha20Legacy
+        // Big-endian, as the wire protocol requires. ChaCha20Legacy
         // (DJB: 32-byte key, 8-byte nonce, 64-bit block counter) then loads
         // these LE into state words 14/15 — exactly what the wire protocol
         // expects. Don't "fix" the endianness.
@@ -217,7 +216,7 @@ impl ChaPoly {
 
         let (mut poly_key, mut cipher) = self.record_state(seqno);
 
-        // MAC-then-decrypt, matching the C order. Either order is safe here
+        // MAC-then-decrypt. Either order is safe here
         // (the cipher is a pure stream XOR with no key-dependent branching),
         // but matching the reference makes side-channel review easier.
         let expected = backend::poly1305(&poly_key, ct);
@@ -264,7 +263,7 @@ impl ChaPoly {
 
         let (mut poly_key, mut cipher) = self.record_state(seqno);
 
-        // MAC-then-decrypt, matching the C order. Tag check BEFORE the
+        // MAC-then-decrypt. Tag check BEFORE the
         // extend so a forged packet doesn't dirty the caller's buffer.
         let expected = backend::poly1305(&poly_key, ct);
         poly_key.zeroize();
@@ -279,7 +278,7 @@ impl ChaPoly {
     }
 }
 
-// ─── backend ────────────────────────────────────────────────────────────────
+// backend
 
 mod backend {
     use super::TAG_LEN;

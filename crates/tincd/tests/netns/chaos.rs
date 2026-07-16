@@ -151,7 +151,7 @@ impl ChaosRig {
             if a_ok && b_ok { Some(()) } else { None }
         });
 
-        // ─── wait for udp_confirmed (status bit 7) ────────────
+        // wait for udp_confirmed (status bit 7)
         // CRITICAL for the chaos tests. validkey alone means data
         // CAN go via UDP, but until PMTU probes confirm the path
         // (`tx_control.rs:115`, `tunnel.rs:197`), `try_tx` falls back
@@ -300,14 +300,14 @@ fn chaos_ping_under_loss() {
     let tmp = tmp!("chaos-loss");
     let mut rig = ChaosRig::setup(netns, &tmp);
 
-    // ─── baseline counters BEFORE chaos ──────────────────────────
+    // baseline counters BEFORE chaos
     // The validkey-kick + flush pings already bumped these.
     let (b_in_pre, _) = ChaosRig::traffic(&mut rig.bob_ctl, "alice");
     let (_, a_out_pre) = ChaosRig::traffic(&mut rig.alice_ctl, "bob");
 
     let _chaos = Netem::apply("lo", "loss 5%");
 
-    // ─── the burst ───────────────────────────────────────────────
+    // the burst
     // `-i 0.05`: 50ms gap. Slow enough that loss is the only
     // perturbation (no queue buildup → no incidental reorder).
     // `-W 1`: don't wait long for replies that won't come.
@@ -332,7 +332,7 @@ fn chaos_ping_under_loss() {
         })
         .expect("ping summary line");
 
-    // ─── post-chaos counters ─────────────────────────────────────
+    // post-chaos counters
     let (b_in_post, _) = ChaosRig::traffic(&mut rig.bob_ctl, "alice");
     let (_, a_out_post) = ChaosRig::traffic(&mut rig.alice_ctl, "bob");
     let alice_sent = a_out_post - a_out_pre;
@@ -341,7 +341,7 @@ fn chaos_ping_under_loss() {
 
     let (alice_stderr, bob_stderr) = rig.finish();
 
-    // ─── ASSERTS ─────────────────────────────────────────────────
+    // ASSERTS
     // Floor: 5/30. Expected ~27 (0.95² × 30), variance is wide at
     // N=30. Below 5 means something other than loss is dropping.
     assert!(
@@ -430,7 +430,7 @@ fn chaos_replay_under_reorder() {
 
     let (alice_stderr, bob_stderr) = rig.finish();
 
-    // ─── ASSERTS ─────────────────────────────────────────────────
+    // ASSERTS
     // Reorder-only: no loss, no dup. ALL pings should reply.
     // (netem reorder doesn't drop — it just shuffles dequeue
     // order.) Allow 2-packet slack for ping's own `-W` race.
@@ -528,7 +528,7 @@ fn chaos_replay_under_duplicate() {
 
     let (alice_stderr, bob_stderr) = rig.finish();
 
-    // ─── ASSERTS ─────────────────────────────────────────────────
+    // ASSERTS
     // Ping must succeed (originals get through). dup-only doesn't
     // lose packets.
     assert!(
@@ -571,7 +571,7 @@ fn chaos_replay_under_duplicate() {
          is wrong, or the bit-clear at :245 races something)."
     );
 
-    // ─── req_key cascade check (indirect) ────────────────────────────────────────
+    // req_key cascade check (indirect)
     // `net.rs:483` lumps `BadSeqno` with `DecryptFailed`: both
     // hit `send_req_key`. That's semantically wrong — a dup
     // doesn't mean keys are stale — but the 10s gate

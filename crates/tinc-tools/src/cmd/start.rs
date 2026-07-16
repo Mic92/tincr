@@ -14,12 +14,10 @@
 //! returns Ok, then closes. Parent reads until EOF; if the last
 //! byte before EOF was nul, success.
 //!
-//! Why socketpair not pipe: upstream tees early-startup log lines
-//! through the umbilical too, so `tinc start` shows you what went
-//! wrong if setup fails. Our daemon doesn't tee logs (`env_logger`
-//! has no hook), so we just get the nul byte. The drain loop here
-//! still passes any bytes it gets to stderr — forward-compat if
-//! log teeing lands, and cross-compat with the upstream tincd.
+//! Any bytes before the final nul are treated as early-startup log lines
+//! and passed through to stderr. The Rust daemon currently sends only the
+//! nul byte, but the C tincd tees its startup logs through the umbilical,
+//! and this drain loop works against either daemon.
 //!
 //! ## `Command::spawn` not raw `fork`
 //!
@@ -93,7 +91,7 @@ pub fn start(paths: &Paths, extra_args: &[String]) -> Result<(), CmdError> {
 /// # Errors
 /// See [`start`].
 pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<(), CmdError> {
-    // ─── already running?
+    // already running?
     // Any connect error means "not running, proceed". PidfileMissing,
     // PidfileMalformed, DaemonDead, SocketConnect — all mean "go".
     if let Ok(ctl) = CtlSocket::connect(paths) {
@@ -101,7 +99,7 @@ pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<
         return Ok(());
     }
 
-    // ─── socketpair
+    // socketpair
     // `UnixStream::pair` wraps `socketpair(AF_UNIX, SOCK_STREAM, 0)`.
     // The catch: std sets CLOEXEC on both fds (sane default for
     // everything *except* deliberate inheritance). We clear it on
@@ -111,18 +109,17 @@ pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<
 
     let theirs_fd = theirs.as_raw_fd();
 
-    // ─── TINC_UMBILICAL value
+    // TINC_UMBILICAL value
     // "{fd} {colorize}". The fd number is stable across spawn —
     // exec preserves non-CLOEXEC fds at their current numbers. We
     // can format it here, in the parent, pre-spawn.
     //
-    // colorize: used for teed log lines. Our daemon ignores it (no
-    // teeing). Still set, for forward-compat and for cross-impl
-    // with the upstream tincd (`TINCD_PATH` pointed at it).
+    // colorize: used for teed log lines. The Rust daemon ignores it, but
+    // it matters when TINCD_PATH points at the C tincd.
     let colorize = i32::from(use_ansi_escapes_stderr());
     let umbilical_val = format!("{theirs_fd} {colorize}");
 
-    // ─── spawn
+    // spawn
     // We don't replay our `-c`/`-n` — instead pass the *resolved*
     // paths as explicit `--pidfile`/`--socket`/`-c`. This is what
     // every test in `crates/tincd/tests/` does already.
@@ -163,15 +160,13 @@ pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<
         .spawn()
         .map_err(|e| CmdError::BadInput(format!("Error starting {}: {e}", tincd.display())))?;
 
-    // ─── close our copy of the child end
+    // close our copy of the child end
     // Critical: if we kept it open, the read loop below would never
     // see EOF (we'd be holding the write end open ourselves).
     drop(theirs);
 
-    // ─── drain the umbilical
-    // Everything before the final nul byte is teed to stderr (the
-    // daemon's startup logs; in our case empty until log teeing
-    // lands, but the loop works against the upstream tincd too).
+    // Drain the umbilical: everything before the final nul byte is teed
+    // to stderr (the daemon's startup logs, if it sends any).
     //
     // `failure` tracks: did we see a nul byte as the *last* byte
     // before EOF? Nul is 0 (false → success). If the daemon died
@@ -198,7 +193,7 @@ pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<
         }
     }
 
-    // ─── reap the child
+    // reap the child
     // The daemon detaches by default — its `daemon(3)` call exits
     // the original child with status 0 immediately. So wait returns
     // fast and `status.success()`. The *grandchild* (the actual

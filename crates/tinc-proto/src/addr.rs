@@ -1,23 +1,17 @@
-//! `netutl.c`: `sockaddr2str` / `str2sockaddr` — but only the wire-string
-//! shape, not the `getaddrinfo` resolution.
+//! Wire-string shape of addresses and ports.
 //!
 //! ## Why addresses are just strings here
 //!
-//! `sockaddr2str` calls `getnameinfo(NI_NUMERICHOST | NI_NUMERICSERV)`.
-//! For `AF_INET` that's the dotted-quad. For `AF_INET6` it's RFC 5952
-//! plus a `%scopeid` that the C immediately strips. For `AF_UNSPEC` it's
-//! the literal string `"unspec"`. And for `AF_UNKNOWN` — tinc's escape
-//! hatch — it's *whatever string was originally fed in*.
-//!
-//! That last one is key. `str2sockaddr` does `getaddrinfo(AI_NUMERICHOST)`
-//! and on failure stuffs the input into `AF_UNKNOWN` verbatim. So the
+//! On the wire, tinc addresses can be dotted-quad IPv4, RFC 5952 IPv6,
+//! the literal `"unspec"`, or — for peers whose address never resolved
+//! numerically — an arbitrary hostname passed through verbatim. So the
 //! protocol layer's contract is: address and port are arbitrary
-//! whitespace-free tokens. Numeric resolution happens *later*, in the
+//! whitespace-free tokens. Numeric resolution happens later, in the
 //! socket layer, when something tries to `connect()`.
 //!
-//! For the Rust port that means: at parse time, just take the string.
-//! Don't validate. Don't `IpAddr::parse`. The daemon resolves when it
-//! needs to. This crate has no I/O.
+//! Therefore: at parse time, just take the string. Don't validate,
+//! don't `IpAddr::parse`. The daemon resolves when it needs to. This
+//! crate has no I/O.
 //!
 //! ## What this module *does* provide
 //!

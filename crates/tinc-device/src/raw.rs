@@ -64,8 +64,8 @@ impl RawSocket {
     ///
     /// # Errors
     /// - `PermissionDenied`: `PF_PACKET` needs `CAP_NET_RAW`.
-    /// - `NotFound`: no such interface (STRICTER: 16+ byte names
-    ///   error here, not silently truncated like C's `strncpy`).
+    /// - `NotFound`: no such interface (16+ byte names error here
+    ///   rather than being silently truncated).
     pub fn open(iface: &str) -> io::Result<Self> {
         use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType, socket};
 
@@ -101,8 +101,7 @@ impl RawSocket {
 ///
 /// SAFETY argument:
 /// - `sockaddr_ll` is `repr(C)`, no niche, all fields integers.
-///   `mem::zeroed` is sound (same as `linux.rs::ifreq`). The C
-///   `struct sockaddr_ll sa = {0}` (`:38`).
+///   `mem::zeroed` is sound (same as `linux.rs::ifreq`).
 /// - We write three fields. The unwritten fields (`sll_hatype`,
 ///   `sll_pkttype`, `sll_halen`, `sll_addr`) stay zero. The
 ///   kernel ignores them for `bind` (man 7 packet: "For

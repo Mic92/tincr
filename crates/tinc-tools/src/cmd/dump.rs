@@ -14,30 +14,14 @@
 //!
 //! ## Dump format is a cross-impl seam
 //!
-//! Format is pinned by the daemon's `dump_*` functions. Rust
-//! `tinc dump` ←→ upstream `tincd` is a useful cross-impl test asserting
-//! identical output. Row schemas (`NodeRow` etc.) live in
-//! [`ctl::rows`](crate::ctl::rows); this module is just dispatch +
-//! output formatting.
+//! The row format is pinned by the daemon's `dump_*` functions and by
+//! scripts that parse `tinc dump ... | awk`; output must stay identical
+//! to C tinc. Row schemas (`NodeRow` etc.) live in
+//! [`ctl::rows`](crate::ctl::rows); this module is dispatch + formatting.
 //!
-//! ## What we tighten
-//!
-//! - `recv_row` validates `code == 18` per row. Upstream checks
-//!   `n >= 2` but never checks `code` — a `"19 3 ..."` row would
-//!   be dispatched on whatever `req` parsed as. We reject.
-//!
-//! - `dump invitations` checks `name.len() == 24` BEFORE decode.
-//!   Upstream's `b64decode_tinc(..., 24)` reads first 24 chars,
-//!   returns 18 on valid. A 25-char name with valid first-24 would
-//!   pass; daemon lookup is exact-24 so it'd never match anyway.
-//!   We tighten to exact-24. Same as `sweep_expired`.
-//!
-//! ## What we drop
-//!
-//! - `usage(true)` calls on bad argument. Upstream dumps the full
-//!   help text. We just error; the binary's main can print usage
-//!   if it wants.
-//!
+//! Stricter than C tinc: `recv_row` validates the reply code per row,
+//! and `dump invitations` requires filenames to be exactly 24 base64
+//! chars (the daemon's invite lookup is exact-24 anyway).
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -47,17 +31,10 @@ use crate::ctl::{CtlRequest, CtlSocket, DumpRow};
 use crate::names::{Paths, check_id};
 
 // Row schemas are wire-level, shared with `info`/`top`/`tinc-auth`.
-// Re-exported so the existing `cmd::dump::{NodeRow,…}` paths and
-// `dump/tests.rs` (`use super::*`) keep working.
+// Re-exported so existing `cmd::dump::{NodeRow,…}` paths keep working.
 pub use crate::ctl::rows::{ConnRow, EdgeRow, NodeRow, StatusBit, SubnetRow, strip_weight};
 
-// Kind: the 7 sub-verbs
-
-/// Which `dump` sub-verb. Upstream uses string matches inline +
-/// `do_graph` int + `only_reachable` bool — three local vars
-/// threading through one switch. We collapse to one enum because
-/// the dispatch is 1:1 (the three-var space has 7 valid points and
-/// a lot of impossible ones like `do_graph=1 && only_reachable`).
+/// Which `dump` sub-verb.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// `dump nodes`
@@ -74,7 +51,7 @@ pub enum Kind {
     Graph,
     /// `dump digraph` — DOT, directed (`->`)
     Digraph,
-    /// `dump invitations` — NO daemon; readdir.
+    /// `dump invitations` — no daemon; reads the invitations directory.
     Invitations,
 }
 
@@ -90,33 +67,25 @@ const KINDS: &[(&str, Kind)] = &[
 ];
 
 impl Kind {
-    /// Does this sub-verb need to talk to the daemon? The binary's
-    /// `cmd_dump` adapter checks this BEFORE `connect()` — so
-    /// `dump invitations` works with daemon down.
+    /// Does this sub-verb need to talk to the daemon? The binary checks
+    /// this before `connect()`, so `dump invitations` works with the
+    /// daemon down.
     #[must_use]
     pub const fn needs_daemon(self) -> bool {
         !matches!(self, Kind::Invitations)
     }
 }
 
-/// Parse `argv` → `Kind`.
-///
-/// The `reachable` shift dance: `dump reachable nodes` is parsed as
-/// `dump nodes` with a bool, via `argv++; argc--`. We do the same
-/// shape (slice, not pointer arith) so the error messages line up.
-///
-/// All matches case-insensitive (`strcasecmp`).
+/// Parse `argv` → `Kind`. All matches are case-insensitive.
 ///
 /// # Errors
-/// `BadInput` mirroring upstream's three error strings — `reachable`
-/// without `nodes`, wrong arg count, unknown type.
+/// `BadInput` for `reachable` without `nodes`, wrong arg count, or an
+/// unknown dump type.
 pub fn parse_kind(args: &[String]) -> Result<Kind, CmdError> {
-    // ─── `reachable` prefix (only valid before `nodes`)
+    // `reachable` prefix is only valid before `nodes`.
     let (only_reachable, args) = match args {
         [first, rest @ ..] if first.eq_ignore_ascii_case("reachable") => {
             let Some(second) = rest.first() else {
-                // `dump reachable` alone: upstream falls through to
-                // "Invalid number of arguments." without shifting.
                 return Err(CmdError::BadInput("Invalid number of arguments.".into()));
             };
             if !second.eq_ignore_ascii_case("nodes") {
@@ -133,10 +102,8 @@ pub fn parse_kind(args: &[String]) -> Result<Kind, CmdError> {
         return Err(CmdError::BadInput("Invalid number of arguments.".into()));
     };
 
-    // ─── Dispatch
     // `only_reachable` was already validated to be nodes-only above,
-    // so it can only pair with `what == "nodes"`; the post-lookup
-    // remap covers that one case.
+    // so the post-lookup remap covers that one case.
     let kind = KINDS
         .iter()
         .find(|(n, _)| what.eq_ignore_ascii_case(n))
@@ -150,9 +117,7 @@ pub fn parse_kind(args: &[String]) -> Result<Kind, CmdError> {
     })
 }
 
-// Dump invitations — pure fs, no daemon
-
-/// One outstanding invitation. We collect so the binary can decide
+/// One outstanding invitation. Collected so the binary can decide
 /// stdout/stderr.
 #[derive(Debug, Clone)]
 pub struct InviteRow {
@@ -162,35 +127,25 @@ pub struct InviteRow {
     pub invitee: String,
 }
 
-/// Walks `confbase/invitations/`, finds 24-char-b64-named files,
-/// reads `Name = ` from line 1, collects. Upstream printf-per-file;
-/// we return Vec for the binary to print.
+/// Walks `confbase/invitations/`, finds 24-char-b64-named files, reads
+/// `Name = ` from line 1, collects.
 ///
-/// Upstream has THREE per-file failure modes that warn-and-skip
-/// (`fprintf(stderr, ...); continue;`):
-///
-/// 1. File won't open
-/// 2. Empty file
-/// 3. First line isn't `Name = VALID_ID`
-///
-/// We don't `eprintln!` from lib code. The most useful behavior is
-/// "show what's valid, skip the rest". So we silently skip. If
-/// someone wants the warnings, the seam is here.
+/// Per-file problems (unreadable, empty, first line not `Name = VALID_ID`)
+/// are silently skipped: lib code doesn't print to stderr, and "show
+/// what's valid" is the most useful behavior.
 ///
 /// # Errors
-/// `Io` if the directory exists but readdir fails (perms?).
-/// ENOENT is NOT an error — exit 0 with empty Vec.
+/// `Io` if the directory exists but readdir fails. ENOENT is not an
+/// error — exit 0 with empty Vec.
 pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
     use tinc_crypto::invite::SLUG_PART_LEN;
 
     let dir = paths.invitations_dir();
 
-    // ─── Open directory
-    // ENOENT → empty list, exit 0. Anything else → error.
     let entries = match fs::read_dir(&dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Never created the dir → no invites → not an error.
+            // Directory never created → no invites → not an error.
             return Ok(Vec::new());
         }
         Err(e) => return Err(io_err(dir)(e)),
@@ -199,60 +154,41 @@ pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
     let mut out = Vec::new();
 
     for entry in entries {
-        // ─── Per-entry errors are skip, not fail
-        // `readdir` doesn't fail per-entry on Linux but it CAN
-        // (e.g. NFS weirdness). Upstream doesn't check; we skip.
+        // Per-entry readdir errors (rare, e.g. NFS) are skip, not fail.
         let Ok(entry) = entry else { continue };
         let name_os = entry.file_name();
 
-        // ─── 24-char-b64 filter
-        // We're stricter than upstream: name must be EXACTLY 24
-        // chars AND decode to 18 bytes. Upstream would accept a
-        // 25-char name with valid first 24. Daemon lookup is
-        // exact-24, so a 25-char file never matches an invite
-        // anyway. Same as `sweep_expired`.
-        //
-        // OsStr::len() is bytes (Unix). 24 bytes is 24 ASCII chars
-        // for valid b64; non-ASCII bytes would fail decode anyway.
+        // Filter to exactly 24 base64 chars. The daemon's invite lookup is
+        // exact-24; anything else is not an invitation cookie.
+        // OsStr::len() is bytes (Unix); non-ASCII bytes fail decode below.
         if name_os.len() != SLUG_PART_LEN {
             continue;
         }
-        // to_str(): non-UTF-8 → skip. b64 alphabet is ASCII so a
-        // valid name is always UTF-8; non-UTF-8 means not-a-cookie.
+        // Non-UTF-8 can't be valid base64.
         let Some(name) = name_os.to_str() else {
             continue;
         };
-        // Decode-validate. We don't NEED the bytes (we just need to
-        // know the name is valid b64), but `decode` is the validator.
+        // Decode is only used as a validator; the bytes are unused.
         let Some(decoded) = tinc_crypto::b64::decode(name) else {
             continue;
         };
-        // 24 b64 chars → 18 bytes always (24 * 6 = 144 bits = 18
-        // bytes). The check is mathematically redundant with
-        // len()==24-and-decoded; assert it to catch a future b64
-        // change.
+        // 24 b64 chars always decode to 18 bytes; assert to catch a future
+        // b64 change.
         debug_assert_eq!(decoded.len(), 18);
 
-        // ─── Read first line
-        // We read just enough — the file might have a long body
-        // (the host config blob), don't slurp it.
+        // Read only the first line — the file body (host config blob)
+        // may be long.
         let path = entry.path();
         let Ok(file) = fs::File::open(&path) else {
             continue;
         };
         let mut first = String::new();
-        // BufReader for one line is overhead but cleaner than a
-        // hand-rolled byte-by-byte newline scan.
         if BufReader::new(file).read_line(&mut first).is_err() || first.is_empty() {
             continue;
         }
 
-        // ─── Extract `Name = X`
-        // The rstrip uses `strchr("\t \r\n", ...)` — strips any
-        // combination from the right. We do the same set, then route
-        // through the canonical `split_kv` so a hand-edited
-        // `Name=bob` invitation lists the same as `tinc get Name`
-        // would read it (P4: one tokenizer for one file format).
+        // Route through the canonical split_kv so a hand-edited `Name=bob`
+        // invitation lists the same as `tinc get Name` would read it.
         let first = first.trim_end_matches(['\t', ' ', '\r', '\n']);
         let (key, invitee) = tinc_conf::split_kv(first);
         if key != "Name" || !check_id(invitee) {
@@ -268,38 +204,26 @@ pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
     Ok(out)
 }
 
-// The daemon-backed dumps
-
-/// Run one of the daemon-backed dumps; returns lines ready for
-/// stdout (the binary prints each + `\n`). An empty vec is silence
-/// — exit 0, no output.
+/// Run one of the daemon-backed dumps; returns lines ready for stdout.
+/// An empty vec means no output, exit 0.
 ///
 /// `paths` must be `resolve_runtime()`d (the binary's `needs_daemon`
 /// gate handles this).
 ///
-/// The function shape: connect, send 1-2 requests, recv-loop with
-/// per-kind parse, format, return lines. Upstream inlines all four
-/// parses into one switch inside one loop; we do the same — the
-/// graph mode interleaves nodes-then-edges and the loop body
-/// dispatches on the row's kind, so per-kind helper functions
-/// would NEED a closure or generic anyway. One function, one match.
-///
-/// `clippy::too_many_lines`: ~165 lines for the same span. Pulling
-/// the per-kind parse out would make the graph-mode interleave less
-/// obvious. Allowed.
+/// One function, one recv loop: graph mode interleaves node and edge rows,
+/// so the loop body dispatches on the row's kind rather than per-kind
+/// helpers.
 ///
 /// # Errors
-/// Connect failure, recv failure (daemon crashed mid-dump), or
-/// row parse failure. Row parse failure SHOULD never happen
-/// against same-version daemon — if it does, the format strings
-/// drifted, file a bug.
+/// Connect failure, recv failure (daemon crashed mid-dump), or row parse
+/// failure (format drift between client and daemon).
 #[cfg(unix)]
 pub fn dump(paths: &Paths, kind: Kind) -> Result<Vec<String>, CmdError> {
     debug_assert!(kind.needs_daemon(), "use dump_invitations()");
 
     let mut ctl = CtlSocket::connect(paths)?;
 
-    // ─── Send: 1 or 2 requests (graph/digraph send NODES then EDGES)
+    // Graph/digraph send NODES then EDGES; everything else sends one request.
     match kind {
         Kind::Nodes | Kind::ReachableNodes => {
             ctl.send(CtlRequest::DumpNodes)?;
@@ -322,8 +246,8 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<Vec<String>, CmdError> {
         Kind::Invitations => unreachable!("debug_assert above"),
     }
 
-    // ─── Receive loop. Graph mode skips the NODES terminator and
-    // exits on the EDGES one; everything else exits on the first.
+    // Receive loop. Graph mode skips the NODES terminator and exits on
+    // the EDGES one; everything else exits on the first.
     let mut lines = Vec::new();
 
     match kind {
@@ -364,15 +288,14 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<Vec<String>, CmdError> {
                     Kind::Graph | Kind::Digraph => {
                         lines.push(row.fmt_dot());
                     }
-                    // Tighten over upstream: NODES when we asked for
-                    // something else is a protocol violation.
+                    // A node row when we asked for something else is a
+                    // protocol violation.
                     _ => {
                         return Err(CmdError::BadInput("Unexpected node row".into()));
                     }
                 }
             }
 
-            // ─── Edge row
             DumpRow::Row(CtlRequest::DumpEdges, body) => {
                 let row = EdgeRow::parse(&body).map_err(|_| {
                     CmdError::BadInput(format!("Unable to parse edge dump from tincd: {body}"))
@@ -381,8 +304,8 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<Vec<String>, CmdError> {
                 match kind {
                     Kind::Edges => lines.push(row.fmt_plain()),
                     Kind::Graph | Kind::Digraph => {
-                        // fmt_dot returns None for the suppressed
-                        // half (undirected dedup).
+                        // fmt_dot returns None for the suppressed half
+                        // (undirected dedup).
                         if let Some(line) = row.fmt_dot(directed) {
                             lines.push(line);
                         }
@@ -393,7 +316,6 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<Vec<String>, CmdError> {
                 }
             }
 
-            // ─── Subnet row
             DumpRow::Row(CtlRequest::DumpSubnets, body) => {
                 let row = SubnetRow::parse(&body).map_err(|_| {
                     CmdError::BadInput("Unable to parse subnet dump from tincd.".into())
@@ -401,7 +323,6 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<Vec<String>, CmdError> {
                 lines.push(row.fmt_plain());
             }
 
-            // ─── Connection row
             DumpRow::Row(CtlRequest::DumpConnections, body) => {
                 let row = ConnRow::parse(&body).map_err(|_| {
                     CmdError::BadInput("Unable to parse connection dump from tincd.".into())
@@ -409,9 +330,7 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<Vec<String>, CmdError> {
                 lines.push(row.fmt_plain());
             }
 
-            // ─── Unknown row type
-            // The daemon sent a row type we didn't ask for and
-            // don't know. This is a daemon bug or version skew.
+            // Unknown row type: daemon bug or version skew.
             DumpRow::Row(_, _) => {
                 return Err(CmdError::BadInput(
                     "Unable to parse dump from tincd.".into(),
@@ -420,7 +339,6 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<Vec<String>, CmdError> {
         }
     }
 
-    // ─── Graph footer
     match kind {
         Kind::Graph | Kind::Digraph => lines.push("}".to_owned()),
         _ => {}
@@ -429,15 +347,9 @@ pub fn dump(paths: &Paths, kind: Kind) -> Result<Vec<String>, CmdError> {
     Ok(lines)
 }
 
-// Tests
-//
-// Golden vectors transcribed from the daemon's printf format strings.
-// These test inputs are what you'd see on the wire if you `nc -U`
-// the control socket.
-//
-// The fmt_plain output is also pinned — it's a script-compatibility
-// surface. If anyone changes the output format, scripts that parse
-// `tinc dump nodes | awk` break.
+// Tests use golden wire vectors (what `nc -U` on the control socket would
+// show) and pin the fmt_plain output, which is a script-compatibility
+// surface: changing it breaks `tinc dump nodes | awk` scripts.
 
 #[cfg(test)]
 mod tests;

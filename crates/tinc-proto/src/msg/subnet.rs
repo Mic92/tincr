@@ -16,9 +16,7 @@ use crate::{Request, Subnet, check_id};
 ///
 /// `owner` is checked against `check_id` during parse; if you construct
 /// one of these directly with an invalid name, `format` will emit it
-/// faithfully and the peer will reject it. That's the C behaviour too —
-/// `send_add_subnet` doesn't validate `subnet->owner->name`, it just
-/// `printf`s.
+/// faithfully and the peer will reject it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubnetMsg {
     /// Node name owning this subnet. `[A-Za-z0-9_]+`, ≤2048 bytes.
@@ -66,8 +64,7 @@ impl SubnetMsg {
     /// `send_request(c, "%d %x %s %s", REQ, prng(...), owner, netstr)`
     ///
     /// Caller picks `which` and supplies a fresh `nonce`. Returns the
-    /// full line *without* trailing `\n` — that's added by the meta-layer
-    /// (`send_request` in C does `request[len++] = '\n'` after `vsnprintf`).
+    /// full line *without* trailing `\n` — the meta layer adds it.
     #[must_use]
     pub fn format(&self, which: Request, nonce: u32) -> String {
         debug_assert!(

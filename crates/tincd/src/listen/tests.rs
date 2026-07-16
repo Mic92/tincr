@@ -12,7 +12,7 @@ fn addr(s: &str, port: u16) -> SocketAddr {
     SocketAddr::new(s.parse().unwrap(), port)
 }
 
-// ─── unmap
+// unmap.
 
 /// `IN6_IS_ADDR_V4MAPPED`. `unmap(SocketAddr) -> SocketAddr` is
 /// ~5 lines; pin its full domain in one table.
@@ -41,7 +41,7 @@ fn unmap_cases() {
     assert!(unmap("[::ffff:10.0.0.5]:655".parse().unwrap()).is_ipv4());
 }
 
-// ─── is_local
+// is_local.
 
 /// v4: 127.0.0.0/8 (`ntohl(...) >> 24 == 127`). Any addr in
 /// the /8, not just .0.0.1.
@@ -50,18 +50,18 @@ fn unmap_cases() {
 fn is_local_cases() {
     #[rustfmt::skip]
     let cases: &[(&str, bool)] = &[
-        // ─── v4: the whole /8 (port doesn't matter)
+        // v4: the whole /8 (port doesn't matter).
         ("127.0.0.1",         true),
         ("127.255.255.255",   true),
         ("127.42.42.42",      true),
-        // ─── v6: exactly ::1
+        // v6: exactly.
         ("::1",               true),
         ("::2",               false),
         // ::ffff:127.0.0.1 — v4-mapped loopback. NOT a v6 loopback.
         // `IN6_IS_ADDR_LOOPBACK` is exactly `::1`. The caller
         // should `unmap()` first; if they don't, this is `false`.
         ("::ffff:127.0.0.1",  false),
-        // ─── nonlocal
+        // nonlocal.
         ("10.0.0.5",          false),
         ("192.168.1.1",       false),
         ("2001:db8::1",       false),
@@ -84,7 +84,7 @@ fn unmap_then_is_local() {
     assert!(is_local(&unmap(mapped)));
 }
 
-// ─── fmt_addr / pidfile_addr
+// fmt_addr / pidfile_addr.
 
 /// `sockaddr2hostname` format. The CLI's `Tok::lit(" port ")`
 /// parser expects exactly this. v6: NO brackets — C
@@ -110,13 +110,13 @@ fn fmt_addr_cases() {
 /// the actual pidfile.
 ///
 /// What we CAN test: empty slice → "127.0.0.1 port 0". The C
-/// `:161` getsockname-fail fallback.
+/// getsockname-fail fallback.
 #[test]
 fn pidfile_addr_empty_fallback() {
     assert_eq!(pidfile_addr(&[]), "127.0.0.1 port 0");
 }
 
-// ─── AddrFamily
+// AddrFamily.
 
 /// `strcasecmp`.
 #[test]
@@ -140,7 +140,7 @@ fn addr_family_try() {
     assert!(AddrFamily::Ipv6.try_v6());
 }
 
-// ─── open_listeners
+// open_listeners.
 //
 // These bind real sockets. Port 0 (kernel-assigned) avoids clashes
 // between parallel test threads. The actual bind path is what the
@@ -248,7 +248,7 @@ fn open_udp_pmtudisc_do() {
 /// only helps with `TIME_WAIT`, not active listeners). The fail is
 /// graceful — `open_one` returns `None`, no panic.
 ///
-/// This is the "EADDRINUSE → continue" path (`:705`).
+/// This is the "EADDRINUSE → continue" path.
 #[test]
 fn open_port_clash_is_graceful() {
     let first = open_listeners(0, AddrFamily::Ipv4, &opts());
@@ -314,7 +314,7 @@ fn open_bind_to_interface_lo() {
 }
 
 /// `SO_BINDTODEVICE` to a nonexistent interface: hard failure.
-/// `open_one` returns `None` (the C closes the fd at `:244,391`).
+/// `open_one` returns `None` (the fd is closed on drop).
 /// No panic; the listener pair just doesn't materialize.
 #[test]
 #[cfg(target_os = "linux")]
@@ -345,7 +345,7 @@ fn open_fwmark_set() {
     };
     let listeners = open_listeners(0, AddrFamily::Ipv4, &o);
     assert_eq!(listeners.len(), 1);
-    // Read back from BOTH sockets — TCP `:248` and UDP `:383`.
+    // Read back from BOTH sockets — TCP and UDP.
     let tcp_mark = getsockopt(&listeners[0].tcp.as_fd(), sockopt::Mark).unwrap();
     let udp_mark = getsockopt(&listeners[0].udp.as_fd(), sockopt::Mark).unwrap();
     assert_eq!(tcp_mark, 0x1234);
@@ -468,7 +468,7 @@ fn sockopts_defaults_match_c() {
     assert!(o.bind_to_interface.is_none());
 }
 
-// ─── adopt_listeners (socket activation)
+// adopt_listeners (socket activation).
 
 /// Put a TCP listener at a high fd (avoiding the fd-3 races
 /// that nextest's shared-process model would cause), call

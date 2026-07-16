@@ -59,8 +59,6 @@ fn count_in_log(log: &ChildWithLog, needle: &str) -> usize {
     log.log_snapshot().matches(needle).count()
 }
 
-// ═══════════════════════════════════════════════════════════════════
-
 /// SIGALRM → `on_retry()` → retry timer fires NOW. The proof: the
 /// second `Trying to connect` log line arrives well before the 5s
 /// backoff would have expired naturally.
@@ -90,7 +88,7 @@ fn sigalrm_retries_now() {
         log.kill_and_log()
     );
 
-    // ─── wait for first connect attempt + 5s backoff arm ────────
+    // wait for first connect attempt + 5s backoff arm
     // First failure backs off 5s.
     let deadline = Instant::now() + Duration::from_secs(5);
     while count_in_log(&log, "Trying to connect to deadpeer") < 1 {
@@ -107,12 +105,12 @@ fn sigalrm_retries_now() {
     // Backoff armed at 5s. Mark time.
     let armed_at = Instant::now();
 
-    // ─── SIGALRM ────────────────────────────────────────────────
+    // SIGALRM
     #[expect(clippy::cast_possible_wrap)] // child.id() is a real PID (< pid_max ≤ 2^22)
     let pid = nix::unistd::Pid::from_raw(log.pid() as i32);
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGALRM).expect("kill SIGALRM");
 
-    // ─── second connect attempt arrives FAST ────────────────────
+    // second connect attempt arrives FAST
     // `on_retry()` sets the timer to Duration::ZERO; next turn() it
     // fires → setup_outgoing_connection → dial. Should take a few
     // ticks at most. 2s is generous; 5s would be the natural
@@ -134,7 +132,7 @@ fn sigalrm_retries_now() {
         "retry took {elapsed:?} — should be near-instant after SIGALRM"
     );
 
-    // ─── stderr: the SIGALRM handler log ────────────────────────
+    // stderr: the SIGALRM handler log
     let snap = log.log_snapshot();
     assert!(
         snap.contains("Got SIGALRM, retrying outgoing connections"),
@@ -190,7 +188,7 @@ fn req_retry_retries_now() {
     }
     let armed_at = Instant::now();
 
-    // ─── send REQ_RETRY over ctl socket ─────────────────────────
+    // send REQ_RETRY over ctl socket
     // `Ctl::connect` does the greeting dance.
     let mut ctl = Ctl::connect(&socket, &pidfile);
     writeln!(ctl.w, "18 10").unwrap();
@@ -200,7 +198,7 @@ fn req_retry_retries_now() {
     ctl.r.read_line(&mut ack).expect("retry ack");
     assert_eq!(ack.trim_end(), "18 10 0", "REQ_RETRY ack");
 
-    // ─── second connect attempt arrives FAST ────────────────────
+    // second connect attempt arrives FAST
     let retry_deadline = armed_at + Duration::from_secs(2);
     while count_in_log(&log, "Trying to connect to deadpeer") < 2 {
         assert!(
@@ -256,20 +254,20 @@ fn req_disconnect_replies() {
     let mut ack = String::new();
     r.read_line(&mut ack).unwrap();
 
-    // ─── not found: `"18 12 nobody"` → `"18 12 -2"` ─────────────
+    // not found: `"18 12 nobody"` → `"18 12 -2"`
     // Only conn is us (`<control>`); no `nobody` conn exists.
     writeln!(w, "18 12 nobody").unwrap();
     let mut reply = String::new();
     r.read_line(&mut reply).unwrap();
     assert_eq!(reply.trim_end(), "18 12 -2", "not-found reply");
 
-    // ─── malformed: `"18 12"` (no name) → `"18 12 -1"` ──────────
+    // malformed: `"18 12"` (no name) → `"18 12 -1"`
     writeln!(w, "18 12").unwrap();
     let mut reply = String::new();
     r.read_line(&mut reply).unwrap();
     assert_eq!(reply.trim_end(), "18 12 -1", "malformed reply");
 
-    // ─── ctl conn still alive after both ────────────────────────
+    // ctl conn still alive after both
     // `control_return` always returns true; conn stays.
     // REQ_DUMP_CONNECTIONS proves we can still talk.
     writeln!(w, "18 6").unwrap();

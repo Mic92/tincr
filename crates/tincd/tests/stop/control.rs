@@ -62,7 +62,7 @@ fn udp_stray_packet_drained() {
 
     assert!(wait_for_file(&socket));
 
-    // ─── find the daemon's UDP port via /proc ──────────────────
+    // find the daemon's UDP port via /proc
     let pid_str = std::fs::read_to_string(&pidfile).unwrap();
     let daemon_pid: u32 = pid_str.split_whitespace().next().unwrap().parse().unwrap();
     let Ok(udp_table) = std::fs::read_to_string(format!("/proc/{daemon_pid}/net/udp")) else {
@@ -129,7 +129,7 @@ fn udp_stray_packet_drained() {
         );
     };
 
-    // ─── send garbage ─────────────────────────────────────────
+    // send garbage
     // 5 packets. The daemon's `on_udp_drain` reads and discards.
     // If it didn't drain (level-triggered, fd stays ready), the
     // loop would spin.
@@ -142,7 +142,7 @@ fn udp_stray_packet_drained() {
     // Brief sleep: let the event loop process the UDP wake.
     std::thread::sleep(Duration::from_millis(100));
 
-    // ─── daemon still alive AND responsive ───────────────────────
+    // daemon still alive AND responsive
     assert!(
         child.try_wait().unwrap().is_none(),
         "daemon died after UDP packet"
@@ -196,7 +196,7 @@ fn req_log_streams() {
 
     let cookie = read_cookie(&pidfile);
 
-    // ─── ctl#1: greeting + REQ_LOG ────────────────────────────────
+    // ctl#1: greeting + REQ_LOG
     let log_stream = UnixStream::connect(&socket).unwrap();
     log_stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -217,7 +217,7 @@ fn req_log_streams() {
     writeln!(log_w, "18 15 2 0").unwrap();
     // No reply (`return true` without control_ok).
 
-    // ─── ctl#2: trigger an Info-level log inside the daemon ────
+    // ctl#2: trigger an Info-level log inside the daemon
     // `on_unix_accept` logs "Connection from localhost port unix
     // (control)" at Debug. That happens INSIDE the event loop turn
     // that processes the accept; flush_log_tap drains it at the
@@ -233,7 +233,7 @@ fn req_log_streams() {
     let mut t2 = String::new();
     trig_r.read_line(&mut t2).unwrap();
 
-    // ─── read on ctl#1: framed log line ────────────────────────────
+    // read on ctl#1: framed log line
     // Format: `"18 15 <len>\n"` then `<len>` raw bytes. There may
     // be MULTIPLE log lines (the REQ_LOG arm itself doesn't log,
     // but the trigger conn's accept + greeting may produce >1).
@@ -269,7 +269,7 @@ fn req_log_streams() {
         "never received 'Connection from ... (control)' log line"
     );
 
-    // ─── cleanup ─────────────────────────────────────────────────
+    // cleanup
     drop(trigger);
     drop(log_stream);
     let _ = child.kill();
@@ -300,7 +300,7 @@ fn set_debug_level_roundtrip() {
 
     assert!(wait_for_file(&socket), "tincd didn't bind socket");
 
-    // ─── connect + greeting ──────────────────────────────────
+    // connect + greeting
     let cookie = read_cookie(&pidfile);
     let stream = UnixStream::connect(&socket).expect("connect to tincd");
     let mut reader = BufReader::new(&stream);
@@ -312,7 +312,7 @@ fn set_debug_level_roundtrip() {
     let mut ack = String::new();
     reader.read_line(&mut ack).unwrap(); // "4 0 <pid>"
 
-    // ─── set debug 5 → reply previous (0) ────────────────────
+    // set debug 5 → reply previous (0)
     // `send_request(..., debug_level)` BEFORE the assignment.
     // Startup level was 0 (no -d).
     writeln!(writer, "18 9 5").unwrap();
@@ -320,14 +320,14 @@ fn set_debug_level_roundtrip() {
     reader.read_line(&mut reply).unwrap();
     assert_eq!(reply, "18 9 0\n", "reply with PREVIOUS level (0)");
 
-    // ─── query (-1) → reply current (5), no change ───────────
+    // query (-1) → reply current (5), no change
     // `if(new_level >= 0)` — negative is query-only.
     writeln!(writer, "18 9 -1").unwrap();
     let mut reply = String::new();
     reader.read_line(&mut reply).unwrap();
     assert_eq!(reply, "18 9 5\n", "query reads back the set value");
 
-    // ─── set debug 2 → reply previous (5) ────────────────────
+    // set debug 2 → reply previous (5)
     // Proves the i32 actually updated (lossless: not derived
     // from log::max_level() inverse-mapping).
     writeln!(writer, "18 9 2").unwrap();
@@ -335,13 +335,13 @@ fn set_debug_level_roundtrip() {
     reader.read_line(&mut reply).unwrap();
     assert_eq!(reply, "18 9 5\n", "previous was 5");
 
-    // ─── query again → 2 ────────────────────────────────────
+    // query again → 2
     writeln!(writer, "18 9 -1").unwrap();
     let mut reply = String::new();
     reader.read_line(&mut reply).unwrap();
     assert_eq!(reply, "18 9 2\n");
 
-    // ─── malformed (no level) → conn dropped ─────────────────
+    // malformed (no level) → conn dropped
     // `if(sscanf(...) != 1) return false`. The ONLY ctl arm that
     // does this (others reply REQ_INVALID and stay up). `return
     // false` → `receive_request` → "Bogus data" + terminate.
@@ -350,7 +350,7 @@ fn set_debug_level_roundtrip() {
     let n = reader.read_line(&mut reply).unwrap();
     assert_eq!(n, 0, "EOF: daemon dropped the conn (`return false`)");
 
-    // ─── reconnect: level was restored on close ────────────
+    // reconnect: level was restored on close
     let stream = UnixStream::connect(&socket).expect("reconnect");
     let mut reader = BufReader::new(&stream);
     let mut writer = &stream;
@@ -362,7 +362,7 @@ fn set_debug_level_roundtrip() {
     reader.read_line(&mut reply).unwrap();
     assert_eq!(reply, "18 9 0\n", "debug level restored after conn close");
 
-    // ─── cleanup ─────────────────────────────────────────────
+    // cleanup
     let _ = child.kill();
     let _ = child.wait();
 }

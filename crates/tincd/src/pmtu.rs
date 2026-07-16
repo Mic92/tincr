@@ -20,15 +20,10 @@
 //! `Emsgsize{at_len}`. Actions: `SendProbe{len}`,
 //! `LogFixed{mtu, after_probes}`, `LogReset`.
 //!
-//! ## Divergence from C
-//!
-//! `try_mtu`'s `for(;;)` loop sends a probe and synchronously
-//! observes EMSGSIZE shrinking `maxmtu` mid-call, then recomputes
-//! and retries in the same tick. We don't have
-//! that synchronous feedback (the daemon sends later); instead
-//! `tick()` returns ONE probe, `on_emsgsize()` recomputes bounds,
-//! and the *next* `tick()` uses the new bounds. Slightly slower
-//! convergence on the first cycle, identical outcome.
+//! EMSGSIZE feedback is asynchronous: `tick()` returns ONE probe,
+//! `on_emsgsize()` recomputes bounds, and the *next* `tick()` uses
+//! the new bounds. Slightly slower convergence on the first cycle
+//! than a synchronous retry, identical outcome.
 
 #![forbid(unsafe_code)]
 
@@ -36,17 +31,17 @@ use std::time::{Duration, Instant};
 
 use crate::daemon::intervals::{PMTU_PROBE_TICK, PMTU_REVALIDATE_TICK};
 
-/// `net.h:36` — 1500 bytes payload + 14 ethernet + 4 VLAN.
+/// 1500 bytes payload + 14 ethernet + 4 VLAN.
 pub(crate) const MTU: u16 = 1518;
-/// `net.h:39` — below this we don't consider UDP to be working.
+/// Below this we don't consider UDP to be working.
 pub(crate) const MINMTU: u16 = 512;
 /// eth header (14) + 4 random bytes.
 pub(crate) const MIN_PROBE_SIZE: u16 = 18;
 
 const PROBES_PER_CYCLE: u32 = 8;
 
-/// PMTU discovery phase. Replaces `node_t.mtuprobes` (i32) where
-/// sign+magnitude select the phase.
+/// PMTU discovery phase (the `mtuprobes` sign+magnitude encoding as an
+/// enum).
 ///
 /// `mtu`/`minmtu`/`maxmtu` stay flat on [`PmtuState`] (orthogonal
 /// to phase — the same `minmtu` raise can happen in Discovery or
@@ -96,7 +91,8 @@ pub(crate) struct PmtuState {
     pub maxmtu: u16,
     pub phase: PmtuPhase,
     pub udp_confirmed: bool,
-    /// `node_status_t::ping_sent` — next reply is the RTT measurement.
+    /// A keepalive probe is outstanding — next reply is the RTT
+    /// measurement.
     pub ping_sent: bool,
     pub udp_ping_sent: Instant,
     /// Last time a probe **reply** arrived. Diagnostic only —
@@ -105,31 +101,30 @@ pub(crate) struct PmtuState {
     pub udp_reply_rx: Instant,
     pub mtu_ping_sent: Instant,
     pub maxrecentlen: u16,
-    /// RTT µs; `None` = unknown (`node.c` init: `-1`).
+    /// RTT µs; `None` = unknown.
     pub udp_ping_rtt: Option<u32>,
 }
 
 /// Action emitted by the state machine for the daemon to dispatch.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PmtuAction {
-    /// `send_udp_probe_packet`. `len` already clamped to
-    /// `>= MIN_PROBE_SIZE`.
+    /// Send a UDP probe. `len` already clamped to `>= MIN_PROBE_SIZE`.
     SendProbe { len: u16 },
 
-    /// `:103-104` log: "Fixing MTU of %s to %d after %d probes".
-    /// `probes` = how many discovery probes were sent before
-    /// converging (0..=20; 20 = timeout).
+    /// Log "Fixing MTU of %s to %d after %d probes". `probes` = how
+    /// many discovery probes were sent before converging (0..=20;
+    /// 20 = timeout).
     LogFixed { mtu: u16, probes: u8 },
 
-    /// `:1390` log: "Decrease in PMTU detected, restarting".
+    /// Log "Decrease in PMTU detected, restarting".
     LogReset,
 
-    /// `:220` log: "Increase in PMTU detected, restarting".
+    /// Log "Increase in PMTU detected, restarting".
     LogIncrease,
 }
 
 impl PmtuState {
-    /// Zeroed struct, `maxmtu = MTU`, `udp_ping_rtt = -1`.
+    /// Fresh state at the start of discovery.
     ///
     /// `initial_maxmtu`: from `choose_initial_maxmtu`
     /// (`getsockopt(IP_MTU)`). With it, PMTU converges in ~1 RTT.
@@ -167,29 +162,29 @@ impl PmtuState {
         self.udp_confirmed && self.ping_sent && now.duration_since(self.udp_ping_sent) >= timeout
     }
 
-    /// `mtuprobes := 0` — restart discovery from scratch. Used by
+    /// Restart discovery from scratch. Used by
     /// `tunnel.rs::reset_unreachable` and `on_udp_timeout`.
     pub(crate) const fn start_discovery(&mut self) {
         self.phase = PmtuPhase::Discovery { sent: 0 };
     }
 
-    /// `try_mtu` + `try_fix_mtu`. Cadence: 333ms discovery, `pinginterval` steady, 1s re-validate.
+    /// Advance the state machine one tick. Cadence: 333ms discovery,
+    /// `pinginterval` steady, 1s re-validate.
     ///
-    /// Caller handles preconditions: `OPTION_PMTU_DISCOVERY` set,
-    /// `udp_confirmed` if `udp_discovery` on. The `:1358-1364` reset
-    /// for not-confirmed is `on_udp_timeout`.
+    /// Caller handles preconditions: PMTU discovery enabled,
+    /// `udp_confirmed` if UDP discovery is on. The reset for
+    /// not-confirmed is `on_udp_timeout`.
     pub(crate) fn tick(&mut self, now: Instant, pinginterval: Duration) -> Vec<PmtuAction> {
-        // ── Cadence gate ──────────────────────────────────────
+        // Cadence gate.
         let elapsed = now.duration_since(self.mtu_ping_sent);
         match self.phase {
             PmtuPhase::Discovery { sent } => {
-                // 333ms (C: tv_sec==0 && tv_usec<333333). First probe
-                // (sent==0) is ungated.
+                // 333ms; the first probe (sent==0) is ungated.
                 if sent != 0 && elapsed < PMTU_PROBE_TICK {
                     return vec![];
                 }
             }
-            // Fix gates as Discovery (mtuprobes >= 0); sent != 0 here.
+            // Fix gates like Discovery; sent != 0 here.
             PmtuPhase::Fix => {
                 if elapsed < PMTU_PROBE_TICK {
                     return vec![];
@@ -213,22 +208,19 @@ impl PmtuState {
 
         let mut out = Vec::new();
 
-        // ── try_fix_mtu ───────────────────────────────────────
         self.try_fix_mtu(&mut out);
 
-        // ── Lost-reprobes reset ───────────────────────────────
-        // `if (mtuprobes < -3)`. After try_fix_mtu we might have
-        // just transitioned Fix→Steady; check phase fresh.
+        // Lost-reprobes reset. After try_fix_mtu we might have just
+        // transitioned Fix→Steady; check phase fresh.
         if self.phase == PmtuPhase::Lost {
             out.push(PmtuAction::LogReset);
             self.phase = PmtuPhase::Discovery { sent: 0 };
             self.minmtu = 0;
         }
 
-        // ── Steady / re-validate branch ───────────────────────
-        // `if (mtuprobes < 0)`. Probe maxmtu, in Steady also
-        // maxmtu+1 (increase detector). Then "decrement"; a maxmtu
-        // reply rewinds to Steady (on_probe_reply).
+        // Steady / re-validate: probe maxmtu, in Steady also maxmtu+1
+        // (increase detector). Each unanswered cycle counts a miss; a
+        // maxmtu reply rewinds to Steady (on_probe_reply).
         match self.phase {
             PmtuPhase::Steady => {
                 out.push(PmtuAction::SendProbe {
@@ -242,14 +234,12 @@ impl PmtuState {
                         len: self.maxmtu.saturating_add(1),
                     });
                 }
-                // `mtuprobes--`: -1 → -2.
                 self.phase = PmtuPhase::Revalidate { misses: 1 };
             }
             PmtuPhase::Revalidate { misses } => {
                 out.push(PmtuAction::SendProbe {
                     len: self.maxmtu.max(MIN_PROBE_SIZE),
                 });
-                // `mtuprobes--`: -2→-3, -3→-4.
                 self.phase = if misses >= 2 {
                     PmtuPhase::Lost
                 } else {
@@ -259,14 +249,13 @@ impl PmtuState {
             // Lost was reset above; Fix was consumed by try_fix_mtu.
             PmtuPhase::Lost | PmtuPhase::Fix => unreachable!(),
             PmtuPhase::Discovery { sent } => {
-                // ── Discovery branch ──── :1407-1455 ───────────────
-                // C re-seeds maxmtu via choose_initial_maxmtu; we did in new().
-                // C's for(;;) observes synchronous EMSGSIZE; we send ONE.
+                // maxmtu was seeded in new(); EMSGSIZE feedback arrives
+                // asynchronously, so send exactly one probe per tick.
                 let len = probe_size(self.minmtu, self.maxmtu, sent);
                 out.push(PmtuAction::SendProbe {
                     len: len.max(MIN_PROBE_SIZE),
                 });
-                // `mtuprobes++`: 19→20 = Fix.
+                // Probe #20 ends discovery.
                 self.phase = if sent + 1 >= 20 {
                     PmtuPhase::Fix
                 } else {
@@ -329,14 +318,15 @@ impl PmtuState {
         true
     }
 
-    /// `udp_probe_h` reply branch. Daemon already extracted type-2
-    /// length. Daemon-side: address-cache, UDP-timeout reset.
+    /// UDP probe reply. The daemon already extracted the type-2
+    /// length; address-cache and UDP-timeout reset stay daemon-side.
     pub(crate) fn on_probe_reply(&mut self, len: u16, now: Instant) -> Vec<PmtuAction> {
-        // Type-2 `len` is peer-supplied; probes never exceed MTU. Clamp or minmtu overruns maxmtu.
+        // Type-2 `len` is peer-supplied; probes never exceed MTU. Clamp
+        // or minmtu overruns maxmtu.
         let len = len.min(MTU);
         let mut out = Vec::new();
 
-        // ── RTT measurement ──── :184-194 ──────────────────────
+        // RTT measurement.
         if self.ping_sent {
             let rtt = now.duration_since(self.udp_ping_sent);
             // Saturate at u32::MAX (~71 min — never happens).
@@ -344,12 +334,11 @@ impl PmtuState {
             self.ping_sent = false;
         }
 
-        // ── UDP confirmed ──── :199-210 ────────────────────────
         self.udp_confirmed = true;
         self.udp_reply_rx = now;
 
-        // ── PMTU-increase detector. `mtuprobes := 1` (not 0) so
-        // the maxmtu re-seed doesn't undo this.
+        // PMTU-increase detector. Restart at sent=1 (not 0) so the
+        // maxmtu re-seed doesn't undo this.
         if len > self.maxmtu {
             out.push(PmtuAction::LogIncrease);
             self.minmtu = len;
@@ -358,14 +347,14 @@ impl PmtuState {
             return out;
         }
 
-        // ── Steady-state confirmation ────────────────────────
-        // `if (mtuprobes < 0 && len == maxmtu) mtuprobes = -1`.
+        // Steady-state confirmation: a maxmtu reply rewinds the miss
+        // counter.
         if self.phase.is_fixed() && len == self.maxmtu {
             self.phase = PmtuPhase::Steady;
             self.mtu_ping_sent = now;
         }
 
-        // ── Raise minmtu ──── :234-237 ─────────────────────────
+        // Raise minmtu.
         if self.minmtu < len {
             self.minmtu = len;
             self.try_fix_mtu(&mut out);
@@ -374,9 +363,8 @@ impl PmtuState {
         out
     }
 
-    /// `reduce_mtu`. EMSGSIZE: cap maxmtu/mtu.
+    /// EMSGSIZE at `at_len`: cap maxmtu/mtu. Floor at MINMTU.
     pub(crate) fn on_emsgsize(&mut self, at_len: u16) -> Vec<PmtuAction> {
-        // Upstream callers pass len-1; we take failed size. Floor at MINMTU.
         let mtu = at_len.saturating_sub(1).max(MINMTU);
         if self.maxmtu > mtu {
             self.maxmtu = mtu;
@@ -389,7 +377,7 @@ impl PmtuState {
         out
     }
 
-    /// `udp_probe_timeout_handler`. Idempotent on already-unconfirmed.
+    /// UDP probe timeout. Idempotent on already-unconfirmed.
     pub(crate) const fn on_udp_timeout(&mut self) {
         if !self.udp_confirmed {
             return;
@@ -406,18 +394,14 @@ impl PmtuState {
         self.maxmtu = MTU;
     }
 
-    /// `try_fix_mtu`. Lock in: 20 probes (timeout) or
-    /// `minmtu >= maxmtu` (converged).
-    ///
-    /// `if (mtuprobes < 0) return` → only acts in Discovery/Fix.
+    /// Lock in the MTU: 20 probes (timeout) or `minmtu >= maxmtu`
+    /// (converged). Only acts in Discovery/Fix.
     fn try_fix_mtu(&mut self, out: &mut Vec<PmtuAction>) {
-        // Only fires when mtuprobes >= 0.
         let probes = match self.phase {
             PmtuPhase::Discovery { sent } => sent,
             PmtuPhase::Fix => 20,
             PmtuPhase::Steady | PmtuPhase::Revalidate { .. } | PmtuPhase::Lost => return,
         };
-        // mtuprobes == 20 || minmtu >= maxmtu.
         if matches!(self.phase, PmtuPhase::Fix) || self.minmtu >= self.maxmtu {
             if self.minmtu > self.maxmtu {
                 self.minmtu = self.maxmtu;
@@ -438,11 +422,11 @@ impl PmtuState {
 ///
 /// Exponential (not linear) because too-large probes vanish silently;
 /// concentrate near `minmtu` where replies happen. Last probe per
-/// 8-cycle is `minmtu+1` (guaranteed progress, `:1438-1439`).
+/// 8-cycle is `minmtu+1` (guaranteed progress).
 ///
-/// 0.97 multiplier (when `maxmtu == MTU`) is hand-tuned (`:1417-1424`
-/// "math simulations"): probe #0 → 1329, then probe #1 → 1407 —
-/// "just below typical tinc MTUs". Two probes, done.
+/// The 0.97 multiplier (when `maxmtu == MTU`) is hand-tuned: probe #0
+/// → 1329, then probe #1 → 1407 — just below typical tinc MTUs. Two
+/// probes, done.
 #[expect(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -458,10 +442,10 @@ fn probe_size(minmtu: u16, maxmtu: u16, sent: u8) -> u16 {
     let minmtu_eff = minmtu.max(MINMTU);
     let interval = f32::from(maxmtu.saturating_sub(minmtu_eff));
 
-    // :1432 powf underflow guard
+    // powf underflow guard.
     let offset: u16 = if interval > 0.0 {
         let exp = multiplier * cycle_position / (PROBES_PER_CYCLE - 1) as f32;
-        interval.powf(exp).round() as u16 // lrintf
+        interval.powf(exp).round() as u16
     } else {
         0
     };
@@ -477,11 +461,11 @@ mod tests {
         Instant::now()
     }
 
-    // ─── probe_size formula ────────────────────────────────────
+    // probe_size formula.
 
     #[test]
     fn probe_size_first_is_1329() {
-        // cyc=7, eff=512, interval=1006, offset≈817. C says 1329; ±1 from f32.
+        // cyc=7, eff=512, interval=1006, offset≈817; ±1 from f32.
         let p = probe_size(0, MTU, 0);
         assert!((1329..=1330).contains(&p), "got {p}");
     }
@@ -512,7 +496,7 @@ mod tests {
         assert_eq!(probe_size(0, 400, 0), MINMTU);
     }
 
-    // ─── tick: discovery ───────────────────────────────────────
+    // tick: discovery.
 
     #[test]
     fn tick_discovery_advances_phase() {
@@ -560,7 +544,7 @@ mod tests {
         }));
     }
 
-    // ─── on_probe_reply ────────────────────────────────────────
+    // on_probe_reply.
 
     #[test]
     fn on_probe_reply_raises_minmtu() {
@@ -602,7 +586,7 @@ mod tests {
         assert_eq!(out, vec![PmtuAction::LogIncrease]);
         assert_eq!(s.minmtu, 1401);
         assert_eq!(s.maxmtu, MTU);
-        // `mtuprobes := 1` — skip the maxmtu re-seed.
+        // Restarts at sent=1 — skips the maxmtu re-seed.
         assert_eq!(s.phase, PmtuPhase::Discovery { sent: 1 });
     }
 
@@ -640,7 +624,7 @@ mod tests {
         assert!(!s.ping_sent);
     }
 
-    // ─── on_emsgsize ───────────────────────────────────────────
+    // on_emsgsize.
 
     #[test]
     fn on_emsgsize_caps_maxmtu() {
@@ -677,7 +661,7 @@ mod tests {
         assert_eq!(s.mtu, 1400);
     }
 
-    // ─── steady state & reset ──────────────────────────────────
+    // steady state & reset.
 
     #[test]
     fn steady_state_probes_maxmtu_plus_one() {
@@ -703,7 +687,7 @@ mod tests {
 
     #[test]
     fn steady_state_at_mtu_no_plus_one() {
-        // C :1402: maxmtu+1 >= MTU → skip the +1 probe.
+        // maxmtu+1 >= MTU → skip the +1 probe.
         let now = t0();
         let mut s = PmtuState::new(now, MTU);
         s.maxmtu = MTU - 1;
@@ -735,11 +719,11 @@ mod tests {
         // Reset to Discovery{0}, then discovery ran one probe → {1}.
         assert_eq!(s.phase, PmtuPhase::Discovery { sent: 1 });
         assert_eq!(s.minmtu, 0);
-        // C :1391-1396 does NOT reset maxmtu (on_udp_timeout does).
+        // The lost-reprobes reset does NOT touch maxmtu (on_udp_timeout does).
         assert_eq!(s.maxmtu, 1400);
     }
 
-    // ─── on_udp_timeout ────────────────────────────────────────
+    // on_udp_timeout.
 
     #[test]
     fn on_udp_timeout_resets() {
@@ -761,10 +745,10 @@ mod tests {
         assert_eq!(s.phase, PmtuPhase::Discovery { sent: 0 });
         assert_eq!(s.minmtu, 0);
         assert_eq!(s.maxmtu, MTU);
-        assert_eq!(s.mtu, 1400); // C :124-137 doesn't touch mtu
+        assert_eq!(s.mtu, 1400); // on_udp_timeout doesn't touch mtu
     }
 
-    // ─── udp_timed_out ─────────────────────────────────────────
+    // udp_timed_out.
 
     #[test]
     fn udp_timed_out_gates_on_outstanding_probe() {
@@ -795,7 +779,7 @@ mod tests {
         assert!(!s.udp_timed_out(now + Duration::from_secs(31), to));
     }
 
-    // ─── on_meta_ack ────────────────────────────────────────
+    // on_meta_ack.
 
     #[test]
     fn on_meta_ack_clamps_peer_supplied_len() {
@@ -880,7 +864,7 @@ mod tests {
         assert_eq!(s.maxmtu, 1400); // untouched
     }
 
-    // ─── phase helpers ─────────────────────────────────────────
+    // phase helpers.
 
     /// Peer-supplied type-2 length must not push `minmtu` past `maxmtu`/`MTU`.
     #[test]

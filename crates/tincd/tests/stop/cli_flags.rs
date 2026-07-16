@@ -298,7 +298,7 @@ fn missing_hosts_file_ok() {
 
     // tinc.conf + private key, but NO hosts/ dir. Port goes in
     // tinc.conf (HOST-tagged, but lookup doesn't care which file —
-    // see doc). The key IS required (chunk 4a); hosts/ is the
+    // see doc). The key IS required; hosts/ is the
     // optional one being tested.
     //
     // Can't use write_config() here — it creates hosts/.

@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-// ═══════════════════════════ env / tool gates ══════════════════════
+// env / tool gates
 
 /// `TINC_C_TINCD` — path to the C `tincd` (devshell sets it).
 pub fn c_tincd_bin() -> Option<PathBuf> {
@@ -32,7 +32,7 @@ pub enum Impl {
     C(PathBuf),
 }
 
-// ═══════════════════════════ ctl-dump parsers ══════════════════════
+// ctl-dump parsers
 
 /// `dump nodes` row → `minmtu` (body token 15). Row: `name id host
 /// "port" PORT cipher digest maclen comp opts status nexthop via
@@ -50,7 +50,7 @@ pub fn node_minmtu(rows: &[String], name: &str) -> Option<u16> {
     })
 }
 
-// ═══════════════════════════ iperf3 JSON ═══════════════════════════
+// iperf3 JSON
 
 #[derive(Debug, serde::Deserialize)]
 pub struct IperfResult {
@@ -81,7 +81,7 @@ pub fn parse_iperf(stdout: &[u8]) -> IperfResult {
     })
 }
 
-// ═══════════════════════════ ping percentiles ══════════════════════
+// ping percentiles
 
 /// Per-packet RTTs (ms), sorted. Parsed from `time=X` reply lines;
 /// works for both iputils and BSD ping (neither summary line has

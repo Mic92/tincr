@@ -30,7 +30,7 @@ pub(super) fn check_keypairs(
     force: bool,
     findings: &mut Vec<Finding>,
 ) -> bool {
-    // ─── Load private key
+    // Load private key
     // Check `Ed25519PrivateKeyFile` config first, fall back to
     // `<confbase>/ed25519_key.priv`. fsck respects this; genkey/sign
     // currently don't (see module doc).
@@ -43,18 +43,17 @@ pub(super) fn check_keypairs(
         .map_or_else(|| paths.ed25519_private(), |e| PathBuf::from(e.get_str()));
 
     let Ok(sk) = keypair::read_private(&priv_path) else {
-        // We single-print where upstream double-prints (its inner
-        // helper also logs). ENOENT vs bad-PEM aren't distinguished
-        // at the fsck level — both are "no private key found".
+        // ENOENT vs bad-PEM aren't distinguished at the fsck level —
+        // both are "no private key found".
         findings.push(Finding::NoPrivateKey { path: priv_path });
         return false;
     };
 
-    // ─── Check private key file mode (Unix only)
+    // Check private key file mode (Unix only)
     #[cfg(unix)]
     check_key_mode(&priv_path, force, findings);
 
-    // ─── Host file readability
+    // Host file readability
     // Warn but continue: the pubkey load below might still succeed
     // via `Ed25519PublicKeyFile` (different path) or fail more
     // specifically. The warning is "heads up, your hosts/NAME is
@@ -68,14 +67,14 @@ pub(super) fn check_keypairs(
         // just early-warning noise, kept for parity.
     }
 
-    // ─── Load public key from config tree + host file
+    // Load public key from config tree + host file
     // Three-step lookup:
     //   1. `Ed25519PublicKey = <b64>` config entry
     //   2. `Ed25519PublicKeyFile = <path>` → PEM-read that path
     //   3. PEM-read `hosts/NAME` directly (default for #2)
     let pubkey = load_ec_pubkey(cfg, host_file);
 
-    // ─── Coherence check
+    // Coherence check
     // Four-way matrix on (priv?, pub?). priv=None already returned
     // above. Remaining:
     //
@@ -141,7 +140,7 @@ fn fix_public_key(
     pubkey: &[u8; PUBLIC_LEN],
     findings: &mut Vec<Finding>,
 ) -> bool {
-    // ─── disable_old_keys
+    // disable_old_keys
     // Our `disable_old_keys` is `Result<bool>` — `Err` is "write/
     // rename failed", both `Ok(true)` and `Ok(false)` are "safe to
     // append" (either nothing matched or it was successfully
@@ -155,7 +154,7 @@ fn fix_public_key(
         return false;
     }
 
-    // ─── Append PEM block
+    // Append PEM block
     // Append mode, existing perms preserved, no chmod. genkey's
     // `open_append` would set a create-mode but hosts files are
     // 0644-ish from `tinc init` and we're appending to an existing

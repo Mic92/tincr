@@ -7,7 +7,7 @@
 //! `daemon/connect.rs:192-210`). For two nodes behind the same
 //! NAT, WAN round-trips the gateway; LAN goes direct.
 //!
-//! `try_udp` (`:1240-1245`) sets `n->status.send_locally`, sends a probe via
+//! `try_udp` sets `n->status.send_locally`, sends a probe via
 //! `choose_local_address`, then clears the flag. If the probe ACKs, the
 //! recorded UDP address is the LAN one. Next packets go direct.
 //!
@@ -83,7 +83,7 @@ pub(crate) fn adapt_socket(target: &SocketAddr, current: u8, listener_addrs: &[S
 /// `*sa = NULL`, caller checks).
 ///
 /// `listener_addrs` is the same `&[SocketAddr]` as `adapt_socket` — passed
-/// through for the post-pick family adjustment (`:806`).
+/// through for the post-pick family adjustment.
 ///
 /// `R: RngCore` — daemon passes `OsRng`; tests use `ChaCha8Rng` for
 /// determinism (same pattern as `autoconnect.rs`). The `next_u32() % len`

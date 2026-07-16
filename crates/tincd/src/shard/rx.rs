@@ -70,7 +70,6 @@ const ETH_P_IP: u16 = 0x0800;
 /// Ethertype for IPv6.
 const ETH_P_IPV6: u16 = 0x86DD;
 
-// ────────────────────────────────────────────────────────────────────
 // RxTarget — probe result
 
 /// One packet's fast-path target. Everything is a borrow into the
@@ -98,7 +97,6 @@ pub(crate) struct RxTarget<'a> {
     pub ct: &'a [u8],
 }
 
-// ────────────────────────────────────────────────────────────────────
 // RxDstMemo — per-batch trie cache
 
 /// Per-batch dst-subnet memo. `rx_open` decrypts then asks "does
@@ -178,7 +176,6 @@ impl RxDstMemo {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // rx_probe — gate chain (no decrypt)
 
 /// Probe whether THIS packet can take the RX fast path. Runs the
@@ -278,7 +275,6 @@ pub(crate) fn rx_probe<'a>(snap: &'a TxSnapshot, pkt: &'a [u8]) -> Option<RxTarg
     })
 }
 
-// ────────────────────────────────────────────────────────────────────
 // rx_open — decrypt + post-gates + ethertype synth
 
 /// Decrypt `target.ct` into `scratch`, run post-decrypt gates, synth
@@ -338,7 +334,7 @@ pub(crate) fn rx_open(
 
     let seqno = u32::from_be_bytes([ct[0], ct[1], ct[2], ct[3]]);
 
-    // ─── Step 1: decrypt. `ChaPoly::new` is `const fn` — just
+    // Step 1: decrypt. `ChaPoly::new` is `const fn` — just.
     // `*key`, 64-byte copy. Cheaper than caching per batch (the
     // brief verified this; one keystream-block prep per packet
     // is in the noise next to the 1500-byte ChaCha XOR).
@@ -358,7 +354,7 @@ pub(crate) fn rx_open(
 
     let ty = scratch[ETH_HLEN];
 
-    // ─── Step 2: type gate. PKT_NORMAL is 0; PKT_COMPRESSED bit 0,
+    // Step 2: type gate. PKT_NORMAL is 0; PKT_COMPRESSED bit 0,.
     // PKT_MAC bit 1, PKT_PROBE bit 2. Any nonzero bit ⇒ slow path.
     // REC_HANDSHAKE (≥128) is the KEX-renegotiate marker — open_into
     // succeeded (tag passed) but the body is a handshake record;
@@ -376,7 +372,7 @@ pub(crate) fn rx_open(
     // body_len: scratch is [0;14][ty:1][body] now.
     let body_len = scratch.len() - ETH_HLEN - 1;
 
-    // ─── Step 3: MTU gate. sptps.rs:332 — body bigger than the
+    // Step 3: MTU gate. sptps.rs:332 — body bigger than the.
     // configured MTU is a peer misconfig; slow path logs + drops.
     // `MTU` is the daemon's `tunnel::MTU` (1518); we compare body
     // length against it same as `receive_sptps_record` does.
@@ -384,7 +380,7 @@ pub(crate) fn rx_open(
         return Err(());
     }
 
-    // ─── Step 4: dst-subnet gate. Read the IP version nibble
+    // Step 4: dst-subnet gate. Read the IP version nibble.
     // (`body[0] >> 4`), parse dst, probe memo. Body lives at
     // `scratch[15..]` (ETH_HLEN + type byte). Empty body ⇒ can't
     // route ⇒ punt (sptps.rs:443 has the same check).
@@ -428,7 +424,7 @@ pub(crate) fn rx_open(
         return Err(());
     }
 
-    // ─── Step 5: replay commit. THE COMMIT. Everything above was
+    // Step 5: replay commit. THE COMMIT. Everything above was.
     // `&self`; this mutates. After this, the slow path's
     // `open_data_into` would get `BadSeqno` for the same packet —
     // but we're past every gate, so we're not falling through.
@@ -443,7 +439,7 @@ pub(crate) fn rx_open(
         .check_public(seqno)
         .map_err(|_| ())?;
 
-    // ─── Step 6: ethertype synth + type-byte strip.
+    // Step 6: ethertype synth + type-byte strip.
     // scratch is `[0;14][ty:1][body]`. We want `[0;12][et:2][body]`.
     // Stamp the ethertype at [12..14] (the headroom is already zero,
     // so the eth dst/src MACs are zero — TUN ignores them).
@@ -458,7 +454,6 @@ pub(crate) fn rx_open(
     Ok(frame_len)
 }
 
-// ════════════════════════════════════════════════════════════════════
 // Tests
 
 #[cfg(test)]

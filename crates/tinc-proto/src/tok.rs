@@ -31,8 +31,8 @@
 use crate::addr::AddrStr;
 use crate::{MAX_STRING, check_id};
 
-/// Parse failure. Not an enum because the C doesn't distinguish either —
-/// `sscanf() != expected_count` is all the daemon cares about.
+/// Parse failure. Not an enum — the daemon only cares that the line
+/// didn't match, not why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseError;
 
@@ -46,10 +46,8 @@ pub struct ParseError;
 ///
 /// Public because `tinc-tools` parses dump rows with the same `sscanf`
 /// shape. The dump format is CLI↔daemon (not on the wire to peers) but
-/// the cross-impl seam (Rust CLI ↔ C daemon and vice versa) wants to
-/// keep working; and the four format strings live next to the
-/// message-protocol ones upstream, so co-locating their
-/// parser here keeps them in lockstep.
+/// the cross-impl seam (Rust CLI ↔ C daemon and vice versa) must keep
+/// working, so the dump-row parser lives next to the message parsers.
 pub struct Tok<'a> {
     /// Unconsumed tail; `s_opt` peeks it for optional trailing fields.
     rest: &'a str,
@@ -159,12 +157,8 @@ impl<'a> Tok<'a> {
         self.s()?.parse().map_err(|_| ParseError)
     }
 
-    /// `%ld`. Only `last_state_change` in the node dump uses it —
-    /// it's a `time_t` cast to `long`. `time_t` is
-    /// `i64` on every platform we care about; `long` is `i32` on
-    /// 32-bit systems but `time_t` would already have wrapped by
-    /// then, so the C is wrong on 32-bit-with-64-bit-time_t and
-    /// we don't try to be wrong the same way. `i64` everywhere.
+    /// Signed integer field. Only `last_state_change` in the node dump
+    /// uses it (a Unix timestamp); parsed as `i64` everywhere.
     ///
     /// # Errors
     /// `ParseError` if no tokens remain or the token isn't a valid `i64`.
@@ -239,7 +233,7 @@ impl<'a> Tok<'a> {
     }
 
     /// Optional trailing `(addr, port)` pair. Atomic: both tokens or
-    /// neither (sscanf returns N or N+2; the C rejects N+1).
+    /// neither — a lone trailing token is a parse error.
     ///
     /// # Errors
     /// Exactly one trailing token, or [`AddrStr::new`] rejects.

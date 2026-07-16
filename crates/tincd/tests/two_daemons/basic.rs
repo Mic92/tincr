@@ -40,11 +40,11 @@ fn two_daemons_connect_and_reach() {
     let alice = Node::new(tmp.path(), "alice", 0xAA);
     let bob = Node::new(tmp.path(), "bob", 0xBB);
 
-    // ─── configs: alice initiates, bob accepts ──────────────────
+    // configs: alice initiates, bob accepts
     bob.write_config(&alice, false);
     alice.write_config(&bob, true);
 
-    // ─── spawn bob first ────────────────────────────────────────
+    // spawn bob first
     // Bob has no ConnectTo; he just listens. Spawn order matters:
     // if alice starts first, her `do_outgoing_connection` tries to
     // connect before bob is bound → ECONNREFUSED → `retry_outgoing`
@@ -62,7 +62,7 @@ fn two_daemons_connect_and_reach() {
         panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
     }
 
-    // ─── poll: both have an active peer connection ──────────────
+    // poll: both have an active peer connection
     // `dump connections` (subtype 6). Alice should have ONE peer
     // row (bob) with status bit 1 set (`active`, our `c->edge` proxy
     // — `0x2`). Same for bob. The control conn is also a row; it
@@ -80,7 +80,7 @@ fn two_daemons_connect_and_reach() {
         }
     });
 
-    // ─── dump nodes: 2 rows, both reachable ─────────────────────
+    // dump nodes: 2 rows, both reachable
     // Row format: 23 fields. Status is field 11
     // (`%x`). Bit 4 = reachable = `0x10`.
     let node_reachable = |rows: &[String], name: &str| -> bool {
@@ -117,7 +117,7 @@ fn two_daemons_connect_and_reach() {
         "bob's view: {b_nodes:?}"
     );
 
-    // ─── dump edges: both see myself→peer ───────────────────────
+    // dump edges: both see myself→peer
     // Each daemon's `on_ack` added `myself→peer` (with addr) +
     // synthesized reverse (no addr). Then `send_everything` sent
     // the forward edge to the peer. So each side has FOUR edges:
@@ -135,7 +135,7 @@ fn two_daemons_connect_and_reach() {
     //
     // So alice's graph has 2 edges. Same for bob. Both see both
     // directions; the synthesized reverse has no `edge_addrs` entry
-    // (chunk-5 STUB) so dumps as "unknown port unknown".
+    // so dumps as "unknown port unknown".
     //
     // Just count rows. The exact addr semantics are pinned by
     // `peer_edge_triggers_reachable` in stop.rs.
@@ -151,7 +151,7 @@ fn two_daemons_connect_and_reach() {
         "alice→bob fwd edge missing: {a_edges:?}"
     );
 
-    // ─── stop alice → bob sees the disconnect ───────────────────
+    // stop alice → bob sees the disconnect
     // Alice exits. Bob's read on the meta connection gets EOF →
     // `FeedResult::Dead` → `terminate` → `del_edge` → `graph()`.
     // Bob's `dump connections` drops to 1 (control only); `dump
@@ -193,7 +193,7 @@ fn two_daemons_connect_and_reach() {
         "edges should be gone; bob's view: {b_edges_after:?}"
     );
 
-    // ─── stderr: bob's reachability transitions ─────────────────
+    // stderr: bob's reachability transitions
     drop(bob_ctl);
     let bob_stderr = drain_stderr(bob_child);
     assert!(
@@ -234,7 +234,7 @@ fn outgoing_retry_after_refused() {
     bob.write_config(&alice, false);
     alice.write_config(&bob, true);
 
-    // ─── spawn alice FIRST. Bob isn't running. ─────────────────
+    // spawn alice FIRST. Bob isn't running.
     let mut alice_child = alice.spawn();
     assert!(
         wait_for_file(&alice.socket),
@@ -252,14 +252,14 @@ fn outgoing_retry_after_refused() {
         "alice connected before bob is up?? {conns:?}"
     );
 
-    // ─── start bob ─────────────────────────────────────────────
+    // start bob
     let mut bob_child = bob.spawn();
     if !wait_for_file(&bob.socket) {
         let _ = alice_child.kill();
         panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
     }
 
-    // ─── wait for alice's retry timer to fire (~5s) ────────────
+    // wait for alice's retry timer to fire (~5s)
     // `retry_outgoing` set timeout=5; the next `setup_outgoing_
     // connection` runs in ~5s + tick slop. Poll with a generous
     // timeout (15s) for slow CI.
@@ -285,7 +285,7 @@ fn outgoing_retry_after_refused() {
         }
     });
 
-    // ─── stderr: prove the retry path fired ─────────────────────
+    // stderr: prove the retry path fired
     drop(alice_ctl);
     let _ = bob_child.kill();
     let _ = bob_child.wait();
@@ -351,14 +351,14 @@ fn ping_pong_keepalive() {
     let mut alice_ctl = alice.ctl();
     let mut bob_ctl = bob.ctl();
 
-    // ─── wait for ACK on both sides ─────────────────────────────
+    // wait for ACK on both sides
     poll_until(Duration::from_secs(10), || {
         let a = alice_ctl.dump(6);
         let b = bob_ctl.dump(6);
         (has_active_peer(&a, "bob") && has_active_peer(&b, "alice")).then_some(())
     });
 
-    // ─── keepalive phase: hold for 5s, conn must survive ──────
+    // keepalive phase: hold for 5s, conn must survive
     // PingInterval=1, PingTimeout=3. Five 1s ticks. Each tick
     // sends PING; the PONG arrives <100ms later (loopback); the
     // bit clears before the next sweep checks it. If PONG handling
@@ -373,7 +373,7 @@ fn ping_pong_keepalive() {
         );
     }
 
-    // ─── SIGSTOP alice; bob's PING goes unanswered ─────────────
+    // SIGSTOP alice; bob's PING goes unanswered
     // Bob sends PING, alice doesn't `recv()`, `pingtimeout` (3s)
     // elapses with `pinged` still set → "didn't respond to PING"
     // → terminate. The TCP socket stays open (kernel buffers the
@@ -391,7 +391,7 @@ fn ping_pong_keepalive() {
         (!has_active_peer(&b, "alice")).then_some(())
     });
 
-    // ─── SIGCONT alice; she sees EOF, retries, reconnects ──────
+    // SIGCONT alice; she sees EOF, retries, reconnects
     // Alice wakes. Bob already closed his side; alice's next read
     // sees EOF → terminate → outgoing retry. The retry connects; the handshake runs; ACK; both active
     // again. The retry is immediate (`timeout = 0` after a conn
@@ -429,8 +429,8 @@ fn tinc_up_runs() {
     alice.write_config(&bob, false);
 
     let marker = tmp.path().join("tinc-up-ran");
-    // `#!/bin/sh` shebang. The C uses `system()` (= `sh -c`) which
-    // would also work without; we don't (see script.rs doc).
+    // `#!/bin/sh` shebang required: scripts are executed directly,
+    // not via `sh -c` (see script.rs doc).
     // `INTERFACE` for `DeviceType=dummy` is `"dummy"` (`tinc-
     // device::Dummy::iface`).
     let script = format!(
@@ -631,7 +631,7 @@ fn autoconnect_converges_to_three() {
         write_ed25519_privkey(&alice.confbase, &alice.seed);
     }
 
-    // ─── spawn peers first (so alice's connects succeed) ─────────
+    // spawn peers first (so alice's connects succeed)
     // Stderr → file: this test runs ~15s with 4 daemons cross-
     // gossiping. Piped stderr (~64K buffer) fills and blocks the
     // event loop on `write(2)`. /dev/null discards diagnostics; a
@@ -667,7 +667,7 @@ fn autoconnect_converges_to_three() {
         panic!("alice setup failed: {}", drain_stderr(alice_child));
     }
 
-    // ─── poll: alice converges to 3 active peer conns ────────────
+    // poll: alice converges to 3 active peer conns
     // First periodic tick at +5s; one Connect per tick. 3 ticks
     // ≈ 15s to fill all three slots. 25s timeout for CI slop.
     let mut alice_ctl = alice.ctl();
@@ -700,7 +700,7 @@ fn autoconnect_converges_to_three() {
         std::thread::sleep(Duration::from_millis(100));
     };
 
-    // ─── collect stderr (also for failure diagnosis) ────────────
+    // collect stderr (also for failure diagnosis)
     drop(alice_ctl);
     let _ = alice_child.kill();
     let alice_out = alice_child.wait_with_output().unwrap();

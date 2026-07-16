@@ -1,10 +1,10 @@
 //! Regression: data must ride TCP while `relay.minmtu == 0`.
 //!
 //! Models a node behind a UDP-blackholing firewall (retiolum blob64
-//! on TUM net): no inbound UDP, no hole-punch. C tinc keeps non-
-//! probe data on TCP until a probe reply lifts `minmtu` above 0
-//! (`net_packet.c:974`). The Rust port had a `relay_minmtu > 0 &&`
-//! guard that inverted this — data went UDP into the blackhole.
+//! on TUM net): no inbound UDP, no hole-punch. Non-probe data must
+//! stay on TCP until a probe reply lifts `minmtu` above 0. A
+//! `relay_minmtu > 0 &&` guard used to invert this — data went UDP
+//! into the blackhole.
 //!
 //! Three nodes because two with a direct meta-conn never reach
 //! `send_sptps_data_relay`: `send_sptps_packet`'s PACKET 17 short-
@@ -79,7 +79,7 @@ fn tcp_fallback_udp_blackhole() {
 
     let mut alice_ctl = alice.ctl();
 
-    // ─── mesh up (meta TCP only) ────────────────────────────────
+    // mesh up (meta TCP only)
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         poll_until(Duration::from_secs(10), || {
             let a = alice_ctl.dump(3);

@@ -66,7 +66,7 @@
 //! 2. Kernel's IP stack is source AND sink: real ICMP, real
 //!    checksums, real route lookup. The socketpair test hand-crafted
 //!    raw bytes with a zero checksum (nothing checked it).
-//! 3. Future: chunk-9's ICMP-unreachable synth becomes pinnable
+//! 3. The ICMP-unreachable synthesis becomes pinnable
 //!    (`ping 10.42.0.99` → no subnet → daemon should write
 //!    `ICMP_NET_UNKNOWN` back into the TUN → ping surfaces it).
 //!

@@ -20,8 +20,8 @@ fn arb_key() -> impl Strategy<Value = String> {
 ///
 /// The leading-`=` exclusion was found by proptest: `"A\t=0"` parses
 /// as `A` / `0`, not `A` / `=0`, because the separator scan eats `\t`
-/// then the optional `=`. Ambiguity is real — the C does the same. But
-/// tinc never writes values starting with `=`: its b64 has no padding
+/// then the optional `=`. The ambiguity is inherent to the config
+/// grammar. But tinc never writes values starting with `=`: its b64 has no padding
 /// (LSB-first variant), addresses don't, port numbers don't, subnet
 /// strings don't. So we constrain the generator to the space tinc
 /// emits, and the round-trip holds there.

@@ -440,8 +440,8 @@ mod tests {
         assert!(!p.udp_confirmed);
         assert!(t.udp_reply_sent.is_none());
         assert!(t.udp_send_failed_at.is_none());
-        assert!(t.udp_addr.is_none()); // `:296`
-        assert_eq!(t.status, TunnelStatus::default()); // `:297`
+        assert!(t.udp_addr.is_none());
+        assert_eq!(t.status, TunnelStatus::default());
         // Traffic counters NOT reset (lifetime totals).
         assert_eq!(t.stats.in_packets(), 100);
         assert_eq!(t.stats.in_bytes(), 50000);
@@ -461,7 +461,7 @@ mod tests {
             make_udp_label("alice", "bob"),
             b"tinc UDP key expansion alice bob\0"
         );
-        // `:259` responder: args swapped at call site, fn doesn't swap.
+        // responder: args swapped at call site, fn doesn't swap.
         assert_eq!(
             make_udp_label("bob", "alice"),
             b"tinc UDP key expansion bob alice\0"

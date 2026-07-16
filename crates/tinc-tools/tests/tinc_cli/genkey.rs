@@ -19,7 +19,7 @@ fn genkey_after_init() {
     assert!(stderr.contains("Generating Ed25519 key pair"));
     assert!(stderr.contains("Done."));
 
-    // ─── private key file: one #-block, one live block ──────────
+    // private key file: one #-block, one live block
     let priv_after = std::fs::read_to_string(confbase.join("ed25519_key.priv")).unwrap();
     // The old block is the first half, #-prefixed. Check by rough
     // shape: every line that was in priv_before is in priv_after
@@ -37,7 +37,7 @@ fn genkey_after_init() {
     let total_begins = priv_after.matches("-----BEGIN ED25519").count();
     assert_eq!(total_begins, 2);
 
-    // ─── host file: one #Ed25519PublicKey, one live one ─────────
+    // host file: one #Ed25519PublicKey, one live one
     let host_after = std::fs::read_to_string(confbase.join("hosts/alice")).unwrap();
     assert_eq!(host_after.matches("#Ed25519PublicKey").count(), 1);
     // Live line: starts at beginning-of-line with no #.

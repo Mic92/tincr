@@ -15,7 +15,7 @@ use tinc_crypto::{b64, chapoly, ecdh, invite, prf, sign};
 
 const VECTORS_JSON: &str = include_str!("kat/vectors.json");
 
-// ─── JSON schema ────────────────────────────────────────────────────────────
+// JSON schema
 // All binary fields are lowercase hex strings. seqno is a decimal string
 // because JSON numbers can't represent the full u64 range.
 
@@ -97,7 +97,7 @@ struct InvitationVec {
     cookie_hash_b64: String,
 }
 
-// ─── helpers ────────────────────────────────────────────────────────────────
+// helpers
 
 fn vectors() -> Vectors {
     serde_json::from_str(VECTORS_JSON).expect("vectors.json is well-formed")
@@ -110,7 +110,7 @@ fn hex_arr<const N: usize>(s: &str, what: &str) -> [u8; N] {
         .unwrap_or_else(|v: Vec<u8>| panic!("{what}: want {N} bytes, got {}", v.len()))
 }
 
-// ─── tests ──────────────────────────────────────────────────────────────────
+// tests
 
 #[test]
 fn chapoly_seal_matches_c() {

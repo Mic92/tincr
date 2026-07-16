@@ -46,9 +46,9 @@ pub const DEFAULT_WEIGHT: i32 = 10;
 
 /// One subnet, as it appears on the wire and in `hosts/*` config files.
 ///
-/// `weight` is `i32` not `u32` because the C parses it with `%d` and
-/// nothing checks for negativity afterward. Negative weight is silly but
-/// the protocol accepts it; so do we.
+/// `weight` is `i32` not `u32` because the wire protocol accepts a
+/// signed value and never rejects negative weights. Negative weight is
+/// silly but valid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Subnet {
     /// MAC address. No prefix — TAP-mode bridge addresses are exact-match.
@@ -134,7 +134,7 @@ impl Subnet {
     #[must_use]
     pub fn matches(&self, find: &Self, as_address: bool) -> bool {
         match (self, find) {
-            // ─── IPv4 / IPv6 ───────────────────────────────────────
+            // IPv4 / IPv6
             // Same rule for both families, differing only in octet width;
             // `ip_match` carries the address-mode vs exact-mode logic.
             (
@@ -158,12 +158,12 @@ impl Subnet {
                 },
             ) => ip_match(&a.octets(), *p, &fa.octets(), *fp, as_address),
 
-            // ─── MAC ───────────────────────────────────────────────
+            // MAC
             // Only memcmp. No prefix on MAC, so address-mode and
             // exact-mode collapse. `address` isn't read in this arm.
             (Self::Mac { addr: a, .. }, Self::Mac { addr: fa, .. }) => a == fa,
 
-            // ─── Type mismatch ─────────────────────────────────────
+            // Type mismatch
             // V4 query against V6 subnet → no match.
             _ => false,
         }
@@ -184,11 +184,11 @@ impl Subnet {
 fn maskcmp(a: &[u8], b: &[u8], prefix: u8) -> bool {
     let full = usize::from(prefix / 8);
     let bits = prefix % 8;
-    // Full bytes: must be byte-equal. C's loop with `a[i] - b[i]`.
+    // Full bytes must be byte-equal.
     if a[..full] != b[..full] {
         return false;
     }
-    // Partial byte: top `bits` bits must agree. C's tail expr.
+    // Partial byte: top `bits` bits must agree.
     if bits != 0 {
         // `0xffu8 << (8 - bits)` = high-bits mask. Shift count is
         // 1..=7 (bits is 1..=7 here), no overflow.
@@ -197,13 +197,13 @@ fn maskcmp(a: &[u8], b: &[u8], prefix: u8) -> bool {
             return false;
         }
     }
-    // C's `return 0` → our `true`.
     true
 }
 
 /// V4/V6 body of [`Subnet::matches`]. Address mode masks at the
 /// SUBNET's prefix; exact mode is `prefix==prefix && memcmp` — full
-/// width, so non-canonical `10.0.0.1/24` ≠ `10.0.0.0/24` (matches C).
+/// width, so non-canonical `10.0.0.1/24` ≠ `10.0.0.0/24` (matches
+/// C tinc's routing behavior).
 fn ip_match(a: &[u8], p: u8, fa: &[u8], fp: u8, as_address: bool) -> bool {
     if as_address {
         maskcmp(a, fa, p)
@@ -212,10 +212,9 @@ fn ip_match(a: &[u8], p: u8, fa: &[u8], fp: u8, as_address: bool) -> bool {
     }
 }
 
-/// `maskcheck` from `subnet_parse.c`: are bytes from bit `prefix`
-/// onward all zero?
+/// Are the bits from bit `prefix` onward all zero?
 ///
-/// Works for both v4 (4 bytes) and v6 (16 bytes); the C takes `void*`.
+/// Works for both v4 (4 bytes) and v6 (16 bytes).
 fn maskcheck(bytes: &[u8], prefix: u8) -> bool {
     let full = usize::from(prefix / 8);
     let bits = prefix % 8;
@@ -231,7 +230,6 @@ fn maskcheck(bytes: &[u8], prefix: u8) -> bool {
     bytes[i..].iter().all(|&b| b == 0)
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Parse: str2net
 
 impl FromStr for Subnet {
@@ -345,7 +343,6 @@ fn parse_mac(s: &str) -> Option<[u8; 6]> {
     Some(out)
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Format: net2str
 
 impl fmt::Display for Subnet {
@@ -385,7 +382,6 @@ impl fmt::Display for Subnet {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // Tests
 
 #[cfg(test)]
@@ -402,7 +398,7 @@ mod tests {
     fn kat_roundtrip() {
         #[rustfmt::skip]
         let cases: &[(&str, &str, Subnet)] = &[
-            // ─── IPv4 ───
+            // IPv4
             ("10.0.0.0/24",     "10.0.0.0/24",     Subnet::V4 { addr: Ipv4Addr::new(10,0,0,0), prefix: 24, weight: 10 }),
             ("10.0.0.1",        "10.0.0.1",        Subnet::V4 { addr: Ipv4Addr::new(10,0,0,1), prefix: 32, weight: 10 }),
             // /32 is canonical-omitted
@@ -415,7 +411,7 @@ mod tests {
             // negative weight: C parses %d, never checks sign
             ("10.0.0.0/24#-1",  "10.0.0.0/24#-1",  Subnet::V4 { addr: Ipv4Addr::new(10,0,0,0), prefix: 24, weight: -1 }),
 
-            // ─── IPv6 ───
+            // IPv6
             ("2001:db8::/32",   "2001:db8::/32",   Subnet::V6 { addr: "2001:db8::".parse().unwrap(),   prefix: 32,  weight: 10 }),
             ("::1",             "::1",             Subnet::V6 { addr: Ipv6Addr::LOCALHOST,             prefix: 128, weight: 10 }),
             ("fe80::1/64#20",   "fe80::1/64#20",   Subnet::V6 { addr: "fe80::1".parse().unwrap(),      prefix: 64,  weight: 20 }),
@@ -424,7 +420,7 @@ mod tests {
             ("2001:0db8:0000:0000:0000:0000:0000:0001", "2001:db8::1",
              Subnet::V6 { addr: "2001:db8::1".parse().unwrap(), prefix: 128, weight: 10 }),
 
-            // ─── MAC ───
+            // MAC
             ("00:11:22:33:44:55",  "00:11:22:33:44:55", Subnet::Mac { addr: [0,0x11,0x22,0x33,0x44,0x55], weight: 10 }),
             ("aa:bb:cc:dd:ee:ff",  "aa:bb:cc:dd:ee:ff", Subnet::Mac { addr: [0xaa,0xbb,0xcc,0xdd,0xee,0xff], weight: 10 }),
             // one-digit parts (1.0-era wire format)
@@ -560,7 +556,7 @@ mod tests {
         );
     }
 
-    // ─── maskcmp: prefix-bit compare ─────────────────────────────────
+    // maskcmp: prefix-bit compare
 
     /// The C bit-math `0x100 - (1 << (8 - m))` and our `0xff << (8-m)`
     /// produce the same mask for m=1..7. m=0 doesn't reach the math.
@@ -603,8 +599,7 @@ mod tests {
         assert!(!maskcmp(&[0x80, 0, 0, 0], &[0x00, 0, 0, 0], 1));
     }
 
-    /// /0 matches everything (no bits compared). The C: full-byte loop
-    /// runs zero times, partial-byte branch skipped (`m == 0`).
+    /// /0 matches everything (no bits compared).
     #[test]
     fn maskcmp_slash_zero() {
         assert!(maskcmp(&[10, 0, 0, 0], &[192, 168, 1, 1], 0));
@@ -624,7 +619,7 @@ mod tests {
         assert!(!maskcmp(&a, &b, 72));
     }
 
-    // ─── Subnet::matches: the info_subnet match logic ────────────────
+    // Subnet::matches: the info_subnet match logic
 
     /// Helper: cuts `unwrap` noise.
     fn sn(s: &str) -> Subnet {

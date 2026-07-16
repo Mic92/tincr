@@ -11,7 +11,7 @@ fn all_up(_: &str) -> bool {
     true
 }
 
-// ─── Ord: pin every tiebreak level ──────────────────────────────
+// Ord: pin every tiebreak level.
 //
 // The comparator IS the algorithm. If these break, routing breaks.
 // Each test isolates ONE level by holding the others equal.
@@ -204,7 +204,7 @@ fn mac_no_prefix() {
     assert!(pref < backup);
 }
 
-// ─── Lookup: longest-prefix match ───────────────────────────────
+// Lookup: longest-prefix match.
 
 /// THE routing decision. `10.0.0.0/8` and `10.1.0.0/16` both
 /// cover `10.1.2.3`. The /16 is more specific → wins. Tree
@@ -368,7 +368,7 @@ fn lookup_ipv6_longest_wins() {
     assert_eq!(owner, Some("broad"));
 }
 
-// ─── add / del ──────────────────────────────────────────────────
+// add / del.
 
 #[test]
 fn del_removes() {

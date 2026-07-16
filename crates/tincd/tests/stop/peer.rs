@@ -6,11 +6,9 @@ use std::time::{Duration, Instant};
 use super::common::{self, *};
 use super::write_config;
 
-// ════════════════════════════════════════════════════════════════════
-// SPTPS peer handshake → ACK exchange (chunk 4b)
+// SPTPS peer handshake → ACK exchange.
 //
-// THE TEST IS THE INITIATOR. We don't have outgoing connections
-// (`do_outgoing_connection` is chunk 6). So: we drive the initiator
+// THE TEST IS THE INITIATOR: we drive the initiator
 // side from the test process using `tinc-sptps::Sptps` directly.
 // Same shape as `tinc-tools/cmd/join.rs`'s pump loop.
 //
@@ -40,7 +38,7 @@ fn peer_ack_exchange() {
     let socket = fx.socket.clone();
     let mut tmp_buf = [0u8; 256];
 
-    // ─── parse the daemon's ACK ─────────────────────────────────
+    // parse the daemon's ACK
     // `"%d %s %d %x"` = `"4 <udp-port> <weight> <opts>"`.
     // Record body has trailing `\n` (`send_request:120` appends).
     let ack = &fx.daemon_ack;
@@ -49,7 +47,7 @@ fn peer_ack_exchange() {
     let mut t = body.split_whitespace();
     assert_eq!(t.next(), Some("4"), "ACK reqno: {body:?}");
     // UDP port: kernel-assigned (Port=0). Just: it's a valid u16,
-    // and ≠ the TCP port (`bind_reusing_port` not yet — chunk 10).
+    // and ≠ the TCP port.
     let daemon_udp_port: u16 = t.next().unwrap().parse().expect("udp port");
     assert_ne!(daemon_udp_port, 0);
     // Weight: RTT in ms. Localhost handshake is fast; >= 0, < some
@@ -66,7 +64,7 @@ fn peer_ack_exchange() {
     let daemon_opts = u32::from_str_radix(t.next().unwrap(), 16).expect("opts hex");
     assert_eq!(daemon_opts, 0x0700_000c, "options: {body:?}");
 
-    // ─── send OUR ACK ─────────────────────────────────────────────
+    // send OUR ACK
     // INITIATOR side: `if(allow == ACK) send_ack(c)`.
     // The initiator's HandshakeDone fires the SAME arm. We model
     // that here. Port 0 (we have no UDP listener); weight 1ms
@@ -78,23 +76,23 @@ fn peer_ack_exchange() {
     // only follows edges with `e->reverse` set; without this
     // gossip, the daemon's testnode→
     // testpeer edge has no twin and `BecameReachable` never fires.
-    // (chunk-9b removed the synthesized reverse from `on_ack` —
-    // it broke 3-node relay forwarding. Tests that drive the
-    // daemon manually now must send what a real peer sends.)
+    // `on_ack` does not synthesize the reverse edge (that broke
+    // 3-node relay forwarding), so tests driving the daemon
+    // manually must send what a real peer sends.
     fx.send_record(b"12 deadbeef testpeer testnode 127.0.0.1 655 700000c 1\n");
 
-    // ─── daemon activates: send_everything + send_add_edge ─────
+    // daemon activates: send_everything + send_add_edge
     // Log: "Connection with X (Y) activated". Then
     // `send_everything(c)` walks the world model. With zero
     // subnets and ONE edge (testnode→testpeer, just added with an
-    // addr entry), we get 1 ADD_EDGE record. Then `:1058 send_add_
-    // edge(everyone, c->edge)` broadcasts the same edge — we ARE
+    // addr entry), we get 1 ADD_EDGE record. Then the new edge is
+    // broadcast to everyone — we ARE
     // the only active conn, so we get a SECOND ADD_EDGE for the
     // same edge with a DIFFERENT nonce. Both pass `seen.check`;
     // the second hits `lookup_edge`-exists-same-weight → idempotent.
     //
-    // The synthesized reverse (testpeer→testnode) has NO `edge_
-    // addrs` entry (chunk-5 STUB), so `fmt_add_edge` skips it.
+    // The synthesized reverse (testpeer→testnode) has no `edge_
+    // addrs` entry, so `fmt_add_edge` skips it.
     //
     // Receive both records. Parse the first; assert it's `ADD_EDGE
     // testnode testpeer`. Then drain until WouldBlock — proves the
@@ -144,7 +142,7 @@ fn peer_ack_exchange() {
         ..
     } = fx;
 
-    // ─── dump connections over control socket ────────────────────
+    // dump connections over control socket
     // Walk connection_list, format `"%d %d %s %s %x %d %x"` per
     // row, then terminator `"%d %d"`. With
     // ONE peer + ONE control conn (us), we get 2 rows.
@@ -198,7 +196,7 @@ fn peer_ack_exchange() {
     // idempotent. `c->options` = `0x0700000c`. Hex unpadded.
     assert!(peer_row.contains(" 700000c "), "peer row: {peer_row}");
 
-    // ─── chunk 5: ADD_SUBNET / dump subnets / dedup / DEL ──────
+    // ADD_SUBNET / dump subnets / dedup / DEL
     // `add_subnet_h`. Send an ADD_SUBNET via SPTPS record, daemon
     // parses + inserts into
     // SubnetTree, `dump subnets` over the control socket shows it.
@@ -311,7 +309,7 @@ fn peer_ack_exchange() {
     let rows = dump_subnets(&mut ctl_r, &mut ctl_w);
     assert_eq!(rows.len(), 0, "dump after DEL_SUBNET: {rows:?}");
 
-    // ─── stderr: prove the daemon's path ─────────────────────────
+    // stderr: prove the daemon's path
     // Hold `stream` until here — dropping it would let the daemon's
     // ping-timeout sweep close the conn before we dump.
     drop(stream);
@@ -326,12 +324,12 @@ fn peer_ack_exchange() {
         stderr.contains("Connection with testpeer") && stderr.contains("activated"),
         "daemon didn't log activation; stderr:\n{stderr}"
     );
-    // The chunk-4a placeholder warning is GONE.
+    // No placeholder warning may appear.
     assert!(
         !stderr.contains("send_ack not implemented"),
-        "chunk-4a placeholder leaked; stderr:\n{stderr}"
+        "placeholder send_ack warning leaked; stderr:\n{stderr}"
     );
-    // Chunk 5: `on_ack` → `graph.add_edge` → `run_graph` → `BecameReachable`.
+    // `on_ack` → `graph.add_edge` → `run_graph` → `BecameReachable`.
     // `"Node %s became reachable"`. Our log says `"Node testpeer
     // became reachable"`. THIS is the proof that
     // graph::run_graph fired and the diff produced a transition.
@@ -349,8 +347,8 @@ fn peer_ack_exchange() {
 /// `ADD_EDGE testpeer faraway` plus the reverse `faraway testpeer`.
 /// `sssp` only follows bidi edges (`if(!e->reverse) continue`);
 /// both directions are needed for the transition to
-/// fire. The C peer would send both (each side's `ack_h` adds its
-/// `c->edge`, then broadcasts).
+/// fire. A real peer sends both (each side adds its own edge on
+/// ACK, then broadcasts).
 ///
 /// `dump connections` STILL shows one row (testpeer): faraway has
 /// no direct connection — graph-only.
@@ -427,7 +425,7 @@ fn assert_dump_nodes_reachable(ctl_r: &mut BufReader<&UnixStream>, mut ctl_w: &U
             "{name} not reachable (status={status:x}); row: {row}"
         );
     }
-    // testpeer/faraway: sptps bit set (chunk-7's BecameReachable).
+    // testpeer/faraway: sptps bit set on BecameReachable.
     assert!(
         parse_status(peer_row) & 0x40 != 0,
         "testpeer sptps bit; row: {peer_row}"
@@ -527,13 +525,12 @@ fn assert_dump_edges_four(ctl_r: &mut BufReader<&UnixStream>, mut ctl_w: &UnixSt
         "forward edge addr (remote=conn.address+hisport, local=getsockname+myudp); row: {fwd}"
     );
 
-    // testpeer→testnode: synthesized reverse from `on_ack`.
-    // chunk-5 left this with NO `edge_addrs` entry (rendered
-    // as `"unknown port unknown"`). chunk-9b fixed the
-    // idempotence check in `on_add_edge`: the test's `our_edge`
-    // ADD_EDGE (line ~154) now falls through to update (was
-    // early-returning on weight+options match without checking
-    // address) and populates `edge_addrs` with the wire body's
+    // testpeer→testnode: synthesized reverse from `on_ack`, which
+    // starts with no `edge_addrs` entry (rendered as
+    // `"unknown port unknown"`). The idempotence check in
+    // `on_add_edge` also compares the address, so the test's
+    // `our_edge` ADD_EDGE falls through to update and populates
+    // `edge_addrs` with the wire body's
     // `127.0.0.1` `655`. The `three_daemon_relay` test depends
     // on this fall-through for hub-spoke topology.
     let rev = edge_rows
@@ -579,14 +576,13 @@ fn peer_edge_triggers_reachable() {
     // Send our ACK. Daemon activates + adds myself→testpeer edge
     // + runs graph. Then our ADD_EDGE (testpeer→testnode) gives
     // the daemon's edge its reverse; THAT graph() fires
-    // BecameReachable. (Real peers' on_ack sends both in one
-    // burst; chunk-9b removed the daemon's synthesized reverse.)
+    // BecameReachable. (Real peers send both in one burst; the
+    // daemon does not synthesize the reverse itself.)
     fx.send_record(b"4 0 1 700000c\n");
     fx.send_record(b"12 deadbeef testpeer testnode 127.0.0.1 655 700000c 1\n");
 
-    // Chunk 6: daemon's `on_ack` now calls `send_everything` +
-    // `send_add_edge(everyone)`. We get 1-2 ADD_EDGE records for
-    // testnode→testpeer. Drain them.
+    // On ACK the daemon sends everything plus its new edge, so we
+    // get 1-2 ADD_EDGE records for testnode→testpeer. Drain them.
     let post_ack = fx.drain_records(500);
     // 1-2 ADD_EDGE records for testnode→testpeer.
     assert!(
@@ -601,19 +597,18 @@ fn peer_edge_triggers_reachable() {
         );
     }
 
-    // ─── ADD_EDGE: testpeer → faraway, both directions ───────────
+    // ADD_EDGE: testpeer → faraway, both directions
     // `"%d %x %s %s %s %s %x %d"`.
     // `12 <nonce> <from> <to> <addr> <port> <opts> <weight>`.
     // No local-addr suffix (6-token form, pre-1.0.24 compat).
     //
-    // `sssp` follows edges only if `e->reverse` is set (`graph.c:
-    // 159`). `Graph::add_edge` auto-links the reverse if it exists.
-    // So: send BOTH directions. The C peer would do the same (each
-    // side's `ack_h` adds its `c->edge` and broadcasts; testpeer
-    // sends `testpeer→faraway`, faraway sends `faraway→testpeer`).
+    // `sssp` follows only bidirectional edges; `Graph::add_edge`
+    // auto-links the reverse if it exists. So: send BOTH directions,
+    // as real peers would (testpeer sends `testpeer→faraway`,
+    // faraway sends `faraway→testpeer`).
     //
-    // Different nonces — each is a separate `prng()` in C.
-    // Addresses are arbitrary tokens (Phase-1 finding: `AddrStr`
+    // Different nonces — each sender picks its own.
+    // Addresses are arbitrary tokens (`AddrStr`
     // is opaque, `str2sockaddr` accepts anything).
     fx.send_record(b"12 11111111 testpeer faraway 10.99.0.2 655 0 50\n");
     fx.send_record(b"12 22222222 faraway testpeer 10.99.0.1 655 0 50\n");
@@ -626,7 +621,7 @@ fn peer_edge_triggers_reachable() {
         "forward_request should skip from-conn; got: {after_edge:?}"
     );
 
-    // ─── dump connections: STILL one peer row ───────────────────
+    // dump connections: STILL one peer row
     // faraway is graph-only (no NodeState, no Connection).
     // `dump_connections` walks `conns`, not `node_ids`.
     let cookie = read_cookie(&pidfile);
@@ -661,13 +656,13 @@ fn peer_edge_triggers_reachable() {
         "faraway shouldn't have a connection: {rows:?}"
     );
 
-    // ─── dump nodes: 3 rows, all reachable ─────────────────────
+    // dump nodes: 3 rows, all reachable
     assert_dump_nodes_reachable(&mut ctl_r, ctl_w);
 
-    // ─── dump edges: 4 rows (2 bidi pairs) ─────────────────────
+    // dump edges: 4 rows (2 bidi pairs)
     assert_dump_edges_four(&mut ctl_r, ctl_w);
 
-    // ─── update_edge: same edge, different weight ────────────
+    // update_edge: same edge, different weight
     // In-place update path. Send the
     // SAME `testpeer→faraway` edge with weight 99 (was 50). Same
     // addr tokens — the addr in the dump row must stay identical
@@ -714,7 +709,7 @@ fn peer_edge_triggers_reachable() {
         "update_edge: weight changed, addr preserved (EdgeId stable)"
     );
 
-    // ─── local_address-only change must NOT be idempotent ─────
+    // local_address-only change must NOT be idempotent
     // Regression: idempotency check compared only (addr,port) and
     // early-returned, so LocalDiscovery kept probing a stale LAN
     // address after a peer roamed (Wi-Fi → dock).
@@ -748,7 +743,7 @@ fn peer_edge_triggers_reachable() {
         "local_address-only change must update edge_addrs"
     );
 
-    // ─── stderr: BecameReachable fired for faraway ──────────────
+    // stderr: BecameReachable fired for faraway
     let stderr = fx.kill_and_stderr();
     // The on_ack graph bridge fires testpeer-reachable first.
     assert!(
@@ -887,7 +882,7 @@ fn peer_wrong_key_fails_sig() {
         }
     };
 
-    // ─── the daemon's stderr says BadSig ─────────────────────────
+    // the daemon's stderr says BadSig
     let _ = child.kill();
     let out = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -932,7 +927,7 @@ fn peer_wrong_key_fails_sig() {
 fn pcap_captures_tcp_packet() {
     use std::io::Read;
 
-    // ─── config: Mode=switch so route_packet_mac broadcasts ───
+    // config: Mode=switch so route_packet_mac broadcasts
     // The default `write_config` is router mode; we need switch.
     let mut fx = PeerFixture::spawn_with_config("pcap", |confbase| {
         std::fs::create_dir_all(confbase.join("hosts")).unwrap();
@@ -956,7 +951,7 @@ fn pcap_captures_tcp_packet() {
     // Drain post-ACK ADD_EDGE gossip (don't care, just clear the pipe).
     let _ = fx.drain_records(300);
 
-    // ─── arm pcap on the control socket ────────────────────────
+    // arm pcap on the control socket
     // `"18 14 0"`: REQ_PCAP, snaplen=0 (full packet). NO ack
     // (`return true` not `control_ok`). The CLI
     // (`stream.rs:540`) sends this then immediately starts reading
@@ -973,7 +968,7 @@ fn pcap_captures_tcp_packet() {
     ctl_r.read_line(&mut ack).unwrap();
     writeln!(ctl_w, "18 14 0").unwrap();
 
-    // ─── inject a frame via PACKET 17 ─────────────────────────
+    // inject a frame via PACKET 17
     // 60-byte minimal ethernet frame. dst MAC unknown → switch-mode
     // `route_mac` floods (Broadcast). `0x0a` at byte 5 of dst MAC:
     // the pcap body MAY contain `\n`; the length-prefix framing must
@@ -998,7 +993,7 @@ fn pcap_captures_tcp_packet() {
     fx.send_record(pkt_hdr.as_bytes());
     fx.send_record(&frame);
 
-    // ─── read pcap header + body from ctl socket ─────────────
+    // read pcap header + body from ctl socket
     // `"%d %d %d"` = `"18 14 60"`. Then `send_meta(c,
     // DATA(packet), len)` = 60 raw bytes. Control
     // conn is plaintext: `send` appends `\n`, `send_raw` doesn't.
@@ -1023,7 +1018,7 @@ fn pcap_captures_tcp_packet() {
     ctl_r.read_exact(&mut body).expect("read pcap body");
     assert_eq!(&body[..], &frame[..], "pcap body byte-for-byte");
 
-    // ─── snaplen clip: re-arm with snaplen=20, send again ────
+    // snaplen clip: re-arm with snaplen=20, send again
     // Second ctl conn (the first is still subscribed at snaplen=0;
     // a fresh conn is the simpler test path). `if(c->outmaclength
     // && c->outmaclength < len) len = c->
@@ -1055,7 +1050,7 @@ fn pcap_captures_tcp_packet() {
     ctl2_r.read_exact(&mut body2).expect("read pcap body 2");
     assert_eq!(&body2[..], &frame[..20], "snaplen clip: first 20 bytes");
 
-    // ─── cleanup ─────────────────────────────────────────────
+    // cleanup
     let _ = fx.child.kill();
     let _ = fx.child.wait();
 }

@@ -37,10 +37,9 @@ pub mod top;
 /// for the binary to print, plus a structured kind for tests to
 /// match on.
 ///
-/// Phrasing matches upstream's error strings — not because they're
-/// API (nothing parses them), but because users grep for error
-/// messages, and matching upstream means existing forum posts /
-/// stack overflow answers still apply.
+/// Phrasing matches C tinc's error strings — not because they're API
+/// (nothing parses them), but because users grep for error messages and
+/// existing forum posts / stack overflow answers should still apply.
 #[derive(Debug, thiserror::Error)]
 pub enum CmdError {
     /// File/dir already exists when we wanted to create it. `cmd_init`:

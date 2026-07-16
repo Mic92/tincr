@@ -493,7 +493,7 @@ fn server_stub_single_use() {
 fn invite_join_roundtrip_in_process() {
     let dir = tempfile::tempdir().unwrap();
 
-    // ─── Inviter side: alice invites bob
+    // Inviter side: alice invites bob
     let inviter = paths_at(&dir.path().join("inviter"));
     init::run(&inviter, "alice").unwrap();
     {
@@ -521,12 +521,12 @@ fn invite_join_roundtrip_in_process() {
     let inv_key = keypair::read_private(&inviter.invitation_key()).unwrap();
     let inv_pub = *inv_key.public_key();
 
-    // ─── Joiner setup
+    // Joiner setup
     let joiner_paths = paths_at(&dir.path().join("joiner"));
     let throwaway = keypair::generate();
     let throwaway_pub = *throwaway.public_key();
 
-    // ─── Start both SPTPS sessions
+    // Start both SPTPS sessions
     // Joiner = initiator. Server = responder. Stream framing.
     // Same label, same as the C wire bytes.
     let (mut joiner, j_init) = Sptps::start(
@@ -552,7 +552,7 @@ fn invite_join_roundtrip_in_process() {
         &mut OsRng,
     );
 
-    // ─── The pump
+    // The pump
     // Two unidirectional byte queues. `Output::Wire` from one
     // side → enqueue → `receive()` on the other. Loop until both
     // queues are empty AND no new wire bytes were produced
@@ -612,7 +612,7 @@ fn invite_join_roundtrip_in_process() {
             break;
         }
 
-        // ─── Server processes its inbox
+        // Server processes its inbox
         if !to_server.is_empty() {
             let inp = std::mem::take(&mut to_server);
             let mut off = 0;
@@ -706,7 +706,7 @@ fn invite_join_roundtrip_in_process() {
             }
         }
 
-        // ─── Joiner processes its inbox
+        // Joiner processes its inbox
         // This is `cmd_join`'s SPTPS loop, transcribed for in-
         // process testing. Same structure: type-0 accumulate,
         // type-1 finalize, type-2 success.
@@ -762,7 +762,7 @@ fn invite_join_roundtrip_in_process() {
         }
     }
 
-    // ─── Asserts
+    // Asserts
     assert!(success, "type-2 never arrived; pump stalled");
     assert_eq!(server_phase, ServerPhase::Done);
     let r = join_result.unwrap();

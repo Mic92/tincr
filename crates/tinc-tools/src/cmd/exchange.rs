@@ -118,11 +118,10 @@ pub fn export_one(paths: &Paths, name: &str, mut out: impl Write) -> Result<(), 
     writeln!(out, "Name = {name}").map_err(io_err("<stdout>"))?;
 
     for line in content.lines() {
-        // Skip any line whose `split_kv` key is `Name` (case-
-        // insensitive): `Name = foo`, `Name=foo`, `name\tfoo`, but
-        // not `Namespace = ` nor ` Name = foo` (leading space — a
-        // harmless upstream quirk we keep for fidelity; the config
-        // parser would lstrip, this filter doesn't).
+        // Skip any line whose `split_kv` key is `Name` (case-insensitive):
+        // `Name = foo`, `Name=foo`, `name\tfoo`, but not `Namespace =` nor
+        // ` Name = foo` — unlike the config parser, this filter does not
+        // lstrip, matching C tinc's export output.
         if is_name_line(line) {
             continue;
         }
@@ -270,12 +269,11 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
     let mut firstline = true;
 
     // `lines()` strips the newline; the separator match adjusts.
-    // We don't truncate long lines (upstream's 4096 buffer would).
-    // No real host file has lines that long anyway.
+    // Long lines are not truncated.
     for line in inp.lines() {
         let line = line.map_err(io_err("<stdin>"))?;
 
-        // ─── "Name = X" → switch files
+        // "Name = X" → switch files
         // Exact prefix `"Name = "`, then take the first whitespace-
         // delimited token. See doc comment for what this matches.
         if let Some(tail) = line.strip_prefix("Name = ") {
@@ -331,23 +329,20 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
             continue;
         }
 
-        // ─── Junk before first Name → warn once
+        // Junk before first Name → warn once
         if firstline {
             eprintln!("Junk at the beginning of the input, ignoring.");
             firstline = false;
         }
 
-        // ─── Separator → skip
-        // `lines()` strips the newline, so compare sans newline.
-        // Tiny upstream difference: a separator at EOF without a
-        // trailing newline would be content there but skipped here.
-        // Export always writes the trailing newline; not worth
-        // replicating for hand-crafted input.
+        // Separator → skip. `lines()` strips the newline, so compare sans
+        // newline; a separator at EOF without a trailing newline is also
+        // skipped (export always writes the trailing newline anyway).
         if line == SEPARATOR {
             continue;
         }
 
-        // ─── Content → write to current file (silently dropped if none)
+        // Content → write to current file (silently dropped if none)
         if let Some(f) = out.as_mut() {
             writeln!(f, "{line}").map_err(io_err(current_path.as_ref().unwrap()))?;
         }
@@ -385,7 +380,7 @@ mod tests {
         assert!(is_name_line("NAME\tfoo"));
         assert!(!is_name_line("Namespace = foo")); // stop=9
         assert!(!is_name_line("Named = foo")); // stop=5
-        assert!(!is_name_line(" Name = foo")); // stop=0, the upstream bug
+        assert!(!is_name_line(" Name = foo")); // leading space is not stripped
         assert!(!is_name_line("")); // stop=0
         assert!(!is_name_line("Nam")); // stop=3
     }
@@ -603,20 +598,20 @@ mod tests {
                         Subnet = fd00::/64\n\
                         Ed25519PublicKey = Pg2fEkaQ9lLAnEDV+ZOfu8I0il9rmrQaY+WYDOzeavK\n";
 
-        // ─── Export side
+        // Export side
         let export_cd = setup("alice", original);
         let export_paths = export_cd.paths().clone();
         let mut blob = Vec::new();
         export(&export_paths, &mut blob).unwrap();
 
-        // ─── Import side (different confbase)
+        // Import side (different confbase)
         let import_cd = bare();
         let import_paths = import_cd.paths().clone();
 
         let count = import(&import_paths, blob.as_slice(), false).unwrap();
         assert_eq!(count, 1);
 
-        // ─── The proof
+        // The proof
         let imported = fs::read_to_string(import_paths.host_file("alice")).unwrap();
         assert_eq!(imported, original);
     }

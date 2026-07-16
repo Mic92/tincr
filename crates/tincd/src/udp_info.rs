@@ -27,43 +27,37 @@ pub(crate) const MTU_MAX: i32 = 9018;
 /// values lower than this are corrupt, not just pessimistic.
 pub(crate) const MTU_MIN: i32 = 512;
 
-// ────────────────────────────────────────────────────────────────────
-// Snapshot inputs
-
 /// State of `from` (the node whose address we're learning) for
-/// `on_receive_udp_info`. `None` at the call-site means
-/// `lookup_node(from_name)` failed → `UnknownNode`.
+/// `on_receive_udp_info`. `None` at the call-site means the node isn't
+/// in our graph → `UnknownNode`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FromState {
-    /// `from->connection != NULL` (`:251`). Direct meta connection;
-    /// we already know their address from the TCP edge, so a relay's
-    /// UDP observation isn't useful.
+    /// Direct meta connection to `from`; we already know their address
+    /// from the TCP edge, so a relay's UDP observation isn't useful.
     pub directly_connected: bool,
-    /// `from->status.udp_confirmed` (`:251`). We already have a
-    /// working UDP address (got a reply from it). Don't overwrite.
+    /// We already have a working UDP address (got a reply from it).
+    /// Don't overwrite.
     pub udp_confirmed: bool,
-    /// `from->via == from` (`:247`). Route to `from` is direct (we
-    /// ARE the relay for them, or there's no static relay between
-    /// us). `UDP_INFO` terminates at the static relay (`:157`), so a
-    /// message arriving when this is `false` wandered too far.
+    /// Route to `from` is direct (no static relay between us).
+    /// `UDP_INFO` terminates at the static relay, so a message arriving
+    /// when this is `false` wandered too far.
     pub via_is_self: bool,
 }
 
 /// Per-node MTU state for `from` in `on_receive_mtu_info`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FromMtuState {
-    /// `from->mtu`. Current effective MTU we use for packets to
-    /// `from`.
+    /// Current effective MTU we use for packets to `from`.
     pub mtu: u16,
-    /// `from->minmtu`. Lower probe bound.
+    /// Lower probe bound.
     pub minmtu: u16,
-    /// `from->maxmtu`. Upper probe bound.
+    /// Upper probe bound.
     pub maxmtu: u16,
 }
 
 /// Snapshot of one node's PMTU convergence for [`adjust_mtu_for_send`].
-/// `minmtu == maxmtu` means PMTU discovery has converged
-/// (`net_packet.c`: probe ladder narrows until they meet).
+/// `minmtu == maxmtu` means PMTU discovery has converged (the probe
+/// ladder narrows until they meet).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PmtuSnapshot {
     pub minmtu: u16,
@@ -71,167 +65,115 @@ pub(crate) struct PmtuSnapshot {
 }
 
 impl PmtuSnapshot {
-    /// `from->minmtu == from->maxmtu`: probing converged.
+    /// Probing converged.
     #[must_use]
     pub(crate) const fn converged(self) -> bool {
         self.minmtu == self.maxmtu
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
-// UDP_INFO send gates
-
-/// Gates before sending `UDP_INFO`. `send_udp_info`.
+/// Gates before sending `UDP_INFO`. Returns `true` if the message
+/// should be sent; the caller builds the actual `UdpInfo`.
 ///
-/// Returns `false` if any gate fails. Upstream returns `true` from each
-/// gate (it's "I successfully decided not to send"); we return `bool`
-/// = "should I send".
-///
-/// The actual `UdpInfo` struct is built by the caller — it has the
-/// `from->name`/`to->name`/addr; we only decide *whether*.
-///
-/// On `true` return when `from_is_myself`, the caller MUST also bump
-/// the `last_sent` timestamp (`:211` `to->udp_info_sent = now`).
-///
-/// # Clippy
-///
-/// `too_many_arguments`: each parameter maps to one C global-state
-/// read. The C original has them as `myself->options`, `to->status.
-/// reachable`, etc. — direct globals. Flattening into 11 parameters
-/// is *correct* but ugly. A `SendCtx` struct would just move the
-/// noise. Live with it.
-#[expect(clippy::too_many_arguments)] // each param maps to one C global-state read; struct just moves the noise
+/// On `true` return when `from_is_myself`, the caller must also bump
+/// the `last_sent` timestamp so the debounce works.
+#[expect(clippy::too_many_arguments)] // each param is one independent snapshot read; struct just moves the noise
 #[expect(clippy::fn_params_excessive_bools)] // independent gates, not a state machine
 #[must_use]
 pub(crate) fn should_send_udp_info(
-    // `:170` `if(to == myself) return true;` — would be sending a
-    // hint to ourselves. The relay deref (`:158`) made `to` the
-    // actual hop; if that's us, we're the endpoint.
+    // Sending a hint to ourselves would be pointless: after relay
+    // resolution, `to` is the actual hop; if that's us, we're the endpoint.
     to_is_myself: bool,
-    // `:174` `if(!to->status.reachable)`. Graph says no path; the
-    // `to->nexthop->connection` deref at `:207` would be NULL anyway.
+    // Graph says no path to `to`.
     to_reachable: bool,
-    // `:179` `if(to->connection)`. Only checked when `from ==
-    // myself`. Direct meta connection to `to` → they already know
-    // our address from the edge; the UDP_INFO would be circular.
+    // Direct meta connection to `to` → they already know our address
+    // from the edge; the UDP_INFO would be circular. Only checked when
+    // we originate.
     to_directly_connected: bool,
-    // `:178` `if(from == myself)`. Enables the `to->connection` and
-    // debounce checks. When forwarding (`from != myself`), neither
-    // applies — the originator already debounced, and the directly-
-    // connected check is about the *originator*'s relationship to
-    // `to`, not ours.
+    // Whether we originate (enables the directly-connected and debounce
+    // checks). When forwarding, the originator already debounced and
+    // the directly-connected check is about the originator, not us.
     from_is_myself: bool,
-    // `:190` three-way OR: `(myself | from | to)->options &
-    // OPTION_TCPONLY`. Any party opting out of UDP makes UDP info
-    // moot. Note this is `to`'s ORIGINAL options, before the `:158`
-    // relay deref.
+    // Any party opting out of UDP (TCPONLY) makes UDP info moot.
     from_options: ConnOptions,
     to_options: ConnOptions,
     myself_options: ConnOptions,
-    // `:194` `(to->nexthop->options >> 24) < 5`. The relay's protocol
-    // minor (top byte of options). UDP_INFO was introduced at minor
-    // 5 (commit 2013); older relays would log "unknown request type"
-    // and possibly drop the connection.
-    //
-    // The C reads `to->nexthop->options`, NOT the post-deref `to`'s
-    // options. `to->nexthop` is always the next hop on the path (the
-    // node we have a direct connection to and will hand the message
-    // to). After `:158` `to` may BE `to->nexthop` (the via-myself
-    // case), but in the static-relay case they differ. We just need
-    // the nexthop's options here.
+    // Next hop's protocol options; UDP_INFO requires protocol minor ≥ 5.
+    // Older peers would log "unknown request type" and possibly drop
+    // the connection.
     nexthop_options: ConnOptions,
-    // `:183` `now - to->udp_info_sent < udp_info_interval`. Per-`to`
-    // debounce. `None` = never sent → no debounce. Only checked when
-    // `from_is_myself`.
+    // Per-`to` debounce. `None` = never sent → no debounce. Only
+    // checked when `from_is_myself`.
     last_sent: Option<Instant>,
     now: Instant,
     interval: Duration,
 ) -> bool {
-    // `:170`
     if to_is_myself {
         return false;
     }
-    // `:174`
     if !to_reachable {
         return false;
     }
-    // `:178-188`: originator-only checks.
+    // Originator-only checks.
     if from_is_myself {
-        // `:179`
         if to_directly_connected {
             return false;
         }
-        // `:183-187` — debounce. C compares `tv_sec < interval`, i.e.
-        // truncated seconds. We use full Duration precision; the
-        // worst case is we send fractionally earlier than C would.
         if let Some(last) = last_sent
             && now.saturating_duration_since(last) < interval
         {
             return false;
         }
     }
-    // `:190` — three-way TCPONLY OR.
     if (myself_options | from_options | to_options).contains(ConnOptions::TCPONLY) {
         return false;
     }
-    // `:194` — relay too old to understand UDP_INFO. Minor 5 (2013).
+    // Relay too old to understand UDP_INFO.
     if nexthop_options.prot_minor() < 5 {
         return false;
     }
     true
 }
 
-// ────────────────────────────────────────────────────────────────────
-// UDP_INFO receive
-
-/// What to do with a received `UDP_INFO`. `udp_info_h`.
+/// What to do with a received `UDP_INFO`.
 ///
 /// Every variant except `UnknownNode` and `DroppedPastRelay` implies
-/// "and then forward up the chain" — `:265` calls `send_udp_info`
-/// unconditionally after the address-learning block. The daemon
-/// re-runs `should_send_udp_info(from, to)` on Forward / Update.
+/// "and then forward up the chain"; the daemon re-runs
+/// `should_send_udp_info(from, to)` on Forward / Update.
 ///
 /// `N` is the caller's node-id type. The forwarding variants carry
 /// `from`/`to` so the caller doesn't have to re-unwrap `Option`s
 /// whose `Some`-ness this function already proved.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum UdpInfoAction<N> {
-    /// `:251-257`. `from` is not directly connected, not UDP-
-    /// confirmed, and the message's address differs from what we
-    /// have. Daemon calls `update_node_udp(from, new_addr)` then
-    /// forwards. **The payoff case**: a relay told us where `from`
-    /// is reachable.
+    /// `from` is not directly connected, not UDP-confirmed, and the
+    /// message's address differs from what we have. Daemon updates
+    /// `from`'s UDP address then forwards. The payoff case: a relay
+    /// told us where `from` is reachable.
     UpdateAndForward {
         from: N,
         to: N,
         new_addr: SocketAddr,
     },
-    /// `:265` without `:255`. Forward without learning: we're
-    /// directly connected (`:251`), or UDP-confirmed (`:251`), or
-    /// the addr matches what we already have, or the addr didn't
-    /// parse (yielding `AF_UNKNOWN`, which fails `sockaddrcmp` and
-    /// skips `update_node_udp` the same way).
+    /// Forward without learning: we're directly connected, or
+    /// UDP-confirmed, or the addr matches what we already have, or the
+    /// addr didn't parse.
     Forward { from: N, to: N },
-    /// `:247` `from != from->via`. Message wandered past a static
-    /// relay. Log warning, drop. C returns `true` (don't tear down
-    /// the connection — it's a routing weirdness, not a protocol
-    /// violation).
+    /// Message wandered past a static relay. Log warning, drop; not a
+    /// protocol violation, so the connection stays up.
     DroppedPastRelay,
-    /// `:238` or `:261`. `lookup_node(from)` or `lookup_node(to)`
-    /// failed. Node not in our graph. C logs and returns `true`
-    /// (drop without conn-teardown).
+    /// `from` or `to` not in our graph. Drop without connection
+    /// teardown.
     UnknownNode,
 }
 
-/// `udp_info_h` decision. Pure: parsing already happened (`UdpInfo::parse`); we get the parsed message and
-/// the `from`-node snapshot.
+/// `UDP_INFO` receive decision. Pure: parsing already happened; we get
+/// the parsed message and node snapshots.
 ///
-/// `from`: `None` ⇔ `lookup_node(from_name) == NULL` (`:238`). The
-///   `N` rides along so the caller gets it back in the action.
-/// `to`: `None` ⇔ `lookup_node(to_name) == NULL` (`:261`).
-/// `current_from_addr`: what `from->address` currently holds. `None`
-///   = `AF_UNSPEC` (never learned). `:254` `sockaddrcmp` only fires
-///   `update_node_udp` if the addresses differ.
+/// `from`/`to`: `None` if the node isn't in our graph; the `N` rides
+///   along so the caller gets it back in the action.
+/// `current_from_addr`: what we currently hold for `from`. `None` =
+///   never learned. Only differing addresses trigger an update.
 #[must_use]
 pub(crate) fn on_receive_udp_info<N>(
     parsed: &UdpInfo,
@@ -239,57 +181,27 @@ pub(crate) fn on_receive_udp_info<N>(
     to: Option<N>,
     current_from_addr: Option<SocketAddr>,
 ) -> UdpInfoAction<N> {
-    // `:238` — `from` lookup.
     let Some((from_nid, from)) = from else {
         return UdpInfoAction::UnknownNode;
     };
 
-    // `:247` — wandered past static relay.
     if !from.via_is_self {
         return UdpInfoAction::DroppedPastRelay;
     }
 
-    // `:251-257` — the learning block. Gated on `!from->connection
-    // && !from->status.udp_confirmed`. Both conditions mean "we
-    // don't have a better source of truth for `from`'s address".
-    //
-    // The address comes from `parsed.addr`/`parsed.port` joined.
-    // `AddrStr` is the wire-format token; convert to `SocketAddr`
-    // here. If parse fails (peer sent garbage, or `unspec`), we
-    // can't construct UpdateAndForward — fall through to Forward.
-    // (AF_UNKNOWN would fail `sockaddrcmp` and be discarded the
-    // same way.)
+    // Learn `from`'s address only if we don't have a better source of
+    // truth (direct connection or confirmed UDP). If the address fails
+    // to parse (garbage or `unspec`), fall through to Forward.
     let learned = if !from.directly_connected && !from.udp_confirmed {
-        parse_socket_addr(parsed.addr.as_str(), parsed.port.as_str()).filter(|a| {
-            // `:254` `sockaddrcmp(&from_addr, &from->address)`. C's
-            // `sockaddrcmp` returns nonzero (truthy) on *difference*.
-            // Only update if different.
-            current_from_addr != Some(*a)
-        })
+        parse_socket_addr(parsed.addr.as_str(), parsed.port.as_str())
+            .filter(|a| current_from_addr != Some(*a))
     } else {
         None
     };
 
-    // `:261` — `to` lookup. C does this AFTER the update_node_udp
-    // block, so we mirror: even if `to` is unknown, the address
-    // learning above already happened. But we can't return both
-    // "update" and "unknown to". The C *does* update then drop. We
-    // do the same: if `learned.is_some()` and `!to_exists`, the
-    // daemon should still call update_node_udp but NOT forward.
-    //
-    // We collapse this into the variants: `UpdateAndForward` with a
-    // doc-note that the daemon's forward step will independently
-    // bounce off `should_send_udp_info` if `to` is gone (it'll be
-    // unreachable). And `UnknownNode` for the no-learn case.
-    //
-    // Actually no — the C explicitly does NOT forward when `to` is
-    // unknown (`:263 return true`). But it DID already call
-    // update_node_udp at `:255`. Our pure model can't express "do
-    // both". We pick fidelity to the *forward* decision: if `to`
-    // doesn't exist, return `UnknownNode` and DROP the address. The
-    // address-learning was opportunistic anyway; losing one relay
-    // observation when our graph is inconsistent (we know `from` but
-    // not `to`?!) is fine.
+    // If `to` is unknown, drop the learned address as well: the
+    // learning is opportunistic, and losing one relay observation when
+    // our graph is inconsistent is fine.
     let Some(to_nid) = to else {
         return UdpInfoAction::UnknownNode;
     };
@@ -312,7 +224,7 @@ pub(crate) fn on_receive_udp_info<N>(
 /// Returns `None` for unparseable addresses (including `unspec`).
 /// Handles bracketing for IPv6: `[::1]:655`.
 fn parse_socket_addr(addr: &str, port: &str) -> Option<SocketAddr> {
-    // `unspec` is C's `AF_UNSPEC` placeholder. Never a real address.
+    // `unspec` is the wire placeholder for "no address"; never a real address.
     if addr == tinc_proto::AddrStr::UNSPEC {
         return None;
     }
@@ -321,39 +233,31 @@ fn parse_socket_addr(addr: &str, port: &str) -> Option<SocketAddr> {
     Some(SocketAddr::new(ip, port))
 }
 
-// ────────────────────────────────────────────────────────────────────
-// MTU_INFO send gates
-
-/// Gates before sending `MTU_INFO`. `send_mtu_info`.
+/// Gates before sending `MTU_INFO`.
 ///
 /// Same shape as [`should_send_udp_info`] but: no TCPONLY check
 /// (MTU info is useful even on TCP-mostly paths — *some* hop might
 /// use UDP), and the minor-version gate is **6** not 5 (`MTU_INFO`
-/// landed one release after `UDP_INFO`).
+/// was introduced one protocol minor after `UDP_INFO`).
 ///
-/// On `true` return when `from_is_myself`, caller bumps the separate
-/// `mtu_info_sent` timestamp (`:323`). Distinct from
-/// `udp_info_sent`!
+/// On `true` return when `from_is_myself`, caller bumps the MTU-info
+/// timestamp — a separate timestamp from the UDP-info one.
 ///
-/// The MTU *value* adjustment (`:305-320`) is NOT here — see
+/// The MTU *value* adjustment is not here — see
 /// [`adjust_mtu_for_send`].
-#[expect(clippy::too_many_arguments)] // mirrors should_send_udp_info: each param = one C global read
+#[expect(clippy::too_many_arguments)] // mirrors should_send_udp_info: each param is one snapshot read
 #[expect(clippy::fn_params_excessive_bools)] // independent gates, not a state machine
 #[must_use]
 pub(crate) fn should_send_mtu_info(
-    // `:278` — same as UDP_INFO.
     to_is_myself: bool,
-    // `:282`
     to_reachable: bool,
-    // `:287` — only when `from_is_myself`.
+    // Only checked when `from_is_myself`.
     to_directly_connected: bool,
-    // `:286`
     from_is_myself: bool,
-    // `:299` — separate timestamp from UDP_INFO.
+    // Separate timestamp from UDP_INFO.
     last_sent: Option<Instant>,
     now: Instant,
     interval: Duration,
-    // `:299` `(to->nexthop->options >> 24) < 6`. Minor 6, not 5.
     nexthop_options: ConnOptions,
 ) -> bool {
     if to_is_myself {
@@ -372,45 +276,35 @@ pub(crate) fn should_send_mtu_info(
             return false;
         }
     }
-    // `:299` — minor 6. MTU_INFO came after UDP_INFO.
+    // MTU_INFO requires protocol minor ≥ 6 (introduced after UDP_INFO).
     if nexthop_options.prot_minor() < 6 {
         return false;
     }
     true
 }
 
-/// MTU adjustment before sending. `send_mtu_info`.
-///
-/// Called by the daemon AFTER `should_send_mtu_info` returns `true`.
-/// Takes the MTU we were about to send and possibly tightens it based
-/// on what we know about the path to `from`.
+/// MTU adjustment before sending, called by the daemon after
+/// `should_send_mtu_info` returns `true`. Takes the MTU we were about
+/// to send and possibly tightens it based on what we know about the
+/// path to `from`.
 ///
 /// `mtu`: the value we were going to send. On the originating call
-///   this is `MTU` (the compile-time max); on forward it's the
-///   received value.
-/// `from_via_is_myself`: `from->via == myself` (`:308`). Route to
-///   `from` has no static relay — we send directly or via dynamic
-///   relays. This is the case where our own measurement is
+///   this is the compile-time max; on forward it's the received value.
+/// `from_via_is_myself`: route to `from` has no static relay — we send
+///   directly or via dynamic relays, so our own measurement is
 ///   authoritative.
-/// `from_pmtu`: `from->{min,max}mtu`. `None` if we have no tunnel.
-/// `via_pmtu`: `(from->via OR from->nexthop)->{min,max}mtu`. The
-///   relay's PMTU. The C derefs `from->via` (static relay case) or
-///   `from->nexthop` (`:305` deref). `None` if no tunnel.
-/// `via_nexthop_pmtu`: `via->nexthop->{min,max}mtu` (`:318`). The
-///   relay's *own* nexthop's PMTU. Only consulted in the dynamic-
-///   relay case.
+/// `from_pmtu`: our PMTU state for `from`. `None` if we have no tunnel.
+/// `via_pmtu`: the relay's PMTU. `None` if no tunnel.
+/// `via_nexthop_pmtu`: the relay's *own* nexthop's PMTU. Only consulted
+///   in the dynamic-relay case.
 ///
-/// The three branches at `:308-320`:
-///   1. `from->minmtu == from->maxmtu && from->via == myself`: we
-///      have a converged direct measurement. *Override* `mtu`
-///      entirely — even increase it (`:310`). We're the static relay,
-///      we know.
-///   2. `via->minmtu == via->maxmtu`: static relay has converged.
-///      `mtu = min(mtu, via->minmtu)` — never increase, only tighten.
-///   3. `via->nexthop->minmtu == via->nexthop->maxmtu`: dynamic
-///      relay's nexthop converged. Same `min` clamp.
-///   4. else: leave `mtu` alone (`:326`: "we're using TCP" — but
-///      forward anyway, downstream might use UDP).
+/// Branches:
+///   1. converged direct measurement and no static relay: override
+///      `mtu` entirely — the only branch that can increase it.
+///   2. static relay converged: `min` clamp, never increase.
+///   3. dynamic relay's nexthop converged: same `min` clamp.
+///   4. else: leave `mtu` alone (path is TCP-only for us, but forward
+///      anyway — downstream might use UDP).
 #[must_use]
 pub(crate) fn adjust_mtu_for_send(
     mtu: i32,
@@ -419,99 +313,81 @@ pub(crate) fn adjust_mtu_for_send(
     via_pmtu: Option<PmtuSnapshot>,
     via_nexthop_pmtu: Option<PmtuSnapshot>,
 ) -> i32 {
-    // `:308` — direct converged measurement. Override entirely. This
-    // is the only branch that can *increase* mtu.
+    // Converged direct measurement: override entirely. The only branch
+    // that can increase mtu.
     if from_via_is_myself
         && let Some(f) = from_pmtu
         && f.converged()
     {
         return i32::from(f.minmtu);
     }
-    // `:314` — static relay converged. Clamp.
+    // Static relay converged: clamp.
     if let Some(v) = via_pmtu
         && v.converged()
     {
         return mtu.min(i32::from(v.minmtu));
     }
-    // `:318` — dynamic relay's nexthop converged. Clamp.
+    // Dynamic relay's nexthop converged: clamp.
     if let Some(n) = via_nexthop_pmtu
         && n.converged()
     {
         return mtu.min(i32::from(n.minmtu));
     }
-    // `:326` — no measurement. Pass through.
+    // No measurement: pass through.
     mtu
 }
 
-// ────────────────────────────────────────────────────────────────────
-// MTU_INFO receive
-
-/// What to do with a received `MTU_INFO`. `mtu_info_h`.
+/// What to do with a received `MTU_INFO`.
 ///
 /// `N` is the caller's node-id type; forwarding variants carry
 /// `from`/`to` so the caller doesn't re-unwrap.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum MtuInfoAction<N> {
-    /// `:365-370` `if(from->mtu != mtu && from->minmtu != from->
-    /// maxmtu) from->mtu = mtu`. Set the *provisional* MTU (we
-    /// haven't converged ourselves; trust the relay's number until
-    /// we do). Then forward (`:375`). `new_mtu` is already clamped
-    /// to `[MTU_MIN, MTU_MAX]`.
+    /// Set the *provisional* MTU (we haven't converged ourselves; trust
+    /// the relay's number until we do), then forward. `new_mtu` is
+    /// already clamped to `[MTU_MIN, MTU_MAX]`.
     ClampAndForward { from: N, to: N, new_mtu: u16 },
-    /// `:375` without `:369`. Forward without clamping: we already
-    /// converged (`minmtu == maxmtu`), or our `mtu` already matches.
+    /// Forward without clamping: we already converged, or our MTU
+    /// already matches.
     Forward { from: N, to: N },
-    /// `:345` `if(mtu < 512) return false`. Malformed message —
-    /// connection-fatal in C (`return false` from a `_h` handler
-    /// tears down the connection). 512 is the IPv4 minimum
-    /// reassembly size; below that is nonsense.
+    /// MTU below the IPv4 minimum reassembly size — nonsense, treated
+    /// as connection-fatal by the caller.
     Malformed,
-    /// `:357` or `:371`. `from` or `to` not in graph.
+    /// `from` or `to` not in graph.
     UnknownNode,
 }
 
-/// `mtu_info_h` decision.
+/// `MTU_INFO` receive decision.
 ///
-/// `from`: `None` ⇔ `lookup_node(from)` failed. `N` rides
-///   along so the caller gets it back in the action.
-/// `to`: `None` ⇔ `lookup_node(to)` failed (`:371`).
+/// `from`/`to`: `None` if the node isn't in our graph; `N` rides along
+///   so the caller gets it back in the action.
 ///
-/// The `mtu < 512` check happens first (`:345`), before name lookups.
-/// That's the only `Malformed` (connection-fatal) outcome; everything
-/// else is drop-and-continue.
+/// The `mtu < 512` check happens first, before node lookups. That's
+/// the only `Malformed` (connection-fatal) outcome; everything else is
+/// drop-and-continue.
 #[must_use]
 pub(crate) fn on_receive_mtu_info<N>(
     parsed: &MtuInfo,
     from: Option<(N, FromMtuState)>,
     to: Option<N>,
 ) -> MtuInfoAction<N> {
-    // `:345` — mtu < 512 is connection-fatal. Checked BEFORE node
-    // lookups in C, so we mirror.
     if parsed.mtu < MTU_MIN {
         return MtuInfoAction::Malformed;
     }
-    // `:349` `mtu = MIN(mtu, MTU)`. Clamp to compile-time max. We use
-    // the jumbo build's max; see [`MTU_MAX`].
     let mtu = parsed.mtu.min(MTU_MAX);
     #[expect(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // clamped to [512,9018]
     let mtu = mtu as u16;
 
-    // `:357` — from lookup.
     let Some((from_nid, from)) = from else {
         return MtuInfoAction::UnknownNode;
     };
 
-    // `:365-370` — provisional MTU. Two conditions:
-    //   `from->mtu != mtu`: it's actually different.
-    //   `from->minmtu != from->maxmtu`: we haven't converged. If we
-    //     HAVE converged, our measurement beats the relay's hearsay.
+    // Only take the relay's number if it differs and we haven't
+    // converged; a converged local measurement beats hearsay.
     let learned = from.mtu != mtu && from.minmtu != from.maxmtu;
 
-    // `:371` — to lookup. Same C-ordering issue as UDP_INFO: C
-    // already wrote `from->mtu = mtu` at `:369` before checking `to`.
-    // We DON'T mirror that here — same reasoning as `on_receive_
-    // udp_info`: dropping one provisional hint when graph is
-    // inconsistent is fine.
+    // If `to` is unknown, drop the provisional hint too; losing one
+    // hint when the graph is inconsistent is fine.
     let Some(to_nid) = to else {
         return MtuInfoAction::UnknownNode;
     };
@@ -529,8 +405,6 @@ pub(crate) fn on_receive_mtu_info<N>(
         }
     }
 }
-
-// ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -552,13 +426,10 @@ mod tests {
         }
     }
 
-    // ── UDP_INFO send gates ────────────────────────────────────────
-    //
-    // Pattern C: 11-param fn, each gate test flips ONE input. Struct
-    // with all-gates-pass defaults; each row shows only what varies.
+    // Struct with all-gates-pass defaults; each test row flips one input.
 
     #[derive(Clone, Copy)]
-    #[expect(clippy::struct_excessive_bools)] // mirrors C's flat globals
+    #[expect(clippy::struct_excessive_bools)] // flat test fixture, not a state machine
     struct Send {
         to_myself: bool,
         reachable: bool,
@@ -571,8 +442,7 @@ mod tests {
         last_ago: Option<Duration>,
     }
     impl Send {
-        // The "all gates pass" baseline. Proven by the first assert
-        // in `udp_send_gates`.
+        // "All gates pass" baseline; proven by the first assert in `udp_send_gates`.
         const PASS: Self = Self {
             to_myself: false,
             reachable: true,
@@ -612,32 +482,22 @@ mod tests {
         let s = |secs| Some(Duration::from_secs(secs));
 
         assert!( p.run(now),                                        "all gates pass");
-        // `:170` to == myself → would loop
         assert!(!Send { to_myself: true,       ..p }.run(now),      "to_myself blocks");
-        // `:174` unreachable → no path
         assert!(!Send { reachable: false,      ..p }.run(now),      "unreachable blocks");
-        // `:179` from==myself && to->connection → they know our addr from edge
         assert!(!Send { to_conn: true,         ..p }.run(now),      "directly_connected blocks");
-        // forwarding (from != myself) ignores `:179`
         assert!( Send { to_conn: true, from_myself: false, ..p }.run(now),
                                                                     "forwarding ignores directly_connected");
-        // `:183-187` debounce: sent 2s ago, interval 5s
+        // debounce: sent 2s ago, interval 5s
         assert!(!Send { last_ago: s(2),        ..p }.run(now),      "debounce suppresses");
-        // debounce passed: sent 6s ago
         assert!( Send { last_ago: s(6),        ..p }.run(now),      "debounce passed");
-        // forwarding ignores `:183`
         assert!( Send { last_ago: s(1), from_myself: false, ..p }.run(now),
                                                                     "forwarding ignores debounce");
-        // `:190` three-way TCPONLY OR
         assert!(!Send { my_opt:   ConnOptions::TCPONLY, ..p }.run(now),   "tcponly myself blocks");
         assert!(!Send { from_opt: ConnOptions::TCPONLY, ..p }.run(now),   "tcponly from blocks");
         assert!(!Send { to_opt:   ConnOptions::TCPONLY, ..p }.run(now),   "tcponly to blocks");
-        // `:194` nexthop minor < 5 → too old for UDP_INFO
         assert!(!Send { nexthop: MINOR_4,      ..p }.run(now),      "nexthop minor<5 blocks");
         assert!( Send { nexthop: MINOR_5,      ..p }.run(now),      "nexthop minor==5 ok");
     }
-
-    // ── UDP_INFO receive ───────────────────────────────────────────
 
     fn from_ok() -> FromState {
         FromState {
@@ -647,12 +507,8 @@ mod tests {
         }
     }
 
-    /// `on_receive_udp_info` decision table.
-    ///
-    /// Unparseable-addr divergence: upstream would yield `AF_UNKNOWN`
-    /// and trigger `update_node_udp` with garbage; we can't represent
-    /// `AF_UNKNOWN` as `SocketAddr` so we drop the learning.
-    /// Deliberate: garbage addresses don't propagate into our addr tree.
+    /// `on_receive_udp_info` decision table. Unparseable addresses drop
+    /// the learning so garbage never propagates into our address tree.
     #[test]
     #[rustfmt::skip]
     fn udp_recv_table() {
@@ -691,11 +547,8 @@ mod tests {
         }
     }
 
-    // ── MTU_INFO send gates ────────────────────────────────────────
-
     /// `should_send_mtu_info` gates. No TCPONLY check (UDP_INFO-only
-    /// gate). Minor gate is **6**
-    /// (`MTU_INFO` landed one release after `UDP_INFO`).
+    /// gate); minor-version gate is 6.
     #[test]
     fn mtu_send_gates() {
         let now = Instant::now();
@@ -703,17 +556,13 @@ mod tests {
         let ago = |s| Some(now.checked_sub(Duration::from_secs(s)).unwrap());
         let send = |last, nh| should_send_mtu_info(false, true, false, true, last, now, int, nh);
 
-        // happy path; also documents no-TCPONLY-check (no options param exists)
         assert!(send(None, MINOR_6), "all gates pass");
-        // `:299` minor gate is 6 not 5
         assert!(!send(None, MINOR_5), "nexthop minor<6 blocks");
         assert!(send(None, MINOR_6), "nexthop minor==6 ok");
         // separate debounce timestamp from UDP_INFO
         assert!(!send(ago(1), MINOR_6), "debounce suppresses");
         assert!(send(ago(10), MINOR_6), "debounce passed");
     }
-
-    // ── MTU adjust ─────────────────────────────────────────────────
 
     /// `adjust_mtu_for_send` branches.
     #[test]
@@ -738,8 +587,6 @@ mod tests {
             assert_eq!(adjust_mtu_for_send(mtu, via_my, from, via, nh), want, "{label}");
         }
     }
-
-    // ── MTU_INFO receive ───────────────────────────────────────────
 
     fn mkmtu(mtu: i32) -> MtuInfo {
         MtuInfo {

@@ -5,7 +5,7 @@
 //!
 //! ## Why this lives in `tinc-conf` not `tinc-tools`
 //!
-//! Four consumers in C:
+//! Four consumers:
 //!
 //! | Consumer | Uses |
 //! |---|---|
@@ -19,14 +19,12 @@
 //! which is `tinc-conf`'s domain. Putting it here means both binaries
 //! reach it without `tinc-tools` ← `tincd` or vice versa.
 //!
-//! ## Why not generate this from C
+//! ## Why the table is hand-maintained
 //!
-//! It's static data — 74 entries, never changes except when adding a
-//! config key (rare; daemon work). The C source IS the spec. Hand-
-//! transcription is one-shot work, and the test at the bottom counts
-//! entries and spot-checks flags so transcription drift gets caught.
-//! Generating it would mean either parsing C (fragile) or building +
-//! introspecting the C binary (a whole nix derivation for 74 lines).
+//! It's static data — 74 entries inherited from C tinc plus a few
+//! Rust-side keys, changing only when a config key is added. The test
+//! at the bottom counts entries and spot-checks flags so drift
+//! against C tinc gets caught.
 //!
 //! ## Flags as `u8` newtype, not `bitflags!`
 //!
@@ -38,11 +36,9 @@
 //!
 //! ## Lookup
 //!
-//! C does linear scan + `strcasecmp` everywhere. 74 entries, called
-//! once-per-config-line at fsck time or once-per-set-command. We do
-//! the same: linear scan, `eq_ignore_ascii_case` (not folded — the
-//! query strings come from parsed config, which already preserves
-//! case for error messages). Returns `Option<&'static Var>` so the
+//! Linear scan with `eq_ignore_ascii_case`: 74 entries, called
+//! once-per-config-line at fsck time or once-per-set-command, so no
+//! index is worth it. Returns `Option<&'static Var>` so the
 //! canonical-case `name` is available — `cmd_config` uses it to
 //! normalize `port` → `Port` in the file it writes.
 //!
@@ -51,18 +47,13 @@
 //!
 //! ## The table is NOT in canonical order
 //!
-//! C has it in two blocks: server-only first (alpha-ish), then the
-//! `VAR_HOST` ones. **`MTUInfoInterval` and `UDPInfoInterval` break
-//! alpha** in the server block (they're after `UDPDiscoveryTimeout`).
-//! We preserve the C order. fsck's duplicate-count uses `count[i]`
-//! indexed by table position — the *index* is stable across C and
-//! Rust if and only if the order matches. fsck doesn't compare its
-//! `count` array to a C-produced one (it's local), so divergence
-//! wouldn't break anything observable. But: free invariant, costs
-//! nothing, and "the table matches the C table" is easier to reason
-//! about than "the table is the C table sorted."
+//! Entry order (and therefore index) matches C tinc's `variables[]`
+//! table, including its alphabetical-order break at `MTUInfoInterval`
+//! / `UDPInfoInterval`. Nothing observable depends on the indices,
+//! but keeping them identical is a free invariant that makes
+//! comparing the two tables trivial; the tests pin it.
 //!
-/// Bitflags for config-key metadata. `tincctl.h:36-40`.
+/// Bitflags for config-key metadata.
 ///
 /// `u8` newtype — see module doc for why not `bitflags!`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -173,12 +164,11 @@ pub struct Var {
     pub flags: VarFlags,
 }
 
-// The table. C order preserved (see module doc). The {NULL, 0}
-// sentinel is just the slice end.
+// The table, in C tinc's order (see module doc).
 //
-// Spelling out the macro: `S` = SERVER, `H` = HOST, `M` = MULTIPLE,
-// `O` = OBSOLETE, `F` (saFe) = SAFE. Single-letter consts to keep
-// each row on one line — diff against the C is line-aligned that way.
+// `S` = SERVER, `H` = HOST, `M` = MULTIPLE, `O` = OBSOLETE,
+// `F` (saFe) = SAFE. Single-letter consts keep each row on one line
+// so the table stays diffable against C tinc's.
 
 #[allow(non_upper_case_globals)] // single-letter, scoped to this block
 const S: VarFlags = VarFlags::SERVER;
@@ -205,7 +195,7 @@ const fn v(name: &'static str, flags: VarFlags) -> Var {
 /// assert. If the assert fires *without* you adding one, you have a
 /// transcription error.
 pub static VARS: &[Var] = &[
-    // ─── Server configuration ───────────────────────────────────────
+    // Server configuration
     v("AddressFamily", S.union(F)),
     v("AutoConnect", S.union(F)),
     v("BindToAddress", S.union(M)),
@@ -254,8 +244,7 @@ pub static VARS: &[Var] = &[
     v("UDPDiscoveryKeepaliveInterval", S.union(F)),
     v("UDPDiscoveryInterval", S.union(F)),
     v("UDPDiscoveryTimeout", S.union(F)),
-    // ─── Alpha break: these two come after UDPDiscovery* ───────────
-    // (preserved from upstream order)
+    // Alpha break: these two come after UDPDiscovery* (C tinc order).
     v("MTUInfoInterval", S.union(F)),
     v("UDPInfoInterval", S.union(F)),
     v("UDPRcvBuf", S),
@@ -265,7 +254,7 @@ pub static VARS: &[Var] = &[
     v("UPnPRefreshPeriod", S),
     v("VDEGroup", S),
     v("VDEPort", S),
-    // ─── Host configuration ─────────────────────────────────────────
+    // Host configuration
     v("Address", H.union(M)),
     v("Cipher", S.union(H)),
     v("ClampMSS", S.union(H).union(F)),
@@ -282,18 +271,15 @@ pub static VARS: &[Var] = &[
     v("PublicKeyFile", S.union(H).union(O)),
     v("Subnet", H.union(M).union(F)),
     v("TCPOnly", S.union(H).union(F)),
-    // Upstream tags Weight HOST-only; we also read it from tinc.conf
+    // Weight is HOST-tagged in C tinc; we also read it from tinc.conf
     // as a global fallback (`settings.rs::global_weight`), so tag it
     // SERVER too or `tinc set Weight` / `fsck` would refuse/flag a
     // value the daemon legitimately consumes.
     v("Weight", S.union(H).union(F)),
-    // ─── End of C transcription. Rust-side extensions below. ───
-    // Appended, not interleaved: indices [0, 74) match the C array
-    // exactly (the spot_check test asserts the alpha-break boundary at
-    // [48]). Interleaving would shift those. fsck doesn't compare
-    // count[i] across implementations so the index stability is more
-    // documentation than mechanism, but "first 74 entries == C's 74
-    // entries" is the invariant the tripwire enforces.
+    // End of the C tinc table. Rust-side extensions below, appended
+    // rather than interleaved so indices [0, 74) keep matching the C
+    // array (the spot_check test asserts the alpha-break boundary at
+    // [48]).
     //
     // DhtBootstrap: SERVER+MULTIPLE (bootstrap nodes are a list, like
     // ConnectTo). NOT SAFE — an invitation that sets DhtBootstrap routes
@@ -336,26 +322,20 @@ pub static VARS: &[Var] = &[
     v("SPTPSKex", S.union(H)),
 ];
 
-/// Transcription tripwire. Upstream has 74 entries; +2 Rust-side keys
-/// (`DhtDiscovery`, `DhtBootstrap`) that upstream never reads. The 74
-/// check is the one that matters — drift here means a config key was
-/// added/removed upstream and our table
-/// is stale. The +N is fixed (this crate owns those keys).
+/// Tripwire: C tinc's table has 74 entries, plus our Rust-side keys.
+/// Drift in the 74 means a config key was added or removed in C tinc
+/// and this table is stale.
 const _: () = assert!(VARS.len() == 74 + 7);
 
-/// Look up by name, case-insensitive. C does this inline everywhere
-/// (`for(i=0; variables[i].name; i++) if(!strcasecmp(...))`). We
-/// give it a name.
+/// Look up by name, case-insensitive.
 ///
 /// Returns `Option<&'static Var>` — the `&'static` matters for
 /// `cmd_config`'s canonicalization: `lookup("port").unwrap().name`
 /// gives `"Port"` with `'static` lifetime, no clone needed.
 ///
 /// `None` for unknown keys. fsck *skips* unknowns — intentional: a
-/// typo'd key
-/// doesn't crash, it's just inert (and the actual `Config::lookup`
-/// finds nothing, so the daemon ignores it). Surfacing "unknown key"
-/// as a warning is a feature request, not a port — the C doesn't.
+/// typo'd key doesn't crash, it's just inert (the daemon's
+/// `Config::lookup` finds nothing and ignores it).
 #[must_use]
 pub fn lookup(name: &str) -> Option<&'static Var> {
     VARS.iter().find(|v| v.name.eq_ignore_ascii_case(name))
@@ -406,9 +386,8 @@ mod tests {
         // SERVER | HOST | OBSOLETE.
         assert_eq!(lookup("PublicKeyFile").unwrap().flags, S | H | O);
 
-        // The alpha-break boundary. MTUInfoInterval is at index 48
-        // upstream (zero-indexed). Verify our index matches — proves
-        // order preservation, not just content.
+        // The alpha-break boundary: MTUInfoInterval must sit at index
+        // 48, proving order matches C tinc's table, not just content.
         assert_eq!(VARS[48].name, "MTUInfoInterval");
         assert_eq!(VARS[49].name, "UDPInfoInterval");
     }

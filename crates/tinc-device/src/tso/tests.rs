@@ -1,9 +1,8 @@
 #![allow(clippy::cast_possible_truncation)] // test packet builders: u8/u16 header field consts
 use super::*;
 
-/// Decode the wg-go test vectors' header shapes. wg-go
-/// `offload_linux_test.go:179` "tcp4" case: `csum_start=20`
-/// (IPv4 hdr), `csum_offset=16` (TCP `th_sum`), `gso_size=100`.
+/// Decode a typical TSO header: `csum_start=20` (IPv4 hdr),
+/// `csum_offset=16` (TCP `th_sum`), `gso_size=100`.
 #[test]
 fn vnet_hdr_decode() {
     // flags=NEEDS_CSUM(1), gso=TCPV4(1), hdr_len=40, gso_size=100,
@@ -60,7 +59,7 @@ fn checksum_chains() {
     assert_eq!(direct, chained);
 }
 
-// ─── packet builders for tso_split tests ───────────────────
+// packet builders for tso_split tests
 
 /// IPv4 + TCP + `payload_len` bytes of `0xAA`. Minimal headers
 /// (20 + 20). seq=1000, ACK+PSH set. Checksums valid.
@@ -183,10 +182,9 @@ fn verify_v4_seg(frame: &[u8], expect_id: u16, expect_seq: u32, expect_payload_l
     assert_eq!(recomputed.to_be_bytes(), stored, "TCP csum");
 }
 
-// ─── tso_split: the main cases ─────────────────────────────
+// tso_split: the main cases
 
 /// IPv4, 200 bytes payload, `gso_size=100` → 2 segments of 100.
-/// wg-go `offload_linux_test.go:179` "tcp4" case shape.
 #[test]
 fn split_v4_even() {
     let pkt = build_v4_tcp(200);
@@ -329,7 +327,7 @@ fn split_seq_wraps() {
     assert_eq!(s1, 0xFFFF_FFE4);
 }
 
-// ─── tso_split: error paths ────────────────────────────────
+// tso_split: error paths
 
 #[test]
 fn split_errors() {
@@ -384,7 +382,7 @@ fn gso_none_completes_partial_csum() {
     assert_eq!(checksum(&tcp, pseudo).to_be_bytes(), stored);
 }
 
-// ─── GRO bucket ─────────────────────────────────────────────────
+// GRO bucket
 
 /// Build N adjacent v4 TCP segments à la what a peer's `tso_split`
 /// would emit. seq starts at 1000, each segment carries
@@ -532,8 +530,7 @@ fn gro_single_packet_zero_vnet_hdr() {
     assert_eq!(&out[VNET_HDR_LEN..], &segs[0][..]);
 }
 
-/// Reject criteria. Each is a wg-go check; each is a
-/// kernel-contract requirement (`gro.c` selftests).
+/// Reject criteria: each is a kernel-contract requirement.
 #[test]
 fn gro_rejects() {
     let mut b = GroBucket::new();
@@ -574,8 +571,7 @@ fn gro_flush_on_mismatch() {
     let mut b = GroBucket::new();
     assert_eq!(b.offer(&segs[0]), GroVerdict::Coalesced);
 
-    // Same everything but ack=43 (was 42). wg-go: separate
-    // flow key.
+    // Same everything but ack=43 (was 42): different flow key.
     let mut other = segs[1].clone();
     other[28..32].copy_from_slice(&43u32.to_be_bytes());
     assert_eq!(b.offer(&other), GroVerdict::FlushFirst);

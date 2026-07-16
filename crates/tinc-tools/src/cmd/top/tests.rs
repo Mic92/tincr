@@ -148,8 +148,8 @@ fn departed_node_stays_dim() {
     assert_eq!(s.display_order.len(), 2); // also never shrinks
 }
 
-/// u64 - u64 wraps on counter decrease (daemon restart).
-/// `wrapping_sub`. The spike is upstream's behavior.
+/// u64 - u64 wraps on counter decrease (daemon restart); the spike is
+/// intentional (see module doc).
 #[test]
 fn counter_decrease_wraps() {
     let mut s = Stats::default();
@@ -310,7 +310,7 @@ fn render_header_row2_text() {
 fn render_row_attribute_logic() {
     let stats = Stats::default();
 
-    // ─── Gone: known=false → DIM
+    // Gone: known=false → DIM
     let gone = NodeStats {
         known: false,
         ..Default::default()
@@ -319,7 +319,7 @@ fn render_row_attribute_logic() {
     assert!(r.contains("\x1b[2m")); // DIM
     assert!(!r.contains("\x1b[1m")); // not BOLD
 
-    // ─── Idle: known=true, rate=0 → no SGR (NORMAL)
+    // Idle: known=true, rate=0 → no SGR (NORMAL)
     let idle = NodeStats {
         known: true,
         ..Default::default()
@@ -328,7 +328,7 @@ fn render_row_attribute_logic() {
     assert!(!r.contains("\x1b[2m")); // not DIM
     assert!(!r.contains("\x1b[1m")); // not BOLD
 
-    // ─── Active: known=true, in_packets_rate > 0 → BOLD
+    // Active: known=true, in_packets_rate > 0 → BOLD
     let active = NodeStats {
         known: true,
         in_packets_rate: 100.0,
@@ -337,7 +337,7 @@ fn render_row_attribute_logic() {
     let r = render_row("carol", &active, &stats, 3);
     assert!(r.contains("\x1b[1m")); // BOLD
 
-    // ─── Out only: known=true, out_packets_rate > 0 → BOLD
+    // Out only: known=true, out_packets_rate > 0 → BOLD
     // `||` of in OR out.
     let out_only = NodeStats {
         known: true,
@@ -347,12 +347,11 @@ fn render_row_attribute_logic() {
     let r = render_row("dave", &out_only, &stats, 3);
     assert!(r.contains("\x1b[1m")); // BOLD
 
-    // ─── Bytes-only nonzero → NORMAL
+    // Bytes-only nonzero → NORMAL
     // The check is on PACKETS rate, not bytes. "Nonzero bytes
     // implies nonzero packets" is true for real traffic. But
-    // synthetic stats can have bytes!=0, packets==0 (impossible
-    // in nature, possible here). Test that we replicate the
-    // upstream check, not the "obvious" check.
+    // synthetic stats can have bytes!=0, packets==0. Pin that the
+    // check looks at packet rates, not byte rates.
     let bytes_only = NodeStats {
         known: true,
         in_bytes_rate: 1000.0,

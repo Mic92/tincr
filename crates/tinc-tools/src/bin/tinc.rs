@@ -2,10 +2,9 @@
 //!
 //! ## Dispatch
 //!
-//! The dispatch table (`COMMANDS`) is the same shape as upstream's
-//! `commands[]` array; adding a command is one entry + one module in
-//! `cmd/`. The argv parsing and `Paths` resolution are done once,
-//! here, and every command gets them pre-chewed.
+//! Adding a command is one `COMMANDS` entry + one module in `cmd/`. The
+//! argv parsing and `Paths` resolution are done once, here, and every
+//! command gets them pre-chewed.
 //!
 //! Each entry carries a `Run` variant that encodes the command's
 //! arity. `main` validates the positional count centrally and hands
@@ -26,17 +25,16 @@
 //! that `tinc -n foo init bar` and `tinc init -n foo bar` and
 //! `NETNAME=foo tinc init bar` all work the same as the C.
 //!
-//! Well — almost. C's `getopt_long` with `"+bc:n:"` (the `+` means
-//! "stop at first non-option") only accepts global options *before*
-//! the subcommand. We do the same: `tinc init -n foo bar` would treat
-//! `-n` as a positional for `init`. That's the C behavior (`+` mode).
-//! It's also what users expect from `git`-style CLIs (`git -C dir
+//! Well — almost. Global options are only accepted *before* the
+//! subcommand (like C tinc): `tinc init -n foo bar` treats `-n` as a
+//! positional for `init`. It's also what users expect from `git`-style
+//! CLIs (`git -C dir
 //! commit` not `git commit -C dir`).
 //!
 //! ## Exit codes
 //!
-//! Upstream returns 1 on any error. So do we. There's no
-//! granular exit code tradition to preserve.
+//! Any error exits 1, matching C tinc; there is no granular exit-code
+//! tradition to preserve.
 
 #![forbid(unsafe_code)]
 
@@ -203,7 +201,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: Run::Any(cmd_join),
         help: "join INVITATION        Join a VPN using an invitation.",
     },
-    // ─── daemon RPC
+    // daemon RPC
     // `start`/`restart`: not really daemon-RPC (they *spawn* the
     // daemon) but `needs_daemon: true` gets us `resolve_runtime()`
     // — `cmd::start` needs `paths.pidfile()` and `paths.unix_socket()`
@@ -263,17 +261,12 @@ const COMMANDS: &[CmdEntry] = &[
         run: Run::N1("node name", cmd::ctl_simple::disconnect),
         help: "disconnect NODE        Close meta connection with NODE.",
     },
-    // ─── cmd_config: get/set/add/del + the `config` umbrella
-    // Five entries route to one function. Upstream does `if(strcasecmp(argv[0], "config")) { argv--; argc++; }`
-    // — if you typed `tinc add Foo bar`, shift argv back so
-    // `argv[1]` is `add` again, then dispatch on it. We do the
-    // shift in cmd_config_dispatch.
+    // cmd_config: get/set/add/del + the `config` umbrella.
+    // Five entries route to one function via cmd_config_dispatch.
     //
-    // `needs_daemon: true` for ALL of them — even `get` (it might
-    // hit the Port-from-pidfile path). The `set`/`add`/`del` need
-    // it for the post-edit reload. Upstream's `ctl` is `true` only
-    // for `config`; the aliases are `false`. Inconsistent (the
-    // author probably forgot). We're consistent: all `true`.
+    // `needs_daemon: true` for all of them — even `get` (it might hit
+    // the Port-from-pidfile path); set/add/del need it for the
+    // post-edit reload.
     CmdEntry {
         name: "get",
         needs_daemon: true,
@@ -307,14 +300,13 @@ const COMMANDS: &[CmdEntry] = &[
         run: Run::Any(cmd_config_umbrella),
         help: "",
     },
-    // ─── dump: nodes/edges/subnets/connections/graph/invitations
+    // dump: nodes/edges/subnets/connections/graph/invitations
     // `dump` and `list` both → cmd_dump.
     //
     // `needs_daemon: true` even though `dump invitations` is pure
-    // readdir. Upstream has `ctl=false` and connects INSIDE cmd_dump
-    // after the kind switch. We can't — `resolve_runtime` is `&mut`.
-    // So: resolve unconditionally. `dump invitations` pays one
-    // harmless `access(2)` probe and never calls `pidfile()`.
+    // readdir: `resolve_runtime` is `&mut`, so it runs unconditionally.
+    // `dump invitations` pays one harmless access(2) probe and never
+    // calls `pidfile()`.
     CmdEntry {
         name: "dump",
         needs_daemon: true,
@@ -360,7 +352,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: Run::Opt(cmd_pcap),
         help: "pcap [snaplen]              Dump traffic in pcap format [up to snaplen bytes per packet]",
     },
-    // ─── edit: spawn $EDITOR on a config file, then reload
+    // edit: spawn $EDITOR on a config file, then reload
     // `needs_daemon: true` so the pidfile path gets resolved (the
     // silent reload needs it). The connect-can-fail is INSIDE
     // cmd::edit::run.
@@ -370,7 +362,7 @@ const COMMANDS: &[CmdEntry] = &[
         run: Run::N1("FILE", cmd::edit::run),
         help: "edit FILE                   Edit a config file with $VISUAL/$EDITOR/vi",
     },
-    // ─── version, help: trivial dispatchers
+    // version, help: trivial dispatchers
     // Help text is empty: listing `help` in `--help`'s output is
     // recursive; the user already found it.
     CmdEntry {
@@ -385,11 +377,8 @@ const COMMANDS: &[CmdEntry] = &[
         run: Run::Any(cmd_help),
         help: "",
     },
-    // ─── network: list networks under confdir
-    // Upstream has TWO modes (list / switch); we only have list. The
-    // switch is C-behavior-drop #2 — only useful in the readline
-    // loop, which we don't have. `tinc network NAME` errors with
-    // "use -n NAME" advice.
+    // network: list networks under confdir. Switch mode is not
+    // supported; `tinc network NAME` errors with "use -n NAME" advice.
     CmdEntry {
         name: "network",
         needs_daemon: false,
@@ -398,12 +387,10 @@ const COMMANDS: &[CmdEntry] = &[
     },
 ];
 
-// ─────────────────────────────────────────────────────────────────────
 // Adapters that can't point straight at a `cmd::*` function: they
 // read `Globals`, print to stdout/stderr, parse a sub-argument, or
 // have irregular arity. Everything else is wired directly in the
 // table above.
-// ─────────────────────────────────────────────────────────────────────
 
 /// Arity guard for the few `Run::Any` handlers that still want zero
 /// positionals but also need `&Globals`.
@@ -556,8 +543,7 @@ fn cmd_restart(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdErr
     cmd::start::restart(paths, args)
 }
 
-/// `debug`: with arg, set level; without, query (our extension —
-/// upstream requires the arg, but the daemon already supports `-1`
+/// `debug`: with arg, set level; without, query (the daemon supports `-1`
 /// as "return current without changing").
 fn cmd_debug(paths: &Paths, arg: Option<&str>) -> Result<(), CmdError> {
     let level = match arg {
@@ -642,8 +628,8 @@ fn cmd_del(p: &Paths, g: &Globals, a: &[String]) -> Result<(), CmdError> {
 }
 
 /// `tinc config <verb> ...`. The umbrella form. `tinc config Port`
-/// (no verb) → default GET. `replace`/`change` are aliases for `set`
-/// — only available here, not as toplevel commands; same as upstream.
+/// (no verb) → default GET. `replace`/`change` are aliases for `set`,
+/// only available here, not as toplevel commands.
 fn cmd_config_umbrella(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
     use cmd::config::Action;
 
@@ -720,9 +706,8 @@ fn cmd_top(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> 
     cmd::top::run(paths, g.netname.as_deref())
 }
 
-/// `tinc log` → daemon's level. `tinc log 5` → filter at 5.
-/// `parse::<i32>()` rejects garbage; C's `atoi` returns 0. The
-/// change is observable only for invalid input — better.
+/// `tinc log` → daemon's level. `tinc log 5` → filter at 5. Garbage
+/// levels are rejected rather than silently treated as 0.
 fn cmd_log(paths: &Paths, arg: Option<&str>) -> Result<(), CmdError> {
     let level = arg
         .map(|lvl| {
@@ -752,7 +737,7 @@ fn cmd_version(_: &Paths) -> Result<(), CmdError> {
     Ok(())
 }
 
-/// Upstream IGNORES args; `tinc help foo` ≡ `tinc help`.
+/// Args are ignored; `tinc help foo` ≡ `tinc help`.
 #[expect(clippy::unnecessary_wraps)]
 fn cmd_help(_: &Paths, _: &Globals, _: &[String]) -> Result<(), CmdError> {
     print_help();
@@ -1015,8 +1000,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         None => {
-            // Upstream enters interactive shell mode here. We don't
-            // have shell mode; print help, exit 1 (like bare `git`).
+            // No interactive shell mode; print help, exit 1 (like bare `git`).
             eprintln!("No command given.");
             eprintln!("Try `tinc --help' for more information.");
             return ExitCode::FAILURE;

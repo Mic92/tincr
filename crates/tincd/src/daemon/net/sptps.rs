@@ -577,7 +577,7 @@ impl Daemon {
             || (!direct && !relay_supported)
             || too_big;
 
-        // ── relay_tx_bytes ─────────────────────────────────────────
+        // relay_tx_bytes.
         // Autoconnect-shortcut signal: bytes WE originated for `to`
         // that left via a relay (not direct). `!direct` already
         // encodes "from==myself && relay!=to"; the only exclusions

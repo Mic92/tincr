@@ -236,11 +236,11 @@ impl Daemon {
     fn recvmmsg_batch(&mut self, i: u8, batch: &mut UdpRxBatch) -> usize {
         let fd = self.listeners[usize::from(i)].listener.udp.as_raw_fd();
 
-        // ─── Phase 1: syscall + extract (len, peer) per message.
+        // Phase 1: syscall + extract (len, peer) per message.
         let mut meta: [(u16, Option<SocketAddr>); UDP_RX_BATCH] = [(0u16, None); UDP_RX_BATCH];
         let count = Self::udp_recv_phase1(fd, batch, &mut meta);
 
-        // ─── Phase 2: dispatch. iov borrows are dead; `batch.bufs`
+        // Phase 2: dispatch. iov borrows are dead; `batch.bufs`.
         // is now free to read while we hold `&mut self`.
         //
         // GRO TUN write: arm the coalescer for the duration
@@ -291,7 +291,7 @@ impl Daemon {
             }
             let pkt = &batch.bufs[idx][..n];
 
-            // ─── RX fast-path attempt. rx_probe walks the gate
+            // RX fast-path attempt. rx_probe walks the gate.
             // chain (slowpath_all/dst_null/src_known/tunnel/udp_addr);
             // rx_open decrypts + post-gates + replay-commits. On Ok
             // we have `[eth:14][IP]` in rx_fast_scratch ready for
@@ -327,7 +327,7 @@ impl Daemon {
                 continue;
             }
 
-            // ─── Slow path. Flush staged TUN writes first so a
+            // Slow path. Flush staged TUN writes first so a.
             // slow-path `device.write` doesn't reorder past staged
             // fast-path frames from the same flow.
             if let Err(e) = self.device.write_flush() {
@@ -369,7 +369,7 @@ impl Daemon {
     /// for relay we never decrypt, so this gate is the only thing
     /// stopping a 1:1 UDP reflector attack (security audit `2f72c2ba`).
     fn handle_incoming_vpn_packet(&mut self, pkt: &[u8], peer: Option<SocketAddr>) {
-        // ─── DHT port-probe demux (Rust extension). Gate is source
+        // DHT port-probe demux (Rust extension). Gate is source.
         // addr, NOT `pkt[0]==b'd'`: SPTPS's first byte is dst_id6[0] =
         // sha512(name)[:6][0], uniformly random; ~1/256 of legitimate
         // traffic starts with 'd'. Spoofing a known target's source addr

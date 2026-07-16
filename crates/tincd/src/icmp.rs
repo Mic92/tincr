@@ -8,25 +8,22 @@
 //! the ICMP body (RFC 792 §3: "Internet Header + 64 bits of Original
 //! Data Datagram").
 //!
-//! Upstream mutates the `vpn_packet_t` in place — `memmove` the
-//! quote down, overwrite the front, write back. We build a fresh
-//! `Vec`: this fires at most 3×/sec ([`IcmpRateLimit`]), alloc
-//! doesn't matter.
+//! Packets are built into a fresh `Vec`: this fires at most 3×/sec
+//! ([`IcmpRateLimit`]), so allocation doesn't matter.
 //!
 //! ## TTL-exceeded source-address override
 //!
-//! TTL-exceeded does a `socket()/connect()/getsockname()` trick to
-//! discover which local IP the kernel would use to reach the
-//! original sender — that becomes the ICMP source so `traceroute`
-//! shows our hop correctly. Only matters when we're a HOP in the
-//! middle (`DecrementTTL=yes` + TTL hit zero), not the endpoint.
-//! Without it, original-dst-as-src means traceroute shows the final
-//! destination at every relay hop.
+//! For TTL-exceeded the daemon discovers which local IP the kernel
+//! would use to reach the original sender — that becomes the ICMP
+//! source so `traceroute` shows our hop correctly. Only matters when
+//! we're a hop in the middle (`DecrementTTL=yes` + TTL hit zero), not
+//! the endpoint. Without it, original-dst-as-src means traceroute
+//! shows the final destination at every relay hop.
 //!
-//! That trick is I/O; this module is `#![forbid(unsafe_code)]` and
-//! pure. The daemon does the discovery (`daemon/net.rs::
-//! local_ip_facing`) and passes the result as the `src_override` 5th
-//! param. `None` = current behavior (orig dst as ICMP source).
+//! That discovery is I/O; this module is pure. The daemon
+//! (`daemon/net.rs::local_ip_facing`) passes the result as
+//! `src_override`. `None` = use the original destination as ICMP
+//! source.
 
 #![forbid(unsafe_code)]
 
@@ -34,12 +31,10 @@ use zerocopy::{FromBytes, IntoBytes};
 
 use crate::packet::{Icmp6Hdr, IcmpHdr, Ipv4Hdr, Ipv6Hdr, Ipv6Pseudo, inet_checksum};
 
-// ── Sizes ──────────────────────────────────────────────────────────
-
 const ETHER_SIZE: usize = 14;
 const IP_SIZE: usize = 20;
 
-/// `swap_mac_addresses`: dst←orig src, src←orig dst, ethertype copied.
+/// Reply ethernet header: dst←orig src, src←orig dst, ethertype copied.
 /// Caller has already length-checked `original` to ≥ `ETHER_SIZE`.
 fn eth_reply_hdr(original: &[u8]) -> [u8; ETHER_SIZE] {
     let mut eth = [0u8; ETHER_SIZE];
@@ -49,26 +44,22 @@ fn eth_reply_hdr(original: &[u8]) -> [u8; ETHER_SIZE] {
     eth
 }
 
-/// `struct icmp` is 28 bytes (8 hdr + 20 quoted-IP tail in the
-/// union); we use only the first 8.
 const ICMP_SIZE: usize = 8;
 const IP6_SIZE: usize = 40;
 const ICMP6_SIZE: usize = 8;
-/// `IP_MSS` — `ipv4.h:88`. RFC 791: "Every internet module must be
-/// able to forward a datagram of 576 octets". Used as the cap for
-/// the synthesized error packet's total IP length.
+/// RFC 791: "Every internet module must be able to forward a datagram
+/// of 576 octets". Cap for the synthesized error packet's total IP
+/// length.
 const IP_MSS: usize = 576;
 
 const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_ICMPV6: u8 = 58;
 
-// ── IPv4 unreachable ───────────────────────────────────────────────
-
 /// Max bytes of the original IP datagram quoted in the ICMP body.
 /// `IP_MSS - ip_size - icmp_size` = 576−20−8.
 pub(crate) const V4_QUOTE_CAP: usize = IP_MSS - IP_SIZE - ICMP_SIZE; // 548
 
-/// `route_ipv4_unreachable`. RFC 792.
+/// Build an `ICMPv4` error packet (RFC 792).
 ///
 /// `original` is the full ethernet frame as read from the TUN
 /// (eth hdr + IP hdr + payload). Returns a new ethernet frame:
@@ -77,14 +68,14 @@ pub(crate) const V4_QUOTE_CAP: usize = IP_MSS - IP_SIZE - ICMP_SIZE; // 548
 /// then up to [`V4_QUOTE_CAP`] bytes of the original IP datagram.
 ///
 /// `frag_mtu`: `Some(mtu)` for `(DEST_UNREACH, FRAG_NEEDED)` —
-/// fills `icmp.nextmtu`. `None` otherwise. We take it as a
-/// parameter so the caller can decide.
+/// fills `icmp.nextmtu`. `None` otherwise. Taken as a parameter so
+/// the caller can decide.
 ///
 /// Returns `None` if `original` is too short to contain an eth +
-/// IPv4 header (`route.c` guards with `checklength` upstream).
+/// IPv4 header.
 ///
-/// `src_override`: `Some(addr)` overrides the ICMP packet's IP
-/// source (TTL-exceeded `getsockname` dance, done by the caller).
+/// `src_override`: `Some(addr)` overrides the ICMP packet's IP source
+/// (TTL-exceeded case; the caller discovers the local address).
 /// `None` = use original-dst.
 #[must_use]
 pub(crate) fn build_v4_unreachable(
@@ -94,64 +85,53 @@ pub(crate) fn build_v4_unreachable(
     frag_mtu: Option<u16>,
     src_override: Option<[u8; 4]>,
 ) -> Option<Vec<u8>> {
-    // Need at least eth + IP hdr to parse src/dst (`:140`).
+    // Need at least eth + IP hdr to parse src/dst.
     if original.len() < ETHER_SIZE + IP_SIZE {
         return None;
     }
 
     let eth = eth_reply_hdr(original);
 
-    // ─── Parse original IP hdr (`:140`: memcpy(&ip, ...)).
     // Length checked above; .ok()? is unreachable but quiets clippy.
     let orig_ip_bytes: &[u8; IP_SIZE] =
         original[ETHER_SIZE..ETHER_SIZE + IP_SIZE].try_into().ok()?;
     let orig_ip = Ipv4Hdr::read_from_bytes(orig_ip_bytes).ok()?;
-    // `:144-145`: remember original src/dst. `:148-169`: caller may
-    // override the dst (= our reply's src) for TIME_EXCEEDED —
-    // mirrors C's `ip_dst = addr.sin_addr` after getsockname().
+    // Reply source is the original destination unless the caller
+    // overrides it (TTL-exceeded case).
     let ip_src = orig_ip.ip_src;
     let ip_dst = src_override.unwrap_or(orig_ip.ip_dst);
 
-    // ─── Quote length (`:170,176-178`).
-    // `oldlen = packet->len - ether_size`: the whole original IP
-    // datagram (header + payload). Capped at IP_MSS - 28.
+    // Quote the whole original IP datagram (header + payload), capped.
     let oldlen = (original.len() - ETHER_SIZE).min(V4_QUOTE_CAP);
     let quote = &original[ETHER_SIZE..ETHER_SIZE + oldlen];
 
-    // ─── Build new IP hdr (`:186-196`).
     let mut ip = Ipv4Hdr::default();
-    ip.set_vhl(4, 5); // :186-187: ip_hl = ip_size/4 = 20/4
-    ip.ip_tos = 0; // :188
-    // truncation: 20+8+548 = 576 < u16::MAX
-    #[expect(clippy::cast_possible_truncation)] // oldlen capped at V4_QUOTE_CAP=548
-    ip.set_total_len((IP_SIZE + ICMP_SIZE + oldlen) as u16); // :189
-    ip.set_id(0); // :190
-    ip.set_off(0); // :191
-    ip.ip_ttl = 255; // :192
-    ip.ip_p = IPPROTO_ICMP; // :193
-    ip.ip_sum = 0; // :194
-    ip.ip_src = ip_dst; // :195 — SWAPPED
-    ip.ip_dst = ip_src; // :196
-    // `:198`: `ip.ip_sum = inet_checksum(&ip, ip_size, 0xFFFF)`.
+    ip.set_vhl(4, 5);
+    ip.ip_tos = 0;
+    #[expect(clippy::cast_possible_truncation)] // 20+8+548 = 576 < u16::MAX
+    ip.set_total_len((IP_SIZE + ICMP_SIZE + oldlen) as u16);
+    ip.set_id(0);
+    ip.set_off(0);
+    ip.ip_ttl = 255;
+    ip.ip_p = IPPROTO_ICMP;
+    ip.ip_sum = 0;
+    ip.ip_src = ip_dst; // swapped
+    ip.ip_dst = ip_src;
     ip.ip_sum = inet_checksum(ip.as_bytes(), 0xFFFF);
 
-    // ─── Build ICMP hdr (`:173-175,202-208`).
     let mut icmp = IcmpHdr::default();
-    icmp.icmp_type = icmp_type; // :202
-    icmp.icmp_code = icmp_code; // :203
-    icmp.icmp_cksum = 0; // :204
-    // `:173-175`: only for FRAG_NEEDED. The C reads packet->len -
-    // ether_size (the *original* IP datagram length, BEFORE the cap
-    // at :176). We take it as a parameter.
+    icmp.icmp_type = icmp_type;
+    icmp.icmp_code = icmp_code;
+    icmp.icmp_cksum = 0;
+    // Only set for FRAG_NEEDED; the caller supplies the value.
     if let Some(mtu) = frag_mtu {
         icmp.set_nextmtu(mtu);
     }
-    // `:206-208`: chain ICMP hdr + quote.
+    // Checksum covers ICMP header + quoted datagram.
     let mut ck = inet_checksum(icmp.as_bytes(), 0xFFFF);
     ck = inet_checksum(quote, ck);
     icmp.icmp_cksum = ck;
 
-    // ─── Assemble (`:213-216`).
     let mut out = Vec::with_capacity(ETHER_SIZE + IP_SIZE + ICMP_SIZE + oldlen);
     out.extend_from_slice(&eth);
     out.extend_from_slice(ip.as_bytes());
@@ -160,13 +140,11 @@ pub(crate) fn build_v4_unreachable(
     Some(out)
 }
 
-// ── IPv6 unreachable ───────────────────────────────────────────────
-
 /// Max bytes of the original IPv6 datagram quoted in the `ICMPv6` body.
 /// `IP_MSS - ip6_size - icmp6_size` = 576−40−8.
 pub(crate) const V6_QUOTE_CAP: usize = IP_MSS - IP6_SIZE - ICMP6_SIZE; // 528
 
-/// `route_ipv6_unreachable`. RFC 4443.
+/// Build an `ICMPv6` error packet (RFC 4443).
 ///
 /// Same shape as [`build_v4_unreachable`] but the `ICMPv6` checksum
 /// includes a pseudo-header (RFC 4443 §2.3 → RFC 2460 §8.1):
@@ -174,12 +152,12 @@ pub(crate) const V6_QUOTE_CAP: usize = IP_MSS - IP6_SIZE - ICMP6_SIZE; // 528
 /// Uses [`Ipv6Pseudo`].
 ///
 /// `pkt_too_big_mtu`: `Some(mtu)` for `ICMP6_PACKET_TOO_BIG` —
-/// fills `icmp6.icmp6_mtu`. We take it as a parameter.
+/// fills `icmp6.icmp6_mtu`.
 ///
 /// Returns `None` if `original` is too short for eth + IPv6 hdr.
 ///
 /// `src_override`: `Some(addr)` overrides the ICMP packet's IPv6
-/// source (TTL-exceeded `getsockname` dance, done by the caller).
+/// source (TTL-exceeded case; the caller discovers the local address).
 /// `None` = use original-dst.
 #[must_use]
 pub(crate) fn build_v6_unreachable(
@@ -195,66 +173,53 @@ pub(crate) fn build_v6_unreachable(
 
     let eth = eth_reply_hdr(original);
 
-    // ─── Parse original IPv6 hdr (`:244`).
     // Length checked above; .ok()? is unreachable but quiets clippy.
     let orig_ip6_bytes: &[u8; IP6_SIZE] = original[ETHER_SIZE..ETHER_SIZE + IP6_SIZE]
         .try_into()
         .ok()?;
     let orig_ip6 = Ipv6Hdr::read_from_bytes(orig_ip6_bytes).ok()?;
 
-    // `:248-249`: remember swapped. The C stores them directly in
-    // `pseudo.ip6_src/dst` and reuses that struct; we keep locals.
-    // `:254-275`: caller may override new_src for TIME_EXCEEDED —
-    // mirrors C's `pseudo.ip6_src = addr.sin6_addr` post-getsockname.
+    // Reply source is the original destination unless the caller
+    // overrides it (TTL-exceeded case).
     let new_src = src_override.unwrap_or(orig_ip6.ip6_dst);
     let new_dst = orig_ip6.ip6_src;
 
-    // ─── Quote length (`:277,282-284`).
     let quote_len = (original.len() - ETHER_SIZE).min(V6_QUOTE_CAP);
     let quote = &original[ETHER_SIZE..ETHER_SIZE + quote_len];
 
-    // ─── Build new IPv6 hdr (`:292-297`).
     let mut ip6 = Ipv6Hdr::default();
-    ip6.set_flow(0x6000_0000); // :292
-    // truncation: 8+528 = 536 < u16::MAX
-    #[expect(clippy::cast_possible_truncation)] // quote_len capped at V6_QUOTE_CAP
-    ip6.set_plen((ICMP6_SIZE + quote_len) as u16); // :293
-    ip6.ip6_nxt = IPPROTO_ICMPV6; // :294
-    ip6.ip6_hlim = 255; // :295
-    ip6.ip6_src = new_src; // :296
-    ip6.ip6_dst = new_dst; // :297
+    ip6.set_flow(0x6000_0000);
+    #[expect(clippy::cast_possible_truncation)] // 8+528 = 536 < u16::MAX
+    ip6.set_plen((ICMP6_SIZE + quote_len) as u16);
+    ip6.ip6_nxt = IPPROTO_ICMPV6;
+    ip6.ip6_hlim = 255;
+    ip6.ip6_src = new_src;
+    ip6.ip6_dst = new_dst;
     // No IPv6 header checksum.
 
-    // ─── Build ICMPv6 hdr (`:278-280,301-303`).
     let mut icmp6 = Icmp6Hdr::default();
-    icmp6.icmp6_type = icmp_type; // :301
-    icmp6.icmp6_code = icmp_code; // :302
-    icmp6.icmp6_cksum = 0; // :303
+    icmp6.icmp6_type = icmp_type;
+    icmp6.icmp6_code = icmp_code;
+    icmp6.icmp6_cksum = 0;
     if let Some(mtu) = pkt_too_big_mtu {
-        icmp6.set_mtu(mtu); // :279
+        icmp6.set_mtu(mtu);
     }
 
-    // ─── Pseudo-header checksum (`:307-316`).
-    // RFC 2460 §8.1: src + dst + upper-layer-len + next.
-    // The C reuses `pseudo.length` for two purposes: first the quote
-    // length (host order), then htonl(icmp6_size + quote) for the
-    // checksum. We just build it directly.
+    // Pseudo-header checksum (RFC 2460 §8.1): src + dst +
+    // upper-layer-len + next.
     let mut pseudo = Ipv6Pseudo::default();
     pseudo.ip6_src = new_src;
     pseudo.ip6_dst = new_dst;
-    // `:308`: `pseudo.length = htonl(icmp6_size + pseudo.length)`.
-    // truncation: 8+528 = 536 < u32::MAX
-    #[expect(clippy::cast_possible_truncation)] // quote_len capped at V6_QUOTE_CAP
+    #[expect(clippy::cast_possible_truncation)] // 8+528 = 536 < u32::MAX
     pseudo.set_length((ICMP6_SIZE + quote_len) as u32);
-    pseudo.set_next(u32::from(IPPROTO_ICMPV6)); // :309
+    pseudo.set_next(u32::from(IPPROTO_ICMPV6));
 
-    // `:313-315`: chain pseudo → icmp6 hdr → quote.
+    // Checksum covers pseudo-header, ICMPv6 header, and quote.
     let mut ck = inet_checksum(pseudo.as_bytes(), 0xFFFF);
     ck = inet_checksum(icmp6.as_bytes(), ck);
     ck = inet_checksum(quote, ck);
     icmp6.icmp6_cksum = ck;
 
-    // ─── Assemble (`:320-323`).
     let mut out = Vec::with_capacity(ETHER_SIZE + IP6_SIZE + ICMP6_SIZE + quote_len);
     out.extend_from_slice(&eth);
     out.extend_from_slice(ip6.as_bytes());
@@ -263,13 +228,8 @@ pub(crate) fn build_v6_unreachable(
     Some(out)
 }
 
-// ── Rate limit ─────────────────────────────────────────────────────
-
-/// `ratelimit`. Per-second token bucket.
-///
-/// Upstream uses `static time_t lasttime; static int count` — process-
-/// global. We make it a small struct the daemon owns. `now` is a
-/// parameter (no global `now.tv_sec`).
+/// Per-second token bucket for ICMP error generation, owned by the
+/// daemon; `now` is a parameter so it stays testable.
 #[derive(Debug, Default)]
 pub(crate) struct IcmpRateLimit {
     /// Unix seconds.
@@ -292,22 +252,17 @@ impl IcmpRateLimit {
     /// call 4 sees `count(3) >= freq(3)` and returns true early.
     pub(crate) const fn should_drop(&mut self, now_sec: u64, freq: u32) -> bool {
         if self.last_sec == now_sec {
-            // :90-92
             if self.count >= freq {
                 return true;
             }
         } else {
-            // :94-96
             self.last_sec = now_sec;
             self.count = 0;
         }
-        // :98
         self.count += 1;
         false
     }
 }
-
-// ── Tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -342,17 +297,16 @@ mod tests {
     }
 
     /// KAT: build the full expected output byte-by-byte using the
-    /// same checksum primitive (already KAT-locked against the C in
-    /// `packet.rs::tests::inet_checksum_kat`). This is the strongest
-    /// test short of a kernel pcap — it exercises every field-fill
-    /// in the right order with the right endianness.
+    /// same checksum primitive (KAT-locked in
+    /// `packet.rs::tests::inet_checksum_kat`). Exercises every
+    /// field-fill in the right order with the right endianness.
     #[test]
     fn v4_net_unknown_kat() {
         let orig = v4_orig_frame();
         let got = build_v4_unreachable(&orig, ICMP_DEST_UNREACH, ICMP_NET_UNKNOWN, None, None)
             .expect("built");
 
-        // ── Expected: assemble piecewise.
+        // Expected: assemble piecewise.
         let mut want = Vec::new();
         // eth: MACs swapped, ethertype unchanged
         want.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]); // dst ← orig src
@@ -389,7 +343,7 @@ mod tests {
         assert_eq!(inet_checksum(&got[14..34], 0xFFFF), 0);
     }
 
-    /// `ip.ip_src = ip_dst; ip.ip_dst = ip_src`.
+    /// Reply swaps IP source and destination.
     #[test]
     fn v4_swaps_addrs() {
         let orig = v4_orig_frame();
@@ -398,7 +352,7 @@ mod tests {
         let ip = Ipv4Hdr::read_from_bytes(&out[14..34]).unwrap();
         assert_eq!(ip.ip_src, [10, 0, 0, 99]); // orig dst
         assert_eq!(ip.ip_dst, [10, 0, 0, 1]); // orig src
-        // and eth MACs too (`swap_mac_addresses`, :112)
+        // and eth MACs too
         assert_eq!(&out[0..6], &orig[6..12]);
         assert_eq!(&out[6..12], &orig[0..6]);
     }
@@ -415,7 +369,6 @@ mod tests {
         assert_eq!(quote, &orig[ETHER_SIZE..ETHER_SIZE + oldlen]);
     }
 
-    /// `if(oldlen >= IP_MSS - ip_size - icmp_size) oldlen = ...`.
     /// 1500-byte original → quote capped at 548.
     #[test]
     fn v4_quote_capped_at_548() {
@@ -434,14 +387,12 @@ mod tests {
         assert_eq!(quote, &orig[ETHER_SIZE..ETHER_SIZE + V4_QUOTE_CAP]);
     }
 
-    /// `icmp.icmp_nextmtu = htons(...)`. Bytes 6-7 of the ICMP
-    /// header (the second u16 of the union).
+    /// `FRAG_NEEDED` fills nextmtu: bytes 6-7 of the ICMP header, BE.
     #[test]
     fn v4_frag_needed_sets_mtu() {
         let orig = v4_orig_frame();
         // ICMP_DEST_UNREACH=3, ICMP_FRAG_NEEDED=4 — the type/code
-        // that triggers PMTU. Value of frag_mtu is whatever the
-        // caller picked (in C it's packet->len - ether_size).
+        // that triggers PMTU. frag_mtu is whatever the caller picked.
         let out = build_v4_unreachable(&orig, 3, 4, Some(1400), None).unwrap();
         // ICMP hdr lives at [14+20 .. 14+20+8].
         let icmp_bytes = &out[34..42];
@@ -469,8 +420,7 @@ mod tests {
         );
     }
 
-    /// Too short to parse the IP header → None. The C handles this
-    /// upstream via `checklength` (`:103-110`); we guard inline.
+    /// Too short to parse the IP header → None.
     #[test]
     fn v4_too_short_is_none() {
         assert!(build_v4_unreachable(&[0u8; 10], 3, 0, None, None).is_none());
@@ -500,8 +450,6 @@ mod tests {
         let ip_none = Ipv4Hdr::read_from_bytes(&out_none[14..34]).unwrap();
         assert_eq!(ip_none.ip_src, [10, 0, 0, 99]);
     }
-
-    // ─── IPv6
 
     /// Hand-built original v6 frame: eth + IPv6(UDP) + 8-byte UDP.
     /// `fe80::1` → `fe80::99`
@@ -558,7 +506,7 @@ mod tests {
         let quote = &out[62..];
         assert_eq!(quote, &orig[ETHER_SIZE..]);
 
-        // ── Recompute pseudo-header checksum (`:313-315`).
+        // Recompute pseudo-header checksum independently.
         let mut pseudo = Ipv6Pseudo::default();
         pseudo.ip6_src = ip6.ip6_src;
         pseudo.ip6_dst = ip6.ip6_dst;
@@ -626,8 +574,6 @@ mod tests {
         ck = inet_checksum(quote, ck);
         assert_eq!(ck.to_ne_bytes(), [icmp6_bytes[2], icmp6_bytes[3]]);
     }
-
-    // ─── Rate limit
 
     /// freq=3 allows exactly 3 per second.
     #[test]

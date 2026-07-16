@@ -316,7 +316,7 @@ impl Daemon {
         // reqno: REQ_KEY=15 SPTPS-init, REQ_PUBKEY=19,
         // ANS_PUBKEY=20, SPTPS_PACKET=21.
         if ext.reqno == Request::SptpsPacket as i32 {
-            // ─── case SPTPS_PACKET ───────────────────────────────
+            // case SPTPS_PACKET.
             let Some(payload) = ext.payload.as_deref() else {
                 log::error!(target: "tincd::proto",
                             "Got bad SPTPS_PACKET from {}: no payload",
@@ -368,7 +368,7 @@ impl Daemon {
             return Ok(false);
         }
 
-        // ─── case REQ_KEY: SPTPS responder start.
+        // case REQ_KEY: SPTPS responder start.
         let Some((hiskey, aead)) = self.load_peer_tunnel_cfg(&msg.from) else {
             // Hard-error.
             log::error!(target: "tincd::proto",

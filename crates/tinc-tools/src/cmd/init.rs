@@ -16,18 +16,14 @@
 //! That's it. Five files/dirs. The user then `tinc edit tinc.conf` to
 //! add `ConnectTo`, runs `tinc-up` setup, and `tincd` is good to go.
 //!
-//! ## Intentional deviations from upstream
+//! ## Intentional limitations
 //!
-//! Deliberate, not bugs to fix later.
-//!
-//! - **No interactive name prompt.** The prompt only exists for the
-//!   interactive `tinc> ` shell mode, which we don't have. When shell
-//!   mode lands the prompt becomes a shell-layer concern.
-//! - **No `check_port`.** Upstream tries to bind 655 and picks a
-//!   random high port if busy. Dropped: pulls in socket code, and the
-//!   random pick is often wrong (firewall/NAT). Better to fail loudly
-//!   at first daemon start.
-//! - **No RSA keygen.** `DISABLE_LEGACY` is permanently on.
+//! - **No interactive name prompt.** The name is a required argument;
+//!   there is no interactive shell mode.
+//! - **No port-availability probe.** Picking a random high port when 655
+//!   is busy is usually wrong (firewall/NAT); better to fail loudly at
+//!   first daemon start.
+//! - **No RSA keygen.** Legacy crypto is permanently disabled.
 //!
 //! ## File mode subtlety
 //!
@@ -64,7 +60,7 @@ use tinc_crypto::b64;
 ///
 /// Doesn't roll back on partial failure. See module doc.
 pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
-    // ─── Guard: already initialized?
+    // Guard: already initialized?
     // `try_exists` not `exists`: `exists` swallows EACCES (returns
     // false on permission-denied to the parent dir), and we'd rather
     // surface that as `Io` than silently re-init.
@@ -88,7 +84,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
         ));
     }
 
-    // ─── makedirs
+    // makedirs
     // The common non-root failure is here (not `try_exists` above):
     // `/etc/tinc` typically doesn't exist yet, so the *mkdir* is what
     // hits EACCES.
@@ -99,7 +95,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     makedir(&paths.hosts_dir(), 0o755)?;
     makedir(&paths.cache_dir(), 0o755)?;
 
-    // ─── Write tinc.conf
+    // Write tinc.conf
     // No `O_EXCL` — we already checked `try_exists` above. There's a
     // TOCTOU here (check, then someone-else-creates, then we
     // overwrite), but the threat model doesn't include hostile
@@ -109,7 +105,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
         writeln!(f, "Name = {name}").map_err(io_err(&tinc_conf))?;
     }
 
-    // ─── Generate Ed25519 keypair
+    // Generate Ed25519 keypair
     // Private → PEM (daemon reads it); public → config *line* in
     // `hosts/NAME` (NOT a PEM — *peers* read it via the config parser).
     eprintln!("Generating Ed25519 key pair:");
@@ -134,7 +130,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
         writeln!(f, "Ed25519PublicKey = {pubkey_b64}").map_err(io_err(&host_path))?;
     }
 
-    // ─── tinc-up stub (Unix only)
+    // tinc-up stub (Unix only)
     #[cfg(unix)]
     write_tinc_up_placeholder(paths)?;
 

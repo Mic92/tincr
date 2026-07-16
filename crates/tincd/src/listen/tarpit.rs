@@ -1,4 +1,4 @@
-//! Connection-rate-limit tarpit (`check_tarpit` + `tarpit`).
+//! Connection-rate-limit tarpit.
 //!
 //! Two leaky buckets (same-host, all-host) plus a fixed-size ring of
 //! accepted-but-ignored fds. Peers in the pit see a connected socket
@@ -8,77 +8,64 @@ use std::net::SocketAddr;
 use std::os::fd::OwnedFd;
 use std::time::Instant;
 
-/// `max_connection_burst`. Leaky bucket capacity.
-/// C default; the runtime value comes from `MaxConnectionBurst` config
-/// via `Tarpit::new`. Tests use this to seed the default behaviour.
+/// Default leaky-bucket capacity; the runtime value comes from
+/// `MaxConnectionBurst` config via `Tarpit::new`. Tests use this to
+/// seed the default behaviour.
 #[cfg(test)]
 const MAX_BURST: u32 = 10;
 
-/// `pits` array length. Ring buffer of tarpitted fds.
+/// Ring-buffer length for tarpitted fds.
 const PIT_SIZE: usize = 10;
 
-/// `check_tarpit` + `tarpit`.
+/// Connection-burst rate limiter.
 ///
 /// Two leaky buckets:
-/// - same-host: `prev_sa` tracks the last peer; if THIS peer matches,
-///   drain+refill the same-host bucket. `> MAX_BURST` → pit.
-/// - all-host: drain+refill regardless of peer. `>= MAX_BURST` → pit.
+/// - same-host: if this peer matches the previous one, drain+refill
+///   the same-host bucket. `> max_burst` → pit.
+/// - all-host: drain+refill regardless of peer. `>= max_burst` → pit.
 ///
-/// The off-by-one between `>` and `>=` IS in the C (`:699` vs `:721`).
-/// Same-host triggers at 11; all-host at 10. Port faithfully.
+/// The off-by-one between `>` and `>=` matches C tinc for identical
+/// behavior: same-host triggers at 11, all-host at 10.
 ///
 /// `pits[]`: ring buffer of fds we accepted but won't serve. They
-/// stay open, doing nothing, until evicted by a NEWER pit (10 slots).
+/// stay open, doing nothing, until evicted by a newer pit (10 slots).
 /// The peer's `connect()` succeeds (TCP handshake completes — kernel
 /// did that before we called `accept`), but reads block forever.
 /// Slows down scanners.
 ///
-/// C uses 5 statics (`prev_sa`, `samehost_burst`, `samehost_burst_
-/// time`, `connection_burst`, `connection_burst_time`) + 2 more in
-/// `tarpit` (`pits[]`, `next_pit`). Seven fields in one struct.
-///
 /// `now` is `tinc-event::Timers::now()` — the cached per-tick Instant.
-/// The C uses `now.tv_sec` (the cached `struct timeval`). We compare
-/// at second granularity (`.as_secs()`) to match C's `time_t`
-/// arithmetic.
+/// Comparisons are at second granularity (`.as_secs()`) to match
+/// C tinc's `time_t` arithmetic.
 pub(crate) struct Tarpit {
-    /// `prev_sa` (`:684`). The last peer's address, port-stripped.
-    /// `None` is the initial state — first peer never matches.
-    /// C uses `static sockaddr_t prev_sa = {0}` which is the zero
-    /// addr; comparing against zero never matches a real peer either
-    /// (`0.0.0.0` isn't a valid source). Explicit None is clearer.
+    /// The last peer's address, port-stripped. `None` is the initial
+    /// state — first peer never matches.
     prev_addr: Option<SocketAddr>,
 
-    /// `samehost_burst` (`:687`). Current bucket fill, same-host.
+    /// Current same-host bucket fill.
     samehost_burst: u32,
-    /// `samehost_burst_time` (`:688`). Last refill time.
+    /// Last same-host refill time.
     samehost_time: Instant,
 
-    /// `connection_burst` (`:709`). All-host bucket.
+    /// All-host bucket fill.
     allhost_burst: u32,
-    /// `connection_burst_time` (`:710`).
+    /// Last all-host refill time.
     allhost_time: Instant,
 
-    /// `max_connection_burst`. Per-instance from config
-    /// (`MaxConnectionBurst`); upstream is a global. The
-    /// `>` vs `>=` off-by-one (see struct doc) is preserved.
+    /// From `MaxConnectionBurst` config. The `>` vs `>=` off-by-one
+    /// (see struct doc) is preserved.
     max_burst: u32,
 
-    /// `pits[10]`. Tarpitted fds. Ring buffer. Option because the
-    /// slot is empty until first eviction. `OwnedFd` because Drop
-    /// closes — `closesocket(pits[next_pit])` on eviction; we get
-    /// that via `mem::replace` dropping the old value.
+    /// Tarpitted fds. Option because a slot is empty until first
+    /// eviction. `OwnedFd` because Drop closes; eviction happens by
+    /// replacing (and dropping) the old value.
     pits: [Option<OwnedFd>; PIT_SIZE],
-    /// `next_pit`. Ring cursor.
+    /// Ring cursor.
     next_pit: usize,
 }
 
 impl Tarpit {
-    /// Construct empty. `now` seeds `*_time` so the first leak doesn't
-    /// drain epoch-seconds-worth (the C's `static time_t = 0` first-
-    /// tick bug — same one we faithfully ported in `top.rs` — would
-    /// happen here if we used `Duration::ZERO`. We don't, because
-    /// `Instant` doesn't have a zero).
+    /// Construct empty. `now` seeds the refill times so the first leak
+    /// doesn't drain an arbitrarily long window.
     #[must_use]
     pub(crate) fn new(now: Instant, max_burst: u32) -> Self {
         Self {
@@ -93,37 +80,24 @@ impl Tarpit {
         }
     }
 
-    /// `check_tarpit` (`:681-732`). Returns `true` if this connection
-    /// should be pitted; the caller hands the fd to `pit()` and does
-    /// NOT register the connection.
+    /// Returns `true` if this connection should be pitted; the caller
+    /// hands the fd to `pit()` and does NOT register the connection.
     ///
     /// Mutates self even on `false` — the buckets always update.
     ///
-    /// `addr` should be `unmap()`ed and stripped of port.
-    /// `sockaddrcmp_noport` zeroes the port before `memcmp`. We use `SocketAddr` with port set to 0 by the caller
-    /// (or compare just `.ip()` — but port-0 makes the test setup
-    /// readable).
+    /// `addr` should be `unmap()`ed. Comparison is on `.ip()`, so the
+    /// port doesn't matter.
     ///
-    /// `now` from `Timers::now()`. The drain is `(now - last).as_
-    /// secs()` — second granularity to match C's `time_t`.
+    /// `now` from `Timers::now()`. The drain is second-granularity.
     pub(crate) fn check(&mut self, addr: SocketAddr, now: Instant) -> bool {
-        // ─── same-host bucket
-        // `if(!sockaddrcmp_noport(sa, &prev_sa))`. The `!` is
-        // because `sockaddrcmp` is memcmp-style: 0 means equal.
-        // Compare on .ip() — the caller's port-strip is just for
-        // making test expected-values look nice.
+        // Same-host bucket.
         let same_host = self.prev_addr.is_some_and(|p| p.ip() == addr.ip());
 
         if same_host {
-            // `:690-694`: leak. If MORE seconds elapsed than the
-            // bucket holds, drain to zero. Else subtract elapsed.
+            // Leak: subtract elapsed seconds, floor at zero. A clock
+            // going backwards is clamped to zero elapsed (never
+            // increases the bucket).
             let elapsed = now.saturating_duration_since(self.samehost_time).as_secs();
-            // `if(elapsed > burst) burst = 0; else burst -= elapsed`.
-            // saturating_sub is the same arithmetic (going below 0
-            // means "would have drained"). C uses signed `time_t`;
-            // a negative `elapsed` (clock went backwards) would
-            // INCREASE burst. saturating_duration_since clamps that
-            // to zero — STRICTER than C, harmless.
             // elapsed: u32 overflows after 136yr uptime; would only under-drain anyway
             #[expect(clippy::cast_possible_truncation)]
             {
@@ -132,20 +106,18 @@ impl Tarpit {
             self.samehost_time = now;
             self.samehost_burst += 1;
 
-            // `:699`: `if(samehost_burst > max_connection_burst)`.
-            // STRICTLY greater. Triggers at 11.
+            // Strictly greater: triggers at 11.
             if self.samehost_burst > self.max_burst {
                 return true;
             }
         }
 
-        // `:705`: `prev_sa = *sa`. Update AFTER the same-host check.
-        // First connection from a new host doesn't tick the same-host
-        // bucket (it's "different from prev"); SECOND connection does.
+        // Update prev AFTER the same-host check. First connection from
+        // a new host doesn't tick the same-host bucket (it's
+        // "different from prev"); the SECOND connection does.
         self.prev_addr = Some(addr);
 
-        // ─── all-host bucket
-        // Same arithmetic, different bucket.
+        // All-host bucket: same arithmetic.
         let elapsed = now.saturating_duration_since(self.allhost_time).as_secs();
         #[expect(clippy::cast_possible_truncation)] // see same-host bucket above
         {
@@ -154,19 +126,12 @@ impl Tarpit {
         self.allhost_time = now;
         self.allhost_burst += 1;
 
-        // `:721`: `if(connection_burst >= max_connection_burst)`.
-        // GREATER OR EQUAL. Triggers at 10. THEN clamps (`:722`:
-        // `connection_burst = max_connection_burst`).
-        //
-        // The clamp means the all-host bucket never exceeds 10. So
-        // the leak only needs to drain 1 to let the next conn in.
-        // Same-host has no clamp (and `>` not `>=`), so it can go
-        // to 11. Two seconds of leak to drain back to 9.
-        //
-        // I think the C author intended both to behave the same and
-        // the off-by-one is accidental. Port faithfully — it's been
-        // this way since 2013 (commit `24e3ec86`) and nobody's
-        // noticed.
+        // Greater-or-equal: triggers at 10, then clamps, so the
+        // all-host bucket never exceeds max_burst and one second of
+        // leak lets the next conn in. Same-host has no clamp (and `>`
+        // not `>=`), so it can go to 11 and needs two seconds of leak.
+        // The asymmetry looks accidental in C tinc but is kept for
+        // identical behavior.
         if self.allhost_burst >= self.max_burst {
             self.allhost_burst = self.max_burst;
             return true;
@@ -175,9 +140,8 @@ impl Tarpit {
         false
     }
 
-    /// `tarpit`. Shove the fd into the pit ring.
-    /// Evict-on-insert: if the slot is occupied, drop the old fd
-    /// (closes it).
+    /// Shove the fd into the pit ring. Evict-on-insert: if the slot is
+    /// occupied, drop the old fd (closes it).
     ///
     /// The fd MUST NOT be registered with the event loop. We're
     /// silent-treatment-ing the peer: their `connect` succeeded (the
@@ -188,18 +152,15 @@ impl Tarpit {
     /// 10 slots = 10 simultaneous tarpitted peers. The 11th evicts
     /// the 1st (its `OwnedFd` drops, peer sees RST). Fixed memory.
     pub(crate) fn pit(&mut self, fd: OwnedFd) {
-        // `if(pits[next_pit] != -1) closesocket(...)`.
-        // Option::replace drops the old OwnedFd; Drop closes. The
-        // returned old value is dropped immediately (we don't bind it).
-        // `let _ =` so clippy knows the discard is intentional.
+        // Option::replace drops the old OwnedFd; Drop closes. `let _ =`
+        // so clippy knows the discard is intentional.
         let _ = self.pits[self.next_pit].replace(fd);
-        // `next_pit++; if(next_pit >= 10) next_pit = 0`.
         self.next_pit = (self.next_pit + 1) % PIT_SIZE;
     }
 
-    /// Test seam: how full are the buckets? Not in C (the statics
-    /// aren't exposed); useful for asserting "9 connections is
-    /// fine, 10th gets pitted" without spawning real sockets.
+    /// Test seam: how full are the buckets? Useful for asserting "9
+    /// connections is fine, 10th gets pitted" without spawning real
+    /// sockets.
     #[cfg(test)]
     pub(crate) const fn buckets(&self) -> (u32, u32) {
         (self.samehost_burst, self.allhost_burst)
@@ -217,8 +178,6 @@ mod tests {
         SocketAddr::new(s.parse().unwrap(), port)
     }
 
-    // ─── Tarpit: leaky bucket arithmetic
-    //
     // Seeded `now` lets us control time. The pit-ring is tested
     // separately with real fds (devnull); the bucket math is pure.
 
@@ -250,11 +209,8 @@ mod tests {
         assert_eq!(allhost, 10);
     }
 
-    /// The same-host early-return. When same-host triggers, it
+    /// The same-host early-return. When same-host triggers, `check`
     /// returns BEFORE updating `prev_addr` or the all-host bucket.
-    /// `if(samehost_burst > max) { tarpit(fd); return true; }` — the
-    /// `return` is before `:705 prev_sa = *sa` and before the all-host
-    /// section.
     ///
     /// Observable effect: once same-host triggers, the attacker's burst
     /// stops ticking all-host. The all-host bucket can leak. A legit
@@ -277,9 +233,7 @@ mod tests {
     /// Observable difference vs no-early-return: `prev_addr` and
     /// `allhost_time` freeze. A subsequent DIFFERENT host's leak
     /// measures from the last pre-pit allhost timestamp, giving it
-    /// MORE leak. Whether the C author intended this is unclear (the
-    /// `>` vs `>=` and early-return placement look incidental). Port
-    /// faithfully; this test pins the early-return-skips-allhost shape.
+    /// MORE leak. This test pins the early-return-skips-allhost shape.
     #[test]
     fn tarpit_samehost_early_return() {
         let t0 = Instant::now();
@@ -317,8 +271,7 @@ mod tests {
         assert_eq!(sh, 14, "sh keeps ticking");
         assert_eq!(ah, 10, "ah STILL frozen — the early-return proof");
 
-        // ─── the part that's actually OBSERVABLE: prev_addr frozen
-        // prev_addr is still `attacker` (last update was conn 11,
+        // The observable part: prev_addr is still `attacker` (last update was conn 11,
         // before same-host took over). A different host at t=2:
         // doesn't match prev (good), ah leaks from t=0 (allhost_time
         // also frozen at conn 11's timestamp).
@@ -334,8 +287,8 @@ mod tests {
     /// never ticks the same-host bucket (each conn's prev is the OTHER
     /// host). Only all-host accumulates.
     ///
-    /// This is realistic: a port scanner that walks IPs. The C tarpit
-    /// catches it via all-host, not same-host.
+    /// This is realistic: a port scanner that walks IPs is caught via
+    /// all-host, not same-host.
     #[test]
     fn tarpit_alternating_hosts_only_allhost() {
         let t0 = Instant::now();
@@ -383,10 +336,10 @@ mod tests {
         assert_eq!(tp.buckets().1, 1, "drained to 0, refilled to 1");
     }
 
-    /// `prev_addr` updates regardless of whether check returned true.
-    /// (In the C, `:705 prev_sa = *sa` is BEFORE the all-host check.)
-    /// So: pitted conn becomes the new prev. Next conn from a
-    /// DIFFERENT host doesn't tick samehost.
+    /// `prev_addr` updates regardless of whether check returned true
+    /// (the update is before the all-host check). So: a pitted conn
+    /// becomes the new prev. Next conn from a DIFFERENT host doesn't
+    /// tick samehost.
     #[test]
     fn tarpit_prev_updates_on_pit() {
         let t0 = Instant::now();
@@ -409,8 +362,8 @@ mod tests {
         assert_eq!(sh, 0, "different host, samehost untouched");
     }
 
-    /// SAME-host check is on `.ip()`, port-agnostic. C
-    /// `sockaddrcmp_noport`. Different ports from same IP = same host.
+    /// Same-host check is on `.ip()`, port-agnostic. Different ports
+    /// from same IP = same host.
     #[test]
     fn tarpit_ignores_port() {
         let t0 = Instant::now();
@@ -441,8 +394,6 @@ mod tests {
         }
         assert!(tp.check(addr("2001:db8::ffff", 0), t0));
     }
-
-    // ─── Tarpit: pit ring buffer
 
     /// /dev/null fd. Dup'd because we want distinct `OwnedFd`'s that
     /// each genuinely close on drop. `OwnedFd::try_clone` returns a

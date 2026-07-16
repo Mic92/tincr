@@ -340,7 +340,7 @@ fn roundtrip(
     received
 }
 
-// ────────────────────────────────────────────────────────────────────
+//
 
 /// 256 bytes, same as `sptps_basic.py`. The size matters less than
 /// "nonzero and not all zeroes" — we want decryption failures to be
@@ -399,7 +399,7 @@ fn scenario(server: Impl, client: Impl, data: &[u8], flags: &[&str]) -> bool {
     true
 }
 
-// ──── Rust↔Rust ─────────────────────────────────────────────────────
+// Rust↔Rust
 // Always run. The unit-test floor: if these fail, the binary is
 // broken regardless of cross-impl.
 
@@ -468,7 +468,7 @@ fn stream_large_payload() {
     assert!(scenario(Impl::Rust, Impl::Rust, &data, &[]));
 }
 
-// ──── Cross-impl: Rust↔C ─────────────────────────────────────────────
+// Cross-impl: Rust↔C
 // These tests skip (return early) if TINC_C_SPTPS_TEST is unset.
 // They aren't #[ignore]'d because:
 //   1. `cargo test --include-ignored` would run them and fail noisily

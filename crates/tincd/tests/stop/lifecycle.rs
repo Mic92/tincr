@@ -23,7 +23,7 @@ fn spawn_connect_stop() {
 
     write_config(&confbase);
 
-    // ─── spawn ────────────────────────────────────────────────────
+    // spawn
     // RUST_LOG=tincd=debug so failure stderr is informative.
     let mut child = tincd_at(&confbase, &pidfile, &socket)
         .env("RUST_LOG", "tincd=debug")
@@ -31,7 +31,7 @@ fn spawn_connect_stop() {
         .spawn()
         .expect("spawn tincd");
 
-    // ─── wait for ready ──────────────────────────────────────────
+    // wait for ready
     // The daemon writes the pidfile in setup(), AFTER which it
     // binds the socket. Wait for the socket file.
     assert!(
@@ -42,7 +42,7 @@ fn spawn_connect_stop() {
         drain_stderr(child)
     );
 
-    // ─── connect + greeting ──────────────────────────────────────
+    // connect + greeting
     let cookie = read_cookie(&pidfile);
     assert_eq!(cookie.len(), 64, "cookie is 64 hex chars");
 
@@ -68,7 +68,7 @@ fn spawn_connect_stop() {
     let pid: u32 = t2.next().unwrap().parse().unwrap();
     assert!(pid > 0);
 
-    // ─── send REQ_STOP ───────────────────────────────────────────
+    // send REQ_STOP
     // `"18 0\n"` — CONTROL=18, REQ_STOP=0.
     writeln!(writer, "18 0").unwrap();
 
@@ -94,7 +94,7 @@ fn spawn_connect_stop() {
         }
     }
 
-    // ─── daemon exits ────────────────────────────────────────────
+    // daemon exits
     // After REQ_STOP, `running = false`, the loop exits, daemon
     // returns 0. Wait with timeout.
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -110,7 +110,7 @@ fn spawn_connect_stop() {
     };
     assert!(status.success(), "tincd exit status: {status:?}");
 
-    // ─── cleanup verification ────────────────────────────────────
+    // cleanup verification
     // Daemon::drop unlinks pidfile; ControlSocket::drop unlinks
     // socket. Both should be gone.
     assert!(!pidfile.exists(), "pidfile should be unlinked on exit");
@@ -139,7 +139,7 @@ fn umbilical_ready_signal() {
 
     write_config(&confbase);
 
-    // ─── Paths setup
+    // Paths setup
     // `start()` needs `pidfile()` and `unix_socket()` resolved —
     // it passes them as `--pidfile`/`--socket` to the spawned
     // tincd. Explicit pidfile means `unix_socket()` derives
@@ -153,14 +153,14 @@ fn umbilical_ready_signal() {
     paths.resolve_runtime(&input);
     let socket = paths.unix_socket();
 
-    // ─── point start() at our tincd
+    // point start() at our tincd
     // CARGO_BIN_EXE_tincd is the binary cargo just built for THIS
     // crate. Passed explicitly via `start_with` instead of mutating
     // process-global `TINCD_PATH` — `set_var` races other test
     // threads under `cargo test`'s default thread pool.
     let tincd = Path::new(env!("CARGO_BIN_EXE_tincd"));
 
-    // ─── the call under test
+    // the call under test
     // `start()` forks, child exec's tincd, tincd detaches (default
     // do_detach=true), the original child exits 0, tincd writes the
     // nul byte, parent reads it + waitpid succeeds. Ok(()).
@@ -177,7 +177,7 @@ fn umbilical_ready_signal() {
         panic!("tinc start failed: {e}");
     }
 
-    // ─── daemon is actually ready
+    // daemon is actually ready
     // The whole point of the umbilical: by the time `start()`
     // returns, the daemon's control socket is bound. No
     // `wait_for_file` needed — if we needed it, the umbilical
@@ -189,13 +189,13 @@ fn umbilical_ready_signal() {
     );
     assert!(pidfile.exists(), "pidfile should exist after start()");
 
-    // ─── idempotent start
+    // idempotent start
     // Second `start` with daemon running is a no-op success. `CtlSocket::connect` succeeds → early
     // return Ok with the "already running" message.
     let second = tinc_tools::cmd::start::start_with(&paths, &[], tincd);
     assert!(second.is_ok(), "second start should be idempotent Ok");
 
-    // ─── stop it
+    // stop it
     // Via the same control socket. `cmd::ctl_simple::stop` is the
     // production stop path; using it here proves `start && stop`
     // works end-to-end (the canonical sysadmin sequence).
@@ -331,7 +331,7 @@ fn sigterm_stops() {
 
     assert!(wait_for_file(&socket), "tincd didn't bind socket");
 
-    // ─── SIGTERM ──────────────────────────────────────────────────
+    // SIGTERM
     // The pidfile has the pid in it (same as `child.id()`, but
     // reading it from the pidfile proves the format).
     let content = std::fs::read_to_string(&pidfile).unwrap();
@@ -342,7 +342,7 @@ fn sigterm_stops() {
     let pid = Pid::from_raw(pid as i32);
     kill(pid, Signal::SIGTERM).expect("kill SIGTERM");
 
-    // ─── daemon exits ────────────────────────────────────────────
+    // daemon exits
     let deadline = Instant::now() + Duration::from_secs(5);
     let status = loop {
         if let Some(s) = child.try_wait().unwrap() {
@@ -355,8 +355,8 @@ fn sigterm_stops() {
     assert!(!pidfile.exists());
 }
 
-/// SIGUSR1/SIGUSR2/SIGWINCH must NOT terminate the daemon. C tinc
-/// sets these to `SIG_IGN` in `detach()` (process.c:205-207). Older
+/// SIGUSR1/SIGUSR2/SIGWINCH must NOT terminate the daemon (C tinc
+/// ignores them too). Older
 /// 1.0.x tincd dumped state on USR1/USR2; in 1.1 that moved to the
 /// control socket and the signals are simply ignored. A monitoring
 /// script that still sends USR1 expecting a stats dump should be
@@ -585,7 +585,7 @@ fn tcp_listener_accepts_and_rejects_control() {
         drain_stderr(child)
     );
 
-    // ─── read TCP addr from pidfile ────────────────────────────
+    // read TCP addr from pidfile
     // The unspec→loopback mapping (`init_control:164-173`) is
     // tested implicitly: if the addr were `0.0.0.0`, the connect
     // would fail (or connect to something unexpected).
@@ -597,12 +597,12 @@ fn tcp_listener_accepts_and_rejects_control() {
     );
     assert_ne!(tcp_addr.port(), 0, "port should be kernel-assigned, not 0");
 
-    // ─── connect over TCP ─────────────────────────────────────
+    // connect over TCP
     let stream = TcpStream::connect(tcp_addr).expect("TCP connect to tincd");
     let mut reader = BufReader::new(&stream);
     let mut writer = &stream;
 
-    // ─── ^cookie over TCP → dropped, no reply ────────────────
+    // ^cookie over TCP → dropped, no reply
     writeln!(writer, "0 ^{cookie} 0").unwrap();
     let mut line1 = String::new();
     let n = reader.read_line(&mut line1).unwrap();
@@ -612,7 +612,7 @@ fn tcp_listener_accepts_and_rejects_control() {
     );
     drop(stream);
 
-    // ─── STOP via unix socket ─────────────────────────────────
+    // STOP via unix socket
     let ustream = UnixStream::connect(&socket).expect("unix connect");
     let mut reader = BufReader::new(&ustream);
     let mut writer = &ustream;
@@ -633,7 +633,7 @@ fn tcp_listener_accepts_and_rejects_control() {
         }
     }
 
-    // ─── daemon exits 0 ───────────────────────────────────────
+    // daemon exits 0
     let deadline = Instant::now() + Duration::from_secs(5);
     let status = loop {
         if let Some(s) = child.try_wait().unwrap() {

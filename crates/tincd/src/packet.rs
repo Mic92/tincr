@@ -40,7 +40,7 @@ use std::mem::size_of;
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-// ── inet_checksum ──────────────────────────────────────────────────
+// inet_checksum.
 
 /// `inet_checksum`. RFC 1071 one's-complement sum.
 ///
@@ -84,12 +84,12 @@ pub(crate) fn inet_checksum(data: &[u8], prevsum: u16) -> u16 {
     }
 }
 
-// ── IPv4 header ────────────────────────────────────────────────────
+// IPv4 header.
 
 /// `struct ip` (`ipv4.h:74-85`). 20 bytes, no options.
 ///
 /// `ip_vhl` is the bitfield byte: `(version << 4) | ihl`. The C
-/// uses `:4` bitfields with `__BYTE_ORDER` gymnastics (`ipv4.h
+/// uses bitfields with `__BYTE_ORDER` gymnastics (`ipv4.h
 /// :67-72`); we use a `u8` and getters. Wire byte for normal IPv4
 /// is `0x45` (v=4, ihl=5 words = 20 bytes).
 #[repr(C, packed)]
@@ -188,7 +188,7 @@ impl Ipv4Hdr {
     }
 }
 
-// ── ICMP header (short) ────────────────────────────────────────────
+// ICMP header (short).
 
 /// `struct icmp`, FIRST 8 BYTES ONLY. The full C struct (`ipv4.h
 /// :100-148`) is 28 bytes with a variant tail union. `route.c` only
@@ -219,7 +219,7 @@ impl IcmpHdr {
     }
 }
 
-// ── IPv6 header ────────────────────────────────────────────────────
+// IPv6 header.
 
 /// `struct ip6_hdr` (`ipv6.h:42-53`). 40 bytes.
 ///
@@ -270,7 +270,7 @@ impl Ipv6Hdr {
     }
 }
 
-// ── ICMPv6 header ──────────────────────────────────────────────────
+// ICMPv6 header.
 
 /// `struct icmp6_hdr` (`ipv6.h:66-75`). 8 bytes.
 ///
@@ -294,7 +294,7 @@ impl Icmp6Hdr {
     }
 }
 
-// ── ARP ────────────────────────────────────────────────────────────
+// ARP.
 
 /// `struct arphdr` (`ethernet.h:75-81`). Fixed 8-byte ARP header.
 #[repr(C, packed)]
@@ -368,7 +368,7 @@ pub(crate) struct EtherArp {
     pub arp_tpa: [u8; 4],
 }
 
-// ── Pseudo-headers (checksum only) ─────────────────────────────────
+// Pseudo-headers (checksum only).
 
 /// IPv6 pseudo-header for upper-layer checksum (RFC 2460 §8.1). 40
 /// bytes. NOT a wire header — never transmitted; checksum input
@@ -413,14 +413,14 @@ impl Ipv4Pseudo {
     }
 }
 
-// ── Tests ──────────────────────────────────────────────────────────
+// Tests.
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use zerocopy::IntoBytes;
 
-    // ─── Struct sizes — pin layout
+    // Struct sizes — pin layout.
 
     /// `STATIC_ASSERT(sizeof(struct ip) == 20)` (`ipv4.h:93`).
     /// Already const-asserted at module level; this test exists so
@@ -437,7 +437,7 @@ mod tests {
         assert_eq!(size_of::<Ipv4Pseudo>(), 12);
     }
 
-    // ─── Bitfield byte ordering
+    // Bitfield byte ordering.
 
     /// THE bitfield test. `ipv4.h:67-72` flips `ip_hl`/`ip_v`
     /// nibble order under `__LITTLE_ENDIAN` because GCC packs
@@ -465,7 +465,7 @@ mod tests {
         assert_eq!(h.version(), 6);
     }
 
-    // ─── Endianness in accessors
+    // Endianness in accessors.
 
     /// `set_total_len(115)` → bytes `[0x00, 0x73]` on the wire. The
     /// stored `u16` is whatever `to_be()` produces on the host;
@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(&h.as_bytes()[2..4], &[0x00, 0x73]);
     }
 
-    // ─── Round-trip
+    // Round-trip.
 
     /// Build, serialize, parse, eq.
     #[test]
@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(back.arp_spa, [10, 0, 0, 1]);
     }
 
-    // ─── inet_checksum KAT
+    // inet_checksum KAT.
 
     /// KAT vectors from `kat/gen_checksum.c`. Proves bit-for-bit
     /// match including the native-endian `memcpy` load and the

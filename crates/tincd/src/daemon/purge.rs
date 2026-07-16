@@ -60,7 +60,7 @@ impl Daemon {
     pub(super) fn purge(&mut self) -> bool {
         log::debug!(target: "tincd::proto", "Purging unreachable nodes");
 
-        // ─── pass 1: gossip DEL + delete subnets/edges ──────────
+        // pass 1: gossip DEL + delete subnets/edges.
         // Collect first: `graph.node_ids()` borrows `&self.graph`,
         // the deletes need `&mut self.graph`.
         let unreachable: Vec<(NodeId, String)> = self
@@ -125,7 +125,7 @@ impl Daemon {
             }
         }
 
-        // ─── pass 2: delete orphan nodes ────────────────────────
+        // pass 2: delete orphan nodes.
         // Re-snapshot unreachables: pass 1 didn't change reachability
         // (it only deleted edges FROM unreachable nodes, which by
         // definition weren't on any path from myself), but re-check

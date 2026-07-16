@@ -193,14 +193,11 @@ pub(crate) struct Connection {
     pub options: crate::dispatch::ConnOptions,
     /// `c->estimated_weight`. RTT ms. i32: wire `%d`.
     pub estimated_weight: i32,
-    /// `c->start`. Set at construct (~μs earlier than upstream's
-    /// `send_id`-time).
+    /// Connection start time, set at construct.
     pub start: Instant,
     /// `c->address` (`connection.h:90`). `None` for unix-socket control.
     pub address: Option<SocketAddr>,
-    /// `c->edge != NULL`. The "past ACK" mark `broadcast_meta` keys
-    /// on. Upstream never sets `unused_active`; the edge
-    /// pointer-as-bool IS the check.
+    /// Past-ACK mark that `broadcast_meta` keys on.
     pub active: bool,
     /// Counted in `Daemon::pending_meta`. Explicit flag because
     /// `outgoing`/`control` can be mutated mid-life (dup-conn
@@ -239,13 +236,12 @@ pub(crate) struct Connection {
     /// `send_meta_raw`) are an encrypted UDP wireframe. Checked
     /// FIRST (outer loop); `tcplen` is inside the SPTPS callback.
     pub sptpslen: u16,
-    /// `sptpslen` accumulator. Upstream reuses `c->inbuf`; separate
-    /// Vec keeps the "inbuf is plaintext-only" invariant.
+    /// `sptpslen` accumulator. Separate Vec keeps the "inbuf is
+    /// plaintext-only" invariant.
     pub sptps_buf: Vec<u8>,
 
-    // ─── Per-host config extracted at id_h. Upstream retains the
-    // whole `c->config_tree`; we extract just the keys send_ack/ack_h
-    // read. None = absent.
+    // Per-host config extracted during the ID handshake; just the keys
+    // the ACK exchange reads. None = absent.
     /// `hosts/NAME` `IndirectData`.
     pub host_indirect: Option<bool>,
     /// `hosts/NAME` `TCPOnly`.
@@ -366,8 +362,8 @@ impl Connection {
             is_unix_ctl: true,
             ..Self::new_base(
                 fd,
-                "<control>".to_string(),           // C :800
-                "localhost port unix".to_string(), // C :802
+                "<control>".to_string(),
+                "localhost port unix".to_string(),
                 now,
             )
         }
@@ -383,7 +379,7 @@ impl Connection {
     ) -> Self {
         Self {
             address: Some(address),
-            ..Self::new_base(fd, "<unknown>".to_string() /* C :759 */, hostname, now)
+            ..Self::new_base(fd, "<unknown>".to_string(), hostname, now)
         }
     }
 
@@ -400,7 +396,7 @@ impl Connection {
     ) -> Self {
         Self {
             address: Some(address),
-            connecting: true, // C :652
+            connecting: true,
             outgoing: Some(outgoing),
             ..Self::new_base(fd, name, hostname, now)
         }
@@ -518,9 +514,8 @@ impl Connection {
                     self.sptps_buf.extend_from_slice(&chunk[off..off + take]);
                     off += take;
                     if self.sptps_buf.len() < usize::from(self.sptpslen) {
-                        break; // C :209-211: blob spans recv()s
+                        break; // blob spans recv()s
                     }
-                    // C :213-217
                     events.push(SptpsEvent::Blob(std::mem::take(&mut self.sptps_buf)));
                     self.sptpslen = 0;
                     continue;
@@ -536,8 +531,7 @@ impl Connection {
                     Ok((consumed, outs)) => {
                         off += consumed;
                         for o in outs {
-                            // "21 LEN" peek (C: `sptps_tcppacket_h:148`
-                            // sets it via callback; we peek instead).
+                            // "21 LEN" peek to learn the raw-blob length.
                             if let Output::Record {
                                 record_type: 0,
                                 ref bytes,
@@ -696,8 +690,7 @@ impl Connection {
 
         // `if(c->protocol_minor >= 2)`. ORDERING: `id_h` calls
         // `send()` BEFORE `Sptps::start` (dispatch.rs), so `sptps` is
-        // None for the id-reply line. Upstream achieves the same by
-        // routing ID through `send_meta_raw`.
+        // None for the id-reply line, which goes out plaintext.
         if let Some(sptps) = self.sptps.as_deref_mut() {
             let mut line = Vec::with_capacity(64);
             write!(VecFmt(&mut line), "{args}").expect("Vec<u8> write infallible");
@@ -744,10 +737,10 @@ impl Connection {
         let n = match send(self.fd.as_raw_fd(), live, crate::msg_nosignal()) {
             Ok(n) => n,
             Err(Errno::EWOULDBLOCK | Errno::EINTR) => {
-                return Ok(false); // C :494-496
+                return Ok(false);
             }
             Err(e) => {
-                return Err(e.into()); // C :497-501
+                return Err(e.into());
             }
         };
 

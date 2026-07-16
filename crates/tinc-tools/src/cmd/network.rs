@@ -3,10 +3,9 @@
 //! ## Two modes; we port one
 //!
 //! `tinc network` (argless) → LIST: scan `confdir` for subdirs with
-//! `tinc.conf`. `tinc network NAME` → SWITCH: only meaningful in an
-//! interactive readline loop, which we don't have. **Deliberate
-//! upstream-behavior-drop #2.** The error message says "use `-n
-//! NAME` instead."
+//! `tinc.conf`. `tinc network NAME` (switch mode) is rejected: switching
+//! is only meaningful in an interactive shell, which this CLI doesn't
+//! have. The error message says "use `-n NAME` instead."
 //!
 //! ## The LIST mode
 //!
@@ -112,7 +111,7 @@ pub(crate) fn list(confdir: &Path, out: &mut impl Write) -> Result<usize, CmdErr
         // backup.tar`, whatever. Silent skip.
     }
 
-    // ─── Sort & emit
+    // Sort & emit
     // `.` sorts first (0x2E < `0` and `A`). The anonymous network
     // at the top is a nice order — it's the "default."
     found.sort_unstable();
@@ -140,10 +139,8 @@ pub(crate) fn list(confdir: &Path, out: &mut impl Write) -> Result<usize, CmdErr
 /// for `read_dir` failures.
 pub fn run(paths: &Paths, arg: Option<&str>) -> Result<(), CmdError> {
     if let Some(name) = arg {
-        // ─── SWITCH mode — deliberate upstream-behavior-drop #2
-        // We have no readline loop. The mutation would happen, then
-        // `Ok(())` → exit 0. Silent no-op — WORSE than erroring:
-        // the user thinks something happened.
+        // Switch mode is rejected: without an interactive shell it would
+        // be a silent no-op, which is worse than erroring.
         //
         // The error message says what to do instead. The user
         // reading `tinc network` output sees `.`, runs `tinc
@@ -158,7 +155,7 @@ pub fn run(paths: &Paths, arg: Option<&str>) -> Result<(), CmdError> {
         )));
     }
 
-    // ─── LIST mode
+    // LIST mode
     // `confdir_always()` falls back to `/etc/tinc` even when `-c`
     // was given. See module doc.
     let confdir = paths.confdir_always();
@@ -340,8 +337,7 @@ mod tests {
 
     // run — the switch-mode rejection
 
-    /// `tinc network NAME` → error with `-n` advice. Deliberate
-    /// upstream-behavior-drop #2.
+    /// `tinc network NAME` → error with `-n` advice.
     #[test]
     fn run_switch_rejected() {
         let p = crate::names::Paths::for_cli(&crate::names::PathsInput {

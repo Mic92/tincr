@@ -5,7 +5,6 @@ use std::fmt;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
-// ────────────────────────────────────────────────────────────────────
 // Line parser
 
 /// Error from a single line. Carries enough context for a useful
@@ -64,31 +63,13 @@ impl fmt::Display for Source {
     }
 }
 
-/// `parse_config_line`. Splits one line into `(variable, value)`.
+/// Splits one config line into `(variable, value)`.
 ///
-/// The separator grammar, in PCRE:
-///
-/// ```text
-/// ^(\S+)[\t ]*=?[\t ]*(.*?)[\t ]*$
-/// ```
-///
-/// — except the C *doesn't* require `\S+` for the variable (it uses
-/// `strcspn(value, "\t =")` which stops at the first `\t`, space, or
-/// `=`, so the variable is everything-before-first-separator-char).
-/// And the trailing strip is `[\t ]` only, not full Unicode whitespace.
-///
-/// Differences from the C:
-///
-///  - **All-whitespace lines.** C does `while(strchr("\t ", *--eol))`
-///    which reads `line[-1]` if the input is all `\t `/space (eol
-///    starts at the NUL, decrements past start). It happens to work
-///    because the read-back-into-the-stack-frame doesn't crash. We
-///    just stop at start-of-string. Such lines are filtered out by
-///    the caller anyway (`!*line` after the strip, `read_config_file`
-///    line 296).
-///
-///  - **No 1024-byte buffer truncation.** We accept arbitrary length — if someone has a 2KB `Subnet` value something
-///    has gone wrong upstream of the parser.
+/// Grammar (kept compatible with existing config files): the variable
+/// is everything before the first `\t`, space, or `=`; an optional `=`
+/// and surrounding `\t`/space are skipped; the rest is the value with
+/// trailing `\t`/space stripped (ASCII only, not full Unicode
+/// whitespace). Lines of any length are accepted.
 ///
 /// Returns `None` for lines that should be skipped (empty after
 /// trailing-strip), `Some(Err)` for "has a key but no value",
@@ -98,11 +79,7 @@ impl fmt::Display for Source {
 /// layer up.
 #[must_use]
 pub fn parse_line(line: &str, source: Source) -> Option<Result<Entry, ParseError>> {
-    // Trailing strip: `\t` and ` ` only. The empty-line check is on the
-    // *original* (pre-trailing-strip) line, so a line of pure spaces
-    // actually *enters* `parse_config_line` and hits the `*--eol`
-    // underflow. We instead make this fn idempotent about it:
-    // empty-after-strip → skip.
+    // Trailing strip: `\t` and ` ` only. Empty-after-strip → skip.
     let line = line.trim_end_matches(['\t', ' ']);
     if line.is_empty() {
         return None;
@@ -111,10 +88,9 @@ pub fn parse_line(line: &str, source: Source) -> Option<Result<Entry, ParseError
     let (variable, value) = split_kv(line);
     let variable = variable.to_owned();
 
-    // Empty value is an error. Variable can be empty (line starting
-    // with `=` or space) and that's *not* checked — it'll fail
-    // downstream at `lookup_config` time (no key matches
-    // ""). We don't add a check the C doesn't have.
+    // Empty value is an error. An empty variable (line starting with
+    // `=` or space) is not rejected here — it's inert, since no
+    // lookup key ever matches "".
     if value.is_empty() {
         return Some(Err(ParseError {
             variable,
@@ -152,16 +128,13 @@ pub fn split_kv(line: &str) -> (&str, &str) {
     (&line[..key_end], val)
 }
 
-/// Case-fold for lookup. C uses `strcasecmp` which is locale-dependent
-/// in theory but ASCII-only in practice on every target tinc runs on.
-/// We pin it to ASCII explicitly. Non-ASCII bytes pass through — they
-/// never appear in valid variable names but `strcasecmp` doesn't
-/// reject them either, just compares them literally.
+/// Case-fold for lookup: ASCII-only, so folding is locale-independent.
+/// Non-ASCII bytes pass through unchanged — they never appear in valid
+/// variable names and are simply compared literally.
 fn ascii_fold(s: &str) -> String {
-    s.bytes().map(|b| b.to_ascii_lowercase() as char).collect()
+    s.to_ascii_lowercase()
 }
 
-// ────────────────────────────────────────────────────────────────────
 // File reader
 
 /// `read_config_file`. Line loop with comment/blank/PEM-block skip.
@@ -171,22 +144,14 @@ fn ascii_fold(s: &str) -> String {
 /// the base64 body without trying to interpret `IBazFoo+/...` as
 /// `key=value`.
 ///
-/// C reads with `fgets` into a fixed 1024-byte buffer; we read raw
-/// bytes and lossily decode (so a stray Latin-1 byte in a comment, as
-/// `fgets` would tolerate, doesn't hard-fail the whole file), strip a
-/// leading UTF-8 BOM, and accept `\r\n`.
-///
-/// First parse error aborts (matches C: `if(!cfg) break;`). I/O errors
-/// also abort. The C distinguishes "EOF cleanly" from "fgets failed" via
-/// `feof(fp)`; we get the same from `lines()` ending vs erroring.
+/// The file is read as raw bytes and lossily decoded (so a stray
+/// Latin-1 byte in a comment doesn't hard-fail the whole file), a
+/// leading UTF-8 BOM is stripped, and `\r\n` is accepted — all inputs
+/// C tinc tolerates.
 ///
 /// # Errors
 /// Returns the first I/O error or parse error encountered. Partial
-/// results are discarded — the C does `break` on parse error and
-/// returns `false`, leaving the tree half-populated; we're stricter
-/// here (caller gets nothing). If half-populated turns out to be
-/// load-bearing (it shouldn't — `read_server_config` propagates the
-/// `false` and the daemon exits), we'll revisit.
+/// results are discarded (the caller gets nothing).
 pub fn parse_file(path: impl AsRef<Path>) -> Result<Vec<Entry>, ReadError> {
     let path = path.as_ref();
     let f = std::fs::File::open(path).map_err(|e| ReadError::Io {
@@ -307,7 +272,6 @@ pub enum ReadError {
     TooManyEntries { path: PathBuf, max: usize },
 }
 
-// ────────────────────────────────────────────────────────────────────
 // The config tree
 
 /// One `key = value` entry, with provenance.
@@ -315,28 +279,27 @@ pub enum ReadError {
 /// Immutable once created.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
-    /// `cfg->variable`. Preserved as-written (case and all) for
-    /// diagnostics — the C logs `"expected for variable %s"` with the
-    /// original casing.
+    /// The variable name, preserved as-written (case and all) for
+    /// diagnostics.
     pub variable: String,
-    /// `cfg->value`. The string after the separator, trailing
-    /// whitespace stripped, no other processing. Typed getters parse it.
+    /// The string after the separator, trailing whitespace stripped,
+    /// no other processing. Typed getters parse it.
     pub value: String,
-    /// `(cfg->file, cfg->line)`. Determines sort order and diagnostics.
+    /// File and line, for sort order and diagnostics.
     pub source: Source,
-    /// Lowercase `variable`, cached for lookup. Not in the C struct —
-    /// the splay tree's `strcasecmp` does it inline. We precompute to
-    /// keep [`Config::lookup`] allocation-free.
+    /// Lowercase `variable`, cached to keep [`Config::lookup`]
+    /// allocation-free.
     key_folded: String,
 }
 
 impl Entry {
-    /// `get_config_bool`. C accepts `"yes"`/`"no"` case-insensitively
-    /// (`strcasecmp`), nothing else. Not `"true"`, not `"1"`.
+    /// Boolean value: `"yes"`/`"no"` case-insensitively, nothing else.
+    /// Not `"true"`, not `"1"` — existing configs rely on exactly this
+    /// set.
     ///
     /// # Errors
-    /// `Err` for any other string. Carries the entry's source for
-    /// the same diagnostic the C produces.
+    /// `Err` for any other string, carrying the entry's source for
+    /// diagnostics.
     pub fn get_bool(&self) -> Result<bool, ParseError> {
         if self.value.eq_ignore_ascii_case("yes") {
             Ok(true)
@@ -383,8 +346,7 @@ impl Entry {
     }
 }
 
-/// The config tree. C: a splay tree of `config_t*` keyed by
-/// `config_compare`. We: a sorted `Vec`.
+/// The config tree, stored as a sorted `Vec`.
 ///
 /// The compare function is a 4-tuple:
 ///
@@ -458,72 +420,24 @@ impl Config {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
 // read_server_config
 //
-// ## What this is, what it isn't
+// Command-line `-o Key=Value` overrides are NOT merged here; when the
+// caller has any, it merges them into the `Config` before calling.
 //
-// The C does three things in sequence:
+// ## conf.d handling
 //
-//   1. read_config_options(tree, NULL)   ─ walk cmdline_conf, merge
-//                                          dotless entries (-o Port=655)
-//   2. read tinc.conf                    ─ hard fail if absent
-//   3. opendir conf.d, readdir *.conf    ─ soft skip if dir absent,
-//                                          hard fail if any file fails
-//
-// We port (2) and (3). (1) is a no-op for both fsck consumers and
-// (eventually) the daemon's first call — cmdline_conf is populated
-// only by `tincd -o` parsing in tincd.c:main(). The fsck binary
-// (linked into tincctl, not tincd) sees an empty list. Checked: rg
-// for cmdline_conf shows tincd.c, conf.c, conf.h — no tincctl.c.
-//
-// When the daemon lands and needs the cmdline merge, the calling
-// pattern is `cfg.merge(cmdline_entries)` *before* calling this. The
-// caller owns the cmdline list (it's argv-derived); this function
-// doesn't reach for a global.
-//
-// ## The 40719189 mishap
-//
-// Upstream HEAD reads:
-//
-//     if(!dir && errno == ENOENT) {
-//         return true;
-//     } else {
-//         logger(..., "Failed to read `%s'...", dname);
-//         return false;
-//     }
-//
-// When opendir SUCCEEDS, dir is non-NULL, !dir is false, the if
-// fails, control falls to else, function returns false. The readdir
-// loop at line 412 is unreachable. conf.d/ support has been broken
-// since 2026-03-30 (commit 40719189, "Fix warnings from
-// clang-tidy-23" — clang-tidy presumably flagged the old
-// unset-errno-on-success path; the cure introduced this).
-//
-// We port the PRE-40719189 behavior (the 2017 logic, 9 years stable):
-// dir absent for any reason → soft skip, dir present → read it.
-// That's what every released tinc has done; that's what users have.
-// The Rust IS the bugfix — we don't carry the regression.
+// Behavior matches released tinc versions: conf.d absent for any
+// reason → soft skip; present → read every `*.conf` in it. (Recent
+// C tinc HEAD carries a regression — commit 40719189 — that makes a
+// *populated* conf.d fail; we deliberately implement the long-stable
+// behavior instead. See the `server_confd_head_bug_not_ported` test.)
 //
 // ## conf.d ordering
 //
-// readdir() returns entries in directory order (filesystem-
-// dependent: ext4 is hash order, xfs is creation order). The C
-// merges in readdir order. We sort. Rationale:
-//
-//   - The 4-tuple compare already sorts by (var, cmdline, line,
-//     file), so two conf.d files defining the same key on different
-//     lines are ordered by LINE first, not file. Merge order is
-//     invisible there.
-//   - Same key, same line number, different file: file name
-//     tiebreaks. Merge order STILL invisible — the sort is total.
-//   - The only place merge order leaks is Config::entries() (the
-//     full dump). That's debug output.
-//
-// Sorting costs nothing (handful of files) and makes the dump
-// deterministic across filesystems. The pre-40719189 C didn't sort
-// because it didn't need to; we don't NEED to either, but readdir-
-// order tests are flaky and we'd rather not.
+// Files are sorted before merging. Merge order is invisible to lookup
+// (the 4-tuple compare is total), but sorting makes the entries()
+// dump deterministic across filesystems and keeps tests stable.
 //
 // ## Why this lives in parse.rs not a new module
 //
@@ -548,10 +462,8 @@ impl Config {
 /// - `tinc.conf` absent or unparseable → error. A daemon without a
 ///   tinc.conf has no Name.
 /// - `conf.d/` absent → fine. Expected case (most installs don't
-///   use it). Pre-40719189 C: any opendir failure is silently OK.
-/// - `conf.d/` present but `read_dir` fails after open → error. C
-///   wouldn't notice (`readdir()` returns NULL on error AND eof; the C
-///   doesn't check errno after the loop). We're stricter — a
+///   use it).
+/// - `conf.d/` present but `read_dir` fails after open → error — a
 ///   transient I/O error during fsck shouldn't read as "no findings."
 /// - Any `*.conf` file in `conf.d/` unparseable → error.
 pub fn read_server_config(confbase: impl AsRef<Path>) -> Result<Config, ReadError> {
@@ -562,24 +474,19 @@ pub fn read_server_config(confbase: impl AsRef<Path>) -> Result<Config, ReadErro
     // with the path, so the error message says which file.
     cfg.merge(parse_file(confbase.join("tinc.conf"))?);
 
-    // (3) conf.d/. Soft skip on absent dir.
-    //
-    // C condition is `if(dir)` — ANY opendir failure (ENOENT, EACCES,
-    // ENOTDIR) is a silent skip in the pre-40719189 code. We match
-    // that. If conf.d is a regular file or you can't read it, the
-    // daemon starts anyway with just tinc.conf. Surprising? A bit. But
-    // tightening it would make a Rust daemon refuse to start where a
-    // 1.0.x daemon ran fine, on a config that's been working for years.
-    // fsck can warn separately if it wants.
+    // (3) conf.d/. ANY failure to open the dir (ENOENT, EACCES,
+    // ENOTDIR) is a silent skip: if conf.d is a regular file or
+    // unreadable, the daemon starts anyway with just tinc.conf.
+    // Tightening this would refuse configs that have worked for
+    // years; fsck can warn separately if it wants.
     let conf_d = confbase.join("conf.d");
     let Ok(rd) = std::fs::read_dir(&conf_d) else {
         return Ok(cfg);
     };
 
-    // Collect-then-sort. See block comment above for why we sort and
-    // the C doesn't (short version: merge order is invisible to lookup
-    // because the 4-tuple compare is total; sorting just makes the
-    // entries() dump deterministic).
+    // Collect-then-sort: merge order is invisible to lookup because
+    // the 4-tuple compare is total; sorting just makes the entries()
+    // dump deterministic.
     //
     // The filter: C does `l > 5 && !strcmp(".conf", name+l-5)`. The
     // strict `> 5` rejects a bare ".conf" (5 chars exactly) — you
@@ -599,10 +506,9 @@ pub fn read_server_config(confbase: impl AsRef<Path>) -> Result<Config, ReadErro
         })?;
         let name = ent.file_name();
         let Some(name) = name.to_str() else { continue };
-        // CASE-SENSITIVE: `foo.CONF` is rejected. clippy's
-        // "use Path::extension + eq_ignore_ascii_case" suggestion
-        // would change behavior. Bytes-suffix is the port-faithful
-        // form (and trivially also rejects non-ASCII look-alikes).
+        // CASE-SENSITIVE: `foo.CONF` is rejected, matching what C tinc
+        // loads. clippy's "Path::extension + eq_ignore_ascii_case"
+        // suggestion would change which files get read.
         #[expect(clippy::case_sensitive_file_extension_comparisons)] // tinc writes ".conf" exactly
         if name.len() > 5 && name.ends_with(".conf") {
             files.push(ent.path());
@@ -1024,9 +930,9 @@ more garbage
         assert_eq!(cfg.entries().len(), 1);
     }
 
-    /// One bad file in conf.d/ fails the whole read. C: hard fail.
-    /// The good file merged before the bad one is lost — we discard
-    /// partial results (see [`parse_file`] docs).
+    /// One bad file in conf.d/ fails the whole read. The good file
+    /// merged before the bad one is lost — partial results are
+    /// discarded (see [`parse_file`] docs).
     #[test]
     fn server_confd_one_bad() {
         let td = Td::new("one_bad");
@@ -1043,13 +949,12 @@ more garbage
     }
 
     /// **The 40719189 regression test.** conf.d/ exists AND has a
-    /// file — if we'd ported HEAD's C, this would fail (the C
-    /// returns false the moment opendir succeeds). It passing proves
-    /// we ported the pre-40719189 (working) behavior.
+    /// file, and it must be read. C tinc HEAD (commit 40719189) fails
+    /// this case; we implement the long-stable behavior instead.
     ///
-    /// This is the same setup as `server_confd_merged` but reduced to
-    /// the minimum that demonstrates the bug. Kept separate so the
-    /// test name is the documentation.
+    /// Same setup as `server_confd_merged` but reduced to the minimum
+    /// that demonstrates the bug; kept separate so the test name is
+    /// the documentation.
     #[test]
     fn server_confd_head_bug_not_ported() {
         let td = Td::new("head_bug");
@@ -1058,16 +963,11 @@ more garbage
         write(td.join("conf.d/a.conf"), "Port = 655\n");
 
         let cfg = read_server_config(&td.0).unwrap();
-        // The kill shot: HEAD C would have returned false before the
-        // readdir loop, never reading a.conf. We did read it.
         assert_eq!(cfg.lookup("Port").next().unwrap().value, "655");
     }
 
-    /// conf.d is a regular file, not a directory. Pre-40719189 C:
-    /// opendir returns NULL with ENOTDIR, `if(dir)` fails, silent
-    /// skip. We match. (HEAD C: !dir is true, errno is ENOTDIR not
-    /// ENOENT, falls to else, return false. Another way 40719189
-    /// broke things.)
+    /// conf.d is a regular file, not a directory: silently skipped,
+    /// daemon starts with just tinc.conf.
     #[test]
     fn server_confd_is_file() {
         let td = Td::new("is_file");

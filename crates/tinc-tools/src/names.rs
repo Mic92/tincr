@@ -238,8 +238,9 @@ impl Paths {
     ///
     /// The rule: `foo.pid` → `foo.socket`; anything else gets
     /// `.socket` appended. Case-sensitive, exactly 4 trailing bytes.
-    /// `Foo.PID` does NOT match → `Foo.PID.socket`. Replicated
-    /// faithfully because socket-path mismatch = silent connect fail.
+    /// `Foo.PID` does NOT match → `Foo.PID.socket`. Must match the
+    /// daemon's derivation exactly — a socket-path mismatch is a silent
+    /// connect failure.
     ///
     /// Why derived not stored: it's pure (no fs probe), and storing
     /// it would mean two `Option`s that are always `Some`/`None`
