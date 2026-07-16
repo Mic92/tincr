@@ -31,10 +31,9 @@ use crate::listen::SockOpts;
 
 pub(crate) use crate::ids::OutgoingId;
 
-/// `outgoing_t` (`net.h:121-125`). Three fields in C: `node_t *node`,
-/// `int timeout`, `timeout_t ev`. We store the node NAME (not a
-/// `NodeId` — outgoings are config-derived, the node might not exist
-/// in the graph yet), the backoff seconds, and the address cache.
+/// One outgoing-connection slot: the node NAME (not a `NodeId` —
+/// outgoings are config-derived, the node might not exist in the graph
+/// yet), the backoff seconds, and the address cache.
 ///
 /// Why this `Outgoing` slot exists. autoconnect's drop logic must
 /// distinguish demand-driven shortcuts (eligible for idle-reap) from
@@ -55,8 +54,7 @@ pub(crate) enum OutOrigin {
     AutoShortcut,
 }
 
-/// C hangs `address_cache` on `node_t` (`node.h:108`); only outgoings
-/// ever read it. Per-outgoing is the natural home.
+/// Only outgoings ever read the address cache, so it lives here.
 pub(crate) struct Outgoing {
     /// `outgoing->node->name`. The `ConnectTo = bob` value.
     pub node_name: String,
@@ -236,7 +234,7 @@ pub(crate) fn try_connect_via_proxy(
 ) -> ConnectAttempt {
     log::info!(target: "tincd::conn",
                "Using proxy at {proxy_addr} for {node_name} ({peer_addr})");
-    // Proxy path never binds to a local addr (C: only direct does).
+    // Proxy path never binds to a local addr; only direct dials do.
     match dial_nonblocking(
         proxy_addr,
         None,
@@ -293,8 +291,7 @@ pub(crate) fn probe_connecting(fd: BorrowedFd<'_>) -> io::Result<bool> {
             //
             // `getsockopt(SOL_SOCKET, SO_ERROR)`. 0 means SO_ERROR
             // was clear — shouldn't happen here (we got ENOTCONN,
-            // SOMETHING failed). C's `if(socket_error)` falls
-            // through (no log, no terminate); we treat as spurious.
+            // SOMETHING failed). Treat as spurious.
             match getsockopt(&fd, sockopt::SocketError) {
                 Ok(0) => Ok(false),
                 Ok(errno) => Err(io::Error::from_raw_os_error(errno)),
@@ -314,10 +311,9 @@ pub(crate) fn probe_connecting(fd: BorrowedFd<'_>) -> io::Result<bool> {
     }
 }
 
-/// `proxytype_t` (`net.h:148-155`). C has six (`NONE`/`SOCKS4`/
-/// `SOCKS4A`/`SOCKS5`/`HTTP`/`EXEC`); we have four. `NONE` is
-/// `Option::None` at the `DaemonSettings.proxy` level. `SOCKS4A` is
-/// faithfully unimplemented ("not implemented yet" upstream too).
+/// Proxy configuration. `NONE` is `Option::None` at the
+/// `DaemonSettings.proxy` level. `SOCKS4A` is unimplemented (C tinc
+/// doesn't implement it either).
 #[derive(Debug, Clone)]
 pub enum ProxyConfig {
     /// `PROXY_EXEC`. `socketpair` + `fork` +
@@ -422,8 +418,7 @@ pub(crate) fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, Str
             }))
         }
         // SOCKS4/4A/5/HTTP all share the same parse shape: walk
-        // through `host port [user [pass]]`. `socks4a`: "not
-        // implemented yet" upstream. Reject.
+        // through `host port [user [pass]]`. socks4a: reject.
         "socks4a" => {
             Err("Proxy type socks4a not implemented (upstream tinc doesn't either)".into())
         }
@@ -481,9 +476,9 @@ pub(crate) fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, Str
 /// `_exit`). The `CString` allocations happen in the PARENT before
 /// the fork; the child only borrows their `.as_ptr()`.
 ///
-/// Upstream `do_outgoing_pipe` doesn't have this problem (tincd is
-/// single-threaded), but our test harness might be multi-threaded
-/// (cargo-nextest spawns threads). We're paranoid for free.
+/// The daemon itself is single-threaded here, but the test harness
+/// might not be (cargo-nextest spawns threads), so stay async-signal-
+/// safe anyway.
 ///
 /// # Errors
 /// `socketpair` or `fork` syscall failure. The child's `exec`
@@ -631,10 +626,8 @@ pub(crate) fn do_outgoing_pipe(
 pub(crate) fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(String, u16)> {
     let host_file = confbase.join("hosts").join(node_name);
     let Ok(entries) = tinc_conf::parse_file(&host_file) else {
-        // No hosts/NAME file. The cache file (if any) is the only
-        // source. C: `read_host_config` returns false; the address
-        // cache walk falls through to `cache->cfg = NULL` and the
-        // config phase yields nothing.
+        // No hosts/NAME file: the cache file (if any) is the only
+        // source; the config phase yields nothing.
         log::warn!(target: "tincd::conn",
                    "hosts/{node_name} not readable; no Address config");
         return Vec::new();
@@ -642,8 +635,8 @@ pub(crate) fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(Str
     let mut cfg = tinc_conf::Config::new();
     cfg.merge(entries);
 
-    // C address_cache.c:165: bare-Address port falls back to
-    // `lookup_config("Port")` before the 655 default.
+    // A bare `Address` (no port) falls back to the host's `Port`
+    // before the 655 default.
     let default_port = cfg
         .lookup("Port")
         .next()
@@ -787,8 +780,7 @@ mod tests {
         }
     }
 
-    /// Missing `hosts/NAME` → empty. C: `read_host_config` returns
-    /// false; the config phase of `get_recent_address` yields nothing.
+    /// Missing `hosts/NAME` → empty; the config phase yields nothing.
     #[test]
     fn resolve_missing_file() {
         let tmp = std::env::temp_dir().join(format!(
@@ -915,7 +907,7 @@ mod tests {
         assert!(parse_proxy_config("socks5 localhost notaport").is_err());
         assert!(parse_proxy_config("http localhost").is_err());
 
-        // socks4a: faithfully unimplemented upstream.
+        // socks4a: unimplemented.
         assert!(parse_proxy_config("socks4a localhost 1080").is_err());
 
         // unknown.

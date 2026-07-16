@@ -7,32 +7,25 @@
 //!
 //! ## Data structure
 //!
-//! Upstream uses ONE `splay_tree_t subnet_tree` for all three
-//! address families, with a `type` discriminant on each entry and a
-//! `if(p->type != SUBNET_IPV4) continue` guard in every lookup loop.
-//! We split into three `BTreeMap`s — same iteration
-//! order, no per-iteration type check, and the borrow checker doesn't
-//! tangle when v4 and v6 lookups happen on the same packet (TAP mode
-//! with dual-stack ARP).
+//! Three `BTreeMap`s, one per address family. Lookups never cross
+//! families, and separate trees keep the borrow checker happy when v4
+//! and v6 lookups happen on the same packet (TAP mode with dual-stack
+//! ARP).
 //!
 //! ## The comparator IS the algorithm
 //!
-//! `subnet_compare_ipv4` sorts by prefix length DESCENDING first.
-//! So in-order tree iteration visits `/32` before `/24` before
-//! `/8`. `lookup_subnet_ipv4` is then a linear scan: first `maskcmp` hit IS the longest match.
-//! No trie needed. The sort order does the work.
-//!
-//! Our `Ord for Ipv4Key` is the C comparator; `BTreeMap::iter()` is
-//! the in-order walk; `Subnet::matches(addr, true)` is `maskcmp`.
+//! The keys sort by prefix length DESCENDING first, so in-order tree
+//! iteration visits `/32` before `/24` before `/8`. Lookup is then a
+//! linear scan: the first mask match IS the longest match. No trie
+//! needed — the sort order does the work. The ordering matches C
+//! tinc's comparators so route selection agrees across the mesh.
 //!
 //! ## What's NOT here
 //!
-//! - The hash cache (`ipv4_cache` etc). Hot-path optimization;
-//!   separate commit once routing actually works.
-//! - The per-node subnet tree (`node->subnet_tree`). Upstream maintains
-//!   TWO trees per subnet (global + the owner's). We only need the
-//!   global one for routing; the per-node view is for `dump subnets`
-//!   and that can filter the global tree by owner.
+//! - A lookup cache (hot-path optimization; add if profiling asks).
+//! - A per-node subnet index. The global table is enough for routing;
+//!   the per-node view (`dump subnets`) filters the global tree by
+//!   owner.
 
 #![forbid(unsafe_code)]
 
@@ -91,40 +84,18 @@ struct MacKey {
     owner: Option<String>,
 }
 
-// Ord impls: the C comparators.
-//
-// The C does `b->prefixlength - a->prefixlength` (int subtraction).
-// That's fine for u8-range values but `a->weight - b->weight` is an
-// i32-on-i32 subtraction and the wire format never range-checks
-// weight (`%d` parse). `i32::MIN - 1` is UB in C and a panic in
-// Rust. We use `Ord::cmp` chaining; the descending-prefix bit is
-// `.reverse()`.
-//
-// Upstream also short-circuits owner compare when either owner is
-// NULL (`if(result || !a->owner || !b->owner)`). That's the
-// search-key sentinel pattern: `lookup_subnet` builds a
-// fake `subnet_t` with `owner = NULL` and `splay_search`es for it.
-// We don't need that — `BTreeMap::get`/`iter` don't take fake
-// entries.
-//
-// HOWEVER: `owner = NULL` is also a real tree state. `net_setup.c:
-// 485-505` inserts `ff:ff:ff:ff:ff:ff`, `255.255.255.255`,
-// `224.0.0.0/4`, `ff00::/8` with `subnet_add(NULL, s)`. `route.c:
-// `if(!subnet->owner) route_broadcast()`. We use `None`. The
-// upstream short-circuit sorts ownerless before owned at the owner
-// tiebreak (NULL stops the strcmp); `Option::Ord` gives us the
-// same: `None < Some(_)`.
+// Ord impls define the routing order (see module doc). Ownerless
+// (broadcast) entries sort before owned ones at the owner tiebreak
+// (`None < Some(_)`), which matches C tinc's ordering.
 
 impl Ord for Ipv4Key {
-    /// `subnet_compare_ipv4`. Four-level tiebreak:
+    /// Four-level tiebreak:
     ///
-    /// 1. `prefixlength` DESCENDING (C: `b - a`). Longest first.
-    /// 2. `address` ascending (C: `memcmp`). `Ipv4Addr` derives `Ord`
-    ///    as big-endian byte compare — same as `memcmp` on the octets.
+    /// 1. `prefix` DESCENDING. Longest first.
+    /// 2. `address` ascending (big-endian byte compare).
     /// 3. `weight` ascending. Lower weight = preferred route.
-    /// 4. `owner` ascending. `strcmp` ≡ `String`'s `Ord` (both are
-    ///    byte-lex; node names are `[A-Za-z0-9_]+` so no UTF-8
-    ///    surprises).
+    /// 4. `owner` ascending, byte-lex (node names are `[A-Za-z0-9_]+`
+    ///    so no UTF-8 surprises).
     fn cmp(&self, other: &Self) -> Ordering {
         let Subnet::V4 {
             addr: a,
@@ -143,14 +114,10 @@ impl Ord for Ipv4Key {
             unreachable!("Ipv4Key holds non-V4 subnet")
         };
 
-        // `b->prefixlength - a->prefixlength`. Descending → `.reverse()`.
         pa.cmp(&pb)
-            .reverse()
-            // C :146: `memcmp(&a->address, &b->address, sizeof ipv4_t)`.
+            .reverse() // longest prefix first
             .then_with(|| a.cmp(&b))
-            // C :152: `a->weight - b->weight`. NO subtraction.
             .then_with(|| wa.cmp(&wb))
-            // C :158: `strcmp(a->owner->name, b->owner->name)`.
             .then_with(|| self.owner.cmp(&other.owner))
     }
 }
@@ -227,12 +194,8 @@ impl PartialOrd for MacKey {
 
 // SubnetTree
 
-/// `subnet_tree` from `subnet.c`. The global routing table.
+/// The global routing table, split by address family.
 ///
-/// C uses a single `splay_tree_t` with a type tag. We split by
-/// family: lookups never cross families anyway (`route_ipv4` never
-/// asks about MAC), and three separate trees means iteration skips
-/// the `p->type != SUBNET_IPV4` check on every element.
 /// `Clone`: snapshot-and-publish for the TX fast path. Clone is O(n)
 /// String clones (the `owner` field); for a 100-subnet mesh that's
 /// ~1KB, called once per `ADD_SUBNET`/`DEL_SUBNET` gossip event —
@@ -250,14 +213,10 @@ impl SubnetTree {
         Self::default()
     }
 
-    /// `subnet_add`. Dispatches on `Subnet` variant to the right
-    /// tree. Upstream
-    /// inserts into BOTH the global tree and `n->subnet_tree`; we
-    /// only have the global one (see module doc).
+    /// Add an owned subnet, dispatching on the `Subnet` variant to the
+    /// right tree.
     ///
-    /// Idempotent — re-adding the same `(subnet, owner)` is a no-op
-    /// (`splay_insert` replaces, but the value IS the key so it's
-    /// observationally identical).
+    /// Idempotent — re-adding the same `(subnet, owner)` is a no-op.
     pub(crate) fn add(&mut self, subnet: Subnet, owner: String) {
         let owner = Some(owner);
         match subnet {
@@ -273,15 +232,11 @@ impl SubnetTree {
         }
     }
 
-    /// `subnet_add(NULL, s)`.
-    ///
-    /// Ownerless subnets divert to `route_broadcast`. The four
-    /// hard-coded defaults (Ethernet broadcast,
-    /// IPv4 limited broadcast, IPv4 multicast `224/4`, IPv6 multicast
-    /// `ff00::/8`) plus any `BroadcastSubnet` config entries.
-    ///
-    /// `Option::Ord` sorts `None` first — matches upstream's
-    /// NULL-short-circuit.
+    /// Add an ownerless (broadcast) subnet. Ownerless subnets divert
+    /// to `route_broadcast`: the four hard-coded defaults (Ethernet
+    /// broadcast, IPv4 limited broadcast, IPv4 multicast `224/4`,
+    /// IPv6 multicast `ff00::/8`) plus any `BroadcastSubnet` config
+    /// entries.
     pub(crate) fn add_broadcast(&mut self, subnet: Subnet) {
         match subnet {
             Subnet::V4 { .. } => {
@@ -362,30 +317,26 @@ impl SubnetTree {
         }
     }
 
-    /// `lookup_subnet_ipv4`.
+    /// IPv4 longest-prefix lookup.
     ///
     /// Linear scan in tree order. Tree order has `/32` before `/24`
     /// before `/8` (descending prefix), so the FIRST entry whose
     /// top-`prefix` bits match `addr` is the longest-prefix match.
-    /// The C exploits this and so do we.
     ///
     /// ## Reachability
     ///
-    /// `if(!p->owner || p->owner->status.reachable) break`. The scan
-    /// KEEPS GOING past matches whose owner is down,
-    /// looking for a less-specific match owned by someone reachable.
-    /// (If alice owns `10.0.0.0/24` but is offline, and bob owns
-    /// `10.0.0.0/16`, route to bob.)
+    /// The scan keeps going past matches whose owner is down, looking
+    /// for a less-specific match owned by someone reachable. (If alice
+    /// owns `10.0.0.0/24` but is offline, and bob owns `10.0.0.0/16`,
+    /// route to bob.)
     ///
     /// We don't have node state here. `is_reachable` lets the caller
     /// inject it: return `true` for nodes that are up. The closure
     /// is called once per matching subnet, in longest-first order.
     ///
-    /// C also remembers the LAST match (`r = p`) even if it never
-    /// finds a reachable owner — `route_ipv4` then logs "Node %s
-    /// is not reachable" with that owner's name. We return `Some`
-    /// for that fallback too: the last `maskcmp`
-    /// hit, reachable or not.
+    /// If no reachable owner is found, the last mask hit is still
+    /// returned so the caller can log "Node %s is not reachable" with
+    /// that owner's name.
     pub(crate) fn lookup_ipv4(
         &self,
         addr: Ipv4Addr,
@@ -401,15 +352,10 @@ impl SubnetTree {
         };
         let mut last_hit: Option<(&Subnet, Option<&str>)> = None;
         for k in &self.ipv4 {
-            // `if(!maskcmp(...))` — `maskcmp` returns 0 for equal
-            // (memcmp convention), and `!0` is truthy. So
-            // `!maskcmp(...)` is "if equal under mask".
-            // Our `matches(_, true)` returns `true` for equal.
             if k.subnet.matches(&q, true) {
                 last_hit = Some((&k.subnet, k.owner.as_deref()));
-                // C :275: `if(!p->owner || p->owner->status.reachable)
-                // break`. Ownerless (broadcast) is always "reachable"
-                // — it goes to ALL reachable peers via route_broadcast.
+                // Ownerless (broadcast) is always "reachable" — it goes
+                // to ALL reachable peers via route_broadcast.
                 if k.owner.as_deref().is_none_or(&mut is_reachable) {
                     break;
                 }
@@ -418,7 +364,7 @@ impl SubnetTree {
         last_hit
     }
 
-    /// `lookup_subnet_ipv6`. Same as v4.
+    /// IPv6 longest-prefix lookup. Same as v4.
     pub(crate) fn lookup_ipv6(
         &self,
         addr: &Ipv6Addr,
@@ -433,7 +379,7 @@ impl SubnetTree {
         for k in &self.ipv6 {
             if k.subnet.matches(&q, true) {
                 last_hit = Some((&k.subnet, k.owner.as_deref()));
-                // `!p->owner ||` short-circuit.
+                // Ownerless is always "reachable".
                 if k.owner.as_deref().is_none_or(&mut is_reachable) {
                     break;
                 }
@@ -442,21 +388,13 @@ impl SubnetTree {
         last_hit
     }
 
-    /// `for splay_each(subnet_t, subnet, &subnet_tree)` (`subnet.c:
-    /// 396`). All families, in C-splay-order: v4 first (descending
-    /// prefix), then v6, then MAC. The C has ONE tree interleaved
-    /// by `subnet_compare`'s `a->type - b->type` first key; we have
-    /// three trees and chain. Same ordering: type discriminant
-    /// ascending (the upstream enum is `MAC=0, V4=1, V6=2`, so
-    /// MAC sorts FIRST). Match: mac, v4, v6.
+    /// Iterate all owned subnets in C tinc's dump/gossip order:
+    /// MAC first, then v4 (descending prefix), then v6. Matching this
+    /// order keeps dump output diffable against C tincd.
     ///
-    /// SKIPS ownerless (broadcast) subnets. Upstream `send_everything`
-    /// walks per-node `n->subnet_tree`s; broadcast subnets aren't in
-    /// any node's tree, so they're never gossiped. Our gossip.rs
-    /// walks this global iterator instead —
-    /// filtering here keeps the wire output equivalent. (Cosmetic
-    /// fallout: `dump_subnets` won't print `(broadcast)` rows.
-    /// Separate fix if anyone cares.)
+    /// SKIPS ownerless (broadcast) subnets so they're never gossiped,
+    /// same as C tinc. (Cosmetic fallout: `dump_subnets` won't print
+    /// `(broadcast)` rows. Separate fix if anyone cares.)
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&Subnet, &str)> {
         self.mac
             .iter()
@@ -467,9 +405,8 @@ impl SubnetTree {
     }
 
     /// All subnets owned by `name`, collected. Wrapper over `iter()` +
-    /// filter + collect: 5 callsites had this exact 5-line block
-    /// (`subnet_update(n, NULL, ...)` in upstream terms). The collect
-    /// is intentional: callers immediately call `run_subnet_script` /
+    /// filter + collect shared by several callsites. The collect is
+    /// intentional: callers immediately call `run_subnet_script` /
     /// `del()` while iterating, which would self-borrow on the iterator.
     #[must_use]
     pub(crate) fn owned_by(&self, name: &str) -> Vec<Subnet> {
