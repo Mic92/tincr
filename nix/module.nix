@@ -89,8 +89,8 @@ let
           example = "/var/lib/tincr/mesh/ed25519_key.priv";
           description = ''
             Path to the node's Ed25519 private key. Stateful; the
-            module does not generate it. tinc.conf gets
-            `Ed25519PrivateKeyFile =` pointing here.
+            module does not generate it. Loaded via systemd
+            `LoadCredential=`, so it may be readable only by root.
           '';
         };
 
@@ -217,7 +217,6 @@ let
           "Interface = ${net.interfaceName}"
           "Port = ${toString net.listenPort}"
           "AutoConnect = ${if net.autoConnect then "yes" else "no"}"
-          "Ed25519PrivateKeyFile = ${toString net.ed25519PrivateKeyFile}"
         ]
         ++ map (n: "ConnectTo = ${n}") net.connectTo
         ++ optional net.dns.enable "DNSSuffix = ${net.dns.suffix}"
@@ -329,6 +328,9 @@ let
 
         User = serviceUser;
         Group = serviceUser;
+
+        LoadCredential = [ "ed25519_key:${toString net.ed25519PrivateKeyFile}" ];
+        Environment = [ "TINCR_ED25519_PRIVATE_KEY_FILE=%d/ed25519_key" ];
 
         RuntimeDirectory = "tincr";
         RuntimeDirectoryMode = "0755";
