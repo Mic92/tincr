@@ -311,7 +311,9 @@ let
         "systemd-networkd.service"
       ];
       wants = [ "network-online.target" ];
-      wantedBy = mkIf (!net.socketActivation) [ "multi-user.target" ];
+      # tincd dials out itself, so it can't rely on socket activation to start.
+      wantedBy = [ "multi-user.target" ];
+      requires = mkIf net.socketActivation [ "${unitName netName}.socket" ];
 
       restartTriggers = [ (mkTincConf netName net) ];
 
