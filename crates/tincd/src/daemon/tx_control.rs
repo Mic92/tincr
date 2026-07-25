@@ -1126,6 +1126,14 @@ impl Daemon {
             via_nexthop_nid.and_then(|v| self.pmtu_snapshot(v)),
         );
 
+        // A converged direct/relay PMTU below `MTU_MIN` (512) means UDP to
+        // `from` is unusable; advertising it would trip the peer's fatal
+        // `mtu < 512` teardown and loop. Suppress — see `mtu_info_sendable`
+        // and issue #21.
+        if !udp_info::mtu_info_sendable(mtu) {
+            return false;
+        }
+
         if from_is_myself {
             self.dp.tunnels.entry(to_nid).or_default().mtu_info_sent = Some(now);
         }

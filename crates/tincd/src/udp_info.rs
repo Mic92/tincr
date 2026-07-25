@@ -337,6 +337,22 @@ pub(crate) fn adjust_mtu_for_send(
     mtu
 }
 
+/// Whether an `MTU_INFO` carrying `mtu` may be put on the wire.
+///
+/// [`on_receive_mtu_info`] treats `mtu < MTU_MIN` (512) as
+/// [`MtuInfoAction::Malformed`], which the daemon turns into a fatal
+/// `BadKey` that tears down the meta connection. A converged direct or
+/// relay PMTU below that floor (e.g. `0` when no probe replies arrive,
+/// or `18` = `MIN_PROBE_SIZE` when only keepalive-sized probes survive a
+/// blackholing path) is a legitimate "UDP is unusable" state, NOT a
+/// value to advertise: emitting it would drop the link and loop
+/// (teardown → SPTPS restart → PMTU re-collapse → re-send). Suppress it;
+/// the peer relies on its own discovery / TCP fallback. See issue #21.
+#[must_use]
+pub(crate) const fn mtu_info_sendable(mtu: i32) -> bool {
+    mtu >= MTU_MIN
+}
+
 /// What to do with a received `MTU_INFO`.
 ///
 /// `N` is the caller's node-id type; forwarding variants carry
@@ -585,6 +601,40 @@ mod tests {
         ];
         for &(label, mtu, via_my, from, via, nh, want) in cases {
             assert_eq!(adjust_mtu_for_send(mtu, via_my, from, via, nh), want, "{label}");
+        }
+    }
+
+    /// The sender must never emit an `MTU_INFO` value the receiver
+    /// rejects as fatal: `mtu_info_sendable` is the exact inverse of the
+    /// `on_receive_mtu_info` `Malformed` gate. A converged sub-512 PMTU
+    /// (0 when no probe replies arrive, 18 = `MIN_PROBE_SIZE` on a
+    /// blackholing path) is therefore suppressed instead of tearing down
+    /// the meta connection. Regression for issue #21.
+    #[test]
+    fn mtu_send_floor_matches_recv_gate() {
+        let unconv = FromMtuState {
+            mtu: 1500,
+            minmtu: 1000,
+            maxmtu: 1500,
+        };
+        // Collapsed values seen in the wild, plus the 511/512 edge.
+        for mtu in [0, 18, 511] {
+            assert!(!mtu_info_sendable(mtu), "sub-512 must be suppressed: {mtu}");
+        }
+        for mtu in [MTU_MIN, 1400, MTU_MAX] {
+            assert!(mtu_info_sendable(mtu), "usable MTU must be sendable: {mtu}");
+        }
+        // Contract: sendable ⇔ receiver does NOT treat it as Malformed.
+        for mtu in [-1, 0, 18, 400, 511, 512, 1400, MTU_MAX, 12000] {
+            let rejected = matches!(
+                on_receive_mtu_info(&mkmtu(mtu), Some(((), unconv)), Some(())),
+                MtuInfoAction::Malformed
+            );
+            assert_eq!(
+                mtu_info_sendable(mtu),
+                !rejected,
+                "sender/receiver contract disagree at mtu={mtu}"
+            );
         }
     }
 
