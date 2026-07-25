@@ -536,9 +536,15 @@ impl Daemon {
         let nexthop_nid = route.nexthop;
 
         // PROBE always prefers via (tiny + measures via's MTU); data
-        // prefers via only if it FITS. minmtu=0 until discovery →
-        // data goes hop-by-hop via nexthop until then (correct).
-        let via_minmtu = self.dp.tunnels.get(&via_nid).map_or(0, TunnelState::minmtu);
+        // prefers via only if it FITS a *usable* UDP MTU. `usable_minmtu`
+        // is 0 until discovery proves MINMTU (512), so a path that only
+        // passes keepalive-sized probes (symmetric NAT / flaky link)
+        // never attracts real data onto its blackholing direct hop.
+        let via_minmtu = self
+            .dp
+            .tunnels
+            .get(&via_nid)
+            .map_or(0, TunnelState::usable_minmtu);
         let relay_nid = if via_nid != self.myself
             && (record_type == PKT_PROBE || origlen <= usize::from(via_minmtu))
         {
@@ -562,15 +568,17 @@ impl Daemon {
         let tcponly =
             (self.myself_options.bits() | relay_options) & crate::dispatch::OPTION_TCPONLY != 0;
 
-        // C parity (`net_packet.c:974`): data stays on TCP until a
-        // probe reply lifts `minmtu` above 0. Probes are exempt so
-        // discovery still runs; behind a UDP-blackholing firewall
-        // minmtu stays 0 and data correctly never goes UDP.
+        // Data stays on TCP until discovery proves a *usable* UDP MTU
+        // (>= MINMTU). Probes are exempt so discovery still runs; behind
+        // a UDP-blackholing / sub-MINMTU path `usable_minmtu` stays 0 and
+        // data correctly never goes UDP (issue #21). Diverges from C
+        // net_packet.c:974 ("minmtu > 0"), which lets tiny-probe noise
+        // pin real data to a dead direct path.
         let relay_minmtu = self
             .dp
             .tunnels
             .get(&relay_nid)
-            .map_or(0, TunnelState::minmtu);
+            .map_or(0, TunnelState::usable_minmtu);
         let too_big = record_type != PKT_PROBE && origlen > usize::from(relay_minmtu);
         let go_tcp = record_type == tinc_sptps::REC_HANDSHAKE
             || tcponly

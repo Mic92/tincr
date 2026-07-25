@@ -160,7 +160,11 @@ impl Daemon {
         // reading the post-action value covers all three. None until
         // first HandshakeDone (probes start after the SPTPS dance).
         if let Some(h) = self.tunnel_handles.get(&peer) {
-            let m = self.dp.tunnels.get(&peer).map_or(0, TunnelState::minmtu);
+            let m = self
+                .dp
+                .tunnels
+                .get(&peer)
+                .map_or(0, TunnelState::usable_minmtu);
             h.minmtu.store(m, std::sync::atomic::Ordering::Relaxed);
         }
         // UDP-discovery timeout is checked inline in `try_udp`
@@ -1366,7 +1370,11 @@ impl Daemon {
         // Publish minmtu to the fast path (same as the real probe-
         // reply arm; seconds-apart, not hot).
         if let Some(h) = self.tunnel_handles.get(&peer) {
-            let m = self.dp.tunnels.get(&peer).map_or(0, TunnelState::minmtu);
+            let m = self
+                .dp
+                .tunnels
+                .get(&peer)
+                .map_or(0, TunnelState::usable_minmtu);
             h.minmtu.store(m, std::sync::atomic::Ordering::Relaxed);
         }
     }

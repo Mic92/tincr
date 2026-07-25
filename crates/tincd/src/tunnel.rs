@@ -317,6 +317,21 @@ impl TunnelState {
         self.pmtu.as_ref().map_or(0, |p| p.minmtu)
     }
 
+    /// `minmtu`, but only once it has reached the UDP-usability floor
+    /// (`MINMTU` = 512, the IPv4 minimum reassembly size). Below that the
+    /// path has NOT been proven to carry a real datagram — a value like
+    /// 18 (`MIN_PROBE_SIZE`) or 118 comes from a keepalive-sized probe
+    /// squeaking through an otherwise-blackholing path (symmetric NAT,
+    /// flaky link), which then flaps `minmtu` 0↔tiny and, if used, sends
+    /// real data into a path that can't carry it. Treat sub-`MINMTU` as
+    /// "no usable UDP MTU" (== 0) so the send gate rides TCP / relays
+    /// until discovery proves a genuine MTU. See issue #21.
+    #[must_use]
+    pub(crate) fn usable_minmtu(&self) -> u16 {
+        let m = self.minmtu();
+        if m >= crate::pmtu::MINMTU { m } else { 0 }
+    }
+
     /// `n->maxmtu`.
     #[must_use]
     pub(crate) fn maxmtu(&self) -> u16 {
@@ -451,6 +466,33 @@ mod tests {
         // decide_autoconnect would go negative (saturate to 0) if
         // this reset, masking real relay traffic across a flap.
         assert_eq!(t.relay_tx_bytes, 12345);
+    }
+
+    #[test]
+    fn usable_minmtu_floors_at_minmtu() {
+        use crate::pmtu::{MIN_PROBE_SIZE, MINMTU};
+        let mut t = TunnelState::default();
+        // No pmtu state yet → not usable.
+        assert_eq!(t.usable_minmtu(), 0, "unseeded → 0");
+
+        let set = |t: &mut TunnelState, m: u16| {
+            let mut p = PmtuState::new(Instant::now(), MTU);
+            p.minmtu = m;
+            t.pmtu = Some(p);
+        };
+
+        // Sub-MINMTU values (tiny-probe noise on a blackholing path)
+        // are NOT a usable UDP MTU → reported as 0 so the send gate
+        // rides TCP/relay instead of the dead direct hop.
+        for m in [0, MIN_PROBE_SIZE, 118, MINMTU - 1] {
+            set(&mut t, m);
+            assert_eq!(t.usable_minmtu(), 0, "sub-MINMTU {m} → 0");
+        }
+        // At/above the floor, the real measurement is reported.
+        for m in [MINMTU, 1400, MTU] {
+            set(&mut t, m);
+            assert_eq!(t.usable_minmtu(), m, "usable {m} passes through");
+        }
     }
 
     #[test]
