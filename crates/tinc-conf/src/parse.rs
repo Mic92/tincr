@@ -362,7 +362,7 @@ impl Entry {
 /// present (cmdline sorts first), else the lowest-line file entry.
 ///
 /// We sort once on construction, then iterate.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Config {
     /// Sorted by `compare_entries`.
     entries: Vec<Entry>,

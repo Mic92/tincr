@@ -242,6 +242,8 @@ pub struct Daemon {
     /// Kept so `id_h` peer-branch can resolve `hosts/NAME` paths.
     /// Stored once here, borrowed into each `IdCtx`.
     pub(crate) confbase: PathBuf,
+    /// `-o` overrides, re-merged on reload.
+    pub(crate) cmdline_conf: tinc_conf::Config,
 
     /// Our options bitfield (`PROT_MINOR` in top byte). Built from
     /// global `IndirectData`/`TCPOnly`/`PMTUDiscovery`/`ClampMSS` at

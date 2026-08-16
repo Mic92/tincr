@@ -347,7 +347,29 @@ fn register_listeners(
 /// extension. Off (returns `Ok(None)`) unless BOTH are set.
 /// `Alias =` lines from hosts/ files, lowercased. Node names win over
 /// aliases. A duplicate alias goes to the first host in sorted order.
-fn load_aliases(confbase: &Path) -> HashMap<String, String> {
+/// tinc.conf + `-o` overrides + hosts/NAME, and the expanded name.
+pub(super) fn read_daemon_config(
+    confbase: &Path,
+    cmdline_conf: &tinc_conf::Config,
+) -> Result<(tinc_conf::Config, String), SetupError> {
+    let mut config =
+        tinc_conf::read_server_config(confbase).map_err(|e| SetupError::Config(format!("{e}")))?;
+    config.merge(cmdline_conf.entries().iter().cloned());
+    let name = config
+        .lookup("Name")
+        .next()
+        .map(tinc_conf::Entry::get_str)
+        .ok_or_else(|| SetupError::Config("Name for tinc daemon required!".into()))?;
+    let name = expand_name(name).map_err(SetupError::Config)?;
+    let host = crate::keys::read_host_config(confbase, &name);
+    if host.entries().is_empty() {
+        log::warn!(target: "tincd", "hosts/{name} empty or unreadable, using defaults");
+    }
+    config.merge(host.entries().iter().cloned());
+    Ok((config, name))
+}
+
+pub(super) fn load_aliases(confbase: &Path) -> HashMap<String, String> {
     let mut nodes: Vec<String> = std::fs::read_dir(confbase.join("hosts"))
         .into_iter()
         .flatten()
@@ -566,40 +588,8 @@ impl Daemon {
         cmdline_conf: &tinc_conf::Config,
         socket_activation: Option<usize>,
     ) -> Result<Self, SetupError> {
-        // read tinc.conf
-        let mut config = tinc_conf::read_server_config(confbase)
-            .map_err(|e| SetupError::Config(format!("{e}")))?;
-
-        // cmdline -o overrides
-        // Merge order doesn't matter: Source::Cmdline sorts before
-        // Source::File regardless. Empty cmdline_conf is a no-op.
-        config.merge(cmdline_conf.entries().iter().cloned());
-
-        // Name
-        let name = config
-            .lookup("Name")
-            .next()
-            .map(tinc_conf::Entry::get_str)
-            .ok_or_else(|| SetupError::Config("Name for tinc daemon required!".into()))?;
-        let name = expand_name(name).map_err(SetupError::Config)?;
+        let (config, name) = read_daemon_config(confbase, cmdline_conf)?;
         log::info!(target: "tincd", "tincd starting, name={name}");
-
-        // read host config
-        // Merge hosts/NAME into the same tree as tinc.conf. HOST-tagged
-        // vars (Port, Subnet, PublicKey, etc) live there. Missing
-        // hosts/NAME is not fatal: the only var we read from it here
-        // is Port, which has a default. Hard failures (no key, no
-        // subnets) come later.
-        let host_file = confbase.join("hosts").join(&name);
-        match tinc_conf::parse_file(&host_file) {
-            Ok(entries) => config.merge(entries),
-            Err(e) => {
-                // Warn-level: MIGHT be intentional (freshly-init'd
-                // daemon has no hosts/ yet) but more likely a Name typo.
-                log::warn!(target: "tincd",
-                           "hosts/{name} not read: {e}; using defaults");
-            }
-        }
 
         // private key
         // Missing key is FATAL: we forbid legacy, so there is no RSA
@@ -796,6 +786,7 @@ impl Daemon {
             name,
             mykey,
             confbase: confbase.to_path_buf(),
+            cmdline_conf: cmdline_conf.clone(),
             myself_options: myself_options_from_config(&config),
             my_udp_port,
             graph,
