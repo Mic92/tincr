@@ -221,6 +221,8 @@ impl Daemon {
             },
         );
 
+        self.seen.purge_mentions(&name);
+
         // `active` is the `broadcast_targets` "past ACK" filter. Set
         // BEFORE broadcast so the new conn DOES get its own edge back;
         // receiver's `seen.check` dups it.
