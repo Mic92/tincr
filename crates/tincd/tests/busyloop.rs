@@ -1,22 +1,35 @@
-//! Regression: pre-ACK connect timeout must not cause a CPU busy-loop.
-//!
-//! Portable version of `netns/busyloop.rs` — no iptables, no netns.
-//! Uses `ConnectTo` pointing at `192.0.2.1:1` (RFC 5737 TEST-NET-1,
-//! non-routable) so the TCP SYN hangs without RST. The daemon's
-//! `on_ping_tick` fires `terminate()` on the pre-ACK timeout path;
-//! the regression was a leaked epoll/kqueue registration causing
-//! 100% CPU after that.
-//!
-//! Works on Linux and macOS.
+//! Regression: pre-ACK connect timeout must not cause a CPU busy-loop
+//! (leaked epoll/kqueue registration). Portable version of
+//! `netns/busyloop.rs`: `ConnectTo` points at a local listener with a
+//! saturated accept queue so the connect hangs. TEST-NET-1 was not
+//! reliable — many networks answer it with ICMP unreachable.
 
 #[path = "common/mod.rs"]
 #[macro_use]
 mod common;
 
+use std::net::{SocketAddr, TcpStream};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use common::*;
+
+/// Loopback listener with backlog 0 and a saturated accept queue.
+fn blackhole() -> (socket2::Socket, Vec<TcpStream>, SocketAddr) {
+    let s = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    s.bind(&SocketAddr::from(([127, 0, 0, 1], 0)).into())
+        .unwrap();
+    s.listen(0).unwrap();
+    let addr = s.local_addr().unwrap().as_socket().unwrap();
+    let mut held = Vec::new();
+    for _ in 0..16 {
+        match TcpStream::connect_timeout(&addr, Duration::from_millis(250)) {
+            Ok(c) => held.push(c),
+            Err(_) => break,
+        }
+    }
+    (s, held, addr)
+}
 
 /// CPU time (user + system). Linux: clock ticks. macOS: centiseconds.
 fn cpu_time(pid: u32) -> u64 {
@@ -61,9 +74,13 @@ fn outgoing_timeout_no_busy_loop() {
     .unwrap();
     std::fs::write(confbase.join("hosts").join("testnode"), "Port = 0\n").unwrap();
     let dummy_pub = tinc_crypto::b64::encode(&pubkey_from_seed(&[0xDE; 32]));
+    let (_listener, _held, addr) = blackhole();
     std::fs::write(
         confbase.join("hosts").join("blackhole"),
-        format!("Ed25519PublicKey = {dummy_pub}\nAddress = 192.0.2.1 1\n"),
+        format!(
+            "Ed25519PublicKey = {dummy_pub}\nAddress = 127.0.0.1 {}\n",
+            addr.port()
+        ),
     )
     .unwrap();
     write_ed25519_privkey(&confbase, &[0x42; 32]);

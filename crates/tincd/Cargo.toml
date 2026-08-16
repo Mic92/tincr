@@ -147,6 +147,8 @@ cc = "1.0"
 [dev-dependencies]
 # Unit/integration test tempdirs.
 tempfile = "3"
+# busyloop.rs: local blackhole listener with a saturated backlog.
+socket2 = "0.6"
 # tinc-conf/-crypto/-sptps for test helpers (write_pem, SigningKey,
 # Sptps::start — the integration test IS the SPTPS initiator side).
 # These are also in [dependencies] but listing here documents the
