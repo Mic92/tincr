@@ -1,12 +1,7 @@
-# End-to-end test for services.tincr: declarative tinc.conf + hosts/,
-# hardened Type=notify unit, .socket activation, and the TUN-intercept
-# DNS stub wired through systemd-networkd + resolved.
-#
-# Two nodes mesh on 10.21.0.0/16. The module sets DNSAddress=10.21.0.53
-# + DNSSuffix=mesh and emits a .network unit with DNS=/Domains=~mesh,
-# so `dig beta.mesh` from alpha is routed by resolved to 10.21.0.53,
-# leaves via the tunnel, and is answered by tincd on beta from beta's
-# Subnet.
+# End-to-end test for services.tincr: declarative config, hardened
+# socket-activated unit, and the DNS stub wired through networkd +
+# resolved. Two nodes mesh on 10.21.0.0/16. resolved routes `*.mesh`
+# to DNSAddress 10.21.0.53 on the TUN, where tincd answers.
 {
   testers,
   tincd,
@@ -24,6 +19,7 @@ let
       Address = beta
       Subnet = 10.21.0.2/32
       Ed25519PublicKey = ${keys.beta.ed25519Public}
+      Alias = web
     '';
   };
 
@@ -50,9 +46,7 @@ let
       }
       // extraNet;
 
-      # The module declares Ed25519PrivateKeyFile but does not own
-      # the bytes (stateful by design); supply them inline. tincd
-      # runs as `tincr`, so the key must be group-readable.
+      # The module does not own the key bytes. tincd runs as `tincr`.
       environment.etc."tinc/mesh/ed25519_key.priv" = {
         text = keys.${self}.ed25519Private;
         mode = "0400";
@@ -77,10 +71,11 @@ testers.runNixOSTest {
   testScript = ''
     start_all()
 
+    dig = "dig +short +tries=1 +time=3 @127.0.0.53"
+
     with subtest("module brings up the hardened socket-activated unit"):
-        # Beta's service stays inactive until alpha's first dial
-        # triggers socket activation; poll instead of wait_for_unit
-        # which would fail fast on inactive+no-job.
+        # Beta stays inactive until alpha's first dial triggers socket
+        # activation. wait_for_unit would fail fast on inactive+no-job.
         for m in (alpha, beta):
             m.wait_for_unit("tincr-mesh.socket")
         alpha.systemctl("start tincr-mesh.service")
@@ -111,23 +106,20 @@ testers.runNixOSTest {
             out = m.succeed("resolvectl domain tinc-mesh")
             assert "mesh" in out, out
 
-        # 127.0.0.53 is resolved's stub; it routes `*.mesh` to
-        # 10.21.0.53 on tinc-mesh, the packet hits the TUN, tincd
-        # answers with the peer's /32 Subnet.
         beta_ip = alpha.wait_until_succeeds(
-            "dig +short +tries=1 +time=3 @127.0.0.53 beta.mesh A",
-            timeout=15,
+            f"{dig} beta.mesh A", timeout=15
         ).strip()
         assert beta_ip == "10.21.0.2", f"unexpected: {beta_ip!r}"
 
-        alpha_ip = beta.succeed(
-            "dig +short +tries=1 +time=3 @127.0.0.53 alpha.mesh A"
-        ).strip()
+        alpha_ip = beta.succeed(f"{dig} alpha.mesh A").strip()
         assert alpha_ip == "10.21.0.1", f"unexpected: {alpha_ip!r}"
 
-        # PTR not asserted: resolved's mDNS responder beats the
-        # stub with `<name>.local`. PTR has unit-test coverage in
-        # crates/tincd/src/dns.rs.
+        # Alias = web in hosts/beta answers like the node name.
+        web_ip = alpha.succeed(f"{dig} web.mesh A").strip()
+        assert web_ip == "10.21.0.2", f"unexpected: {web_ip!r}"
+
+        # PTR not asserted. resolved's mDNS responder answers first.
+        # PTR is unit-tested in crates/tincd/src/dns.rs.
 
     with subtest("clean stop"):
         alpha.systemctl("stop tincr-mesh.service")

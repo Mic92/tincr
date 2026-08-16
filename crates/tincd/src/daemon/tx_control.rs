@@ -639,12 +639,7 @@ impl Daemon {
 
             self.lookup_or_add_node(&fname);
 
-            // Only need the hosts/ file (Address is HOST-tagged).
-            let Ok(entries) = tinc_conf::parse_file(ent.path()) else {
-                continue; // unreadable file — skip silently
-            };
-            let mut cfg = tinc_conf::Config::default();
-            cfg.merge(entries);
+            let cfg = crate::keys::read_host_config(&self.confbase, &fname);
 
             if cfg.lookup("Address").next().is_some() {
                 self.has_address.insert(fname.clone());

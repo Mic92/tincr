@@ -661,19 +661,14 @@ impl Daemon {
     /// NOT reloadable: Port, `AddressFamily`, `DeviceType` (need re-bind/
     /// re-open). Not-yet: Compression, Forwarding.
     pub(super) fn reload_configuration(&mut self) -> bool {
-        let config = match tinc_conf::read_server_config(&self.confbase) {
-            Ok(c) => c,
+        let config = match super::setup::read_daemon_config(&self.confbase, &self.cmdline_conf) {
+            Ok((c, _)) => c,
             Err(e) => {
                 log::error!(target: "tincd",
                             "Unable to reread configuration file: {e}");
                 return false;
             }
         };
-        let mut config = config;
-        let host_file = self.confbase.join("hosts").join(&self.name);
-        if let Ok(entries) = tinc_conf::parse_file(&host_file) {
-            config.merge(entries);
-        }
 
         // Warn about edits to keys that need a full restart, so an
         // operator who changed Port= and ran `tinc reload` is told
@@ -714,6 +709,10 @@ impl Daemon {
         }
 
         apply_reloadable_settings(&config, &mut self.settings);
+
+        if let Some(dns) = &mut self.dns {
+            dns.aliases = super::setup::load_aliases(&self.confbase);
+        }
 
         // Operator may have run `tinc invite` since boot.
         match invitation_serve::read_invitation_key(&self.confbase) {

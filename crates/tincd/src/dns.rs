@@ -23,6 +23,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use zerocopy::IntoBytes;
@@ -49,6 +50,9 @@ pub(crate) struct DnsConfig {
     /// for private use July 2024 — it will NEVER be delegated.
     /// `.tinc` alone could theoretically be sold as a gTLD.
     pub suffix: String,
+    /// `Alias = <name>` lines from hosts/ files, lowercased alias →
+    /// node name. Answered like the node name itself.
+    pub aliases: HashMap<String, String>,
 }
 
 // Wire constants (RFC 1035).
@@ -413,6 +417,7 @@ pub(crate) fn answer(
                 q.qtype,
             ));
         }
+        let node = cfg.aliases.get(node).map_or(node, String::as_str);
         // Walk the subnet tree, collect host-prefix subnets owned by
         // `node`. Case-insensitive owner compare: tinc names are
         // case-preserved on disk but `check_id` allows both, and the
@@ -752,6 +757,7 @@ mod tests {
             dns_addr4: Some(Ipv4Addr::new(10, 255, 255, 53)),
             dns_addr6: None,
             suffix: "tinc.internal".into(),
+            aliases: HashMap::new(),
         }
     }
 
@@ -904,6 +910,20 @@ mod tests {
         // Node exists (it has SOME subnet) but no /32 → NODATA
         assert_eq!(u16::from_be_bytes([resp[2], resp[3]]) & 0x0F, 0); // NOERROR
         assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 0); // ANCOUNT
+    }
+
+    #[test]
+    fn answer_a_alias() {
+        let mut t = SubnetTree::new();
+        t.add(sn("10.0.0.5"), "alice".into());
+
+        let mut c = cfg();
+        c.aliases.insert("web".into(), "alice".into());
+        // Answered under the queried name, with alice's records.
+        let q = mk_query("WEB.tinc.internal", TYPE_A);
+        let resp = answer(&q, &c, &t, "myself").unwrap();
+        assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 1); // ANCOUNT
+        assert_eq!(&resp[resp.len() - 4..], &[10, 0, 0, 5]);
     }
 
     #[test]

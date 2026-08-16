@@ -83,6 +83,15 @@ impl SeenRequests {
         let left = self.cache.len();
         (before - left, left)
     }
+
+    /// Drop entries mentioning `name` as a token. Called when a meta
+    /// connection with that node activates: a reconnected peer
+    /// re-gossips byte-identical lines, which must not dedup against
+    /// its previous incarnation.
+    pub(crate) fn purge_mentions(&mut self, name: &str) {
+        self.cache
+            .retain(|k, _| !k.split(' ').any(|tok| tok == name));
+    }
 }
 
 /// Drop token 2 (nonce) from `"<REQ> <nonce> <rest...>"`. The nonce
@@ -185,6 +194,19 @@ mod tests {
     // `crates/tinc-proto/src/msg/`.
     const ADD_EDGE: &str = "12 a3f alice bob 10.0.0.1 655 0 50 192.168.1.1 655";
     const ADD_SUBNET: &str = "10 b4e alice 10.0.0.0/24#10";
+
+    #[test]
+    fn purge_mentions_frees_node_lines() {
+        let mut s = SeenRequests::new();
+        let now = Instant::now();
+        assert!(!s.check(ADD_EDGE, now));
+        assert!(!s.check(ADD_SUBNET, now));
+        s.purge_mentions("bob");
+        assert!(!s.check(ADD_EDGE, now), "bob line purged");
+        assert!(s.check(ADD_SUBNET, now), "alice-only line kept");
+        s.purge_mentions("ali");
+        assert!(s.check(ADD_SUBNET, now), "token match, not substring");
+    }
 
     #[test]
     fn check_second_is_true() {
