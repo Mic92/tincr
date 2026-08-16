@@ -624,16 +624,12 @@ pub(crate) fn do_outgoing_pipe(
 /// Unparseable lines (bad port) warn-and-skip.
 #[must_use]
 pub(crate) fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(String, u16)> {
-    let host_file = confbase.join("hosts").join(node_name);
-    let Ok(entries) = tinc_conf::parse_file(&host_file) else {
-        // No hosts/NAME file: the cache file (if any) is the only
-        // source; the config phase yields nothing.
+    if !confbase.join("hosts").join(node_name).exists() {
         log::warn!(target: "tincd::conn",
                    "hosts/{node_name} not readable; no Address config");
         return Vec::new();
-    };
-    let mut cfg = tinc_conf::Config::new();
-    cfg.merge(entries);
+    }
+    let cfg = crate::keys::read_host_config(confbase, node_name);
 
     // A bare `Address` (no port) falls back to the host's `Port`
     // before the 655 default.

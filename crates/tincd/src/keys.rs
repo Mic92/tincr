@@ -15,24 +15,44 @@
 //! bug; the warning is cosmetic and 1.1 users
 //! grep for the C message.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 use tinc_conf::{Config, read_pem};
 use tinc_crypto::aead::{SptpsAead, hw_aes_available};
 use tinc_crypto::b64;
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 
-/// Read `hosts/{name}` into a fresh [`Config`]; empty on ENOENT/parse-fail.
-/// Dedups the `confbase.join("hosts").join(name)` + `parse_file` + `merge`
-/// preamble that every per-peer reader open-coded.
+type Stamp = (Option<SystemTime>, u64);
+type HostCache = Mutex<HashMap<PathBuf, (Stamp, Arc<Config>)>>;
+static HOST_CACHE: OnceLock<HostCache> = OnceLock::new();
+
+/// Read `hosts/{name}` into a [`Config`], empty on ENOENT/parse-fail.
+/// Cached per path, revalidated by mtime+size so on-disk updates are seen.
 #[must_use]
-pub(crate) fn read_host_config(confbase: &Path, name: &str) -> Config {
+pub(crate) fn read_host_config(confbase: &Path, name: &str) -> Arc<Config> {
+    let path = confbase.join("hosts").join(name);
+    let mut cache = HOST_CACHE.get_or_init(Default::default).lock().unwrap();
+    let Ok(meta) = std::fs::metadata(&path) else {
+        cache.remove(&path);
+        return Arc::default();
+    };
+    let stamp = (meta.modified().ok(), meta.len());
+    if let Some((cached, cfg)) = cache.get(&path)
+        && *cached == stamp
+    {
+        return Arc::clone(cfg);
+    }
     let mut cfg = Config::default();
-    if let Ok(entries) = tinc_conf::parse_file(confbase.join("hosts").join(name)) {
+    if let Ok(entries) = tinc_conf::parse_file(&path) {
         cfg.merge(entries);
     }
+    let cfg = Arc::new(cfg);
+    cache.insert(path, (stamp, Arc::clone(&cfg)));
     cfg
 }
 

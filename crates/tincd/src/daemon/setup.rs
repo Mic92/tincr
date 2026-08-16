@@ -1070,9 +1070,7 @@ impl Daemon {
                 if !tinc_proto::check_id(&fname) || fname == self.name {
                     return None;
                 }
-                let entries = tinc_conf::parse_file(ent.path()).ok()?;
-                let mut cfg = tinc_conf::Config::default();
-                cfg.merge(entries);
+                let cfg = crate::keys::read_host_config(&self.confbase, &fname);
                 // Address= present → dialable without DHT; skip.
                 if cfg.lookup("Address").next().is_some() {
                     return None;
