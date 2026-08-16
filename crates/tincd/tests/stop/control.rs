@@ -56,6 +56,7 @@ fn udp_stray_packet_drained() {
     write_config(&confbase);
 
     let mut child = tincd_at(&confbase, &pidfile, &socket)
+        .env("TINCR_ALLOW_COREDUMP", "1")
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -184,6 +185,7 @@ fn req_log_streams() {
     // max_level to Trace).
     let mut child = tincd_at(&confbase, &pidfile, &socket)
         .env("RUST_LOG", "warn")
+        .env("TINCR_ALLOW_COREDUMP", "1")
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -429,7 +431,9 @@ fn control_conn_churn_no_fd_leak() {
     let (confbase, pidfile, socket) = tmp.std_paths();
     write_config(&confbase);
 
+    // dumpable, so /proc/PID/fd stays readable for fd counting
     let mut child = tincd_at(&confbase, &pidfile, &socket)
+        .env("TINCR_ALLOW_COREDUMP", "1")
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
