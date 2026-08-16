@@ -192,8 +192,13 @@ impl Daemon {
                         "route: ICMP synth failed (short input)");
             return false;
         };
+        let kind_name = match kind {
+            IcmpKind::Unreach { .. } => "UNREACH",
+            IcmpKind::FragNeeded { .. } => "FRAG_NEEDED",
+            IcmpKind::TooBigV6 { .. } => "PACKET_TOO_BIG",
+        };
         log::debug!(target: "tincd::net",
-                    "route: sending ICMP ({} bytes)", reply.len());
+                    "route: sending ICMP {kind_name} ({} bytes)", reply.len());
         self.write_icmp_reply(reply, from)
     }
 

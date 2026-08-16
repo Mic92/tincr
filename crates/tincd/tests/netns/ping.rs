@@ -310,7 +310,7 @@ fn real_tun_unreachable() {
     // daemon stderr: the synth log
     let alice_stderr = drain_stderr(alice_child);
     assert!(
-        alice_stderr.contains("unreachable, sending ICMP"),
+        alice_stderr.contains("route: sending ICMP UNREACH"),
         "alice should log the ICMP synth; stderr:\n{alice_stderr}"
     );
 
