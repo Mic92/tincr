@@ -256,6 +256,8 @@ pub static VARS: &[Var] = &[
     v("VDEPort", S),
     // Host configuration
     v("Address", H.union(M)),
+    // Rust-only: extra DNS names for the stub resolver
+    v("Alias", H.union(M)),
     v("Cipher", S.union(H)),
     v("ClampMSS", S.union(H).union(F)),
     v("Compression", S.union(H).union(F)),
@@ -325,7 +327,7 @@ pub static VARS: &[Var] = &[
 /// Tripwire: C tinc's table has 74 entries, plus our Rust-side keys.
 /// Drift in the 74 means a config key was added or removed in C tinc
 /// and this table is stale.
-const _: () = assert!(VARS.len() == 74 + 7);
+const _: () = assert!(VARS.len() == 74 + 8);
 
 /// Look up by name, case-insensitive.
 ///

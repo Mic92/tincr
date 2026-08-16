@@ -3,6 +3,7 @@
 //! `SetupError` lives in the parent so `settings.rs` and this file
 //! both reach it via `super::` without a sibling cycle.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -344,8 +345,43 @@ fn register_listeners(
 
 /// Parse `DNSAddress`/`DNSSuffix` into `DnsConfig`. Rust-only
 /// extension. Off (returns `Ok(None)`) unless BOTH are set.
+/// `Alias =` lines from hosts/ files, lowercased. Node names win over
+/// aliases. A duplicate alias goes to the first host in sorted order.
+fn load_aliases(confbase: &Path) -> HashMap<String, String> {
+    let mut nodes: Vec<String> = std::fs::read_dir(confbase.join("hosts"))
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| tinc_proto::check_id(n))
+        .collect();
+    nodes.sort();
+    let mut aliases = HashMap::new();
+    for node in &nodes {
+        for e in crate::keys::read_host_config(confbase, node).lookup("Alias") {
+            let alias = e.value.trim_matches('.').to_ascii_lowercase();
+            let problem = if alias.is_empty() || alias.contains('.') {
+                "invalid"
+            } else if nodes.iter().any(|n| n.eq_ignore_ascii_case(&alias)) {
+                "shadows a node name"
+            } else {
+                match aliases.entry(alias) {
+                    Entry::Occupied(_) => "already claimed",
+                    Entry::Vacant(v) => {
+                        v.insert(node.clone());
+                        continue;
+                    }
+                }
+            };
+            log::warn!(target: "tincd::dns",
+                       "hosts/{node}: Alias = {}: {problem}, ignored", e.value);
+        }
+    }
+    aliases
+}
+
 fn load_dns_config(
     config: &tinc_conf::Config,
+    confbase: &Path,
 ) -> Result<Option<crate::dns::DnsConfig>, SetupError> {
     let mut a4 = None;
     let mut a6 = None;
@@ -374,10 +410,15 @@ fn load_dns_config(
                          .chain(a6.map(|a| a.to_string()))
                          .collect::<Vec<_>>()
                          .join(" + "));
+            let aliases = load_aliases(confbase);
+            if !aliases.is_empty() {
+                log::info!(target: "tincd::dns", "{} aliases loaded", aliases.len());
+            }
             Ok(Some(crate::dns::DnsConfig {
                 dns_addr4: a4,
                 dns_addr6: a6,
                 suffix,
+                aliases,
             }))
         }
         (true, None) => Err(SetupError::Config(
@@ -718,7 +759,7 @@ impl Daemon {
         // `DNSAddress=` and `DNSSuffix=` are set. The magic IP must
         // also be added to the TUN in `tinc-up`. `DNSAddress` can be
         // repeated for v4+v6.
-        let dns = load_dns_config(&config)?;
+        let dns = load_dns_config(&config, confbase)?;
 
         // BroadcastSubnet
         add_broadcast_subnets(&mut subnets, &config);
@@ -1109,6 +1150,27 @@ mod tests {
             .collect();
         c.merge(entries);
         c
+    }
+
+    #[test]
+    fn aliases_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts = dir.path().join("hosts");
+        std::fs::create_dir(&hosts).unwrap();
+        std::fs::write(
+            hosts.join("alice"),
+            "Alias = web\nAlias = bob\nAlias = Db\n",
+        )
+        .unwrap();
+        std::fs::write(hosts.join("bob"), "Alias = db\nAlias = mail\n").unwrap();
+
+        let a = load_aliases(dir.path());
+        // node name wins, duplicate goes to sorted-first alice
+        assert_eq!(a.get("web").unwrap(), "alice");
+        assert_eq!(a.get("db").unwrap(), "alice");
+        assert_eq!(a.get("mail").unwrap(), "bob");
+        assert!(!a.contains_key("bob"));
+        assert_eq!(a.len(), 3);
     }
 
     /// `build_listeners` no-config default = `open_listeners`.
