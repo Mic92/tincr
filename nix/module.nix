@@ -1,3 +1,4 @@
+{ crane }:
 {
   config,
   lib,
@@ -401,6 +402,10 @@ in
 
     package = mkOption {
       type = types.package;
+      # callPackage splices: under cross-compilation rustc runs on the
+      # build platform instead of a native (emulated) bootstrap.
+      default = pkgs.callPackage ./tincd.nix { craneLib = crane.mkLib pkgs; };
+      defaultText = literalExpression "pkgs.callPackage ./tincd.nix { }";
       description = "Default package used for any network without an explicit `package`.";
     };
   };
