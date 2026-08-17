@@ -73,18 +73,13 @@
           nixos-tinc-dht = pkgs.callPackage ./nix/nixos-test-dht.nix { inherit tincd; };
           nixos-tincr = pkgs.callPackage ./nix/nixos-test-tincr.nix {
             inherit tincd;
-            tincrModule = ./nix/module.nix;
+            tincrModule = self.nixosModules.tincr;
           };
         }
       );
 
       formatter = eachSystem (system: _: treefmt.${system}.config.build.wrapper);
 
-      nixosModules.tincr =
-        { pkgs, ... }:
-        {
-          imports = [ ./nix/module.nix ];
-          services.tincr.package = self.packages.${pkgs.stdenv.hostPlatform.system}.tincd;
-        };
+      nixosModules.tincr = nixpkgs.lib.modules.importApply ./nix/module.nix { inherit crane; };
     };
 }
