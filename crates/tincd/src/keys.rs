@@ -161,6 +161,21 @@ pub(crate) enum PrivKeyError {
     Pem(PathBuf, #[source] tinc_conf::PemError),
 }
 
+fn private_key_permissions_insecure(
+    path: &Path,
+    mode: u32,
+    credentials_directory: Option<&Path>,
+) -> bool {
+    let allowed = if credentials_directory.is_some_and(|dir| path.starts_with(dir)) {
+        // systemd exposes service credentials as root-owned 0440 files inside
+        // a per-unit directory that only the service can traverse.
+        0o100_740
+    } else {
+        0o100_700
+    };
+    mode & !allowed != 0
+}
+
 /// Load the node's Ed25519 private key. Path resolution:
 /// `TINCR_ED25519_PRIVATE_KEY_FILE` env var, else the
 /// `Ed25519PrivateKeyFile` config var, else `confbase/ed25519_key.priv`.
@@ -194,7 +209,8 @@ pub(crate) fn read_ecdsa_private_key(
 
     if let Ok(meta) = f.metadata() {
         let mode = meta.permissions().mode();
-        if mode & !0o100_700 != 0 {
+        let credentials_directory = std::env::var_os("CREDENTIALS_DIRECTORY").map(PathBuf::from);
+        if private_key_permissions_insecure(&path, mode, credentials_directory.as_deref()) {
             log::warn!(target: "tincd::keys",
                        "Warning: insecure file permissions for Ed25519 private key file `{}'!",
                        path.display());
@@ -430,23 +446,46 @@ mod tests {
     /// that we MATCH the C bug.
     #[test]
     fn priv_perm_condition() {
+        let path = Path::new("/run/key");
         // 0o100600 — regular file, owner rw only. Safe.
-        assert_eq!(0o100_600 & !0o100_700, 0);
+        assert!(!private_key_permissions_insecure(path, 0o100_600, None));
         // 0o100644 — group+other read. Warns. (THE intended case.)
-        assert_ne!(0o100_644 & !0o100_700, 0);
+        assert!(private_key_permissions_insecure(path, 0o100_644, None));
         // 0o100700 — owner rwx. Safe (the boundary: x bit allowed).
-        assert_eq!(0o100_700 & !0o100_700, 0);
+        assert!(!private_key_permissions_insecure(path, 0o100_700, None));
         // 0o100400 — owner r only. Safe.
-        assert_eq!(0o100_400 & !0o100_700, 0);
+        assert!(!private_key_permissions_insecure(path, 0o100_400, None));
 
         // False positives (C-bug, ported).
         // 0o102600 — setgid + 600. NOT actually insecure (setgid on
         // a non-executable does nothing exploitable for a key file).
         // C warns anyway. We match.
-        assert_ne!(0o102_600 & !0o100_700, 0);
+        assert!(private_key_permissions_insecure(path, 0o102_600, None));
         // 0o101600 — sticky + 600. Sticky on a regular file is
         // ignored on Linux. C warns. We match.
-        assert_ne!(0o101_600 & !0o100_700, 0);
+        assert!(private_key_permissions_insecure(path, 0o101_600, None));
+    }
+
+    #[test]
+    fn systemd_credential_permissions_are_confined() {
+        let credentials = Path::new("/run/credentials/tincr-naru.service");
+        let key = credentials.join("ed25519_key");
+
+        assert!(!private_key_permissions_insecure(
+            &key,
+            0o100_440,
+            Some(credentials),
+        ));
+        assert!(private_key_permissions_insecure(
+            &key,
+            0o100_444,
+            Some(credentials),
+        ));
+        assert!(private_key_permissions_insecure(
+            Path::new("/run/secrets/key"),
+            0o100_440,
+            Some(credentials),
+        ));
     }
 
     /// The actual perm warn fires (loads OK, just warns). Mode 644.
