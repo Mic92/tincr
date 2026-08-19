@@ -12,6 +12,7 @@ mod icmp;
 mod route;
 mod rx;
 mod sptps;
+pub(in crate::daemon) use sptps::TunnelSendOutcome;
 
 pub use rx::MAX_PENDING_META;
 

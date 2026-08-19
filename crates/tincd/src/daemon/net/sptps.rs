@@ -12,6 +12,21 @@ use crate::graph::NodeId;
 use rand_core::OsRng;
 use tinc_proto::Request;
 
+/// Transport result kept separate from the historical "meta socket
+/// needs write readiness" boolean.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(in crate::daemon) struct TunnelSendOutcome {
+    pub(in crate::daemon) needs_write: bool,
+    pub(in crate::daemon) udp_sent: bool,
+}
+
+impl TunnelSendOutcome {
+    fn merge(&mut self, other: Self) {
+        self.needs_write |= other.needs_write;
+        self.udp_sent |= other.udp_sent;
+    }
+}
+
 impl Daemon {
     /// Router strips the eth header (receiver re-synthesizes from
     /// IP version nibble).
@@ -132,12 +147,22 @@ impl Daemon {
         peer_name: &str,
         outs: Vec<tinc_sptps::Output>,
     ) -> bool {
+        self.dispatch_tunnel_outputs_outcome(peer, peer_name, outs)
+            .needs_write
+    }
+
+    pub(in crate::daemon) fn dispatch_tunnel_outputs_outcome(
+        &mut self,
+        peer: NodeId,
+        peer_name: &str,
+        outs: Vec<tinc_sptps::Output>,
+    ) -> TunnelSendOutcome {
         use tinc_sptps::Output;
-        let mut nw = false;
+        let mut outcome = TunnelSendOutcome::default();
         for o in outs {
             match o {
                 Output::Wire { record_type, bytes } => {
-                    nw |= self.send_sptps_data(peer, record_type, &bytes);
+                    outcome.merge(self.send_sptps_data_outcome(peer, record_type, &bytes));
                 }
                 Output::HandshakeDone => {
                     let tunnel = self.dp.tunnels.entry(peer).or_default();
@@ -206,11 +231,11 @@ impl Daemon {
                     self.dp.rx_scratch.clear();
                     self.dp.rx_scratch.resize(14, 0);
                     self.dp.rx_scratch.extend_from_slice(&bytes);
-                    nw |= self.receive_sptps_record(peer, peer_name, record_type);
+                    outcome.needs_write |= self.receive_sptps_record(peer, peer_name, record_type);
                 }
             }
         }
-        nw
+        outcome
     }
 
     /// Decode, decompress (if needed) and route one SPTPS record.
@@ -396,7 +421,17 @@ impl Daemon {
         record_type: u8,
         ct: &[u8],
     ) -> bool {
-        self.send_sptps_data_relay(to_nid, self.myself, record_type, Some(ct))
+        self.send_sptps_data_outcome(to_nid, record_type, ct)
+            .needs_write
+    }
+
+    fn send_sptps_data_outcome(
+        &mut self,
+        to_nid: NodeId,
+        record_type: u8,
+        ct: &[u8],
+    ) -> TunnelSendOutcome {
+        self.send_sptps_data_relay_outcome(to_nid, self.myself, record_type, Some(ct))
     }
 
     /// Relay decision: TCP vs UDP, `via` vs `nexthop`.
@@ -525,6 +560,17 @@ impl Daemon {
         record_type: u8,
         ct: Option<&[u8]>,
     ) -> bool {
+        self.send_sptps_data_relay_outcome(to_nid, from_nid, record_type, ct)
+            .needs_write
+    }
+
+    fn send_sptps_data_relay_outcome(
+        &mut self,
+        to_nid: NodeId,
+        from_nid: NodeId,
+        record_type: u8,
+        ct: Option<&[u8]>,
+    ) -> TunnelSendOutcome {
         // `ct` is None on the hot path: SPTPS frame at
         // tx_scratch[12..] from seal_data_into. Some(ct): relay/
         // handshake/probe path. origlen is plaintext body length
@@ -536,7 +582,7 @@ impl Daemon {
             log::debug!(target: "tincd::net",
                         "No route to {}; dropping",
                         self.node_log_name(to_nid));
-            return false;
+            return TunnelSendOutcome::default();
         };
         let via_nid = route.via;
         let nexthop_nid = route.nexthop;
@@ -599,7 +645,10 @@ impl Daemon {
         }
 
         if go_tcp {
-            return self.send_sptps_tcp(to_nid, from_nid, record_type, ct, from_is_myself);
+            return TunnelSendOutcome {
+                needs_write: self.send_sptps_tcp(to_nid, from_nid, record_type, ct, from_is_myself),
+                udp_sent: false,
+            };
         }
 
         // We always prefix (peers are ≥1.1). direct ⇒ dst=nullid.
@@ -641,7 +690,7 @@ impl Daemon {
                 log::debug!(target: "tincd::net",
                             "No UDP address known for relay {}; dropping",
                             self.node_log_name(relay_nid));
-                return false;
+                return TunnelSendOutcome::default();
             };
             cold_sockaddr = socket2::SockAddr::from(addr);
             (&cold_sockaddr, sock)
@@ -680,30 +729,33 @@ impl Daemon {
             }
             dp.tx_batch
                 .stage(sockaddr, sock, relay_nid, at_len, &dp.tx_scratch);
-            return false; // staged; UDP send doesn't touch outbuf
+            return TunnelSendOutcome::default(); // staged; no meta write or immediate UDP send
         }
 
         // Immediate-send path. Hit when: outside the drain loop,
         // OR cold path (no cached addr), OR relay/
         // handshake (`ct.is_some()`).
-        self.send_sptps_udp_immediate(sockaddr, sock, relay_nid, origlen);
-        false // UDP send doesn't touch any meta-conn outbuf
+        TunnelSendOutcome {
+            needs_write: false,
+            udp_sent: self.send_sptps_udp_immediate(sockaddr, sock, relay_nid, origlen),
+        }
     }
 
     /// Single-frame UDP send for [`Self::send_sptps_data_relay`].
     /// `count=1` means `stride == last_len`; both `Portable` and
-    /// `linux::Fast` skip GSO. Handles `EMSGSIZE` → PMTU shrink.
+    /// `linux::Fast` skip GSO. Returns true only when the local UDP
+    /// socket accepted the datagram. Handles `EMSGSIZE` → PMTU shrink.
     fn send_sptps_udp_immediate(
         &mut self,
         sockaddr: &socket2::SockAddr,
         sock: u8,
         relay_nid: NodeId,
         origlen: usize,
-    ) {
+    ) -> bool {
         #[expect(clippy::cast_possible_truncation)] // tx_scratch ≤ MTU+33+12 < u16::MAX
         let len = self.dp.tx_scratch.len() as u16;
         let Some(slot) = self.listeners.get_mut(usize::from(sock)) else {
-            return;
+            return false;
         };
         let Err(e) = slot.egress.send_batch(&crate::egress::EgressBatch {
             dst: sockaddr,
@@ -712,7 +764,7 @@ impl Daemon {
             count: 1,
             last_len: len,
         }) else {
-            return;
+            return true;
         };
         if e.kind() == io::ErrorKind::WouldBlock {
             // Drop; UDP is unreliable.
@@ -741,6 +793,7 @@ impl Daemon {
             log::warn!(target: "tincd::net",
                        "Error sending UDP SPTPS packet to {relay_name}: {e}");
         }
+        false
     }
 }
 
