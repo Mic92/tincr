@@ -14,8 +14,9 @@
 Description=tinc VPN listen socket (network %i)
 
 [Socket]
-ListenStream=655
-BindIPv6Only=both
+ListenStream=0.0.0.0:655
+ListenStream=[::]:655
+BindIPv6Only=ipv6-only
 # tincd treats every passed fd as a TCP listener; FreeBind lets
 # the bind succeed before the interface address exists at boot.
 FreeBind=yes
