@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use super::net::TunnelSendOutcome;
 use super::{ConnId, Daemon, PKT_PROBE, TimerWhat, parse_subnets_from_config};
 
 use std::collections::HashSet;
@@ -185,7 +186,12 @@ impl Daemon {
 
     /// Build and send a PROBE request of `len` bytes. byte[0]=0
     /// (request), bytes[1..14]=zero, bytes[14..len]=random.
-    pub(super) fn send_udp_probe(&mut self, peer: NodeId, peer_name: &str, len: u16) -> bool {
+    fn send_udp_probe_outcome(
+        &mut self,
+        peer: NodeId,
+        peer_name: &str,
+        len: u16,
+    ) -> TunnelSendOutcome {
         let len = len.max(pmtu::MIN_PROBE_SIZE);
         let mut body = vec![0u8; usize::from(len)];
         // zero[0..14], random[14..]. The 14-byte zero prefix is
@@ -197,28 +203,38 @@ impl Daemon {
 
         log::debug!(target: "tincd::net",
                     "Sending UDP probe length {len} to {peer_name}");
-        self.send_probe_record(peer, peer_name, &body)
+        self.send_probe_record_outcome(peer, peer_name, &body)
     }
 
     /// Shared path for probe requests and replies.
     pub(super) fn send_probe_record(&mut self, peer: NodeId, peer_name: &str, body: &[u8]) -> bool {
+        self.send_probe_record_outcome(peer, peer_name, body)
+            .needs_write
+    }
+
+    fn send_probe_record_outcome(
+        &mut self,
+        peer: NodeId,
+        peer_name: &str,
+        body: &[u8],
+    ) -> TunnelSendOutcome {
         let tunnel = self.dp.tunnels.entry(peer).or_default();
         if !tunnel.status.validkey {
-            return false;
+            return TunnelSendOutcome::default();
         }
         let Some(sptps) = tunnel.sptps.as_deref_mut() else {
-            return false;
+            return TunnelSendOutcome::default();
         };
         let outs = match sptps.send_record(PKT_PROBE, body) {
             Ok(outs) => outs,
             Err(e) => {
                 log::debug!(target: "tincd::net",
                             "Probe send_record for {peer_name}: {e:?}");
-                return false;
+                return TunnelSendOutcome::default();
             }
         };
         // relay decision always prefers `via` for PKT_PROBE.
-        self.dispatch_tunnel_outputs(peer, peer_name, outs)
+        self.dispatch_tunnel_outputs_outcome(peer, peer_name, outs)
     }
 
     /// The "improve the tunnel" tick. Called from TWO places:
@@ -341,8 +357,19 @@ impl Daemon {
                     Self::log_pmtu_action(&target_name, a);
                 }
                 for a in actions {
-                    if let PmtuAction::SendProbe { len } = a {
-                        nw |= self.send_udp_probe(target, &target_name, len);
+                    if let PmtuAction::SendProbe { len, counts_miss } = a {
+                        let outcome = self.send_udp_probe_outcome(target, &target_name, len);
+                        nw |= outcome.needs_write;
+                        if counts_miss
+                            && outcome.udp_sent
+                            && let Some(pmtu) = self
+                                .dp
+                                .tunnels
+                                .get_mut(&target)
+                                .and_then(|t| t.pmtu.as_mut())
+                        {
+                            pmtu.on_counted_probe_sent();
+                        }
                     }
                 }
             }
@@ -373,7 +400,7 @@ impl Daemon {
     }
 
     /// Probe-request send + gratuitous-reply keepalive. Gated on
-    /// `udp_ping_sent` elapsed: 2s when not confirmed (aggressive
+    /// the last local attempt: 2s when not confirmed (aggressive
     /// discovery), 10s when confirmed (NAT keepalive).
     pub(super) fn try_udp(&mut self, target: NodeId, target_name: &str, now: Instant) -> bool {
         if !self.settings.udp_discovery {
@@ -447,14 +474,14 @@ impl Daemon {
         } else {
             self.settings.udp_discovery_interval
         };
-        let elapsed = now.duration_since(p.udp_ping_sent);
-        if elapsed >= Duration::from_secs(u64::from(interval)) {
-            // Fresh Instant::now() for the RTT stamp only — the cadence gate
-            // above keeps using the cached loop clock to avoid
-            // per-packet clock_gettime().
-            p.udp_ping_sent = Instant::now();
-            p.ping_sent = true;
-            nw |= self.send_udp_probe(target, target_name, pmtu::MIN_PROBE_SIZE);
+        if p.udp_probe_due(now, Duration::from_secs(u64::from(interval))) {
+            // Fresh clock only for a submitted probe's RTT stamp; the
+            // cadence gate uses the cached loop clock.
+            let attempted_at = Instant::now();
+            let outcome = self.send_udp_probe_outcome(target, target_name, pmtu::MIN_PROBE_SIZE);
+            nw |= outcome.needs_write;
+            let mut sent = outcome.udp_sent;
+
             // localdiscovery && !udp_confirmed && has_prevedge.
             // send_locally is a side-channel to choose_udp_address;
             // no early-return between set/clear.
@@ -469,11 +496,22 @@ impl Daemon {
                     if let Some(t) = self.dp.tunnels.get_mut(&target) {
                         t.status.send_locally = true;
                     }
-                    nw |= self.send_udp_probe(target, target_name, pmtu::MIN_PROBE_SIZE);
+                    let local =
+                        self.send_udp_probe_outcome(target, target_name, pmtu::MIN_PROBE_SIZE);
+                    nw |= local.needs_write;
+                    sent |= local.udp_sent;
                     if let Some(t) = self.dp.tunnels.get_mut(&target) {
                         t.status.send_locally = false;
                     }
                 }
+            }
+            if let Some(p) = self
+                .dp
+                .tunnels
+                .get_mut(&target)
+                .and_then(|t| t.pmtu.as_mut())
+            {
+                p.on_udp_probe_attempt(attempted_at, sent);
             }
         }
 
