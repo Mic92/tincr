@@ -451,9 +451,8 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts, v6only: bool) -> io::Result<Socke
         log::warn!(target: "tincd::net", "SO_BROADCAST: {e}");
     }
 
-    // IP_MTU_DISCOVER / IPV6_MTU_DISCOVER = PMTUDISC_DO.
-    // Linux-only: forces DF on every datagram for PMTU discovery.
-    // macOS sets DF by default on UDP sockets.
+    // PMTU probes must reach the underlay as one datagram. Linux and
+    // macOS use different socket options to disable IP fragmentation.
     #[cfg(target_os = "linux")]
     {
         let (level, optname, optval, label) = if domain == Domain::IPV6 {
@@ -472,6 +471,23 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts, v6only: bool) -> io::Result<Socke
             )
         };
         if let Err(e) = set_int_sockopt(s.as_fd(), level, optname, optval) {
+            log::warn!(target: "tincd::net", "{label}: {e}");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let (label, result) = if domain == Domain::IPV6 {
+            (
+                "IPV6_DONTFRAG",
+                setsockopt(&s.as_fd(), sockopt::Ipv6DontFrag, &true),
+            )
+        } else {
+            (
+                "IP_DONTFRAG",
+                setsockopt(&s.as_fd(), sockopt::IpDontFrag, &true),
+            )
+        };
+        if let Err(e) = result {
             log::warn!(target: "tincd::net", "{label}: {e}");
         }
     }
