@@ -265,11 +265,25 @@ impl UtunBatch {
     }
 
     /// Ship all staged frames via one `sendmsg_x`. No-op when empty.
-    /// On `ENOSYS` latches `disabled` and replays via per-frame
-    /// `write(2)` so nothing is lost; on `ENOBUFS`/partial send the
-    /// unsent tail is dropped (utun inject is best-effort — same
-    /// semantics as a full TUN txq under the per-packet path).
+    /// A short positive return is an accepted prefix; replay only the
+    /// unsent tail with bounded per-packet writes.
     pub(super) fn flush(&mut self, fd: BorrowedFd<'_>) -> io::Result<()> {
+        self.flush_with(fd, |fd, hdrs, count, flags| {
+            // SAFETY: `flush_with` initialized `hdrs[..count]`; each
+            // iovec points into the live persistent write buffer.
+            let ret = unsafe { sendmsg_x(fd, hdrs, count, flags) };
+            if ret < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                usize::try_from(ret).map_err(io::Error::other)
+            }
+        })
+    }
+
+    fn flush_with<F>(&mut self, fd: BorrowedFd<'_>, submit: F) -> io::Result<()>
+    where
+        F: FnOnce(libc::c_int, *const MsghdrX, libc::c_uint, libc::c_int) -> io::Result<usize>,
+    {
         let n = std::mem::take(&mut self.wcount);
         if n == 0 {
             return Ok(());
@@ -297,31 +311,108 @@ impl UtunBatch {
         }
         // n ≤ STRIDE = 64.
         #[allow(clippy::cast_possible_truncation)]
-        let cnt = n as libc::c_uint;
-        // SAFETY: `hdrs[..n]` fully initialised above; each iovec is
-        // within `self.wbuf` which we exclusively own. fd is the utun
-        // socket borrowed from the owning `BsdTun`.
-        let ret = unsafe { sendmsg_x(fd.as_raw_fd(), self.hdrs.as_ptr(), cnt, libc::MSG_DONTWAIT) };
-        if ret >= 0 {
-            return Ok(());
-        }
-        let err = io::Error::last_os_error();
-        match err.raw_os_error() {
-            Some(libc::ENOSYS) => {
-                self.disabled = true;
-                // Replay so this batch isn't lost; subsequent calls
-                // go straight to per-packet `write()`.
-                for i in 0..n {
-                    let off = i * WRITE_SLOT;
-                    let len = usize::from(self.wlens[i]);
-                    let _ = nix::unistd::write(fd, &self.wbuf[off..off + len]);
-                }
-                Ok(())
+        let count = n as libc::c_uint;
+        let first_unsent = match submit(
+            fd.as_raw_fd(),
+            self.hdrs.as_ptr(),
+            count,
+            libc::MSG_DONTWAIT,
+        ) {
+            Ok(accepted) if accepted <= n => accepted,
+            Ok(accepted) => {
+                return Err(io::Error::other(format!(
+                    "sendmsg_x reported {accepted} datagrams for a {n}-datagram batch"
+                )));
             }
-            // sndbuf full: same as per-packet `ENOBUFS` — drop, the
-            // inner transport retransmits.
-            Some(libc::ENOBUFS | libc::EAGAIN) => Ok(()),
-            _ => Err(err),
+            Err(err) if err.raw_os_error() == Some(libc::ENOSYS) => {
+                self.disabled = true;
+                0
+            }
+            // A batch can make no progress when its aggregate request
+            // hits the socket limit. Per-packet fallback may still fit.
+            Err(err) if matches!(err.raw_os_error(), Some(libc::ENOBUFS | libc::EAGAIN)) => 0,
+            Err(err) => return Err(err),
+        };
+
+        for i in first_unsent..n {
+            let off = i * WRITE_SLOT;
+            let len = usize::from(self.wlens[i]);
+            match nix::unistd::write(fd, &self.wbuf[off..off + len]) {
+                Ok(written) if written == len => {}
+                Ok(written) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        format!("utun wrote {written} of {len} bytes"),
+                    ));
+                }
+                // Best effort, matching the existing per-packet utun
+                // behavior. Never spin in the single-threaded daemon.
+                Err(nix::errno::Errno::ENOBUFS | nix::errno::Errno::EAGAIN) => {}
+                Err(err) => return Err(err.into()),
+            }
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::AsFd;
+    use std::os::unix::net::UnixDatagram;
+
+    use super::*;
+
+    fn frame(marker: u8) -> Vec<u8> {
+        let mut frame = vec![0u8; ETH_HLEN + 20];
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        frame[ETH_HLEN] = 0x45;
+        frame[ETH_HLEN + 1] = marker;
+        frame
+    }
+
+    fn assert_markers(rx: &UnixDatagram, expected: &[u8]) {
+        let mut buf = [0u8; 64];
+        for marker in expected {
+            let n = rx.recv(&mut buf).unwrap();
+            assert_eq!(&buf[..4], &(libc::AF_INET as u32).to_be_bytes());
+            assert_eq!(buf[5], *marker);
+            assert_eq!(n, AF_PREFIX_LEN + 20);
+        }
+    }
+
+    #[test]
+    fn flush_replays_partial_tail() {
+        let (tx, rx) = UnixDatagram::pair().unwrap();
+        let mut batch = UtunBatch::new();
+        for marker in 1..=4 {
+            assert!(batch.stage(&frame(marker)));
+        }
+
+        batch
+            .flush_with(tx.as_fd(), |fd, hdrs, _count, flags| {
+                // SAFETY: `flush_with` initialized four headers. The
+                // real syscall accepts the first two as one batch.
+                let sent = unsafe { sendmsg_x(fd, hdrs, 2, flags) };
+                assert_eq!(sent, 2);
+                Ok(2)
+            })
+            .unwrap();
+
+        assert_markers(&rx, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn flush_replays_zero_progress_once() {
+        let (tx, rx) = UnixDatagram::pair().unwrap();
+        let mut batch = UtunBatch::new();
+        for marker in 1..=3 {
+            assert!(batch.stage(&frame(marker)));
+        }
+
+        batch
+            .flush_with(tx.as_fd(), |_fd, _hdrs, _count, _flags| Ok(0))
+            .unwrap();
+
+        assert_markers(&rx, &[1, 2, 3]);
     }
 }
