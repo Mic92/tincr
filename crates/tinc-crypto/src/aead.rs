@@ -27,13 +27,10 @@
 //!
 //! ## Backend
 //!
-//! `ring::aead::AES_256_GCM`. ring carries hand-tuned AES-NI/PCLMUL
-//! and ARMv8 AES/PMULL kernels and falls back to a constant-time
-//! bitsliced AES otherwise. The fallback is *correct* but ~10× slower
-//! and historically a side-channel minefield on shared-cache hosts;
+//! OpenSSL `EVP_aes_256_gcm`, same thread-local reused-context
+//! pattern as [`chapoly`](crate::chapoly)'s backend. AES-NI/PMULL
+//! (VAES/AVX-512 where available) with a constant-time fallback;
 //! [`hw_aes_available`] lets the daemon warn at startup.
-
-use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 
 use crate::chapoly::{ChaPoly, KEY_LEN, OpenError, TAG_LEN};
 
@@ -47,7 +44,7 @@ pub enum SptpsAead {
     /// Wire-compatible with C tinc 1.1.
     #[default]
     ChaCha20Poly1305,
-    /// AES-256-GCM via `ring`. tincr↔tincr only.
+    /// AES-256-GCM via OpenSSL. tincr↔tincr only.
     Aes256Gcm,
 }
 
@@ -143,52 +140,24 @@ pub fn hw_aes_available() -> bool {
 /// AES-256-GCM by the configured [`SptpsAead`].
 ///
 /// Drop-in for [`ChaPoly`]: same `seal`/`open`/`seal_into`/`open_into`
-/// signatures, same 64-byte key blob, same 16-byte tag, same
-/// "seqno-is-the-nonce" model. The hot UDP path constructs one of
-/// these per packet from the 64-byte key snapshot in `TunnelHandles`;
-/// `new` is therefore kept cheap (one 64-byte copy plus, for AES, one
-/// key-schedule expansion — ~90 ns on Apple M, lost in the ~250 ns
-/// seal it precedes).
+/// signatures, same 64-byte key blob (AES consumes the first 32),
+/// same 16-byte tag, same "seqno-is-the-nonce" model. `new` is one
+/// 64-byte copy; the AES key schedule runs in the thread-local EVP
+/// context, cached across records of the same key.
 pub struct SptpsCipher {
     aead: SptpsAead,
-    /// Always populated. Holds the full 64-byte PRF output (and
-    /// zeroizes it on drop) so [`key_bytes`](Self::key_bytes) can
-    /// hand the snapshot back to the shard fast-path verbatim, and so
-    /// the ChaCha arm of every seal/open call is a direct method call
-    /// rather than a fresh `ChaPoly::new` per record.
+    /// Always populated: holds and zeroizes the full 64-byte blob,
+    /// serves the ChaCha arm directly.
     chapoly: ChaPoly,
-    /// `Some` iff `aead == Aes256Gcm`. ring owns the expanded round
-    /// keys in private heap state with no `ZeroizeOnDrop`; reaching
-    /// into it with `unsafe` is unsound (layout unstable across
-    /// versions/arches). Input key bytes *are* wiped (via
-    /// [`ChaPoly`]'s `ZeroizeOnDrop` and the `Zeroizing` PRF blob in
-    /// `Sptps::key`); round keys persist in freed heap until the
-    /// allocator reuses the region — same threat model as every
-    /// ring-backed TLS stack. Swap to `aes-gcm` (RustCrypto) for
-    /// strict wiping, at the cost of ring's AES-NI/PMULL kernels.
-    aes: Option<LessSafeKey>,
 }
 
 impl SptpsCipher {
     /// Key a session cipher.
-    ///
-    /// # Panics
-    ///
-    /// Only if `ring` rejects a 32-byte AES-256 key, which its API
-    /// contract says it never does for `AES_256_GCM`. Unwrapping here
-    /// keeps the signature infallible like [`ChaPoly::new`].
     #[must_use]
     pub fn new(aead: SptpsAead, key: &[u8; KEY_LEN]) -> Self {
-        let aes = match aead {
-            SptpsAead::ChaCha20Poly1305 => None,
-            SptpsAead::Aes256Gcm => Some(LessSafeKey::new(
-                UnboundKey::new(&AES_256_GCM, &key[..32]).expect("AES-256 key is 32 bytes"),
-            )),
-        };
         Self {
             aead,
             chapoly: ChaPoly::new(key),
-            aes,
         }
     }
 
@@ -204,32 +173,33 @@ impl SptpsCipher {
         self.chapoly.key_bytes()
     }
 
-    /// 96-bit GCM nonce from a 32-bit record seqno: `0⁸ ‖ seqno_be⁴`.
-    /// SPTPS feeds `seqno as u64` here; the high 32 bits are always
-    /// zero (the wire seqno is 4 bytes), so the leading 8 zero bytes
-    /// are fixed and uniqueness reduces to seqno uniqueness — the
-    /// same property `SEAL_KEY_LIMIT` in `tinc-sptps` already
-    /// enforces for the ChaCha path.
+    /// 96-bit GCM nonce from a 32-bit record seqno: `0⁸ ‖ seqno_be⁴`
+    /// (the wire seqno is 4 bytes, so the high half is always zero —
+    /// uniqueness reduces to seqno uniqueness, as for ChaCha).
     #[inline]
-    fn gcm_nonce(seqno: u64) -> Nonce {
+    fn gcm_nonce(seqno: u64) -> [u8; 12] {
         let mut n = [0u8; 12];
         n[4..].copy_from_slice(&seqno.to_be_bytes());
-        Nonce::assume_unique_for_key(n)
+        n
+    }
+
+    #[inline]
+    fn aes_key(&self) -> &[u8; 32] {
+        self.chapoly.key_bytes()[..32]
+            .try_into()
+            .expect("32-byte prefix")
     }
 
     /// Encrypt `plaintext` and append a 16-byte tag. See
     /// [`ChaPoly::seal`].
-    #[expect(clippy::missing_panics_doc)] // unreachable: ring GCM seal only errs on len overflow (> 64 GiB)
     #[must_use]
     pub fn seal(&self, seqno: u64, plaintext: &[u8]) -> Vec<u8> {
-        match &self.aes {
-            None => self.chapoly.seal(seqno, plaintext),
-            Some(k) => {
+        match self.aead {
+            SptpsAead::ChaCha20Poly1305 => self.chapoly.seal(seqno, plaintext),
+            SptpsAead::Aes256Gcm => {
                 let mut out = plaintext.to_vec();
-                let tag = k
-                    .seal_in_place_separate_tag(Self::gcm_nonce(seqno), Aad::empty(), &mut out)
-                    .expect("GCM seal");
-                out.extend_from_slice(tag.as_ref());
+                let tag = gcm::seal(self.aes_key(), &Self::gcm_nonce(seqno), &mut out);
+                out.extend_from_slice(&tag);
                 out
             }
         }
@@ -238,7 +208,6 @@ impl SptpsCipher {
     /// In-place hot-path encrypt. See [`ChaPoly::seal_into`] for the
     /// buffer-layout contract; this matches it exactly so the SPTPS
     /// framing code stays AEAD-agnostic.
-    #[expect(clippy::missing_panics_doc)] // unreachable: ring GCM seal only errs on len overflow (> 64 GiB)
     pub fn seal_into(
         &self,
         seqno: u64,
@@ -247,22 +216,20 @@ impl SptpsCipher {
         out: &mut Vec<u8>,
         encrypt_from: usize,
     ) {
-        match &self.aes {
-            None => self
+        match self.aead {
+            SptpsAead::ChaCha20Poly1305 => self
                 .chapoly
                 .seal_into(seqno, type_byte, body, out, encrypt_from),
-            Some(k) => {
+            SptpsAead::Aes256Gcm => {
                 debug_assert_eq!(out.len(), encrypt_from);
                 out.push(type_byte);
                 out.extend_from_slice(body);
-                let tag = k
-                    .seal_in_place_separate_tag(
-                        Self::gcm_nonce(seqno),
-                        Aad::empty(),
-                        &mut out[encrypt_from..],
-                    )
-                    .expect("GCM seal");
-                out.extend_from_slice(tag.as_ref());
+                let tag = gcm::seal(
+                    self.aes_key(),
+                    &Self::gcm_nonce(seqno),
+                    &mut out[encrypt_from..],
+                );
+                out.extend_from_slice(&tag);
             }
         }
     }
@@ -272,32 +239,21 @@ impl SptpsCipher {
     /// # Errors
     /// [`OpenError`] on short input or tag mismatch.
     pub fn open(&self, seqno: u64, sealed: &[u8]) -> Result<Vec<u8>, OpenError> {
-        match &self.aes {
-            None => self.chapoly.open(seqno, sealed),
-            Some(k) => {
-                // ring's `open_in_place` wants the tag at the tail of
-                // the same buffer. One copy is unavoidable here; this
-                // is the cold path (handshake / TCP fallback).
-                if sealed.len() < TAG_LEN {
-                    return Err(OpenError);
-                }
-                let mut buf = sealed.to_vec();
-                let pt_len = k
-                    .open_in_place(Self::gcm_nonce(seqno), Aad::empty(), &mut buf)
-                    .map_err(|_| OpenError)?
-                    .len();
-                buf.truncate(pt_len);
-                Ok(buf)
+        match self.aead {
+            SptpsAead::ChaCha20Poly1305 => self.chapoly.open(seqno, sealed),
+            SptpsAead::Aes256Gcm => {
+                let mut out = Vec::with_capacity(sealed.len());
+                self.open_into(seqno, sealed, &mut out, 0)?;
+                Ok(out)
             }
         }
     }
 
     /// In-place hot-path decrypt. See [`ChaPoly::open_into`] for the
-    /// buffer-layout contract — in particular, **`out` is unchanged on
-    /// `Err`**. The shard RX fast-path relies on that to leave its
-    /// scratch buffer at `[0u8; headroom]` when a forged packet fails
-    /// the tag, so the AES arm truncates back on failure to match
-    /// ChaPoly's MAC-then-extend ordering.
+    /// buffer-layout contract — in particular, `out`'s length is
+    /// restored on `Err` (GCM decrypts before the tag verifies, so
+    /// the failed plaintext bytes linger in spare capacity, same as
+    /// the previous ring backend).
     ///
     /// # Errors
     /// [`OpenError`] on short input or tag mismatch.
@@ -308,22 +264,19 @@ impl SptpsCipher {
         out: &mut Vec<u8>,
         decrypt_at: usize,
     ) -> Result<(), OpenError> {
-        match &self.aes {
-            None => self.chapoly.open_into(seqno, sealed, out, decrypt_at),
-            Some(k) => {
-                if sealed.len() < TAG_LEN {
-                    return Err(OpenError);
-                }
+        match self.aead {
+            SptpsAead::ChaCha20Poly1305 => self.chapoly.open_into(seqno, sealed, out, decrypt_at),
+            SptpsAead::Aes256Gcm => {
+                let ct_len = sealed.len().checked_sub(TAG_LEN).ok_or(OpenError)?;
+                let (ct, tag) = sealed.split_at(ct_len);
                 debug_assert_eq!(out.len(), decrypt_at);
-                // ring decrypts in place over `ct‖tag`, so we have to
-                // extend first; restore the contract by truncating on
-                // failure (and by stripping the tag tail on success).
-                out.extend_from_slice(sealed);
-                if let Ok(pt) =
-                    k.open_in_place(Self::gcm_nonce(seqno), Aad::empty(), &mut out[decrypt_at..])
-                {
-                    let pt_len = pt.len();
-                    out.truncate(decrypt_at + pt_len);
+                out.extend_from_slice(ct);
+                if gcm::open(
+                    self.aes_key(),
+                    &Self::gcm_nonce(seqno),
+                    &mut out[decrypt_at..],
+                    tag,
+                ) {
                     Ok(())
                 } else {
                     out.truncate(decrypt_at);
@@ -331,6 +284,144 @@ impl SptpsCipher {
                 }
             }
         }
+    }
+}
+
+mod gcm {
+    // The crate denies unsafe_code; this FFI module is the one opt-out.
+    #![allow(unsafe_code)]
+
+    use super::TAG_LEN;
+    use openssl_sys as ffi;
+    use std::cell::RefCell;
+
+    /// Per-thread encrypt/decrypt contexts, reused across records.
+    /// The last key is cached so steady-state records re-init IV only
+    /// (the AES key schedule is the expensive part).
+    struct Ctx {
+        enc: *mut ffi::EVP_CIPHER_CTX,
+        dec: *mut ffi::EVP_CIPHER_CTX,
+        enc_key: [u8; 32],
+        dec_key: [u8; 32],
+        keyed: [bool; 2],
+    }
+
+    impl Ctx {
+        fn new() -> Self {
+            // SAFETY: constructors + one-time cipher bind; null-checked.
+            unsafe {
+                let enc = ffi::EVP_CIPHER_CTX_new();
+                let dec = ffi::EVP_CIPHER_CTX_new();
+                assert!(!enc.is_null() && !dec.is_null());
+                let ok = ffi::EVP_EncryptInit_ex(
+                    enc,
+                    ffi::EVP_aes_256_gcm(),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                ) & ffi::EVP_DecryptInit_ex(
+                    dec,
+                    ffi::EVP_aes_256_gcm(),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                );
+                assert_eq!(ok, 1, "EVP_aes_256_gcm bind");
+                Self {
+                    enc,
+                    dec,
+                    enc_key: [0; 32],
+                    dec_key: [0; 32],
+                    keyed: [false; 2],
+                }
+            }
+        }
+    }
+
+    impl Drop for Ctx {
+        fn drop(&mut self) {
+            use zeroize::Zeroize;
+            // SAFETY: owned non-null pointers, freed exactly once.
+            unsafe {
+                ffi::EVP_CIPHER_CTX_free(self.enc);
+                ffi::EVP_CIPHER_CTX_free(self.dec);
+            }
+            self.enc_key.zeroize();
+            self.dec_key.zeroize();
+        }
+    }
+
+    thread_local! {
+        static CTX: RefCell<Ctx> = RefCell::new(Ctx::new());
+    }
+
+    /// Encrypt `buf` in place, return the 16-byte tag.
+    pub(super) fn seal(key: &[u8; 32], iv: &[u8; 12], buf: &mut [u8]) -> [u8; TAG_LEN] {
+        let mut tag = [0u8; TAG_LEN];
+        CTX.with(|c| {
+            let mut c = c.borrow_mut();
+            let fresh = !(c.keyed[0] && c.enc_key == *key);
+            if fresh {
+                c.enc_key = *key;
+                c.keyed[0] = true;
+            }
+            let mut n = 0;
+            let len = i32::try_from(buf.len()).expect("record < 2GiB");
+            // SAFETY: ctx pre-bound to AES-256-GCM; key 32B, iv 12B
+            // (GCM default IV length); in-place update writes exactly
+            // `len` bytes; GET_TAG writes TAG_LEN into `tag`.
+            let ok = unsafe {
+                ffi::EVP_EncryptInit_ex(
+                    c.enc,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    if fresh { key.as_ptr() } else { std::ptr::null() },
+                    iv.as_ptr(),
+                ) & ffi::EVP_EncryptUpdate(c.enc, buf.as_mut_ptr(), &raw mut n, buf.as_ptr(), len)
+                    & ffi::EVP_EncryptFinal_ex(c.enc, buf.as_mut_ptr(), &raw mut n)
+                    & ffi::EVP_CIPHER_CTX_ctrl(
+                        c.enc,
+                        ffi::EVP_CTRL_GCM_GET_TAG,
+                        16,
+                        tag.as_mut_ptr().cast(),
+                    )
+            };
+            assert_eq!(ok, 1, "GCM seal");
+        });
+        tag
+    }
+
+    /// Decrypt `buf` in place; `true` iff the tag verifies.
+    pub(super) fn open(key: &[u8; 32], iv: &[u8; 12], buf: &mut [u8], tag: &[u8]) -> bool {
+        debug_assert_eq!(tag.len(), TAG_LEN);
+        CTX.with(|c| {
+            let mut c = c.borrow_mut();
+            let fresh = !(c.keyed[1] && c.dec_key == *key);
+            if fresh {
+                c.dec_key = *key;
+                c.keyed[1] = true;
+            }
+            let mut n = 0;
+            let len = i32::try_from(buf.len()).expect("record < 2GiB");
+            // SAFETY: as in `seal`; SET_TAG reads TAG_LEN bytes from
+            // `tag`, final verifies and returns 0 on mismatch.
+            unsafe {
+                let ok = ffi::EVP_DecryptInit_ex(
+                    c.dec,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    if fresh { key.as_ptr() } else { std::ptr::null() },
+                    iv.as_ptr(),
+                ) & ffi::EVP_DecryptUpdate(c.dec, buf.as_mut_ptr(), &raw mut n, buf.as_ptr(), len)
+                    & ffi::EVP_CIPHER_CTX_ctrl(
+                        c.dec,
+                        ffi::EVP_CTRL_GCM_SET_TAG,
+                        16,
+                        tag.as_ptr().cast_mut().cast(),
+                    );
+                ok == 1 && ffi::EVP_DecryptFinal_ex(c.dec, buf.as_mut_ptr(), &raw mut n) == 1
+            }
+        })
     }
 }
 
