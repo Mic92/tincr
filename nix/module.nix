@@ -383,8 +383,11 @@ let
     description = "tinc VPN listen socket (network ${netName})";
     wantedBy = [ "sockets.target" ];
     socketConfig = {
-      ListenStream = toString net.listenPort;
-      BindIPv6Only = "both";
+      ListenStream = [
+        "0.0.0.0:${toString net.listenPort}"
+        "[::]:${toString net.listenPort}"
+      ];
+      BindIPv6Only = "ipv6-only";
       FreeBind = true;
     };
   };

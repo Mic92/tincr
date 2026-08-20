@@ -60,12 +60,15 @@ let
         };
       };
 
-      # Mirror contrib/tincd@.socket: TCP only, port 655. tincd opens
-      # the paired UDP socket itself against the same address.
+      # Mirror contrib/tincd@.socket: separate TCP listeners ensure tincd
+      # opens paired IPv4 and IPv6 UDP sockets instead of an IPv6-only pair.
       systemd.sockets."tincd@mesh" = {
         wantedBy = [ "sockets.target" ];
-        listenStreams = [ "655" ];
-        socketConfig.BindIPv6Only = "both";
+        listenStreams = [
+          "0.0.0.0:655"
+          "[::]:655"
+        ];
+        socketConfig.BindIPv6Only = "ipv6-only";
       };
 
       # Mirror contrib/tincd@.service.
@@ -160,9 +163,8 @@ testers.runNixOSTest {
             timeout=10,
         )
 
-        # UDP 655 is bound by tincd (not systemd): the daemon opened
-        # it against the adopted TCP addr.
-        beta.succeed("ss -ulnp 'sport = :655' | grep -w tincd")
+        # UDP 655 is bound by tincd (not systemd), once for each family.
+        beta.succeed("test $(ss -H -ulnp 'sport = :655' | grep -cw tincd) -eq 2")
 
     with subtest("data path over the activated listener"):
         alpha.wait_until_succeeds("ping -c1 -W2 10.21.0.2", timeout=30)

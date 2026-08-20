@@ -96,9 +96,26 @@ testers.runNixOSTest {
         assert "cap_net_admin" not in out.lower(), out
         assert "cap_net_bind_service" in out.lower(), out
 
-    with subtest("data path: ping over the mesh"):
+        for m in (alpha, beta):
+            listeners = m.succeed(
+                "systemctl show -p Listen tincr-mesh.socket"
+            )
+            assert "0.0.0.0:655" in listeners, listeners
+            assert "[::]:655" in listeners, listeners
+
+    with subtest("data path: direct UDP over the mesh"):
+        import re
+
         alpha.wait_until_succeeds("ping -c1 -W2 10.21.0.2", timeout=30)
         beta.succeed("ping -c1 -W2 10.21.0.1")
+        for m, peer in ((alpha, "beta"), (beta, "alpha")):
+            row = m.wait_until_succeeds(
+                "tinc --pidfile=/run/tincr/mesh.pid -n mesh dump nodes "
+                f"| grep '^{peer} '",
+                timeout=30,
+            )
+            status = int(re.search(r"status ([0-9a-f]+)", row).group(1), 16)
+            assert status & 0x80, row
 
     with subtest("DNS stub answers via systemd-resolved per-link routing"):
         for m in (alpha, beta):
