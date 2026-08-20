@@ -26,11 +26,7 @@ use tinc_device::Device;
 
 /// Effective shard count. >1 needs Linux, TUN + `Interface` set,
 /// router mode, and no socket activation; otherwise 1.
-pub(crate) fn resolve(
-    settings: &DaemonSettings,
-    config: &Config,
-    socket_activation: bool,
-) -> usize {
+pub(crate) fn resolve(settings: &DaemonSettings, config: &Config) -> usize {
     if !cfg!(target_os = "linux") {
         return 1;
     }
@@ -44,12 +40,14 @@ pub(crate) fn resolve(
         .lookup("DeviceType")
         .next()
         .is_none_or(|e| e.get_str().eq_ignore_ascii_case("tun"));
-    let ok = tun && settings.routing_mode == RoutingMode::Router && !socket_activation;
+    // Socket activation is fine: systemd adopts TCP only, UDP is
+    // always bound by tincd with our own sockopts.
+    let ok = tun && settings.routing_mode == RoutingMode::Router;
     if !ok {
         if settings.shards.is_some() {
             log::warn!(target: "tincd",
-                "Shards > 1 needs DeviceType=tun, Mode=router, \
-                 no socket activation; running single-threaded");
+                "Shards > 1 needs DeviceType=tun and Mode=router; \
+                 running single-threaded");
         }
         return 1;
     }

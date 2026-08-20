@@ -650,7 +650,7 @@ impl Daemon {
         // settings
         let mut settings = load_settings(&config, confbase)?;
 
-        let n_shards = resolve_shards(&settings, &config, socket_activation.is_some());
+        let n_shards = resolve_shards(&settings, &config);
         settings.sockopts.shard_group = n_shards > 1;
 
         // device

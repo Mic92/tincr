@@ -113,7 +113,20 @@ impl Tun {
 
         // `iface = None` → ifr_name zeroed → kernel picks `tun0` /
         // `tap0` / first free; the chosen name is read back.
-        let (fd, iface) = open_queue(device, ifr_name, flags)?;
+        // EINVAL retry: a persistent multi-queue device rejects a
+        // plain attach; re-attach with the MQ flag (1 queue is legal).
+        let (fd, iface) = match open_queue(device, ifr_name, flags) {
+            Err(e)
+                if cfg.mode == Mode::Tun
+                    && cfg.iface.is_some()
+                    && e.kind() == io::ErrorKind::InvalidInput =>
+            {
+                #[expect(clippy::cast_possible_truncation)]
+                let mq_flags = flags | libc::IFF_MULTI_QUEUE as i16;
+                open_queue(device, ifr_name, mq_flags)?
+            }
+            r => r?,
+        };
 
         // SIOCGIFHWADDR (TAP only): the MAC is kernel-generated
         // (random with the locally-administered bit set); switch mode

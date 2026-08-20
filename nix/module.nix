@@ -243,6 +243,8 @@ let
       User = serviceUser;
       VNetHeader = "yes";
       PacketInfo = "no";
+      # tincd shards the data plane across queues (Shards = auto).
+      MultiQueue = "yes";
     };
   };
 
