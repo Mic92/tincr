@@ -188,6 +188,13 @@ pub struct DaemonSettings {
     /// the same LAN behind the same NAT - the WAN probe round-trips
     /// through the NAT (or hairpin-fails); the LAN probe goes direct.
     pub local_discovery: bool,
+    /// `Shards = auto|N` (Rust extension, Linux-only, restart-only).
+    /// Data-plane worker threads, each owning one multi-queue TUN fd
+    /// and one reuseport UDP socket. `None` = auto:
+    /// `min(available_parallelism, 4)` — four ≈5 Gbit/s shards
+    /// saturate the ~20 Gbit/s per-queue kernel egress path. `1`
+    /// disables sharding (single-thread datapath, today's code).
+    pub shards: Option<u16>,
     /// When set, outgoing meta-connections `bind()` to this local
     /// address before `connect()`. Useful for multi-homed hosts
     /// where the default route doesn't go via the desired interface.
@@ -368,6 +375,7 @@ impl Default for DaemonSettings {
             maxoutbufsize: 10 * MTU as usize,
             invitation_lifetime: Duration::from_secs(604_800), // 1 week
             local_discovery: true,
+            shards: None,
             bind_to_address: None,
             proxy: None,
             autoconnect: true,
@@ -440,6 +448,15 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
     // tunnelserver implies strictsubnets. Applied after BOTH parsed.
     settings.strictsubnets |= settings.tunnelserver;
     cfg_bool!(config, "LocalDiscovery" => settings.local_discovery);
+    if let Some(e) = config.lookup("Shards").next() {
+        match e.get_str() {
+            "auto" => settings.shards = None,
+            s => match s.parse::<u16>() {
+                Ok(n @ 1..=64) => settings.shards = Some(n),
+                _ => log::warn!(target: "tincd", "Shards = {s}: expected auto or 1..=64"),
+            },
+        }
+    }
     cfg_bool!(config, "DirectOnly" => settings.directonly);
     cfg_bool!(config, "PriorityInheritance" => settings.priorityinheritance);
     cfg_bool!(config, "AutoConnect" => settings.autoconnect);
