@@ -34,7 +34,6 @@ use crate::graph::NodeId;
 use crate::node_id::NodeId6;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
-use tinc_crypto::aead::SptpsCipher;
 
 /// `PKT_NORMAL`. Re-stated (not re-exported from `daemon.rs`) so
 /// `shard` doesn't reach into `daemon` private constants. The byte
@@ -88,7 +87,7 @@ pub(crate) struct RxTarget<'a> {
     #[allow(dead_code)]
     // cfg-dependent: tests assert routing; shard slow-path will read for `send_req_key`
     pub from_nid: NodeId,
-    /// The peer's handles. `rx_open` reads `inkey` (decrypt) and
+    /// The peer's handles. `rx_open` reads `incipher` (decrypt) and
     /// `replay` (commit). Borrow not clone: probe is per-packet, an
     /// `Arc::clone` per packet is one atomic inc + one dec at MTU
     /// rate (~800k pkts/s); the borrow is free.
@@ -334,10 +333,7 @@ pub(crate) fn rx_open(
 
     let seqno = u32::from_be_bytes([ct[0], ct[1], ct[2], ct[3]]);
 
-    // Step 1: decrypt. `ChaPoly::new` is `const fn` — just.
-    // `*key`, 64-byte copy. Cheaper than caching per batch (the
-    // brief verified this; one keystream-block prep per packet
-    // is in the noise next to the 1500-byte ChaCha XOR).
+    // Step 1: decrypt with the prebuilt session cipher.
     //
     // `scratch` setup: clear, resize to ETH_HLEN headroom.
     // `open_into` debug-asserts `out.len() == decrypt_at` then
@@ -346,8 +342,9 @@ pub(crate) fn rx_open(
     // slow path's `open_data_into` will re-clear it anyway.
     scratch.clear();
     scratch.resize(ETH_HLEN, 0);
-    let cipher = SptpsCipher::new(target.handles.aead, &target.handles.inkey);
-    cipher
+    target
+        .handles
+        .incipher
         .open_into(u64::from(seqno), &ct[4..], scratch, ETH_HLEN)
         .map_err(|_| ())?;
     // scratch = [0;14][type:1][body]
@@ -465,6 +462,7 @@ mod tests {
     use crate::subnet_tree::SubnetTree;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64};
+    use tinc_crypto::aead::SptpsCipher;
     use tinc_sptps::ReplayWindow;
 
     /// Build a UDP wire packet: `[NULL:6][src_id6:6][seqno:4]
@@ -521,16 +519,16 @@ mod tests {
         // Also a subnet bob owns, for the negative dst test.
         st.add("10.1.0.0/24".parse().unwrap(), "bob".into());
 
-        // bob's handles. inkey IS the test key; outkey doesn't
+        // bob's handles. inkey IS the test key; outcipher doesn't
         // matter (RX doesn't seal). replay starts empty (seqno 0
         // is the first valid). udp_addr cached so probe passes.
+        let aead = tinc_sptps::SptpsAead::default();
         let handles = Arc::new(TunnelHandles {
             outseqno: Arc::new(AtomicU64::new(0)),
             out_key_base: 0,
             replay: Arc::new(Mutex::new(ReplayWindow::default())),
-            aead: tinc_sptps::SptpsAead::default(),
-            outkey: [0u8; 64],
-            inkey,
+            outcipher: SptpsCipher::new(aead, &[0u8; 64]),
+            incipher: SptpsCipher::new(aead, &inkey),
             udp_addr: Mutex::new(Some((
                 socket2::SockAddr::from("10.0.0.2:655".parse::<std::net::SocketAddr>().unwrap()),
                 0,
@@ -603,7 +601,7 @@ mod tests {
     /// (The hard rule: forged seqno + bad tag must not commit.)
     #[test]
     fn bad_tag_no_replay_advance() {
-        let (snap, _bob, _inkey) = fixture();
+        let (snap, _bob, inkey) = fixture();
         let body = v4_body([10, 0, 0, 5], 100);
         // Seal with WRONG key.
         let pkt = wire_packet("bob", 0, PKT_NORMAL, &body, &[0xFFu8; 64]);
@@ -615,7 +613,6 @@ mod tests {
 
         // Now seal with the RIGHT key, same seqno. Must succeed —
         // the bad-tag attempt didn't burn seqno 0.
-        let inkey = snap.tunnels[&target.from_nid].inkey;
         let pkt2 = wire_packet("bob", 0, PKT_NORMAL, &body, &inkey);
         let target2 = rx_probe(&snap, &pkt2).unwrap();
         assert!(rx_open(&target2, &snap, &mut scratch, &mut memo).is_ok());

@@ -19,7 +19,6 @@ use super::probe::TxTarget;
 use crate::daemon::PKT_NORMAL;
 use crate::egress::{TxBatch, UdpEgress};
 use crate::graph::NodeId;
-use tinc_crypto::aead::SptpsCipher;
 
 /// Stats for the daemon's `myself_tunnel.out_{packets,bytes}` and the
 /// per-dst tunnel counters. `bytes` is sum of BODY lengths (the inner
@@ -67,7 +66,7 @@ pub(crate) fn seal_super(
     batch: &mut TxBatch,
     egress: &mut dyn UdpEgress,
 ) -> Result<SealOk, SealErr> {
-    let cipher = SptpsCipher::new(target.handles.aead, &target.handles.outkey);
+    let cipher = &target.handles.outcipher;
     let mut bytes = 0u64;
 
     for (i, &len) in lens.iter().enumerate() {

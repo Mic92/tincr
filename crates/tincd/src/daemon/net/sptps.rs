@@ -175,9 +175,14 @@ impl Daemon {
                             outseqno: sptps.outseqno_handle(),
                             out_key_base: sptps.out_key_base(),
                             replay: sptps.replay_handle(),
-                            aead: sptps.aead(),
-                            outkey: *sptps.outcipher_key().expect("post-HandshakeDone"),
-                            inkey: *sptps.incipher_key().expect("post-HandshakeDone"),
+                            outcipher: tinc_crypto::aead::SptpsCipher::new(
+                                sptps.aead(),
+                                &sptps.outcipher_key().expect("post-HandshakeDone"),
+                            ),
+                            incipher: tinc_crypto::aead::SptpsCipher::new(
+                                sptps.aead(),
+                                &sptps.incipher_key().expect("post-HandshakeDone"),
+                            ),
                             udp_addr: std::sync::Mutex::new(tunnel.udp_addr_cached.clone()),
                             validkey: std::sync::atomic::AtomicBool::new(true),
                             minmtu: std::sync::atomic::AtomicU16::new(tunnel.minmtu()),

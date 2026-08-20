@@ -17,11 +17,8 @@ use crate::route_decide::{RouteResult, route};
 /// Per-super seal-send target. Everything is a COPY — no borrows into
 /// snapshot state. ~120 bytes, copied once per super (~33 chunks).
 pub(crate) struct TxTarget {
-    /// The `Arc` from `snap.tunnels.get()`. Seal loop reads `outkey`.
-    /// Holding the `Arc` directly instead of unpacking key/sock: the
-    /// seal loop derefs `handles.outkey` once into `ChaPoly::new`;
-    /// no point copying 64 bytes when the `Arc` clone is one refcount
-    /// bump.
+    /// The `Arc` from `snap.tunnels.get()`. Seal loop reads
+    /// `outcipher`; the `Arc` clone is one refcount bump.
     pub handles: Arc<TunnelHandles>,
     /// `handles.udp_addr.lock().clone()`. Cloned once per super so
     /// the seal loop's `sendto` isn't holding the mutex.
@@ -234,9 +231,14 @@ mod tests {
             outseqno: Arc::new(AtomicU64::new(0)),
             out_key_base: 0,
             replay: Arc::new(Mutex::new(ReplayWindow::default())),
-            aead: tinc_sptps::SptpsAead::default(),
-            outkey: [0u8; 64],
-            inkey: [0u8; 64],
+            outcipher: tinc_crypto::aead::SptpsCipher::new(
+                tinc_sptps::SptpsAead::default(),
+                &[0u8; 64],
+            ),
+            incipher: tinc_crypto::aead::SptpsCipher::new(
+                tinc_sptps::SptpsAead::default(),
+                &[0u8; 64],
+            ),
             udp_addr: Mutex::new(Some((
                 socket2::SockAddr::from("10.0.0.2:655".parse::<std::net::SocketAddr>().unwrap()),
                 0,

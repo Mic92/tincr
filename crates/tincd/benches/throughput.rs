@@ -334,6 +334,8 @@ mod bench {
                     // shows up in the profile). The C at `-d0` is silent;
                     // keep parity.
                     .env("RUST_LOG", "tincd=info")
+                    // Non-dumpable targets fail perf attach (EACCES).
+                    .envs(std::env::var_os("TINCD_PERF").map(|_| ("TINCR_ALLOW_COREDUMP", "1")))
                     .stderr(Stdio::piped())
                     .spawn()
                     .expect("spawn rust tincd"),
@@ -962,7 +964,7 @@ mod bench {
                 .arg(pid.to_string())
                 .arg("-o")
                 .arg(out)
-                .stderr(Stdio::null())
+                .stderr(Stdio::inherit())
                 .spawn()
                 .ok();
             match &child {
