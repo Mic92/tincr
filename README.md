@@ -61,10 +61,14 @@ Everything tinc 1.1 does, plus:
   client (PCP, falling back to UPnP-IGD) instead of libminiupnpc,
   and also opens IPv6 pinholes. The mapped address is published via
   the DHT.
-- **Fast.** Multi-gigabit on a single thread on Linux (measured:
-  ~5 Gbit/s on a Ryzen 9 3900) by batching packets (GSO/GRO:
-  bursts of TUN reads become one `sendmsg` with `UDP_SEGMENT`, and
-  vice versa on receive).
+- **Fast.** Multi-gigabit per flow on Linux by batching packets
+  (GSO/GRO: bursts of TUN reads become one `sendmsg` with
+  `UDP_SEGMENT`, and vice versa on receive) and using the AVX-512
+  AEAD kernels via OpenSSL. Measured on a Ryzen AI 7 350 against
+  C tinc's ~1 Gbit/s: 3.2 Gbit/s single flow (5.7 with AES), and
+  with the sharded data plane (`Shards`, on by default) traffic
+  from multiple peers spreads across cores: 8.6 Gbit/s aggregate
+  from 4 peers.
 - **Call nodes by name.** With `DNSAddress` and `DNSSuffix` set,
   `ssh laptop.vpn` just works: the daemon answers DNS queries for
   `NODE.SUFFIX` (and reverse lookups) straight from its routing
@@ -85,9 +89,8 @@ Everything tinc 1.1 does, plus:
   that relay traffic for each other connect directly.
 - **AES encryption as an option** (`SPTPSCipher = aes-256-gcm`).
   The default is ChaCha20-Poly1305. On CPUs with AES hardware,
-  AES-256-GCM raises tunnel throughput by 43–44% (measured: 3.4 →
-  4.9 Gbit/s on a Ryzen 9 3900, 2.1 → 3.0 Gbit/s on Apple
-  M-series). Both ends must be tincr and agree.
+  AES-256-GCM roughly doubles single-flow throughput (measured:
+  3.2 → 5.7 Gbit/s on Zen 5). Both ends must be tincr and agree.
 - **Post-quantum key exchange** (`SPTPSKex = x25519-mlkem768`).
   Adds ML-KEM-768 on top of X25519, so recorded traffic stays
   secret even against a future quantum computer. Both ends must be
