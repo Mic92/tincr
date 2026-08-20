@@ -19,9 +19,9 @@ use nix::sys::socket::{MsgFlags, SockaddrStorage, recvmmsg};
 
 use super::punt::{PUNT_SLOT, PuntQueue};
 use super::{RxDstMemo, TxSnapshot, rx_open, rx_probe, seal_super, tx_probe};
+use crate::daemon::net::helpers::gro_offer_or_write;
 use crate::egress::{TxBatch, UdpEgress};
 use crate::listen::unmap;
-use crate::daemon::net::helpers::gro_offer_or_write;
 use tinc_device::{Device, DeviceArena, DrainResult, GroBucket, VirtioNetHdr, tso_split};
 
 const RX_BATCH: usize = 64;

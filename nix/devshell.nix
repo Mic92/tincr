@@ -14,6 +14,7 @@
   meson,
   ninja,
   pkg-config,
+  openssl,
   bubblewrap ? null,
   iproute2 ? null,
   iputils ? null,
@@ -48,6 +49,7 @@ mkShell {
     meson
     ninja
     pkg-config
+    openssl # tinc-crypto ChaPoly backend
     iperf3
   ]
   # Linux-only: netns integration tests need bwrap+userns,

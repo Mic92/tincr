@@ -10,8 +10,8 @@
 //! that the test is wrong.
 
 // `forbid` would block the `#![allow(unsafe_code)]` on chapoly's
-// vendored-asm Poly1305 FFI. Everything else stays safe; the allow is
-// scoped to that one function and every block carries a SAFETY comment.
+// EVP_MAC FFI. Everything else stays safe; the allow is scoped to
+// that one module and every block carries a SAFETY comment.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![allow(

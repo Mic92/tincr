@@ -654,8 +654,7 @@ impl Daemon {
         settings.sockopts.shard_group = n_shards > 1;
 
         // device
-        let (device, shard_tuns) =
-            open_device(&config, n_shards, settings.shards.is_some())?;
+        let (device, shard_tuns) = open_device(&config, n_shards, settings.shards.is_some())?;
         // open_device may have fallen back to a single queue.
         let n_shards = if shard_tuns.is_empty() {
             1
