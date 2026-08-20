@@ -1,13 +1,9 @@
-//! Shard worker executor: one thread per shard, owning one reuseport
-//! UDP socket and one multi-queue TUN fd. RX fast path only so far;
-//! everything else goes to the control thread via [`PuntQueue`].
-//!
-//! Control publishes routing state as `Arc<TxSnapshot>` through a
-//! mailbox (epoch counter + mutex); workers reload it between
-//! batches, never mid-packet. Per-tunnel state (seqno, replay,
-//! stats, `udp_addr`) is shared via the `Arc<TunnelHandles>` inside
-//! the snapshot, so worker and control stay coherent without any
-//! new synchronization.
+//! Shard worker: one thread per shard, owning one reuseport UDP
+//! socket per listener and one multi-queue TUN fd. RX fast path
+//! only; everything else punts to the control thread. Routing state
+//! arrives as `Arc<TxSnapshot>` via an epoch mailbox, reloaded
+//! between batches; per-tunnel state is shared through the
+//! `Arc<TunnelHandles>` inside it.
 
 #![cfg(target_os = "linux")]
 // Wired into setup in the next commit; see bpf/mod.rs for the same staging.
@@ -22,10 +18,14 @@ use nix::poll::{PollFd, PollFlags, PollTimeout};
 use nix::sys::socket::{MsgFlags, SockaddrStorage, recvmmsg};
 
 use super::punt::{PUNT_SLOT, PuntQueue};
-use super::{RxDstMemo, TxSnapshot, rx_open, rx_probe};
-use tinc_device::Device;
+use super::{RxDstMemo, TxSnapshot, rx_open, rx_probe, seal_super, tx_probe};
+use crate::egress::{TxBatch, UdpEgress};
+use crate::listen::unmap;
+use crate::daemon::net::helpers::gro_offer_or_write;
+use tinc_device::{Device, DeviceArena, DrainResult, GroBucket, VirtioNetHdr, tso_split};
 
 const RX_BATCH: usize = 64;
+const DRAIN_CAP: usize = 64;
 
 pub(crate) struct SnapMailbox {
     epoch: AtomicU64,
@@ -57,8 +57,7 @@ impl SnapMailbox {
 
 pub(crate) struct WorkerHandle {
     pub punt: Arc<PuntQueue>,
-    /// Worker writes 1 here after pushing punts; control's event loop
-    /// registers the fd and drains on wake.
+    /// Written after pushing punts; control drains on wake.
     pub punt_efd: Arc<OwnedFd>,
     pub mailbox: Arc<SnapMailbox>,
     stop: Arc<AtomicBool>,
@@ -80,15 +79,15 @@ impl Drop for WorkerHandle {
     }
 }
 
-/// Spawn shard worker `idx` (1-based; shard 0 is the control thread).
+/// Spawn worker `idx` (1-based; shard 0 is the control thread).
 ///
 /// # Panics
-/// Thread spawn failure (out of threads/memory).
+/// Thread spawn failure.
 pub(crate) fn spawn(
     idx: usize,
-    udp: OwnedFd,
+    udp: Vec<OwnedFd>,
+    egress: Vec<Box<dyn UdpEgress + Send>>,
     tun: Box<dyn Device + Send>,
-    sock_slot: u8,
 ) -> WorkerHandle {
     let punt = Arc::new(PuntQueue::new());
     let punt_efd = Arc::new(
@@ -106,7 +105,7 @@ pub(crate) fn spawn(
         let stop = Arc::clone(&stop);
         std::thread::Builder::new()
             .name(format!("tinc-shard{idx}"))
-            .spawn(move || run(&udp, tun, sock_slot, &punt, &punt_efd, &mailbox, &stop))
+            .spawn(move || run(&udp, egress, tun, &punt, &punt_efd, &mailbox, &stop))
             .expect("spawn shard worker")
     };
     WorkerHandle {
@@ -118,10 +117,19 @@ pub(crate) fn spawn(
     }
 }
 
+struct TxState {
+    arena: DeviceArena,
+    tso_scratch: Box<[u8]>,
+    tso_lens: Box<[usize]>,
+    tx_scratch: Vec<u8>,
+    batch: TxBatch,
+    egress: Vec<Box<dyn UdpEgress + Send>>,
+}
+
 fn run(
-    udp: &OwnedFd,
+    udp: &[OwnedFd],
+    egress: Vec<Box<dyn UdpEgress + Send>>,
     mut tun: Box<dyn Device + Send>,
-    sock_slot: u8,
     punt: &PuntQueue,
     punt_efd: &OwnedFd,
     mailbox: &SnapMailbox,
@@ -131,9 +139,24 @@ fn run(
     let mut seen_epoch = 0u64;
     let mut bufs = vec![[0u8; PUNT_SLOT]; RX_BATCH];
     let mut scratch: Vec<u8> = Vec::with_capacity(PUNT_SLOT);
+    let mut gro_spare = GroBucket::new();
+    let mut tx = TxState {
+        arena: DeviceArena::new(DRAIN_CAP),
+        tso_scratch: vec![0u8; DRAIN_CAP * DeviceArena::STRIDE].into_boxed_slice(),
+        tso_lens: vec![0usize; DRAIN_CAP].into_boxed_slice(),
+        tx_scratch: Vec::new(),
+        batch: TxBatch::default(),
+        egress,
+    };
 
     while !stop.load(Ordering::Relaxed) {
-        let mut fds = [PollFd::new(udp.as_fd(), PollFlags::POLLIN)];
+        let mut fds: Vec<PollFd> = udp
+            .iter()
+            .map(|fd| PollFd::new(fd.as_fd(), PollFlags::POLLIN))
+            .collect();
+        if let Some(fd) = tun.fd() {
+            fds.push(PollFd::new(fd, PollFlags::POLLIN));
+        }
         // 100ms cap so stop and snapshot epoch are checked while idle.
         match nix::poll::poll(&mut fds, PollTimeout::from(100u16)) {
             Ok(0) | Err(nix::errno::Errno::EINTR) => {
@@ -152,61 +175,177 @@ fn run(
             snap = Some(s);
         }
 
+        let mut punted = false;
+        let mut gro = Some(std::mem::take(&mut gro_spare));
+        for fd in udp {
+            punted |= rx_batch(
+                fd,
+                &mut tun,
+                &mut gro,
+                snap.as_deref(),
+                punt,
+                &mut bufs,
+                &mut scratch,
+            );
+        }
+        if let Some(mut b) = gro.take() {
+            if let Some(buf) = b.flush()
+                && let Err(e) = tun.write_super(buf)
+            {
+                log::debug!(target: "tincd::shard", "gro flush: {e}");
+            }
+            gro_spare = b;
+        }
+        if let Err(e) = tun.write_flush() {
+            log::debug!(target: "tincd::shard", "tun flush: {e}");
+        }
+        punted |= tun_drain(&mut tun, snap.as_deref(), punt, &mut tx);
+        if punted {
+            let one = 1u64.to_ne_bytes();
+            let _ = nix::unistd::write(punt_efd.as_fd(), &one);
+        }
+    }
+}
+
+/// Drain the worker's TUN queue: supers go through the seal-send fast
+/// path, everything else punts. Returns whether anything was punted.
+fn tun_drain(
+    tun: &mut Box<dyn Device + Send>,
+    snap: Option<&TxSnapshot>,
+    punt: &PuntQueue,
+    tx: &mut TxState,
+) -> bool {
+    let mut punted = false;
+    for _ in 0..DRAIN_CAP {
+        match tun.drain(&mut tx.arena, DRAIN_CAP) {
+            Ok(DrainResult::Empty) | Err(_) => break,
+            Ok(DrainResult::Frames { count }) => {
+                for i in 0..count {
+                    punted |= punt.push(tx.arena.slot(i), None);
+                }
+                if count > 1 {
+                    break;
+                }
+            }
+            Ok(DrainResult::Super {
+                len,
+                gso_size,
+                gso_type,
+                csum_start,
+                csum_offset,
+            }) => {
+                let hdr = VirtioNetHdr {
+                    flags: 0,
+                    gso_type: 0,
+                    hdr_len: 0,
+                    gso_size,
+                    csum_start,
+                    csum_offset,
+                };
+                let Ok(count) = tso_split(
+                    &tx.arena.as_contiguous()[..len],
+                    &hdr,
+                    gso_type,
+                    &mut tx.tso_scratch,
+                    DeviceArena::STRIDE,
+                    &mut tx.tso_lens,
+                ) else {
+                    break;
+                };
+                punted |= tx_super(snap, punt, tx, count);
+                break;
+            }
+        }
+    }
+    punted
+}
+
+/// Seal-send one split super; punts the segments when the fast path
+/// doesn't apply.
+fn tx_super(snap: Option<&TxSnapshot>, punt: &PuntQueue, tx: &mut TxState, count: usize) -> bool {
+    #[expect(clippy::cast_possible_truncation)] // count <= DRAIN_CAP
+    let target = snap.and_then(|s| tx_probe(s, &tx.tso_scratch[..tx.tso_lens[0]], count as u32));
+    if let Some(target) = target
+        && let Some(egress) = tx.egress.get_mut(usize::from(target.sock))
+    {
+        let r = seal_super(
+            &target,
+            DeviceArena::STRIDE,
+            &tx.tso_lens[..count],
+            &tx.tso_scratch,
+            &mut tx.tx_scratch,
+            &mut tx.batch,
+            egress.as_mut(),
+        );
+        match r {
+            Ok(ok) => {
+                target.handles.stats.add_out(ok.packets, ok.bytes);
+                return false;
+            }
+            Err(_) => return false, // EMSGSIZE: dropped, control's probes re-shrink
+        }
+    }
+    let mut punted = false;
+    for i in 0..count {
+        let off = i * DeviceArena::STRIDE;
+        punted |= punt.push(&tx.tso_scratch[off..off + tx.tso_lens[i]], None);
+    }
+    punted
+}
+
+/// One `recvmmsg` + fast-path dispatch. Returns whether anything was punted.
+fn rx_batch(
+    udp: &OwnedFd,
+    tun: &mut Box<dyn Device + Send>,
+    gro: &mut Option<GroBucket>,
+    snap: Option<&TxSnapshot>,
+    punt: &PuntQueue,
+    bufs: &mut [[u8; PUNT_SLOT]],
+    scratch: &mut Vec<u8>,
+) -> bool {
+    let metas: Vec<(usize, Option<SocketAddr>)> = {
         let mut iovs: Vec<[std::io::IoSliceMut<'_>; 1]> = bufs
             .iter_mut()
             .map(|b| [std::io::IoSliceMut::new(&mut b[..])])
             .collect();
-        let mut data = nix::sys::socket::MultiHeaders::<SockaddrStorage>::preallocate(RX_BATCH, None);
-        let msgs = match recvmmsg(
+        let mut data =
+            nix::sys::socket::MultiHeaders::<SockaddrStorage>::preallocate(RX_BATCH, None);
+        match recvmmsg(
             udp.as_raw_fd(),
             &mut data,
             &mut iovs,
             MsgFlags::MSG_DONTWAIT,
             None,
         ) {
-            Ok(m) => m,
-            Err(nix::errno::Errno::EAGAIN) => continue,
+            Ok(msgs) => msgs
+                .map(|m| (m.bytes, m.address.as_ref().and_then(sockaddr_to_std)))
+                .collect(),
+            Err(nix::errno::Errno::EAGAIN) => return false,
             Err(e) => {
                 log::warn!(target: "tincd::shard", "worker recvmmsg: {e}");
-                continue;
+                return false;
             }
-        };
-
-        let mut punted = false;
-        let mut memo = RxDstMemo::default();
-        let metas: Vec<(usize, Option<SocketAddr>)> = msgs
-            .map(|m| {
-                let n = m.bytes;
-                let src = m.address.as_ref().and_then(sockaddr_to_std);
-                (n, src)
-            })
-            .collect();
-        for (i, &(n, src)) in metas.iter().enumerate() {
-            if n == 0 {
-                continue;
-            }
-            let pkt = &bufs[i][..n];
-            if let Some(s) = snap.as_ref()
-                && let Some(target) = rx_probe(s, pkt)
-                && let Ok(len) = rx_open(&target, s, &mut scratch, &mut memo)
-            {
-                target.handles.stats.add_in(1, len as u64);
-                if let Err(e) = tun.write_stage(&mut scratch[..len]) {
-                    log::debug!(target: "tincd::shard", "tun write: {e}");
-                }
-                continue;
-            }
-            let Some(src) = src else { continue };
-            punted |= punt.push(pkt, src, sock_slot);
         }
-        if let Err(e) = tun.write_flush() {
-            log::debug!(target: "tincd::shard", "tun flush: {e}");
+    };
+    let mut punted = false;
+    let mut memo = RxDstMemo::default();
+    for (i, &(n, src)) in metas.iter().enumerate() {
+        if n == 0 {
+            continue;
         }
-        if punted {
-            let one = 1u64.to_ne_bytes();
-            let _ = nix::unistd::write(punt_efd.as_fd(), &one);
+        let pkt = &bufs[i][..n];
+        if let Some(s) = snap
+            && let Some(target) = rx_probe(s, pkt)
+            && let Ok(len) = rx_open(&target, s, scratch, &mut memo)
+        {
+            target.handles.stats.add_in(1, len as u64);
+            gro_offer_or_write(&mut **tun, gro, &mut scratch[..len]);
+            continue;
         }
+        let Some(src) = src else { continue };
+        punted |= punt.push(pkt, Some(unmap(src)));
     }
+    punted
 }
 
 fn sockaddr_to_std(ss: &SockaddrStorage) -> Option<SocketAddr> {

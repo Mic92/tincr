@@ -129,7 +129,7 @@ impl Daemon {
     /// `gro = None` (`gro_enabled` false, or count == 1): immediate
     /// device write, no coalesce attempt.
     fn rx_fast_sink(device: &mut Box<dyn Device>, gro: &mut Option<GroBucket>, data: &mut [u8]) {
-        super::helpers::gro_offer_or_write(device, gro, data);
+        super::helpers::gro_offer_or_write(device.as_mut(), gro, data);
     }
 
     /// Wire layout: `[dst_id:6][src_id:6][sptps...]`. The 12-byte
@@ -368,6 +368,28 @@ impl Daemon {
     /// receive, SRCID alone is fine (AEAD tag validates end-to-end);
     /// for relay we never decrypt, so this gate is the only thing
     /// stopping a 1:1 UDP reflector attack (security audit `2f72c2ba`).
+    /// Drain worker `k`'s punt queue: clear the eventfd, then run
+    /// each packet through the normal slow path.
+    pub(in crate::daemon) fn on_shard_punt(&mut self, k: u8) {
+        let Some((punt, efd)) = self.shards.punt_handle(usize::from(k)) else {
+            return;
+        };
+        let mut buf = [0u8; 8];
+        let _ = nix::unistd::read(&*efd, &mut buf);
+        let mut nw = false;
+        while let Some(mut p) = punt.pop() {
+            let len = usize::from(p.len);
+            match p.src {
+                Some(src) => self.handle_incoming_vpn_packet(&p.buf[..len], Some(src)),
+                None => nw |= self.forward_packet(&mut p.buf[..len], None),
+            }
+            punt.recycle(p.buf);
+        }
+        if nw {
+            self.maybe_set_write_any();
+        }
+    }
+
     fn handle_incoming_vpn_packet(&mut self, pkt: &[u8], peer: Option<SocketAddr>) {
         // DHT port-probe demux (Rust extension). Gate is source.
         // addr, NOT `pkt[0]==b'd'`: SPTPS's first byte is dst_id6[0] =

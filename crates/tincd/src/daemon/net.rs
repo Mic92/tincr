@@ -7,7 +7,7 @@ use nix::sys::socket::MultiHeaders;
 use nix::sys::socket::SockaddrStorage;
 
 mod device;
-mod helpers;
+pub(crate) mod helpers;
 mod icmp;
 mod route;
 mod rx;

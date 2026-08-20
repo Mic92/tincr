@@ -196,6 +196,7 @@ impl Daemon {
                         if let Some(s) = self.tx_snap.as_mut() {
                             s.tunnels.insert(peer, handles);
                         }
+                        self.publish_shard_snap();
                     }
                 }
                 Output::Record { record_type, bytes } => {

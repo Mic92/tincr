@@ -52,6 +52,9 @@ pub struct SockOpts {
     /// silently binding to the wrong interface defeats the security
     /// intent, so failure kills the listener pair.
     pub bind_to_interface: Option<String>,
+    /// `Shards > 1`: set `SO_REUSEPORT` on UDP before bind so shard
+    /// sibling sockets can join the group (bind order = shard index).
+    pub shard_group: bool,
 }
 
 impl Default for SockOpts {
@@ -62,6 +65,7 @@ impl Default for SockOpts {
             udp_buf_warnings: false,
             fwmark: 0, // 0 = unset
             bind_to_interface: None,
+            shard_group: false,
         }
     }
 }
@@ -436,6 +440,11 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts, v6only: bool) -> io::Result<Socke
 
     s.set_nonblocking(true)?;
 
+    #[cfg(target_os = "linux")]
+    if opts.shard_group {
+        s.set_reuse_port(true)?;
+    }
+
     // SO_BROADCAST for LocalDiscovery (probe peers on LAN). Not used
     // yet, but setting it doesn't hurt.
     if let Err(e) = s.set_broadcast(true) {
@@ -645,6 +654,25 @@ fn open_one(
         udp,
         local,
     })
+}
+
+/// Bind `extra` shard sibling UDP sockets to `l`'s bound address.
+/// `l.udp` must have been bound with [`SockOpts::shard_group`] set;
+/// call order defines the reuseport group index (sibling k = shard
+/// k+1).
+///
+/// # Errors
+/// Any bind/setsockopt failure. Caller falls back to `Shards = 1`.
+#[cfg(target_os = "linux")]
+pub(crate) fn open_udp_siblings(
+    l: &Listener,
+    opts: &SockOpts,
+    extra: usize,
+) -> io::Result<Vec<Socket>> {
+    let addr = SockAddr::from(l.udp.local_addr()?.as_socket().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "udp listener has no inet addr")
+    })?);
+    (0..extra).map(|_| setup_udp(&addr, opts, true)).collect()
 }
 
 /// Set an accepted fd's options: NONBLOCK + NODELAY. TOS/TCLASS/MARK

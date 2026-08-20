@@ -396,7 +396,7 @@ impl Daemon {
         // `gro_bucket = None` and fall through to the immediate
         // write. `data` is `[synth eth(14)][IP]`; the helper skips
         // the eth header.
-        super::helpers::gro_offer_or_write(&mut self.device, &mut self.dp.gro_bucket, data);
+        super::helpers::gro_offer_or_write(self.device.as_mut(), &mut self.dp.gro_bucket, data);
     }
 
     /// Ship the GRO bucket. `bucket.flush()` finalizes `vnet_hdr` +

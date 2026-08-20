@@ -19,9 +19,8 @@ const PUNT_CAP: usize = 256;
 pub(crate) struct PuntPkt {
     pub buf: Box<[u8; PUNT_SLOT]>,
     pub len: u16,
-    pub src: SocketAddr,
-    /// Listener slot index for the reply path.
-    pub sock: u8,
+    /// `Some` = UDP datagram from this source; `None` = TUN frame.
+    pub src: Option<SocketAddr>,
 }
 
 pub(crate) struct PuntQueue {
@@ -47,7 +46,7 @@ impl PuntQueue {
     }
 
     /// `false` = ring full, packet dropped.
-    pub(crate) fn push(&self, pkt: &[u8], src: SocketAddr, sock: u8) -> bool {
+    pub(crate) fn push(&self, pkt: &[u8], src: Option<SocketAddr>) -> bool {
         debug_assert!(pkt.len() <= PUNT_SLOT);
         let mut q = self.q.lock().expect("punt lock");
         if q.full.len() >= PUNT_CAP {
@@ -61,7 +60,6 @@ impl PuntQueue {
             buf,
             len: pkt.len() as u16,
             src,
-            sock,
         });
         true
     }
@@ -94,11 +92,10 @@ mod tests {
     #[test]
     fn push_pop_roundtrip() {
         let q = PuntQueue::new();
-        assert!(q.push(b"hello", addr(), 3));
+        assert!(q.push(b"hello", Some(addr())));
         let p = q.pop().unwrap();
         assert_eq!(&p.buf[..usize::from(p.len)], b"hello");
-        assert_eq!(p.sock, 3);
-        assert_eq!(p.src, addr());
+        assert_eq!(p.src, Some(addr()));
         q.recycle(p.buf);
         assert!(q.pop().is_none());
     }
@@ -107,20 +104,20 @@ mod tests {
     fn drops_when_full_and_counts() {
         let q = PuntQueue::new();
         for _ in 0..PUNT_CAP {
-            assert!(q.push(b"x", addr(), 0));
+            assert!(q.push(b"x", None));
         }
-        assert!(!q.push(b"x", addr(), 0));
+        assert!(!q.push(b"x", None));
         assert_eq!(q.dropped(), 1);
     }
 
     #[test]
     fn freelist_reuses_buffers() {
         let q = PuntQueue::new();
-        assert!(q.push(b"a", addr(), 0));
+        assert!(q.push(b"a", Some(addr())));
         let p = q.pop().unwrap();
         let ptr = std::ptr::from_ref(&*p.buf) as usize;
         q.recycle(p.buf);
-        assert!(q.push(b"b", addr(), 0));
+        assert!(q.push(b"b", Some(addr())));
         let p2 = q.pop().unwrap();
         assert_eq!(std::ptr::from_ref(&*p2.buf) as usize, ptr);
     }
