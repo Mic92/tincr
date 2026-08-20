@@ -872,6 +872,299 @@ mod bench {
         bps
     }
 
+    // mesh: aggregate multi-peer throughput
+
+    /// N bob daemons as distinct nodes (distinct id6 → RX spreads
+    /// over alice's shards), each bob's TUN in its own netns so the
+    /// return routes don't collide. Parallel iperf3 clients from the
+    /// outer ns into every bob; the sum is alice-bound. Run with
+    /// `-- mesh`; alice runs once with Shards auto and once with
+    /// Shards = 1 for the A/B.
+    struct Mesh {
+        _tmp: TmpGuard,
+        daemons: Vec<ChildWithLog>,
+        sleepers: Vec<Child>,
+        n: usize,
+    }
+
+    impl Drop for Mesh {
+        fn drop(&mut self) {
+            for d in self.daemons.drain(..) {
+                let _ = d.kill_and_log();
+            }
+            let _ = Command::new("ip")
+                .args(["link", "del", "tincT0"])
+                .stderr(Stdio::null())
+                .status();
+            for k in 1..=self.n {
+                let _ = Command::new("ip")
+                    .args([
+                        "netns",
+                        "exec",
+                        &format!("tmesh{k}"),
+                        "ip",
+                        "link",
+                        "del",
+                        &format!("tincT{k}"),
+                    ])
+                    .stderr(Stdio::null())
+                    .status();
+            }
+            for k in 1..=self.n {
+                let path = format!("/run/netns/tmesh{k}");
+                let _ = Command::new("umount")
+                    .arg(&path)
+                    .stderr(Stdio::null())
+                    .status();
+                let _ = std::fs::remove_file(&path);
+            }
+            for mut s in self.sleepers.drain(..) {
+                let _ = s.kill();
+                let _ = s.wait();
+            }
+        }
+    }
+
+    fn leak(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+
+    /// Same sleeper + bind-mount pattern as `NetNs::setup`.
+    fn make_child_netns(name: &str) -> Child {
+        let sleeper = Command::new("unshare")
+            .args(["-n", "sleep", "3600"])
+            .spawn()
+            .expect("spawn unshare sleeper");
+        std::thread::sleep(Duration::from_millis(100));
+        let target = format!("/run/netns/{name}");
+        std::fs::write(&target, b"").expect("touch nsfd target");
+        let st = Command::new("mount")
+            .args(["--bind"])
+            .arg(format!("/proc/{}/ns/net", sleeper.id()))
+            .arg(&target)
+            .status()
+            .expect("spawn mount");
+        assert!(st.success(), "mount --bind nsfd for {name}: {st:?}");
+        run_ip(&["netns", "exec", name, "ip", "link", "set", "lo", "up"]);
+        sleeper
+    }
+
+    fn setup_mesh(n: usize, shards1: bool) -> Mesh {
+        const VALIDKEY: u32 = 0x02;
+        const UDP_CONFIRMED: u32 = 0x80;
+        let tag = if shards1 { "mesh1" } else { "mesh" };
+        let tmp = tmp(tag);
+
+        for k in 0..=n {
+            run_ip(&[
+                "tuntap",
+                "add",
+                "mode",
+                "tun",
+                "multi_queue",
+                "name",
+                leak(format!("tincT{k}")),
+            ]);
+            run_ip(&["link", "set", leak(format!("tincT{k}")), "up"]);
+        }
+
+        let alice = Node::new(
+            tmp.path(),
+            "alice",
+            0xA1,
+            "tincT0",
+            "10.44.0.0/24",
+            Impl::Rust,
+        );
+        let bobs: Vec<Node> = (1..=n)
+            .map(|k| {
+                #[expect(clippy::cast_possible_truncation)]
+                Node::new(
+                    tmp.path(),
+                    leak(format!("bob{k}")),
+                    0xB0 + k as u8,
+                    leak(format!("tincT{k}")),
+                    leak(format!("10.44.{k}.0/24")),
+                    Impl::Rust,
+                )
+            })
+            .collect();
+
+        // configs: alice dials every bob
+        for node in std::iter::once(&alice).chain(&bobs) {
+            std::fs::create_dir_all(node.confbase.join("hosts")).unwrap();
+            let mut conf = format!(
+                "Name = {}\nDeviceType = tun\nInterface = {}\nAddressFamily = ipv4\nPingTimeout = 5\n",
+                node.name, node.iface
+            );
+            if node.name == "alice" {
+                for b in &bobs {
+                    let _ = writeln!(conf, "ConnectTo = {}", b.name);
+                }
+                if shards1 {
+                    conf.push_str("Shards = 1\n");
+                }
+            }
+            std::fs::write(node.confbase.join("tinc.conf"), conf).unwrap();
+            std::fs::write(
+                node.confbase.join("hosts").join(node.name),
+                format!("Port = {}\nSubnet = {}\n", node.port, node.subnet),
+            )
+            .unwrap();
+            write_ed25519_privkey(&node.confbase, &node.seed);
+        }
+        for b in &bobs {
+            std::fs::write(
+                b.confbase.join("hosts").join("alice"),
+                format!(
+                    "Ed25519PublicKey = {}\n",
+                    tinc_crypto::b64::encode(&alice.pubkey())
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                alice.confbase.join("hosts").join(b.name),
+                format!(
+                    "Ed25519PublicKey = {}\nAddress = 127.0.0.1 {}\nPort = {}\nSubnet = {}\n",
+                    tinc_crypto::b64::encode(&b.pubkey()),
+                    b.port,
+                    b.port,
+                    b.subnet
+                ),
+            )
+            .unwrap();
+        }
+
+        // spawn + carrier
+        let mut daemons: Vec<ChildWithLog> = bobs.iter().map(Node::spawn).collect();
+        daemons.push(alice.spawn());
+        for node in bobs.iter().chain(std::iter::once(&alice)) {
+            assert!(wait_for_file(&node.socket), "{} setup", node.name);
+            assert!(
+                wait_for_carrier(node.iface, Duration::from_secs(2)),
+                "{} carrier",
+                node.name
+            );
+        }
+
+        // per-bob netns + addressing
+        let sleepers: Vec<Child> = (1..=n)
+            .map(|k| {
+                let ns = format!("tmesh{k}");
+                let sleeper = make_child_netns(&ns);
+                let dev = format!("tincT{k}");
+                run_ip(&["link", "set", &dev, "netns", &ns]);
+                for args in [
+                    vec!["addr", "add", leak(format!("10.44.{k}.1/24")), "dev", &dev],
+                    vec!["link", "set", &dev, "up"],
+                    vec!["route", "add", "10.44.0.0/24", "dev", &dev],
+                ] {
+                    let mut full = vec!["netns", "exec", &ns, "ip"];
+                    full.extend(args);
+                    run_ip(&full);
+                }
+                sleeper
+            })
+            .collect();
+        run_ip(&["addr", "add", "10.44.0.1/24", "dev", "tincT0"]);
+        run_ip(&["link", "set", "tincT0", "up"]);
+        for k in 1..=n {
+            run_ip(&[
+                "route",
+                "add",
+                leak(format!("10.44.{k}.0/24")),
+                "dev",
+                "tincT0",
+            ]);
+        }
+
+        let mesh = Mesh {
+            _tmp: tmp,
+            daemons,
+            sleepers,
+            n,
+        };
+
+        // handshakes + PMTU per bob
+        let mut alice_ctl = alice.ctl();
+        for (k, b) in bobs.iter().enumerate() {
+            let ip = format!("10.44.{}.1", k + 1);
+            let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                poll_until(Duration::from_secs(15), || {
+                    let _ = Command::new("ping")
+                        .args(["-c", "1", "-W", "1", &ip])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                    let a = alice_ctl.dump(3);
+                    let want = VALIDKEY | UDP_CONFIRMED;
+                    let up = node_status(&a, b.name).is_some_and(|s| s & want == want);
+                    let mtu = node_minmtu(&a, b.name).is_some_and(|m| m >= 1500);
+                    if up && mtu { Some(()) } else { None }
+                });
+            }));
+            assert!(ok.is_ok(), "{} tunnel timed out", b.name);
+        }
+        drop(alice_ctl);
+        mesh
+    }
+
+    /// Parallel iperf3 into every bob; aggregate received bps.
+    fn measure_mesh(mesh: &Mesh) -> f64 {
+        let n = mesh.n;
+        let servers: Vec<Child> = (1..=n)
+            .map(|k| {
+                Command::new("ip")
+                    .args([
+                        "netns",
+                        "exec",
+                        &format!("tmesh{k}"),
+                        "iperf3",
+                        "-s",
+                        "--one-off",
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("iperf3 server")
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(300));
+
+        let clients: Vec<Child> = (1..=n)
+            .map(|k| {
+                Command::new("iperf3")
+                    .args(["-c", &format!("10.44.{k}.1"), "-t", "5", "--json"])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("iperf3 client")
+            })
+            .collect();
+
+        let mut total = 0.0;
+        for c in clients {
+            let out = c.wait_with_output().expect("iperf3 client");
+            assert!(out.status.success(), "iperf3 client failed");
+            total += parse_iperf(&out.stdout).end.sum_received.bits_per_second;
+        }
+        for mut s in servers {
+            let _ = s.wait();
+        }
+        total
+    }
+
+    fn run_mesh(n: usize) {
+        for shards1 in [false, true] {
+            let label = if shards1 { "Shards=1" } else { "Shards=auto" };
+            eprintln!("--- mesh {n} peers, {label} ---");
+            let mesh = setup_mesh(n, shards1);
+            let bps = measure_mesh(&mesh);
+            eprintln!("mesh {n} peers, {label}: {:.1} Mbps aggregate", bps / 1e6);
+            drop(mesh);
+        }
+    }
+
     // main
 
     pub fn main() {
@@ -925,6 +1218,14 @@ mod bench {
                 bob: Impl::C(c_bin),
             },
         ];
+
+        // Mesh only on explicit `-- mesh` (it needs 4+ idle cores to
+        // mean anything).
+        if filters.iter().any(|f| f.contains("mesh")) {
+            run_mesh(4);
+            drop(netns);
+            return;
+        }
 
         let mut results: [Option<f64>; 3] = [None; 3];
         // (idle_p99, load_p99) per pairing, for the cross-impl summary.
