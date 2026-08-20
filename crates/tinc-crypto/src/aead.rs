@@ -217,9 +217,10 @@ impl SptpsCipher {
         encrypt_from: usize,
     ) {
         match self.aead {
-            SptpsAead::ChaCha20Poly1305 => self
-                .chapoly
-                .seal_into(seqno, type_byte, body, out, encrypt_from),
+            SptpsAead::ChaCha20Poly1305 => {
+                self.chapoly
+                    .seal_into(seqno, type_byte, body, out, encrypt_from);
+            }
             SptpsAead::Aes256Gcm => {
                 debug_assert_eq!(out.len(), encrypt_from);
                 out.push(type_byte);
@@ -375,7 +376,11 @@ mod gcm {
                     c.enc,
                     std::ptr::null(),
                     std::ptr::null_mut(),
-                    if fresh { key.as_ptr() } else { std::ptr::null() },
+                    if fresh {
+                        key.as_ptr()
+                    } else {
+                        std::ptr::null()
+                    },
                     iv.as_ptr(),
                 ) & ffi::EVP_EncryptUpdate(c.enc, buf.as_mut_ptr(), &raw mut n, buf.as_ptr(), len)
                     & ffi::EVP_EncryptFinal_ex(c.enc, buf.as_mut_ptr(), &raw mut n)
@@ -410,15 +415,24 @@ mod gcm {
                     c.dec,
                     std::ptr::null(),
                     std::ptr::null_mut(),
-                    if fresh { key.as_ptr() } else { std::ptr::null() },
+                    if fresh {
+                        key.as_ptr()
+                    } else {
+                        std::ptr::null()
+                    },
                     iv.as_ptr(),
-                ) & ffi::EVP_DecryptUpdate(c.dec, buf.as_mut_ptr(), &raw mut n, buf.as_ptr(), len)
-                    & ffi::EVP_CIPHER_CTX_ctrl(
-                        c.dec,
-                        ffi::EVP_CTRL_GCM_SET_TAG,
-                        16,
-                        tag.as_ptr().cast_mut().cast(),
-                    );
+                ) & ffi::EVP_DecryptUpdate(
+                    c.dec,
+                    buf.as_mut_ptr(),
+                    &raw mut n,
+                    buf.as_ptr(),
+                    len,
+                ) & ffi::EVP_CIPHER_CTX_ctrl(
+                    c.dec,
+                    ffi::EVP_CTRL_GCM_SET_TAG,
+                    16,
+                    tag.as_ptr().cast_mut().cast(),
+                );
                 ok == 1 && ffi::EVP_DecryptFinal_ex(c.dec, buf.as_mut_ptr(), &raw mut n) == 1
             }
         })

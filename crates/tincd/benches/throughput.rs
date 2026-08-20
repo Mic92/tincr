@@ -1,5 +1,5 @@
-//! Throughput benchmark. S3 (bwrap netns + real TUN) + S4
-//! (against C tincd as the baseline). Run on demand:
+//! Throughput benchmark: iperf3 through two real daemons over real
+//! TUNs in a bwrap netns, C tincd as the baseline.
 //!
 //! ```sh
 //! cargo bench --bench throughput --profile profiling
@@ -7,58 +7,11 @@
 //! cargo bench --bench throughput -- latency     # latency only (idle + load)
 //! ```
 //!
-//! `harness = false` — this isn't a microbenchmark, the netns +
-//! daemons + iperf3 setup IS the benchmark. Positional args after
-//! `--` are substring filters (cargo bench convention). No filter
-//! runs all three pairings + the ratio summary.
-//!
-//! ## What it measures
-//!
-//! `iperf3 -c 10.44.0.2 -t 5 --json` from the outer netns to a server
-//! in the child netns. Packets traverse the full daemon stack: TUN
-//! read → route → SPTPS encrypt → UDP sendto → loopback → recvfrom →
-//! SPTPS decrypt → route → TUN write. Same path as `netns.rs::
-//! real_tun_ping` but at line rate instead of 3 echoes.
-//!
-//! ## What it reports
-//!
-//! Rust↔Rust / C↔C throughput ratio on the same machine, same run.
-//! Absolute numbers are meaningless across machines; the RATIO is what
-//! you compare across commits. Single-threaded ChaCha20-Poly1305
-//! should be within noise of C. A 50% regression means there's an
-//! O(N) per-packet copy hiding somewhere.
-//!
-//! ## Why pre-tag, not CI
-//!
-//! The 28-module daemon decomposition has ~5 places a `Vec<u8>`
-//! clone-per-packet could creep in. None of the functional tests
-//! catch that. This does, BEFORE we tag a release and someone runs
-//! production traffic through it.
-//!
-//! ## Three configurations
-//!
-//! 1. **C↔C** — the baseline (what tinc 1.1pre18 does)
-//! 2. **Rust↔Rust** — what we ship
-//! 3. **Rust↔C** — interop overhead; should ≈ Rust↔Rust. Catches
-//!    direction-asymmetric perf bugs (Rust receive path slow vs
-//!    Rust send path slow).
-//!
-//! ## Dev-vs-release bias
-//!
-//! `cargo bench` defaults to `release`. The C tincd from
-//! `.#tincd-c` is a meson `release` build — apples to apples. Use
-//! `--profile profiling` for `TINCD_PERF=1` (same opt-level, adds
-//! debuginfo + frame pointers so perf can unwind).
-//!
-//! ## Mechanics
-//!
-//! Same bwrap-reexec as `netns.rs` / `crossimpl.rs` (read those
-//! module docs first). One re-exec for the whole test; the three
-//! tunnel configs run sequentially inside it, each one creating
-//! fresh persistent TUN devices and tearing them down on drop.
-//! Different device/netns names (`tincT0/tincT1`, `tbobside`,
-//! 10.44.0.0/24) so this file doesn't collide with the others under
-//! parallel nextest.
+//! Runs C↔C, Rust↔Rust and Rust↔C sequentially and reports the
+//! Rust/C ratio — absolute numbers are machine-specific, the ratio
+//! is what you compare across commits. Same bwrap re-exec as
+//! `netns.rs`/`crossimpl.rs`; distinct device/netns names so nextest
+//! parallelism doesn't collide.
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
@@ -73,13 +26,8 @@ fn main() {
     bench::main();
 }
 
-// Benches can't `mod common;` from tests/. Nine other test files
-// pull from common/ — promoting it to a dev-dep crate is more churn
-// than this `#[path]` ugliness. CARGO_BIN_EXE_tincd in there works
-// for benches same as tests (cargo sets it for any artifact that
-// depends on the bin). Hoisted out of `mod bench` because `#[path]`
-// resolves relative to a virtual `bench/` subdir inside an inline
-// mod — which doesn't physically exist, so `..` traversal fails.
+// Benches can't `mod common;` from tests/; `#[path]` is less churn
+// than promoting common/ to a crate.
 #[cfg(target_os = "linux")]
 #[path = "../tests/common/mod.rs"]
 mod common;
@@ -106,10 +54,8 @@ mod bench {
         TmpGuard::new("thr", tag)
     }
 
-    // bwrap re-exec
-    // Copy of crossimpl.rs::enter_netns. See netns.rs module doc for the
-    // flag-by-flag explanation. No libtest — the inner re-exec just
-    // forwards argv so the filter survives the bwrap boundary.
+    // bwrap re-exec: copy of crossimpl.rs::enter_netns (see netns.rs
+    // for the flag-by-flag explanation).
 
     fn enter_netns() -> Option<NetNs> {
         if std::env::var_os("BWRAP_INNER").is_some() {
@@ -173,23 +119,18 @@ mod bench {
             .args(["--tmpfs", "/run"])
             .arg("--")
             .arg(&self_exe)
-            // Forward filter args so `cargo bench -- rust_rust` survives
-            // the re-exec. cargo bench passes `--bench` as a sentinel
-            // (libtest convention) before user args; harmless here, we
-            // skip non-matching tokens in the filter logic.
+            // Forward filter args so `cargo bench -- rust_rust`
+            // survives the re-exec.
             .args(std::env::args_os().skip(1))
             .env("BWRAP_INNER", "1")
             .status()
             .expect("spawn bwrap");
-        // Outer process is just a shell. Propagate the inner's exit
-        // code so `cargo bench` sees setup panics.
         std::process::exit(status.code().unwrap_or(1));
     }
 
-    /// Base netns state: `lo` up, child netns mounted at `/run/netns/
-    /// tbobside`. Created ONCE for the whole test; the three tunnel
-    /// configs share it. TUN devices are NOT created here — `Tunnel
-    /// Handle` does that per-config so each config gets fresh devices.
+    /// Base netns state, created once and shared by all configs:
+    /// `lo` up, child netns mounted at `/run/netns/tbobside`.
+    /// TUN devices are per-config (`TunnelHandle`).
     struct NetNs {
         sleeper: Child,
     }
@@ -271,8 +212,7 @@ mod bench {
 
         fn write_config(&self, other: &Node, connect_to: bool) {
             std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
-            // See throughput_macos.rs::write_macos_config for the
-            // rationale; same env knob so the docs only mention one.
+            // Same env knob as throughput_macos.rs.
             let sptps_cipher = std::env::var("TINCD_BENCH_SPTPS_CIPHER")
                 .map(|c| format!("SPTPSCipher = {c}\n"))
                 .unwrap_or_default();
@@ -284,9 +224,8 @@ mod bench {
             if connect_to {
                 let _ = writeln!(tinc_conf, "ConnectTo = {}", other.name);
             }
-            // Tight ping for fast detection of a hung daemon. Bumped
-            // under TINCD_PERF: two samplers + saturated tunnel can
-            // delay a ping cycle. 5 is plenty given -F 499.
+            // Tight ping to detect a hung daemon fast; looser under
+            // TINCD_PERF (samplers can delay a ping cycle).
             let pingtimeout = if std::env::var_os("TINCD_PERF").is_some() {
                 5
             } else {
@@ -312,16 +251,12 @@ mod bench {
             write_ed25519_privkey(&self.confbase, &self.seed);
         }
 
-        /// Spawn with stderr piped to a background drain thread. The
-        /// throughput test runs daemons for ~7s each at full debug log
-        /// volume; the 64 KiB pipe buffer fills and `write(2, ...)` to
-        /// stderr blocks the daemon's event loop. Same fix as crossimpl.
+        /// Spawn with stderr piped to a background drain thread so a
+        /// full pipe never blocks the daemon (same fix as crossimpl).
         fn spawn(&self) -> ChildWithLog {
             let child = match &self.which {
                 Impl::Rust => Command::new(env!("CARGO_BIN_EXE_tincd"))
-                    // Rust tincd now detaches by default (C compat).
-                    // -D keeps it foreground so ChildWithLog can drain
-                    // stderr and kill it on drop.
+                    // -D: stay foreground for ChildWithLog.
                     .arg("-D")
                     .arg("-c")
                     .arg(&self.confbase)
@@ -329,10 +264,8 @@ mod bench {
                     .arg(&self.pidfile)
                     .arg("--socket")
                     .arg(&self.socket)
-                    // `info` not `debug`: at line rate, `debug` per-packet
-                    // logging IS the bottleneck (a fmt::Write per packet
-                    // shows up in the profile). The C at `-d0` is silent;
-                    // keep parity.
+                    // info, not debug: per-packet logging would be
+                    // the bottleneck. C runs -d0; keep parity.
                     .env("RUST_LOG", "tincd=info")
                     // Non-dumpable targets fail perf attach (EACCES).
                     .envs(std::env::var_os("TINCD_PERF").map(|_| ("TINCR_ALLOW_COREDUMP", "1")))
@@ -341,8 +274,6 @@ mod bench {
                     .expect("spawn rust tincd"),
                 Impl::C(bin) => Command::new(bin)
                     .arg("-D")
-                    // `-d0`: no per-packet logs. `-d5` floods at
-                    // line rate same as our `debug`.
                     .arg("-d0")
                     .arg("-c")
                     .arg(&self.confbase)
@@ -365,16 +296,9 @@ mod bench {
         _tmp: TmpGuard,
         alice: Option<ChildWithLog>,
         bob: Option<ChildWithLog>,
-        /// Alice's daemon PID. Captured for `perf record -p PID`.
-        /// Alice is the iperf3 CLIENT side: TUN read, route, encrypt,
-        /// sendto. Receiver does the inverse. Both touch the same
-        /// modules at the same packet rate; profiling one side covers
-        /// 90%. The Rust↔C config DOES distinguish: alice is always
-        /// the Rust side there, so we always profile Rust.
+        /// For `perf record -p`. Alice = iperf3 client side (encrypt
+        /// heavy), bob = server side (decrypt heavy); profile both.
         alice_pid: u32,
-        /// Bob's daemon PID. Bob is the iperf3 SERVER side: recvfrom,
-        /// decrypt, route, write to TUN. Send-side and recv-side
-        /// optimizations show up on opposite ends; profile both.
         bob_pid: u32,
     }
 
@@ -395,17 +319,14 @@ mod bench {
 
     impl Drop for TunnelHandle {
         fn drop(&mut self) {
-            // Daemons first — their TUNSETIFF holds carrier; deleting
-            // an attached device works but better to be tidy.
+            // Daemons first, then devices (each in its own netns).
             if let Some(c) = self.alice.take() {
                 let _ = c.kill_and_log();
             }
             if let Some(c) = self.bob.take() {
                 let _ = c.kill_and_log();
             }
-            // tincT0 stayed in the outer ns; tincT1 was moved into
-            // tbobside. Delete each in its own ns. Best-effort: a
-            // panic during setup may have left only one created.
+            // Best-effort: setup may have panicked mid-way.
             let _ = Command::new("ip")
                 .args(["link", "del", "tincT0"])
                 .stderr(Stdio::null())
@@ -418,9 +339,8 @@ mod bench {
     }
 
     /// Build a tunnel with the given (alice, bob) implementations.
-    /// Returns once both sides have `validkey | udp_confirmed` set —
-    /// i.e. UDP data path is hot, no TCP-fallback packets in flight
-    /// (PACKET 17 routes now, but iperf3 wants the UDP path measured).
+    /// Returns once both sides have `validkey | udp_confirmed` — the
+    /// UDP data path is hot, no TCP fallback in flight.
     fn setup_tunnel(tag: &str, alice_impl: Impl, bob_impl: Impl) -> TunnelHandle {
         // Node status bits (`node.h:41`).
         const VALIDKEY: u32 = 0x02;
@@ -530,18 +450,15 @@ mod bench {
             panic!("meta handshake timed out;\n=== alice ===\n{a}\n=== bob ===\n{b}");
         }
 
-        // Kick the per-tunnel handshake. First packet hits send_sptps_
-        // packet with !validkey → dropped, but triggers REQ_KEY.
+        // Kick the per-tunnel handshake (first packet triggers REQ_KEY).
         let _ = Command::new("ping")
             .args(["-c", "1", "-W", "1", "10.44.0.2"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
 
-        // validkey (bit 1) + udp_confirmed (bit 7). Both bits, both
-        // sides. Without udp_confirmed the C falls back to TCP-
-        // tunnelled PACKET frames; the Rust daemon drops those, so
-        // the iperf3 stream would crater immediately.
+        // Both bits on both sides; without udp_confirmed traffic
+        // would take the TCP fallback and crater the measurement.
         let validkey = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             poll_until(Duration::from_secs(10), || {
                 let a = alice_ctl.dump(3);
@@ -558,24 +475,10 @@ mod bench {
             panic!("validkey/udp_confirmed timed out;\n=== alice ===\n{a}\n=== bob ===\n{b}");
         }
 
-        // PMTU convergence: wait for `minmtu ≥ 1500` so full-MSS TCP
-        // segments (1500-byte IP packets) take the UDP path. Without
-        // this, `send_sptps_data`'s `origlen > relay->minmtu` gate
-        // sends them via TCP-tunnelled SPTPS_PACKET (b64 over the
-        // meta-conn) at ~10 Mbps instead of ~1 Gbps.
-        //
-        // Both impls walk the same ladder here. `choose_initial_maxmtu`
-        // is ported (`tx_control.rs`), but on loopback `getsockopt(IP_MTU)`
-        // returns 65536 → clamped to `MTU=1518` → `probe_size` sees
-        // `maxmtu == MTU` → 0.97 multiplier → first probe is ~1329,
-        // not maxmtu. The 1-RTT fast path only fires when the kernel
-        // returns something BELOW 1518 (real link, real PMTU cache
-        // entry). Loopback: 2-3 probes × 333ms cadence ≈ 1s to 1500.
-        //
-        // `try_tx` (which calls `pmtu.tick()`) only fires on VPN packet
-        // egress — not ctl-dump traffic. Ping inside the poll loop to
-        // drive a tick per side; the 333ms probe cadence gates progress,
-        // not ping rate. 10s budget is slack — ~1s in practice.
+        // PMTU convergence: minmtu ≥ 1500 so full-MSS segments take
+        // the UDP path instead of the ~10 Mbps TCP fallback. The ping
+        // inside the loop drives `pmtu.tick()` (VPN egress only);
+        // loopback converges in ~1s.
         let pmtu = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             poll_until(Duration::from_secs(10), || {
                 let _ = Command::new("ping")
@@ -603,19 +506,9 @@ mod bench {
 
     // iperf3 measurement
 
-    /// Run iperf3 server in tbobside, client in the outer ns. 5s, JSON.
-    ///
-    /// The mechanics: the test process IS in the outer netns (alice's
-    /// side). `ip netns exec tbobside ...` works because `NetNs::setup`
-    /// bind-mounted the sleeper's nsfd at `/run/netns/tbobside` — `ip
-    /// netns exec NAME` is just `setns(open("/run/netns/NAME"))` + exec.
-    /// `--bind / /` in the bwrap args means the nix-store iperf3 binary
-    /// is visible at the same path inside.
-    ///
-    /// `--one-off`: server exits after one client. Otherwise it leaks
-    /// across the three configs and the second `iperf3 -s` gets EADDRINUSE.
+    /// iperf3 server in tbobside, client in the outer ns; 5s, JSON.
+    /// `--one-off` so the next config's server doesn't hit EADDRINUSE.
     fn measure(handle: &mut TunnelHandle) -> f64 {
-        // server in bob's netns
         let mut server = Command::new("ip")
             .args(["netns", "exec", "tbobside", "iperf3", "-s", "--one-off"])
             .stdout(Stdio::null())
@@ -623,29 +516,15 @@ mod bench {
             .spawn()
             .expect("spawn iperf3 server");
 
-        // Server bind is asynchronous. Poll for the listener — iperf3's
-        // default port is 5201. We can't `TcpStream::connect` from the
-        // outer ns to check (that would go through the TUNNEL, before
-        // we know it works). Instead: just sleep. iperf3 binds in <10ms;
-        // 200ms is generous and dwarfed by the 5s measurement.
+        // Server bind is async; can't connect-probe from this ns
+        // (that would go through the tunnel). 200ms is generous.
         std::thread::sleep(Duration::from_millis(200));
 
-        // client in outer ns (= test process's ns)
-        // `-t 5`: 5 seconds. Short enough for fast turnaround, long
-        // enough for ChaCha20 to warm caches and TCP to ramp up. If
-        // variance is too high on a loaded CI box, bump to `-t 10` or
-        // median-of-3; the ratio comparison has slop for now.
-        // -Z (sendfile zero-copy) tested at HEAD 7d47fdd1: no measurable
-        // delta. iperf3 isn't the wall — bob's decrypt is. Leaving -Z
-        // out keeps the test closer to the realistic case (apps that
-        // tunnel through tinc do write(), not sendfile).
         let client = Command::new("iperf3")
             .args(["-c", "10.44.0.2", "-t", "5", "--json"])
             .output()
             .expect("spawn iperf3 client");
 
-        // Reap the server. `--one-off` means it exited when the client
-        // disconnected; `wait` is just zombie cleanup.
         let _ = server.wait();
 
         if !client.status.success() {
@@ -671,23 +550,11 @@ mod bench {
         parse_iperf(&client.stdout).end.sum_received.bits_per_second
     }
 
-    // latency measurement
-    // Batched decrypt makes frame 0 wait for the
-    // whole batch before route fires. Throughput doesn't see that —
-    // it's a tail-latency cost. Idle ping won't trigger batching
-    // either (threshold is ~8 frames in flight). So: ping under
-    // iperf3 load, report percentiles. The interesting number is
-    // p99-under-load vs p99-idle, and Rust↔Rust vs C↔C under load.
+    // Latency: batching cost is tail latency, invisible to
+    // throughput. Ping under iperf3 load, report percentiles.
 
-    /// `ping -c COUNT -i 0.01 -D 10.44.0.2`, parse per-packet RTTs.
-    /// 10ms interval × 100 = ~1s wall time. `-D` adds timestamps but
-    /// we don't use them — it's there to match the format we tested
-    /// the parser against; the `time=` field is what we read.
-    ///
-    /// Loss is reported but not asserted on: under saturating iperf3
-    /// load a few ICMP drops are normal (bob's recv buffer fills,
-    /// kernel drops). The latency of the packets that DID make it is
-    /// what shows the batching delay.
+    /// `ping -c COUNT -i 0.01 -D`, parse per-packet RTTs. Loss is
+    /// reported, not asserted — drops under saturation are normal.
     fn ping_rtts(count: u32) -> PingStats {
         let out = Command::new("ping")
             .arg("-c")
@@ -695,8 +562,7 @@ mod bench {
             .args(["-i", "0.01", "-D", "10.44.0.2"])
             .output()
             .expect("spawn ping");
-        // ping exits non-zero if ANY packets are lost. Under load
-        // that's not a failure mode we care about; parse what we got.
+        // ping exits non-zero on any loss; parse what we got.
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stats = PingStats::parse(&stdout, count);
         assert!(
@@ -707,22 +573,13 @@ mod bench {
         stats
     }
 
-    /// Idle RTT: tunnel is up, nothing flowing through it but the
-    /// pings themselves. Baseline. Par-crypto batching shouldn't kick
-    /// in here (1 packet every 10ms is far below the threshold).
+    /// Idle RTT baseline: nothing flowing but the pings.
     fn measure_latency_idle(_handle: &mut TunnelHandle) -> PingStats {
         ping_rtts(100)
     }
 
-    /// RTT under throughput load: THE measurement for par-crypto.
-    /// iperf3 saturates bob's decrypt path; concurrent pings see the
-    /// queueing delay that batching introduces. Returns (mbps, ping).
-    ///
-    /// The iperf3 here uses `-t 3` not `-t 5`: ping does 100 × 10ms =
-    /// ~1s of work; we ramp 500ms, ping ~1s, and want the load to
-    /// outlast the ping. 3s covers it with margin. Shorter than the
-    /// throughput-only `measure()` because here Mbps is context, not
-    /// the headline number.
+    /// RTT under iperf3 load — the queueing delay batching adds.
+    /// `-t 3`: load just needs to outlast the ~1s ping run.
     fn measure_latency_load(handle: &mut TunnelHandle) -> (f64, PingStats) {
         let mut server = Command::new("ip")
             .args(["netns", "exec", "tbobside", "iperf3", "-s", "--one-off"])
@@ -732,9 +589,8 @@ mod bench {
             .expect("spawn iperf3 server");
         std::thread::sleep(Duration::from_millis(200));
 
-        // Client backgrounded so ping runs concurrently. --json so
-        // we can report the Mbps that the latency was measured AT —
-        // "p99=2ms under 800Mbps" reads differently than under 80.
+        // Backgrounded so ping runs concurrently; --json to report
+        // the Mbps the latency was measured at.
         let client = Command::new("iperf3")
             .args(["-c", "10.44.0.2", "-t", "3", "--json"])
             .stdout(Stdio::piped())
@@ -742,8 +598,7 @@ mod bench {
             .spawn()
             .expect("spawn iperf3 client");
 
-        // Ramp: TCP slow-start + first batch of full-MSS frames.
-        // Without this the first ~20 pings see an idle-ish tunnel.
+        // TCP slow-start ramp before measuring.
         std::thread::sleep(Duration::from_millis(500));
 
         let ping = ping_rtts(100);
@@ -773,18 +628,15 @@ mod bench {
         (parsed.end.sum_received.bits_per_second, ping)
     }
 
-    /// One latency pairing: idle, then under-load, on the same tunnel.
-    /// Reusing the tunnel between idle and load means the PMTU/handshake
-    /// state is identical for both — the only variable is the load.
-    /// Returns (idle, `load_mbps`, load) for the cross-pairing summary.
+    /// One latency pairing: idle then under-load on the same tunnel,
+    /// so the only variable is the load.
     fn run_latency(
         p: &Pairing,
         do_idle: bool,
         do_load: bool,
     ) -> (Option<PingStats>, Option<(f64, PingStats)>) {
         eprintln!("--- latency {} ---", p.label);
-        // "lat-" tag prefix → distinct tmpdir from the throughput run
-        // of the same pairing (matters when both run in one invocation).
+        // Distinct tmpdir from the throughput run of the same pairing.
         let mut tunnel = setup_tunnel(&format!("lat-{}", p.tag), p.alice.clone(), p.bob.clone());
 
         let idle = do_idle.then(|| {
@@ -814,41 +666,19 @@ mod bench {
             (bps, s)
         });
 
-        // No per-pairing gate. Tried `load.p99 > 5× idle.p99` — fires
-        // on Rust↔Rust (0.26ms idle → 18× ratio) but not C↔C (1.76ms
-        // idle → 4.8×) despite Rust having LOWER absolute load p99.
-        // The ratio is dominated by how good idle is, not how bad
-        // load is. The cross-impl Δ at the end is the real signal.
-
+        // No per-pairing gate: the load/idle ratio is dominated by
+        // how good idle is. The cross-impl Δ at the end is the signal.
         drop(tunnel);
         (idle, load)
     }
 
     // perf record
 
-    /// `perf trace -s -p PID`: exact syscall counts and per-call latency,
-    /// RAII-stopped. Unlike `perf record` (statistical sampling, output
-    /// shape depends on unwinder quality) this uses kernel tracepoints —
-    /// every syscall enter/exit is recorded. The summary lists call
-    /// COUNT, total time, and avg/max latency per syscall name. This is
-    /// the ground truth for "do we issue more syscalls per packet than
-    /// C, or does each one cost more".
-    ///
-    /// Gated on `TINCD_TRACE=1`. Needs root or `CAP_PERFMON` (tracefs
-    /// `events/raw_syscalls/sys_{enter,exit}` is `0640 root:root` by
-    /// default; remountable with `mount -o remount,mode=755 /sys/kernel/
-    /// tracing` but that's a host-wide change). Run under sudo for
-    /// one-off measurements:
-    ///
-    /// ```sh
-    /// sudo -E env PATH=$PATH TINCD_TRACE=1 \
-    ///   cargo bench --bench throughput --profile profiling
-    /// ```
-    ///
-    /// Tracepoint overhead is much lower than `strace -c` (no ptrace
-    /// stops, no context switch per syscall — just a ringbuffer write).
-    /// Still nonzero; throughput under trace is comparable but not
-    /// identical to a clean run. Use the COUNTS, not the wall time.
+    /// `perf trace -s -p PID`: exact per-syscall counts and latency,
+    /// RAII-stopped. Gated on `TINCD_TRACE=1`; needs root/`CAP_PERFMON`
+    /// (`sudo -E env PATH=$PATH TINCD_TRACE=1 cargo bench ...`).
+    /// Tracepoint overhead is small but nonzero — use the counts,
+    /// not the wall time.
     struct PerfTrace {
         child: Option<Child>,
         out: PathBuf,
@@ -862,11 +692,7 @@ mod bench {
                     out: out.into(),
                 };
             }
-            // -s: summary only at exit (not per-syscall lines, which
-            //   would be millions at line rate).
-            // -o: file, not stderr. We're already piping daemon stderr
-            //   for the failure log; mixing them is unreadable.
-            // No -e filter: we want ALL syscalls. The summary is short.
+            // -s: summary only; -o: keep it out of daemon stderr.
             let child = Command::new("perf")
                 .args(["trace", "-s", "-p"])
                 .arg(pid.to_string())
@@ -896,43 +722,29 @@ mod bench {
     impl Drop for PerfTrace {
         fn drop(&mut self) {
             if let Some(mut child) = self.child.take() {
-                // Same SIGINT-then-wait as PerfRecord. perf trace flushes
-                // the summary on SIGINT.
+                // perf trace flushes the summary on SIGINT.
                 let _ = nix::sys::signal::kill(
                     nix::unistd::Pid::from_raw(child.id().cast_signed()),
                     nix::sys::signal::Signal::SIGINT,
                 );
                 let _ = child.wait();
             }
-            // Dump the summary inline. It's short (~20 lines, one per
-            // syscall). The whole point is to read it side-by-side with
-            // the C run in test output.
-            if let Ok(s) = std::fs::read_to_string(&self.out) {
-                // perf trace -s output starts with a blank line + a
-                // "Summary of events:" header. Keep it; the formatting
-                // is already a nice table.
-                if !s.trim().is_empty() {
-                    eprintln!("--- syscall trace ({}) ---", self.out.display());
-                    for line in s.lines() {
-                        eprintln!("  {line}");
-                    }
+            // Dump the short summary inline, side-by-side with the C run.
+            if let Ok(s) = std::fs::read_to_string(&self.out)
+                && !s.trim().is_empty()
+            {
+                eprintln!("--- syscall trace ({}) ---", self.out.display());
+                for line in s.lines() {
+                    eprintln!("  {line}");
                 }
             }
         }
     }
 
-    /// `perf record -p PID -g -F 999`, RAII-stopped. Drop → SIGINT →
-    /// wait. SIGINT is the documented "finish writing, exit cleanly"
-    /// signal for `perf record`; SIGTERM/SIGKILL would truncate.
-    ///
-    /// `.spawn().ok()` not `.unwrap()`: perf-unavailable degrades to
-    /// throughput-only. The ratio doesn't NEED the profile; the
-    /// profile is for the human reading a regression.
-    ///
-    /// Gated on `TINCD_PERF=1`: perf record adds measurable overhead
-    /// (kernel sampling interrupts, ring buffer copies) that skews the
-    /// very throughput we're measuring. Default-off keeps the gate
-    /// clean; opt-in when you need to know WHERE the cycles go.
+    /// `perf record -p PID`, RAII-stopped via SIGINT (SIGTERM would
+    /// truncate). Gated on `TINCD_PERF=1` — sampling overhead skews
+    /// the throughput being measured. Unavailable perf degrades to
+    /// throughput-only.
     struct PerfRecord {
         child: Option<Child>,
     }
@@ -942,30 +754,11 @@ mod bench {
             if std::env::var_os("TINCD_PERF").is_none() {
                 return Self { child: None };
             }
-            // -g: call graphs. Without this you get the leaf only —
-            //   "80% in chacha20_avx2" doesn't say whether that's
-            //   encrypt-on-send or decrypt-on-recv. With -g you get
-            //   the chain back through send_sptps_data / on_udp_recv.
-            //
-            // -F 499: 499 Hz, not 500 — stay off any kernel periodic
-            //   tick alignment. 5s × 499/s ≈ 2.5k samples per CPU,
-            //   enough resolution for anything ≥ 1% of time. Was 999
-            //   when only alice was sampled; halved when bob's
-            //   recorder was made unconditional — two samplers at
-            //   999 Hz starved the meta-conn of pings under a
-            //   saturated tunnel even with PingTimeout=5. Aggregate
-            //   interrupt rate stayed where it was.
-            //
-            // No --call-graph=dwarf: dev profile has frame pointers
-            //   (Cargo default in debug). dwarf is more accurate but
-            //   perf has to capture stacks on-the-fly — measurable
-            //   overhead. fp is fine.
-            //
-            // perf_event_open(2) is gated by `kernel.perf_event_
-            // paranoid` (host-wide sysctl, the bwrap userns doesn't
-            // help). `<= 1` lets unprivileged users record their own
-            // processes; Debian defaults to `2`. We can't fix the
-            // sysctl from inside the test — feature-detect and degrade.
+            // -g: call graphs (fp-based; dwarf costs too much here).
+            // -F 499: off tick alignment; two samplers at 999 Hz
+            // starved the meta-conn under saturation.
+            // Degrades silently when kernel.perf_event_paranoid
+            // forbids attach.
             let child = Command::new("perf")
                 .args(["record", "-g", "-F", "499", "-p"])
                 .arg(pid.to_string())
@@ -1000,19 +793,10 @@ mod bench {
         }
     }
 
-    /// Top self-time symbols to stderr. Runs even on the green path —
-    /// the profile is the baseline for the NEXT regression.
-    ///
-    /// `--no-children`: without it perf attributes a callee's time to
-    /// ALL its callers, so `Daemon::run` shows 99%. We want SELF time —
-    /// where the cycles actually burn.
-    ///
-    /// A HEALTHY profile (Rust within noise of C) looks like ~35%
-    /// chacha20/poly1305, ~15% `[k] copy_user_*` (kernel↔userspace
-    /// copies for TUN+UDP — same on both impls), ~10% syscall+UDP
-    /// stack, <5% anything in `tincd::`. If `_ZN5alloc7raw_vec...` is
-    /// at 20% there's a per-packet `Vec::clone` somewhere — check
-    /// `on_udp_recv`/`route_ipv4` for `.to_vec()`.
+    /// Top self-time symbols (`--no-children`) to stderr — the
+    /// baseline for the next regression. Healthy: crypto dominates,
+    /// <5% in `tincd::`; an `alloc::raw_vec` entry means a per-packet
+    /// clone crept in.
     fn report_hot_symbols(data: &Path) {
         if !data.exists() {
             return; // perf didn't run
@@ -1034,10 +818,6 @@ mod bench {
             .output();
         let Ok(out) = out else { return };
         eprintln!("--- top symbols ({}) ---", data.display());
-        // Skip the # comment header. First 10 data lines. perf doesn't
-        // demangle Rust v0 symbols; `_ZN5tincd6daemon...` is mostly
-        // readable anyway (the module path is in there). Not pulling
-        // a demangling crate for this.
         for line in String::from_utf8_lossy(&out.stdout)
             .lines()
             .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
@@ -1050,11 +830,9 @@ mod bench {
 
     // pairings
 
-    /// One named pairing. `name` is what `cargo bench -- <substr>`
-    /// matches against. `perf_tag` names the perf.data / trace files
-    /// (only the C↔C and Rust↔Rust pairings get profiled — see the
-    /// `profile` field; Rust↔C is the interop sanity check, not the
-    /// thing you'd open in perf).
+    /// One named pairing. `name` is the `cargo bench -- <substr>`
+    /// filter target; `perf_tag` names the perf.data/trace files
+    /// (Rust↔C isn't profiled — it's the interop sanity check).
     struct Pairing {
         name: &'static str,
         label: &'static str,
@@ -1074,13 +852,8 @@ mod bench {
         let bps = if let Some(tag) = p.perf_tag {
             let alice_perf = perf_out.join(format!("{tag}-alice.perf.data"));
             let bob_perf = perf_out.join(format!("{tag}-bob.perf.data"));
-            // Both ends profiled: send-side and recv-side
-            // optimizations show up on opposite ends, and "why no
-            // bump" is unanswerable without seeing both. The flap
-            // risk (two samplers + saturated receiver losing a ping)
-            // is handled by bumping PingTimeout to 5 under
-            // TINCD_PERF — the same env that gates perf record
-            // itself, so they always move together.
+            // Both ends: send- and recv-side costs show up on
+            // opposite sides.
             let _pa = PerfRecord::start(tunnel.alice_pid, &alice_perf);
             let _pb = PerfRecord::start(tunnel.bob_pid, &bob_perf);
             let _ta = PerfTrace::start(
@@ -1102,12 +875,8 @@ mod bench {
     // main
 
     pub fn main() {
-        // Substring filter, cargo bench convention. `cargo bench --bench
-        // throughput -- rust_rust` → argv = [self, "--bench", "rust_rust"].
-        // `--bench` is the libtest sentinel cargo always passes; we have
-        // no libtest, so just skip anything starting with `-`. Everything
-        // else is a filter; a pairing runs if its name contains ANY filter
-        // (or if no filters were given).
+        // Substring filters after `--`; skip cargo's `--bench`
+        // sentinel (anything starting with `-`).
         let filters: Vec<String> = std::env::args()
             .skip(1)
             .filter(|a| !a.starts_with('-'))
@@ -1129,10 +898,7 @@ mod bench {
             eprintln!("(set TINCD_PERF=1 for sampling profile, TINCD_TRACE=1 for syscall counts)");
         }
 
-        // Order matters for the perf workflow: C↔C first establishes the
-        // "healthy profile" shape to diff Rust↔Rust against. Rust↔C last
-        // — alice is Rust there too, but Rust↔Rust is the interesting
-        // profile and two are enough.
+        // C↔C first: the healthy-profile baseline to diff against.
         let pairings = [
             Pairing {
                 name: "c_c",
@@ -1170,11 +936,9 @@ mod bench {
                 results[i] = Some(run_pairing(p, &perf_out));
                 ran_any = true;
             }
-            // Latency: "latency_{idle,load}_<pairing>". Substring filter
-            // means `-- latency` runs all six, `-- latency_idle` runs
-            // three, `-- latency_load_rust_rust` runs one. The
-            // `want_latency` guard stops a bare `-- rust_rust` from
-            // also matching `latency_load_rust_rust` (substring would).
+            // Latency: "latency_{idle,load}_<pairing>". The guard
+            // stops a bare `-- rust_rust` from matching
+            // `latency_load_rust_rust` by substring.
             let want_latency = filters.is_empty() || filters.iter().any(|f| f.contains("latency"));
             let lat_idle = want_latency && matches(&format!("latency_idle_{}", p.name));
             let lat_load = want_latency && matches(&format!("latency_load_{}", p.name));
@@ -1195,12 +959,6 @@ mod bench {
 
         let [baseline, rust, mixed] = results;
 
-        // hot-symbol report
-        // Before the gate. If it fails, the next thing anyone does is
-        // open the profile; if it passes, the profile is the baseline
-        // for the next regression. Only when perf actually ran —
-        // `report_hot_symbols` checks file existence too, but skip the
-        // noise entirely when off.
         if perf_on {
             if rust.is_some() {
                 report_hot_symbols(&perf_out.join("rust-alice.perf.data"));
@@ -1213,23 +971,13 @@ mod bench {
             eprintln!("perf data: {}", perf_out.display());
         }
 
-        // ratios
-        // No exit(1) gate: we're already at ~135% of C; a hard 95%
-        // threshold would never fire and the dev-profile 1% "is the
-        // tunnel dead" check is better caught by netns.rs::ping.
-        // Compare ratios across commits by eye. If Rust/C drops to
-        // ~50%, look for per-packet Vec::clone (_ZN5alloc... high in
-        // the hot-symbol report) — that's a regression; the hot UDP
-        // data path is zero-alloc via `seal_data_into` + `tx_scratch`
-        // (`send_record_priv` is handshake/probe-only now). Remaining
-        // cold-perf STUB: `maybe_set_write_any` walking all conns
-        // (`tx_control.rs`); irrelevant at n=2 peers.
+        // No pass/fail gate on the ratio — compare across commits by
+        // eye. A drop to ~50% of C usually means a per-packet clone
+        // (alloc::raw_vec high in the hot-symbol report).
         if let (Some(baseline), Some(rust)) = (baseline, rust) {
             eprintln!("Rust/C ratio: {:.1}%", rust / baseline * 100.0);
-            // Mixed against the SLOWER endpoint: a mixed pair is
-            // bottlenecked by whichever side lacks the optimization.
-            // GSO put Rust ahead of C, so comparing against Rust↔Rust
-            // measures "how slow is C", not "is interop broken".
+            // Mixed compares against the slower endpoint — that's
+            // its bottleneck.
             if let Some(mixed) = mixed {
                 let slower = rust.min(baseline);
                 eprintln!(
@@ -1239,11 +987,8 @@ mod bench {
             }
         }
 
-        // latency summary
-        // The Rust-vs-C p99-under-load delta is the par-crypto cost
-        // isolated: same kernel, same iperf3, only the daemon differs.
-        // Diagnostic, not a gate — absolute latency varies wildly
-        // across machines (loopback netns on a laptop vs a CI VM).
+        // Latency summary: diagnostic, not a gate — absolute numbers
+        // vary wildly across machines.
         let [lat_c, lat_r, _] = lat_results;
         if let (Some((_, Some(c_load))), Some((_, Some(r_load)))) = (lat_c, lat_r) {
             eprintln!(

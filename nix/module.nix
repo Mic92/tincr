@@ -228,15 +228,12 @@ let
     in
     concatStringsSep "\n" lines + "\n";
 
-  # Static system user. Owns the persistent TUN (TUNSETOWNER) so
-  # tincd's TUNSETIFF can re-attach without CAP_NET_ADMIN, and the
-  # ed25519 key file can be group-readable.
+  # Static system user: owns the persistent TUN so re-attach needs
+  # no CAP_NET_ADMIN.
   serviceUser = "tincr";
 
-  # systemd-networkd .netdev unit. Pre-creates a persistent TUN with
-  # IFF_VNET_HDR + IFF_NO_PI matching what tincd asks for and pins
-  # the owner to `serviceUser`. Closing the fd after TUNSETPERSIST
-  # leaves the netdev around for tincd to adopt by name.
+  # networkd .netdev unit: persistent TUN with flags matching what
+  # tincd asks for, owned by `serviceUser`.
   mkNetdev = netName: net: {
     netdevConfig = {
       Name = net.interfaceName;
@@ -292,9 +289,8 @@ let
 
   unitName = netName: "tincr-${netName}";
 
-  # tincd runs as `serviceUser`. The TUN is pre-created by networkd
-  # with TUNSETOWNER == serviceUser, so re-opening it needs no
-  # capabilities. Only CAP_NET_BIND_SERVICE remains, for UDP 655.
+  # tincd runs as `serviceUser`; the networkd-owned TUN needs no
+  # capabilities to re-open. CAP_NET_BIND_SERVICE only, for port 655.
   mkService =
     netName: net:
     let
