@@ -8,8 +8,11 @@
   craneLib,
   lib,
   installShellFiles,
+  pkg-config,
+  openssl,
   # true → drop the x86-64-v3/AVX2 floor from .cargo/config.toml so
-  # the binary runs on pre-Haswell x86_64. Slower crypto, no SIGILL.
+  # the binary runs on pre-Haswell x86_64. No SIGILL; the OpenSSL
+  # AEAD kernels dispatch at runtime either way.
   baselineCpu ? false,
 }:
 let
@@ -32,6 +35,9 @@ let
     strictDeps = true;
     # Just the bin crates; --workspace would pull tinc-ffi's cc.
     cargoExtraArgs = "-p tincd -p tinc-tools";
+    # openssl-sys (tinc-crypto's ChaPoly backend)
+    nativeBuildInputs = [ pkg-config ];
+    buildInputs = [ openssl ];
     # netns tests need bwrap+userns the sandbox lacks. The dev shell
     # runs the full suite; this is the deployment artifact.
     doCheck = false;
@@ -39,7 +45,7 @@ let
   // lib.optionalAttrs baselineCpu {
     # Env RUSTFLAGS replaces .cargo/config.toml's target.* rustflags
     # (cargo does not merge them); restate frame-pointers, omit
-    # target-cpu=x86-64-v3 and chacha20_force_avx2.
+    # target-cpu=x86-64-v3.
     RUSTFLAGS = "-C force-frame-pointers=yes";
   };
   # Dummy src/{lib,main}.rs from every workspace Cargo.toml; compiles
@@ -52,7 +58,10 @@ craneLib.buildPackage (
     inherit cargoArtifacts;
     # man/ only here so editing a page doesn't rebuild cargoArtifacts.
     src = mkSrc (lib.fileset.union rustSrc ../man);
-    nativeBuildInputs = [ installShellFiles ];
+    nativeBuildInputs = [
+      installShellFiles
+      pkg-config
+    ];
     # Hand-written mdoc; committed so the build stays hermetic and
     # diffs are reviewable. Regenerate by editing man/*.? directly.
     postInstall = ''
