@@ -1279,11 +1279,13 @@ impl Daemon {
 
         match udp_info::on_receive_mtu_info(&parsed, from, to) {
             MtuInfoAction::Malformed => {
-                // conn-fatal.
-                Err(DispatchError::BadKey(format!(
-                    "MTU_INFO from {conn_name}: invalid MTU {}",
-                    parsed.mtu
-                )))
+                // NOT conn-fatal (deviation from C): unfixed peers
+                // still emit 0/18, and teardown looped one bad hop
+                // into a mesh-wide outage (#21).
+                log::warn!(target: "tincd::proto",
+                           "Ignoring MTU_INFO from {conn_name} with invalid MTU {}",
+                           parsed.mtu);
+                Ok(false)
             }
             MtuInfoAction::UnknownNode => {
                 log::error!(target: "tincd::proto",
