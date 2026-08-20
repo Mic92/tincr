@@ -127,13 +127,13 @@ pub(super) fn handle_udp_emsgsize(
 
 /// Offer raw IP `data` to GRO bucket, flushing as needed; falls
 /// through to direct device write on `NotCandidate`.
-pub(super) fn gro_offer_or_write(
-    device: &mut Box<dyn Device>,
+pub(crate) fn gro_offer_or_write(
+    device: &mut dyn Device,
     gro: &mut Option<GroBucket>,
     data: &mut [u8],
 ) {
     const ETH_HLEN: usize = 14;
-    let flush = |device: &mut Box<dyn Device>, b: &mut GroBucket| {
+    let flush = |device: &mut dyn Device, b: &mut GroBucket| {
         if let Some(buf) = b.flush()
             && let Err(e) = device.write_super(buf)
         {

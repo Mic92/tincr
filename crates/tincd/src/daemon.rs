@@ -34,7 +34,7 @@ mod dump;
 mod gossip;
 pub(crate) mod intervals;
 mod metaconn;
-mod net;
+pub(crate) mod net;
 pub use net::MAX_PENDING_META;
 mod periodic;
 mod purge;
@@ -116,6 +116,8 @@ pub enum IoWhat {
     Tcp(u8),
     /// UDP listener.
     Udp(u8),
+    /// Shard worker punt eventfd (index into the worker vec).
+    ShardPunt(u8),
 }
 
 /// Timer dispatch tags.
@@ -589,6 +591,9 @@ pub struct Daemon {
     /// fence, no fan-out, no wake. Populated at `HandshakeDone`;
     /// cleared at `BecameUnreachable`.
     pub(crate) tunnel_handles: IntHashMap<NodeId, Arc<crate::shard::TunnelHandles>>,
+
+    /// Data-plane worker threads (`Shards > 1`); empty otherwise.
+    pub(crate) shards: crate::shard::runtime::ShardRuntime,
 }
 
 impl Daemon {
@@ -614,6 +619,7 @@ impl Daemon {
         if let Some(s) = self.tx_snap.as_mut() {
             s.subnets = Arc::new(self.subnets.clone());
         }
+        self.publish_shard_snap();
     }
 
     /// Refresh routes + node view. Called at the END of
@@ -638,6 +644,15 @@ impl Daemon {
             // node_ids (it only reads hosts/ for subnets), so it
             // doesn't change id6_table either. One clone covers all.
             s.id6 = Arc::new(self.id6_table.clone());
+        }
+        self.publish_shard_snap();
+    }
+
+    /// Push the current snapshot to the shard workers (no-op when
+    /// sharding is off). Called after every `tx_snap` mutation site.
+    pub(crate) fn publish_shard_snap(&self) {
+        if let Some(s) = &self.tx_snap {
+            self.shards.publish(s);
         }
     }
 }
@@ -813,6 +828,10 @@ impl Daemon {
 
                     IoWhat::Udp(i) => {
                         self.on_udp_recv(i);
+                    }
+
+                    IoWhat::ShardPunt(k) => {
+                        self.on_shard_punt(k);
                     }
                 }
             }

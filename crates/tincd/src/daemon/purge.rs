@@ -190,6 +190,7 @@ impl Daemon {
             s.tunnels
                 .retain(|nid, _| self.tunnel_handles.contains_key(nid));
         }
+        self.publish_shard_snap();
 
         nw
     }

@@ -426,9 +426,16 @@ mod bench {
         const VALIDKEY: u32 = 0x02;
         const UDP_CONFIRMED: u32 = 0x80;
 
-        // fresh persistent TUN devices
-        run_ip(&["tuntap", "add", "mode", "tun", "name", "tincT0"]);
-        run_ip(&["tuntap", "add", "mode", "tun", "name", "tincT1"]);
+        // multi_queue only for Rust ends; C tinc needs a plain device.
+        let add_tun = |name: &str, is_rust: bool| {
+            if is_rust {
+                run_ip(&["tuntap", "add", "mode", "tun", "multi_queue", "name", name]);
+            } else {
+                run_ip(&["tuntap", "add", "mode", "tun", "name", name]);
+            }
+        };
+        add_tun("tincT0", matches!(alice_impl, Impl::Rust));
+        add_tun("tincT1", matches!(bob_impl, Impl::Rust));
         run_ip(&["link", "set", "tincT0", "up"]);
         run_ip(&["link", "set", "tincT1", "up"]);
 

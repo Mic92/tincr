@@ -27,12 +27,13 @@
 #![deny(unsafe_code)]
 
 pub mod bpf;
-mod punt;
-pub(crate) mod worker;
 mod probe;
+mod punt;
+pub(crate) mod runtime;
 mod rx;
 mod seal;
 mod snapshot;
+pub(crate) mod worker;
 pub(crate) use probe::tx_probe;
 pub(crate) use rx::{RxDstMemo, rx_open, rx_probe};
 pub(crate) use seal::seal_super;
@@ -146,6 +147,7 @@ pub(crate) struct TunnelHandles {
 /// confirm). Direct field assigns; no channels, no fences. Stale by
 /// at most one event-loop iteration.
 ///
+#[derive(Clone)]
 pub(crate) struct TxSnapshot {
     /// Spawn-time fold of every config-immutable slow-path gate:
     /// `dns.is_some() | routing_mode != Router | priorityinheritance`.

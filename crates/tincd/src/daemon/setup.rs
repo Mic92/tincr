@@ -38,6 +38,7 @@ use crate::mac_lease;
 use crate::node_id::NodeId6Table;
 use crate::outgoing::{Outgoing, resolve_config_addrs};
 use crate::seen::SeenRequests;
+use crate::shard::runtime::{ShardRuntime, resolve as resolve_shards};
 use crate::subnet_tree::SubnetTree;
 
 use super::settings::{
@@ -156,7 +157,16 @@ fn expand_name(name: &str) -> Result<String, String> {
 }
 
 /// `setup()`: pure config→Device, no daemon state.
-fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError> {
+/// Extra TUN queue fds for the shard workers (empty unless
+/// `shards > 1` on a Linux multi-queue TUN).
+type ShardTuns = Vec<Box<dyn Device + Send>>;
+
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+fn open_device(
+    config: &tinc_conf::Config,
+    shards: usize,
+    shards_explicit: bool,
+) -> Result<(Box<dyn Device>, ShardTuns), SetupError> {
     let device_type = config
         .lookup("DeviceType")
         .next()
@@ -227,6 +237,27 @@ fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError
                     .map(|e| e.get_str().to_owned()),
                 ..Default::default()
             };
+            if shards > 1 {
+                // A precreated persistent single-queue TUN rejects
+                // IFF_MULTI_QUEUE with EINVAL; auto mode falls back.
+                match tinc_device::Tun::open_mq(&cfg, shards) {
+                    Ok(mut queues) => {
+                        let main = queues.remove(0);
+                        let workers = queues
+                            .into_iter()
+                            .map(|t| Box::new(t) as Box<dyn Device + Send>)
+                            .collect();
+                        return Ok((Box::new(main), workers));
+                    }
+                    Err(e) if !shards_explicit => {
+                        log::info!(target: "tincd",
+                            "multi-queue TUN unavailable ({e}); running single-threaded");
+                    }
+                    Err(e) => {
+                        return Err(SetupError::io("open multi-queue TUN device", e));
+                    }
+                }
+            }
             let tun = tinc_device::Tun::open(&cfg)
                 .map_err(|e| SetupError::io("open TUN device /dev/net/tun", e))?;
             Box::new(tun)
@@ -291,7 +322,7 @@ fn open_device(config: &tinc_conf::Config) -> Result<Box<dyn Device>, SetupError
             )));
         }
     };
-    Ok(device)
+    Ok((device, Vec::new()))
 }
 
 /// Register each listener pair on the event loop and wrap into
@@ -617,10 +648,20 @@ impl Daemon {
         }
 
         // settings
-        let settings = load_settings(&config, confbase)?;
+        let mut settings = load_settings(&config, confbase)?;
+
+        let n_shards = resolve_shards(&settings, &config, socket_activation.is_some());
+        settings.sockopts.shard_group = n_shards > 1;
 
         // device
-        let device = open_device(&config)?;
+        let (device, shard_tuns) =
+            open_device(&config, n_shards, settings.shards.is_some())?;
+        // open_device may have fallen back to a single queue.
+        let n_shards = if shard_tuns.is_empty() {
+            1
+        } else {
+            shard_tuns.len() + 1
+        };
         // Captured BEFORE the Box goes into the Daemon struct: the
         // `&dyn` trait borrow makes `&mut self` script call sites
         // awkward.
@@ -706,6 +747,25 @@ impl Daemon {
         // Register each pair. Index `i` becomes `IoWhat::Tcp(i)` so
         // the dispatch arm can index back for the accept.
         let listener_slots = register_listeners(listeners, &mut ev)?;
+
+        #[cfg(target_os = "linux")]
+        let shard_runtime = if n_shards > 1 {
+            crate::shard::runtime::spawn_all(
+                n_shards,
+                shard_tuns,
+                &listener_slots,
+                &settings.sockopts,
+                &mut ev,
+            )
+            .map_err(|e| SetupError::io("set up shard workers", e))?
+        } else {
+            ShardRuntime::default()
+        };
+        #[cfg(not(target_os = "linux"))]
+        let shard_runtime = {
+            let _ = shard_tuns;
+            ShardRuntime::default()
+        };
 
         // init_control
         // Bind (the AlreadyRunning check) BEFORE writing the pidfile,
@@ -885,6 +945,7 @@ impl Daemon {
             #[cfg(feature = "upnp")]
             portmapper: None,
             tx_snap: None,
+            shards: shard_runtime,
             tunnel_handles: IntHashMap::default(),
         };
 
