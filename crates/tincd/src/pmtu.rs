@@ -34,6 +34,11 @@ use crate::daemon::intervals::{PMTU_PROBE_TICK, PMTU_REVALIDATE_TICK};
 /// 1500 bytes payload + 14 ethernet + 4 VLAN.
 pub(crate) const MTU: u16 = 1518;
 /// Below this we don't consider UDP to be working.
+///
+/// Invariant on [`PmtuState::minmtu`]: always `0` or in
+/// `MINMTU..=MTU`. Smaller replies (18-byte keepalives) confirm
+/// liveness but never feed convergence, so a dead path can't
+/// converge at a tiny "usable" value (issue #21).
 pub(crate) const MINMTU: u16 = 512;
 /// eth header (14) + 4 random bytes.
 pub(crate) const MIN_PROBE_SIZE: u16 = 18;
@@ -312,7 +317,7 @@ impl PmtuState {
         if len > self.maxmtu {
             self.maxmtu = len;
         }
-        if len > self.minmtu {
+        if len >= MINMTU && len > self.minmtu {
             self.minmtu = len;
         }
         true
@@ -338,10 +343,11 @@ impl PmtuState {
         self.udp_reply_rx = now;
 
         // PMTU-increase detector. Restart at sent=1 (not 0) so the
-        // maxmtu re-seed doesn't undo this.
+        // maxmtu re-seed doesn't undo this. Tiny replies restart
+        // discovery (path may have healed) with minmtu 0.
         if len > self.maxmtu {
             out.push(PmtuAction::LogIncrease);
-            self.minmtu = len;
+            self.minmtu = if len >= MINMTU { len } else { 0 };
             self.maxmtu = MTU;
             self.phase = PmtuPhase::Discovery { sent: 1 };
             return out;
@@ -354,8 +360,7 @@ impl PmtuState {
             self.mtu_ping_sent = now;
         }
 
-        // Raise minmtu.
-        if self.minmtu < len {
+        if len >= MINMTU && self.minmtu < len {
             self.minmtu = len;
             self.try_fix_mtu(&mut out);
         }
@@ -404,10 +409,13 @@ impl PmtuState {
         };
         if matches!(self.phase, PmtuPhase::Fix) || self.minmtu >= self.maxmtu {
             if self.minmtu > self.maxmtu {
-                self.minmtu = self.maxmtu;
-            } else {
-                self.maxmtu = self.minmtu;
+                self.minmtu = if self.maxmtu >= MINMTU {
+                    self.maxmtu
+                } else {
+                    0
+                };
             }
+            self.maxmtu = self.minmtu;
             self.mtu = self.minmtu;
             out.push(PmtuAction::LogFixed {
                 mtu: self.mtu,
@@ -884,6 +892,80 @@ mod tests {
             s.minmtu,
             MTU
         );
+    }
+
+    // minmtu invariant (issue #21): see MINMTU doc.
+
+    #[test]
+    fn keepalive_reply_does_not_raise_minmtu() {
+        let now = t0();
+        let mut s = PmtuState::new(now, MTU);
+        s.ping_sent = true;
+        let _ = s.on_probe_reply(MIN_PROBE_SIZE, now);
+        assert!(s.udp_confirmed);
+        assert!(s.udp_ping_rtt.is_some());
+        assert_eq!(s.minmtu, 0, "keepalive reply must not raise minmtu");
+    }
+
+    #[test]
+    fn discovery_timeout_with_only_tiny_replies_fixes_at_zero() {
+        let now = t0();
+        let mut s = PmtuState::new(now, MTU);
+        let pi = Duration::from_secs(60);
+        let mut t = now;
+        for _ in 0..25 {
+            t += Duration::from_secs(1);
+            let _ = s.tick(t, pi);
+            let _ = s.on_probe_reply(MIN_PROBE_SIZE, t);
+        }
+        assert!(
+            s.minmtu == 0 || s.minmtu >= MINMTU,
+            "invariant: {}",
+            s.minmtu
+        );
+        assert_eq!(s.mtu, 0, "unusable path must fix at 0, got {}", s.mtu);
+    }
+
+    #[test]
+    fn increase_detector_gated_on_minmtu_floor() {
+        let now = t0();
+        let mut s = PmtuState::new(now, MTU);
+        s.minmtu = 0;
+        s.maxmtu = 0;
+        s.mtu = 0;
+        s.phase = PmtuPhase::Steady;
+        let out = s.on_probe_reply(MIN_PROBE_SIZE, now);
+        assert_eq!(out, vec![PmtuAction::LogIncrease]);
+        assert_eq!(s.minmtu, 0);
+        assert_eq!(s.maxmtu, MTU);
+        assert_eq!(s.phase, PmtuPhase::Discovery { sent: 1 });
+    }
+
+    #[test]
+    fn on_meta_ack_small_len_does_not_raise_minmtu() {
+        let now = t0();
+        let mut s = PmtuState::new(now, MTU);
+        s.ping_sent = true;
+        assert!(s.on_meta_ack(MIN_PROBE_SIZE, now));
+        assert!(s.udp_confirmed);
+        assert_eq!(s.minmtu, 0);
+    }
+
+    #[test]
+    fn try_fix_clamp_down_below_minmtu_is_unusable() {
+        // Peer-raised minmtu above a sub-MINMTU maxmtu.
+        let now = t0();
+        let mut s = PmtuState::new(now, MTU);
+        s.minmtu = 600;
+        s.maxmtu = 431;
+        s.phase = PmtuPhase::Fix;
+        let _ = s.tick(now + Duration::from_secs(1), Duration::from_secs(60));
+        assert!(
+            s.minmtu == 0 || s.minmtu >= MINMTU,
+            "invariant: {}",
+            s.minmtu
+        );
+        assert_eq!(s.mtu, 0);
     }
 
     #[test]

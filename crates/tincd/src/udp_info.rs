@@ -70,6 +70,13 @@ impl PmtuSnapshot {
     pub(crate) const fn converged(self) -> bool {
         self.minmtu == self.maxmtu
     }
+
+    /// Converged at a UDP-usable value; `None` = still probing or
+    /// converged at 0 (UDP dead).
+    #[must_use]
+    pub(crate) fn usable_minmtu(self) -> Option<u16> {
+        (self.converged() && self.minmtu >= crate::pmtu::MINMTU).then_some(self.minmtu)
+    }
 }
 
 /// Gates before sending `UDP_INFO`. Returns `true` if the message
@@ -313,25 +320,18 @@ pub(crate) fn adjust_mtu_for_send(
     via_pmtu: Option<PmtuSnapshot>,
     via_nexthop_pmtu: Option<PmtuSnapshot>,
 ) -> i32 {
-    // Converged direct measurement: override entirely. The only branch
-    // that can increase mtu.
-    if from_via_is_myself
-        && let Some(f) = from_pmtu
-        && f.converged()
-    {
-        return i32::from(f.minmtu);
+    // Converged usable direct measurement: override entirely. The
+    // only branch that can increase mtu.
+    if from_via_is_myself && let Some(m) = from_pmtu.and_then(PmtuSnapshot::usable_minmtu) {
+        return i32::from(m);
     }
     // Static relay converged: clamp.
-    if let Some(v) = via_pmtu
-        && v.converged()
-    {
-        return mtu.min(i32::from(v.minmtu));
+    if let Some(m) = via_pmtu.and_then(PmtuSnapshot::usable_minmtu) {
+        return mtu.min(i32::from(m));
     }
     // Dynamic relay's nexthop converged: clamp.
-    if let Some(n) = via_nexthop_pmtu
-        && n.converged()
-    {
-        return mtu.min(i32::from(n.minmtu));
+    if let Some(m) = via_nexthop_pmtu.and_then(PmtuSnapshot::usable_minmtu) {
+        return mtu.min(i32::from(m));
     }
     // No measurement: pass through.
     mtu
@@ -582,6 +582,10 @@ mod tests {
             (":314 via clamp is min not set",   1000, false, None,       conv(1300), None,       1000),
             (":318 via_nexthop clamp",          1500, false, None,       None,       conv(1200), 1200),
             ("unconverged → passthrough",       1400, true,  probe,      probe,      probe,      1400),
+            // #21: converged-at-0 (UDP dead) → passthrough.
+            ("#21 direct converged-at-0",        1400, true,  conv(0),    None,       None,       1400),
+            ("#21 via converged-at-0",           1400, false, None,       conv(0),    None,       1400),
+            ("#21 via_nh converged-at-0",        1400, false, None,       None,       conv(0),    1400),
         ];
         for &(label, mtu, via_my, from, via, nh, want) in cases {
             assert_eq!(adjust_mtu_for_send(mtu, via_my, from, via, nh), want, "{label}");
