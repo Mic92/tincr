@@ -1,12 +1,13 @@
 # Quickstart
 
-Two machines on a mesh in five minutes, then a third one behind NAT
-that finds them via the DHT alone.
+This guide connects two machines into a mesh, then adds a third one
+behind NAT that finds the others via DHT discovery alone.
 
 All commands assume the `tincd` package from this repo is on `PATH`
 (it ships `tincd`, `tinc`, `tinc-dht-seed`, `tinc-auth`,
-`sptps_keypair`). Everything that touches `/etc/tinc` or `/dev/net/tun`
-needs root; prefix with `sudo` or run from a root shell.
+`sptps_keypair`). Everything that touches `/etc/tinc` or
+`/dev/net/tun` needs root. Prefix the commands with `sudo` or run
+them from a root shell.
 
 ## Pick a netname and address range
 
@@ -26,11 +27,12 @@ tinc -n myvpn add Address 203.0.113.10     # alpha's reachable address
 ```
 
 > `DeviceType` is required: tincr defaults to a **dummy** device (so
-> tests can run unprivileged). Without it the daemon starts, peers
-> connect, and no packets flow. `Interface = myvpn` pins the kernel
-> ifname; otherwise you get `tun0`/`tun1`/….
+> tests can run unprivileged). Without it the daemon starts and peers
+> connect, but no packets flow. `Interface = myvpn` pins the kernel
+> interface name. Without it you get `tun0`/`tun1`/….
 
-`init` wrote a stub `tinc-up`; make it bring the interface up:
+`init` wrote a stub `tinc-up` script. Edit it so it brings the
+interface up:
 
 ```sh
 tinc -n myvpn edit tinc-up
@@ -42,8 +44,9 @@ ip link set dev $INTERFACE up
 ip addr add 10.20.0.1/24 dev $INTERFACE
 ```
 
-The address is alpha's own VPN IP; the `/24` is the *whole* VPN range
-so the kernel routes every `10.20.0.0/24` packet into the TUN.
+The address is alpha's own VPN IP. The `/24` is the *whole* VPN
+range, so the kernel routes every `10.20.0.0/24` packet into the
+TUN device.
 
 ## Node beta
 
@@ -58,8 +61,9 @@ tinc -n myvpn edit tinc-up               # ip addr add 10.20.0.2/24 dev $INTERFA
 
 ## Exchange host files
 
-Each node needs the other's `hosts/NAME` (public key + Subnet +
-Address). `export` prints it, `import` reads it from stdin:
+Each node needs the other's `hosts/NAME` file, which carries the
+public key, `Subnet`, and `Address`. `export` prints the local one,
+`import` reads one from stdin:
 
 ```sh
 # on alpha
@@ -75,9 +79,9 @@ not copy files at all.)
 
 ## Start and verify
 
-Open TCP+UDP **655** on alpha (the side with `Address`) — see
-[FIREWALL.md](FIREWALL.md) for nftables/iptables/firewalld/ufw/NixOS
-recipes. Then:
+Open TCP+UDP port **655** in alpha's firewall (the side with
+`Address`). [FIREWALL.md](FIREWALL.md) has recipes for
+nftables/iptables/firewalld/ufw/NixOS. Then:
 
 ```sh
 # both nodes, foreground with logs
@@ -93,13 +97,13 @@ tinc -n myvpn info alpha
 ```
 
 Under systemd use the instanced unit instead of running `tincd`
-directly; see [OPERATING.md](OPERATING.md).
+directly. See [OPERATING.md](OPERATING.md).
 
 ## Third node via DHT discovery (no `Address=`)
 
-`carol` sits behind NAT, has never heard alpha's IP, and joins
-anyway. This is the path `nix/nixos-test-dht.nix` exercises end to
-end.
+`carol` sits behind NAT and does not know alpha's IP address, yet
+still joins. This is the path `nix/nixos-test-dht.nix` exercises
+end to end.
 
 1. Generate a 32-byte mesh secret once and distribute it out-of-band to every node:
 
@@ -116,8 +120,8 @@ end.
    tinc -n myvpn add UPnP yes        # optional: ask the router for a port map
    ```
 
-   Then **restart** `tincd` (DHT and `DhtSecretFile` are read once at
-   startup; `tinc reload` does not enable them).
+   Then **restart** `tincd`. DHT and `DhtSecretFile` are read once
+   at startup, so `tinc reload` does not enable them.
 
    With no `DhtBootstrap` lines the daemon dials the public mainline
    bootstrap list and persists its routing table to
@@ -157,10 +161,10 @@ end.
    Connection with alpha activated
    ```
 
-   You can also drop `ConnectTo` entirely and set `AutoConnect = yes`
-   instead — with `DhtDiscovery` on, AutoConnect will pick any node
-   whose `hosts/NAME` has an `Ed25519PublicKey`, resolve it, and
-   dial. That is the `dave` scenario in the NixOS test: a node whose
+   You can also drop `ConnectTo` entirely and set
+   `AutoConnect = yes` instead. With `DhtDiscovery` on, AutoConnect
+   will pick any node whose `hosts/NAME` has an `Ed25519PublicKey`,
+   resolve it, and dial. That is the `dave` scenario in the NixOS test: a node whose
    `hosts/` directory contains *only pubkeys* still joins the mesh.
 
 1. Debugging a record by hand:
@@ -173,6 +177,6 @@ end.
 
 ## NixOS
 
-Use the flake's own `services.tincr` module — socket activation,
-networkd-owned TUN, and optional resolved hookup are wired for
-you. See [NIXOS.md](NIXOS.md).
+Use the flake's own `services.tincr` module. It wires up socket
+activation, a networkd-owned TUN device, and (optionally)
+systemd-resolved for you. See [NIXOS.md](NIXOS.md).

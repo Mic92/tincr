@@ -1,15 +1,19 @@
 # In-mesh DNS
 
-tincd ships a built-in stub resolver that answers `<node>.<suffix>`
-queries with the node's `Subnet =` routes. It's a Rust-only
-extension — C tinc has nothing equivalent, so peer-side cooperation
-is not required. The peer just routes packets; this side parses and
-replies.
+With in-mesh DNS enabled, you can reach nodes by name:
+`ssh alice.mesh` instead of `ssh 10.21.0.7`. tincd answers
+`<node>.<suffix>` queries itself, using the node's `Subnet =`
+routes as the source of truth.
+
+This is a tincr-only extension, but it needs no cooperation from
+the other side: the peer just routes packets, and the local daemon
+parses the query and replies. C tinc nodes in the mesh are
+unaffected.
 
 ## How it works
 
 The stub never binds a socket. tincd already inspects every TUN
-ingress packet for routing; the DNS path is one extra match in code
+ingress packet for routing. The DNS path is one extra match in code
 that is already hot:
 
 ```
@@ -22,11 +26,12 @@ TUN packet → dst == DNSAddress && dport == 53
         synthesise reply, inject back into TUN
 ```
 
-So there's no port-53 conflict with `systemd-resolved`'s
-`127.0.0.53`, no listener fd to babysit through `drop_privs`, and no
-`CAP_NET_BIND_SERVICE` cost. The DNS address is just an IP that
-routes to the tinc TUN — pick one inside the mesh prefix and the
-kernel sees it as on-link the moment the interface gets an address.
+Because no socket is bound, there is no port-53 conflict with
+`systemd-resolved`'s `127.0.0.53`, no listener fd to carry through
+`drop_privs`, and no need for `CAP_NET_BIND_SERVICE`. The DNS
+address is just an IP that routes into the tinc TUN device. Pick
+one inside the mesh prefix and the kernel treats it as on-link as
+soon as the interface has an address.
 
 ## Configuration
 
@@ -52,15 +57,14 @@ hooks can pick them up.
 
 - **A / AAAA** for `<node>.<suffix>`. Returns every host-prefix
   `Subnet=` the node advertises (every `/32` v4 or `/128` v6).
-  Multi-homed nodes get multiple records — DNS clients have handled
-  that since 1987.
-- **PTR** for `*.in-addr.arpa` / `*.ip6.arpa`. Reverse-lookup the
-  exact IP in the subnet tree; returns the owning node's name.
-  Makes `who`, `last`, and `journalctl` show node names instead of
-  raw IPs.
-- **NXDOMAIN** for everything else. There is no upstream forwarding;
-  if the OS resolver routes a non-mesh query here by mistake, it
-  gets NXDOMAIN and falls through.
+  Multi-homed nodes get multiple records.
+- **PTR** for `*.in-addr.arpa` / `*.ip6.arpa`. The exact IP is
+  looked up in the subnet tree and the owning node's name is
+  returned. This makes `who`, `last`, and `journalctl` show node
+  names instead of raw IPs.
+- **NXDOMAIN** for everything else. There is no upstream
+  forwarding. If the OS resolver routes a non-mesh query here by
+  mistake, it gets NXDOMAIN and falls through.
 
 Network-level `Subnet =` routes (e.g. `10.0.0.0/24`, not host-
 prefix) are routes, not identities, and are not synthesised into
@@ -69,7 +73,7 @@ A records. The node doesn't "have" address `10.0.0.0`.
 ## OS integration
 
 The stub doesn't take over `/etc/resolv.conf`. Split-DNS is the
-operator's responsibility — point only `*.<suffix>` queries at the
+operator's responsibility: point only `*.<suffix>` queries at the
 DNS address.
 
 ### systemd-resolved (manual)
@@ -79,7 +83,7 @@ resolvectl dns    "$INTERFACE" "$DNS_ADDR"
 resolvectl domain "$INTERFACE" "~$DNS_SUFFIX" "$DNS_SUFFIX"
 ```
 
-The `~` prefix is "routing-only domain" — resolved sends only
+The `~` prefix means "routing-only domain": resolved sends only
 matching queries here. The bare suffix is also a search domain so
 `ssh alice` resolves without typing `.mesh`.
 
@@ -87,7 +91,7 @@ matching queries here. The bare suffix is also a search domain so
 
 The [NixOS module](NIXOS.md) does the wiring declaratively via
 `systemd-networkd`'s `[Network] DNS=`/`Domains=` keys. No
-`tinc-up` hook needed; networkd hands the per-link config to
+`tinc-up` hook is needed: networkd hands the per-link config to
 resolved when the interface comes up.
 
 ### dnsmasq / unbound / NetworkManager
@@ -117,17 +121,15 @@ fields with a routing-only domain (`~mesh`).
 - **Not authoritative for other zones.** Only `<suffix>` and the
   reverse zones for nodes' own subnets.
 - **Not DNSSEC-signed.** Answers are synthesised on the fly from
-  the daemon's runtime view of the graph; signing would require key
+  the daemon's runtime view of the graph. Signing would require key
   management out of band of the mesh itself.
 
 ## Limits
 
 - One `DNSSuffix` per network. Multiple suffixes would force a
-  query-time ambiguity check (`alice.foo` vs `alice.bar`); not
-  worth the complexity.
+  query-time ambiguity check (`alice.foo` vs `alice.bar`).
 - Names are flat: `alice.mesh` works, `alice.dc1.mesh` does not.
   Subnet ownership in tinc is per-node, not per-region.
-- No DNS message compression in replies (RFC 1035 §4.1.4 pointers).
-  Legal — the spec says a server *may* compress; ours doesn't. The
-  bytes saved are not worth the state machine.
+- No DNS message compression in replies (RFC 1035 §4.1.4
+  pointers). This is legal: the spec says a server *may* compress.
 

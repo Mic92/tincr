@@ -2,15 +2,15 @@
 
 tincd listens on one port (default **655**) for both the TCP meta
 protocol and the UDP data channel. Open both on every node that
-should accept inbound connections; nodes that only dial out
+should accept inbound connections. Nodes that only dial out
 (`ConnectTo` behind NAT) can stay closed and rely on conntrack.
 
 If you changed `Port` in `tinc.conf` / `hosts/NAME`, substitute that
 number everywhere below.
 
-The DHT client and the UPnP/PCP port-mapper use outbound UDP only;
-their replies are accepted by the `ct state established` rule every
-stateful firewall already has — no extra inbound rule needed.
+The DHT client and the UPnP/PCP port-mapper use outbound UDP only.
+Their replies are accepted by the `ct state established` rule every
+stateful firewall already has, so they need no extra inbound rule.
 
 ## nftables
 
@@ -64,7 +64,7 @@ networking.firewall.allowedUDPPorts = [ 655 ];
 ## Behind a NAT router
 
 Either forward TCP+UDP 655 to the node manually, or set `UPnP = yes`
-in `tinc.conf` and let the daemon ask the router via PCP / NAT-PMP /
+in `tinc.conf` and let the daemon ask the router via PCP or
 UPnP-IGD. The mapped external address is logged as
 `Portmapped Tcp 655 → EXT_IP:EXT_PORT` and, with `DhtDiscovery`
 enabled, published in the node's DHT record so peers dial it
@@ -72,9 +72,11 @@ directly.
 
 ### Enabling UPnP/PCP on the router
 
-tincd tries PCP first (most modern firmware answers it on the same
-NAT-PMP socket), then falls back to SSDP/UPnP-IGD. The router-side
-switch is usually one checkbox; vendor names vary:
+tincd tries PCP first (most modern firmware answers it on the
+port NAT-PMP used, 5351), then falls back to SSDP/UPnP-IGD.
+NAT-PMP itself is not implemented. PCP is its successor, and
+NAT-PMP-only routers are essentially extinct. The router-side
+switch is usually one checkbox, but vendor names vary:
 
 | Router | Where | Notes |
 |---|---|---|
@@ -86,15 +88,15 @@ switch is usually one checkbox; vendor names vary:
 | ASUS (stock/Merlin) | Advanced Settings → WAN → Internet Connection → **Enable UPnP** | AiProtection's "router security" scan flags UPnP as a risk; that toggle is advisory, the WAN page is the actual switch. |
 | TP-Link Archer/Deco | Advanced → NAT Forwarding → UPnP (Deco: app → More → Advanced → NAT Forwarding) | Usually on by default. |
 
-If the router is itself behind CGNAT, the mapped address is still
-RFC1918 and unhelpful to peers on the public internet; tincd publishes
-it anyway (lab/LAN meshes use it), and the receiving side filters
-unroutable hints.
+If the router is itself behind carrier-grade NAT (CGNAT), the
+mapped address is still a private one and unhelpful to peers on the
+public internet. tincd publishes it anyway (lab/LAN meshes use it),
+and the receiving side filters unroutable hints.
 
 ## Traffic *inside* the tunnel
 
 The rules above admit the encrypted transport. Packets that come
-*out* of the TUN interface are a separate policy decision — on a
+*out* of the TUN interface are a separate policy decision. On a
 default-drop `FORWARD`/`INPUT` host you also need, e.g.:
 
 ```sh

@@ -1,9 +1,9 @@
 # Troubleshooting
 
-Symptom → likely cause → how to confirm → fix. Commands assume
-`tinc -n NET ...`; substitute your network name. See
-[OPERATING.md](OPERATING.md) for the diagnostic commands referenced
-here.
+Each section follows the same shape: symptom → likely cause → how
+to confirm → fix. Commands assume `tinc -n NET ...`. Substitute
+your network name. [OPERATING.md](OPERATING.md) explains the
+diagnostic commands referenced here.
 
 ## Quick index
 
@@ -36,7 +36,7 @@ seconds).
 different MTUs, a flapping tunnel underneath), or an on-path
 middlebox eats large probes inconsistently.
 
-**Confirm** - `tinc -n NET info PEER` repeatedly; watch `PMTU:` and
+**Confirm** - run `tinc -n NET info PEER` repeatedly. Watch `PMTU:` and
 the `min`/`max` columns in `tinc dump nodes`. If `min` keeps
 collapsing to 0 the probes are being dropped, not just resized.
 
@@ -108,7 +108,7 @@ one extra hop.
    from here (outside the tunnel).
 
 2. **Port mapping failed** so the peer's NAT has no inbound rule.
-   On the peer: no `Portmapped Tcp ...` line at INFO; at debug,
+   On the peer: no `Portmapped Tcp ...` line at INFO. At debug,
    `tincd::portmap: map V4/Tcp 655: SSDP discover: no IGD reply
    within timeout` or `PCP v4: timed out`. See
    [OPERATING.md § Port mapping](OPERATING.md#port-mapping-operations).
@@ -153,14 +153,14 @@ that bootstrap purely from DHT can't dial you.
   helpful NAT gateway, the first publish lands after 30 s with
   `v6=` only - correct, but not useful to v4-only peers.
   Check for `tincd::discovery: DHT voted public v4: ...` (INFO) and
-  `tincd::portmap: Portmapped Tcp ...` (INFO); if neither appears,
+  `tincd::portmap: Portmapped Tcp ...` (INFO). If neither appears,
   that's why.
 
 - **Publish failing.** At debug:
   `tincd::discovery: DHT publish failed (will retry in ...)`. Usually
   the host firewall drops inbound UDP on the DHT port so the
   iterative `find_node` never completes. Backoff grows from 5 s to
-  the republish interval; this no longer stalls the daemon.
+  the republish interval. This no longer stalls the daemon.
 
 - **Bootstrap unreachable.** Custom `DhtBootstrap =` pointing at a
   dead host, and no `$STATE_DIRECTORY/dht_nodes` from a previous
@@ -175,16 +175,16 @@ tinc-dht-seed --resolve --secret-file /etc/tinc/NET/dht_secret PUBKEY_OF_NODE
 # miss → tinc-dht-seed: no record for pubkey (publish not landed / wrong secret?)
 ```
 
-A miss with the *correct* secret means the node hasn't published; a
-miss only when you omit `--secret-file` is the expected sealed
+A miss with the *correct* secret means the node hasn't published.
+A miss only when you omit `--secret-file` is the expected sealed
 behaviour.
 
 ---
 
 ## Interop with C tinc fails
 
-**Symptom** - a C tinc node cannot establish a meta connection;
-this side logs one of
+**Symptom** - a C tinc node cannot establish a meta connection.
+This side logs one of
 
 ```
 peer bob (203.0.113.9 port 655) had unknown identity (no Ed25519 public key)
@@ -215,10 +215,10 @@ remove `ExperimentalProtocol = no` if present.
 ## Traffic detours through a slower relay
 
 **Symptom** - `tinc -n NET info DEST` shows `indirectly via X` or
-`nexthop X` where `X` is geographically wrong; RTT to DEST through
+`nexthop X` where `X` is geographically wrong. RTT to DEST through
 the tunnel is much higher than the direct path.
 
-**Cause** - edge weights are sampled at TCP-connect time; one SYN
+**Cause** - edge weights are sampled at TCP-connect time. One SYN
 retransmit can pin a weight at ~1000+ on a 15 ms link. tincd
 re-measures via PING/PONG EWMA and re-gossips when the smoothed RTT
 leaves a ±30/50 % band, so this self-heals within a few
@@ -234,7 +234,7 @@ tinc -n NET dump edges | grep -E '^(myname|X) '
 Compare the `weight` column to real RTT (`ping X`). A weight of
 197 on a 15 ms link is the SYN-retransmit signature.
 
-**Fix** - usually none; wait ~`PingInterval` and re-check. If a
+**Fix** - usually none. Wait ~`PingInterval` and re-check. If a
 specific link is permanently mis-weighted, set `Weight = N` in that
 peer's host file. If the desired nexthop has no meta connection at
 all, add `ConnectTo = NEXTHOP` or rely on AutoConnect's
@@ -248,8 +248,8 @@ By design. `tincd` zeroes `RLIMIT_CORE` (and `PR_SET_DUMPABLE` on
 Linux) at startup so a crash can't write the Ed25519 private key and
 live session keys to disk or to `systemd-coredump`. To debug a crash,
 restart with `--allow-coredump` or set `TINCR_ALLOW_COREDUMP=1` in the
-unit's environment; then `coredumpctl gdb tincd` works as usual. On
-Linux the cleared dumpable bit also blocks same-uid `ptrace`; attach
+unit's environment. Then `coredumpctl gdb tincd` works as usual. On
+Linux the cleared dumpable bit also blocks same-uid `ptrace`. Attach
 as root or use the flag.
 
 ## Reading strace for event-loop health
@@ -266,19 +266,19 @@ strace -T -f -e trace=epoll_wait,futex,recvfrom,sendto,read,write \
 
 Healthy idle pattern: `epoll_wait(..., N, timeout_ms) = 0` with
 `timeout_ms` in the 1000-5000 range, returning after roughly that
-long; occasional `= 1` followed by a `read`/`recvfrom`/`write`
-burst.
+long, with an occasional `= 1` followed by a
+`read`/`recvfrom`/`write` burst.
 
-Red flags (all of these would be tincd bugs — capture the trace
+Red flags (all of these would be tincd bugs, so capture the trace
 and file an issue):
 
 - `epoll_wait(…, 0) = 0` dozens of times in a row at idle → a
   timer is re-arming for "now" and the loop is hot-spinning.
 - `futex(…) <1.0…>` or longer on the **main** TID → something is
-  blocking the loop. While parked, TUN/UDP fds are not serviced;
-  you'll see it as periodic ping stalls that decay (2000 → 1000 →
-  100 ms) as the kernel backlog drains. Worker threads (DHT,
-  portmap) are allowed to block; check the TID against
+  blocking the loop. While parked, TUN/UDP fds are not serviced.
+  You'll see it as periodic ping stalls that decay (2000 → 1000 →
+  100 ms) as the kernel backlog drains. Worker threads (DHT,
+  portmap) are allowed to block. Check the TID against
   `ls /proc/$(pidof tincd)/task`.
 - `sendto` returning `EMSGSIZE` repeatedly for the same peer →
-  PMTU not converging; see [PMTU oscillation](#pmtu-oscillation).
+  PMTU not converging. See [PMTU oscillation](#pmtu-oscillation).
