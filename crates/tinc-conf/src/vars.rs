@@ -322,12 +322,14 @@ pub static VARS: &[Var] = &[
     // band; that's an operator decision, not something an untrusted
     // invitation gets to make.
     v("SPTPSKex", S.union(H)),
+    // Shards: data-plane worker threads (Linux multi-queue TUN).
+    v("Shards", S),
 ];
 
 /// Tripwire: C tinc's table has 74 entries, plus our Rust-side keys.
 /// Drift in the 74 means a config key was added or removed in C tinc
 /// and this table is stale.
-const _: () = assert!(VARS.len() == 74 + 8);
+const _: () = assert!(VARS.len() == 74 + 9);
 
 /// Look up by name, case-insensitive.
 ///

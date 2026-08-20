@@ -27,6 +27,8 @@
 #![deny(unsafe_code)]
 
 pub mod bpf;
+mod punt;
+pub(crate) mod worker;
 mod probe;
 mod rx;
 mod seal;
