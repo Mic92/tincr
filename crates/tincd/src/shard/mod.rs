@@ -40,17 +40,12 @@ use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use crate::graph::{NodeId, Route};
-use tinc_sptps::{ReplayWindow, SptpsAead};
+use tinc_crypto::aead::SptpsCipher;
+use tinc_sptps::ReplayWindow;
 
 use crate::inthash::IntHashMap;
 use crate::node_id::NodeId6Table;
 use crate::subnet_tree::SubnetTree;
-
-/// SPTPS AEAD key blob length (both ChaCha20-Poly1305 and AES-256-GCM
-/// consume the first 32 bytes of the same 64-byte PRF output).
-/// Re-stated here (not re-exported by `tinc-sptps`) to keep the
-/// `TunnelHandles` key fields fixed-size.
-const CIPHER_KEY_LEN: usize = 64;
 
 // TunnelHandles — shared per-peer fast-path state
 
@@ -84,19 +79,14 @@ pub(crate) struct TunnelHandles {
     /// separate type.
     pub replay: Arc<Mutex<ReplayWindow>>,
 
-    /// `Sptps::aead()` snapshot. Paired with `outkey`/`inkey` so the
-    /// shard can rebuild a matching `SptpsCipher` per packet without
-    /// holding `&Sptps`. Static for the session's lifetime.
-    pub aead: SptpsAead,
+    /// Seal-side cipher, built once at `HandshakeDone` from
+    /// `(Sptps::aead(), Sptps::outcipher_key())`. Prebuilt because
+    /// `SptpsCipher::new` runs the AES-256 key schedule + GHASH
+    /// table init — ~5% of RX cycles when done per packet.
+    pub outcipher: SptpsCipher,
 
-    /// `Sptps::outcipher_key()` snapshot. Seal-side. Copied at
-    /// `HandshakeDone`; [`seal_super`] builds its own `SptpsCipher`
-    /// from `(aead, outkey)` — no `Arc` refcount traffic at high seal
-    /// rates.
-    pub outkey: [u8; CIPHER_KEY_LEN],
-
-    /// `Sptps::incipher_key()` snapshot. Open-side. Same story.
-    pub inkey: [u8; CIPHER_KEY_LEN],
+    /// Open-side cipher. Same story.
+    pub incipher: SptpsCipher,
 
     /// Cached `sendto` target. `socket2::SockAddr` not `std::net`
     /// because `sendto` wants the kernel sockaddr layout. The `u8` is
