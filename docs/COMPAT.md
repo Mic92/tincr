@@ -74,7 +74,7 @@ participate.
   unit file doesn't need `-d` flags.
 - **`SPTPSCipher` host key.** Selects AES-256-GCM instead of
   ChaCha20-Poly1305 for the SPTPS record AEAD on a per-edge basis.
-  On AES-NI/PMULL hardware this raises tunnel throughput by 43–44%.
+  On AES-NI/PMULL hardware this roughly doubles tunnel throughput.
   Both ends must be tincr and must agree. C tinc ignores the key,
   so leave it at the default for any C↔Rust edge. See
   [OPERATING.md](OPERATING.md#sptpscipher--aes-256-gcm-opt-in).

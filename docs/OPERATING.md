@@ -398,9 +398,9 @@ survive a reboot. The NixOS module's unit name may differ
 
 On any CPU with AES-NI+PCLMUL (x86_64) or AES+PMULL (ARMv8), i.e.
 everything since ~2013, AES-256-GCM seals an SPTPS record 2–3×
-faster than the default ChaCha20-Poly1305. End to end this raises
-tunnel throughput by 43–44% (measured: 3.4 → 4.9 Gbit/s on a Ryzen
-9 3900, 2.1 → 3.0 Gbit/s on Apple M-series). To enable it for an edge
+faster than the default ChaCha20-Poly1305. End to end this roughly
+doubles single-flow throughput (measured: 3.2 → 5.7 Gbit/s on
+Zen 5). To enable it for an edge
 between two **tincr** nodes `alice` and `bob`, add to *both*
 `hosts/alice` and `hosts/bob` (the host files are synced, so each
 side reads the *peer's* file and both arrive at the same answer):
