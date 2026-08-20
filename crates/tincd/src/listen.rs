@@ -229,16 +229,18 @@ fn apply_common_sockopts(
     domain: Domain,
     opts: &SockOpts,
     label: &str,
+    v6only: bool,
 ) -> io::Result<()> {
     // SO_REUSEADDR: restart after crash without EADDRINUSE from TIME_WAIT.
     if let Err(e) = s.set_reuse_address(true) {
         log::warn!(target: "tincd::net", "SO_REUSEADDR{label}: {e}");
     }
 
-    // IPV6_V6ONLY: load-bearing. Without this the v6 socket grabs v4
-    // traffic via mapped addresses, and the v4 bind sees the port as taken.
+    // IPV6_V6ONLY: load-bearing — without it the v6 socket grabs v4
+    // traffic and the v4 bind sees the port as taken. `v6only = false`
+    // only for UDP paired with an adopted dual-stack fd.
     if domain == Domain::IPV6
-        && let Err(e) = s.set_only_v6(true)
+        && let Err(e) = s.set_only_v6(v6only)
     {
         log::warn!(target: "tincd::net", "IPV6_V6ONLY{label}: {e}");
     }
@@ -280,7 +282,7 @@ fn setup_tcp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
     let s = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
     crate::set_nosigpipe(&s);
 
-    apply_common_sockopts(&s, domain, opts, "")?;
+    apply_common_sockopts(&s, domain, opts, "", true)?;
 
     // Socket's Drop closes on failure.
     s.bind(addr)?;
@@ -383,7 +385,10 @@ pub(crate) fn adopt_listeners_from(
         // `ListenDatagram=` would put a UDP fd in the mix, but tinc's
         // protocol pairs TCP+UDP on the SAME addr — easier to open UDP
         // ourselves than to de-interleave systemd's fd list).
-        let udp = setup_udp(&SockAddr::from(local), opts)
+        // Mirror the adopted fd's dual-stackness: v6only here would
+        // make every send to a v4 peer fail with ENETUNREACH.
+        let v6only = local.is_ipv4() || tcp.only_v6().unwrap_or(true);
+        let udp = setup_udp(&SockAddr::from(local), opts, v6only)
             .map_err(|e| io::Error::other(format!("UDP bind for listen fd {tcp_fd}: {e}")))?;
 
         log::info!(target: "tincd::net",
@@ -425,7 +430,7 @@ pub(crate) fn adopt_listeners(n: usize, opts: &SockOpts) -> io::Result<Vec<Liste
 ///
 /// # Errors
 /// `socket`/`bind` errors. `setsockopt` warnings logged.
-fn setup_udp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
+fn setup_udp(addr: &SockAddr, opts: &SockOpts, v6only: bool) -> io::Result<Socket> {
     let domain = Domain::from(i32::from(addr.family()));
     let s = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
 
@@ -482,7 +487,7 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
     // REUSEADDR, V6ONLY, SO_MARK, BINDTODEVICE. All pre-bind,
     // idempotent, order-independent; BINDTODEVICE stays last
     // (right before bind).
-    apply_common_sockopts(&s, domain, opts, " (udp)")?;
+    apply_common_sockopts(&s, domain, opts, " (udp)", v6only)?;
 
     s.bind(addr)?;
 
@@ -615,7 +620,7 @@ fn open_one(
         .and_then(|a| a.as_socket())
         .map(|a| a.port());
 
-    let udp = match bind_reusing_port(addr, tcp_port, |sa| setup_udp(sa, opts)) {
+    let udp = match bind_reusing_port(addr, tcp_port, |sa| setup_udp(sa, opts, true)) {
         Ok(s) => s,
         Err(e) => {
             // tcp drops here, fd closes.

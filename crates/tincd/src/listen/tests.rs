@@ -512,6 +512,33 @@ fn adopt_listeners_from_high_fd() {
     );
 }
 
+/// A dual-stack adopted fd (systemd `BindIPv6Only=both`) must yield
+/// a dual-stack UDP socket; forcing v6only made every v4 send fail
+/// with ENETUNREACH.
+#[test]
+fn adopt_dual_stack_fd_yields_dual_stack_udp() {
+    let tcp = Socket::new(Domain::IPV6, Type::STREAM, None).unwrap();
+    tcp.set_only_v6(false).unwrap();
+    tcp.bind(&"[::]:0".parse::<SocketAddr>().unwrap().into())
+        .unwrap();
+    tcp.listen(1).unwrap();
+
+    let high_fd = nix::unistd::dup(&tcp).expect("dup");
+    drop(tcp);
+    let raw = high_fd.into_raw_fd();
+    let listeners = adopt_listeners_from(raw, 1, &opts()).unwrap();
+
+    assert!(
+        !listeners[0].udp.only_v6().unwrap(),
+        "UDP must inherit the adopted fd's dual-stackness"
+    );
+    // The kernel maps plain-v4 destinations on a dual-stack socket.
+    listeners[0]
+        .udp
+        .send_to(b"x", &"127.0.0.1:9".parse::<SocketAddr>().unwrap().into())
+        .expect("v4 send through dual-stack UDP socket");
+}
+
 /// `n > MAXSOCKETS` is the only pre-adoption guard.
 #[test]
 fn adopt_listeners_too_many() {
