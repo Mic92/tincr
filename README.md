@@ -61,9 +61,10 @@ Everything tinc 1.1 does, plus:
   client (PCP, falling back to UPnP-IGD) instead of libminiupnpc,
   and also opens IPv6 pinholes. The mapped address is published via
   the DHT.
-- **Fast.** Reaches 10 Gbit/s on a single thread on Linux by
-  batching packets (GSO/GRO: bursts of TUN reads become one
-  `sendmsg` with `UDP_SEGMENT`, and vice versa on receive).
+- **Fast.** Multi-gigabit on a single thread on Linux (measured:
+  ~5 Gbit/s on a Ryzen 9 3900) by batching packets (GSO/GRO:
+  bursts of TUN reads become one `sendmsg` with `UDP_SEGMENT`, and
+  vice versa on receive).
 - **Call nodes by name.** With `DNSAddress` and `DNSSuffix` set,
   `ssh laptop.vpn` just works: the daemon answers DNS queries for
   `NODE.SUFFIX` (and reverse lookups) straight from its routing
@@ -84,8 +85,8 @@ Everything tinc 1.1 does, plus:
   that relay traffic for each other connect directly.
 - **AES encryption as an option** (`SPTPSCipher = aes-256-gcm`).
   The default is ChaCha20-Poly1305. On CPUs with AES hardware,
-  AES-256-GCM raises tunnel throughput by ~44% (measured: 3370 →
-  4851 Mbps on a Ryzen 9 3900, 2082 → 2982 Mbps on Apple
+  AES-256-GCM raises tunnel throughput by 43–44% (measured: 3.4 →
+  4.9 Gbit/s on a Ryzen 9 3900, 2.1 → 3.0 Gbit/s on Apple
   M-series). Both ends must be tincr and agree.
 - **Post-quantum key exchange** (`SPTPSKex = x25519-mlkem768`).
   Adds ML-KEM-768 on top of X25519, so recorded traffic stays

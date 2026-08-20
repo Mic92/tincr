@@ -12,19 +12,20 @@ For the cryptographic details of the transport, see
 
 **Every authenticated member of a tinc mesh is fully trusted for
 routing decisions across the entire mesh.** This is inherent to the
-tinc 1.1 meta-protocol — tincr inherits it for wire compatibility, it
-is not a tincr bug.
+tinc 1.1 meta-protocol, which tincr inherits for wire
+compatibility. It is not a tincr bug.
 
 Once a node has a valid Ed25519 key in another node's `hosts/`
 directory and can complete the SPTPS handshake, it can:
 
-- announce arbitrary `ADD_SUBNET` messages and have traffic for any IP
-  range in the mesh routed to itself (hijack / blackhole);
+- announce arbitrary `ADD_SUBNET` messages and have traffic for any
+  IP range in the mesh routed to itself (hijack / blackhole)
 - announce arbitrary `ADD_EDGE` messages, inventing links between
   other nodes with chosen weights, steering third-party traffic
-  through itself or away from a victim;
-- send `DEL_EDGE` for links it is not party to and partition the mesh;
-- flood gossip to exhaust CPU/memory on every other node.
+  through itself or away from a victim
+- send `DEL_EDGE` for links it is not party to and partition the
+  mesh
+- flood gossip to exhaust CPU/memory on every other node
 
 Gossip is flooded and accepted on the strength of the *neighbour's*
 meta-connection, not signed by the originating node. There is no way
@@ -36,17 +37,17 @@ made that up about C".
 SPTPS (the transport, see [`PROTOCOL.md#sptps`](PROTOCOL.md#sptps))
 provides, against an attacker **outside** the mesh:
 
-- mutual authentication of the two endpoints (Ed25519);
+- mutual authentication of the two endpoints (Ed25519)
 - confidentiality and integrity of meta and data traffic
-  (ChaCha20-Poly1305 / AES-GCM, with PFS);
-- replay protection on the data channel.
+  (ChaCha20-Poly1305 / AES-GCM, with forward secrecy)
+- replay protection on the data channel
 
 SPTPS does **not** provide:
 
-- integrity of routing state against a malicious *member*;
-- authorisation — possession of any accepted key equals full routing
-  authority by default;
-- DoS resistance against a member.
+- integrity of routing state against a malicious *member*
+- authorisation: possession of any accepted key equals full routing
+  authority by default
+- DoS resistance against a member
 
 In short: SPTPS keeps the outside out. It does nothing about a hostile
 inside.
@@ -89,8 +90,8 @@ database. Review changes to it like you would firewall rules.
 
 ## When this is fine
 
-If every node in the mesh is yours — same operator, same threat
-model — the defaults are fine and you can stop reading. The above
+If every node in the mesh is yours (same operator, same threat
+model), the defaults are fine and you can stop reading. The above
 matters when you invite a friend, a customer, or a CI runner.
 
 ## Reporting security issues

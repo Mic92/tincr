@@ -1,9 +1,9 @@
 # Compatibility with tinc 1.1
 
-What an operator running a mixed C/Rust mesh, or migrating from one
-to the other, needs to know. Internal implementation differences that
-don't change observable behaviour are out of scope; see
-[ARCHITECTURE.md](ARCHITECTURE.md) for those.
+This page covers what an operator running a mixed C/Rust mesh, or
+migrating from one to the other, needs to know. Internal
+implementation differences that don't change observable behaviour
+are out of scope. See [ARCHITECTURE.md](ARCHITECTURE.md) for those.
 
 ## Interoperability
 
@@ -34,28 +34,28 @@ so a C node in the mesh is simply oblivious to them.
   recognised and warned about, then ignored. Delete them.
 - **`--bypass-security`.** The C debug flag that skipped signature
   checks is not ported.
-- **OpenSSL/libgcrypt.** One built-in crypto stack; nothing to link
-  against or choose at build time.
+- **OpenSSL/libgcrypt.** There is one built-in crypto stack, with
+  nothing to link against or choose at build time.
 - **TAP on macOS.** macOS builds are utun (L3) only, so
   `Mode = switch`/`hub` is Linux/BSD only.
 
 ## Added
 
 These have no equivalent in C tinc. All are off-mesh or
-backwards-compatible on the wire; a C node simply doesn't
+backwards-compatible on the wire. A C node simply doesn't
 participate.
 
 - **DHT discovery.** A node can publish its current dialable address
   to the BitTorrent Mainline DHT and resolve peers from it, removing
   the need for at least one statically-addressed relay. Records are
-  encrypted and published under a key only mesh members can derive;
-  setting `DhtSecretFile` additionally gates resolution to nodes
+  encrypted and published under a key only mesh members can derive.
+  Setting `DhtSecretFile` additionally gates resolution to nodes
   holding the secret. New keys: `DhtDiscovery`, `DhtSecretFile`,
   `DhtBootstrap`. New tool: `tinc-dht-seed`.
 - **IPv6 firewall pinhole.** Port mapping speaks PCP in addition to
   UPnP-IGD, and uses it over IPv6 to open inbound through consumer
-  router firewalls — so a node with only a global v6 address can
-  still accept direct connections.
+  router firewalls. That way a node with only a global v6 address
+  can still accept direct connections.
 - **`tinc-auth`.** Small HTTP `auth_request` backend that answers
   "which mesh node owns this source IP", for putting per-node ACLs
   in front of internal web services.
@@ -63,20 +63,21 @@ participate.
   queries for mesh subnets by intercepting them on the TUN device.
   No socket bound, nothing to configure on the peer. See
   [DNS.md](DNS.md).
-- **Landlock sandbox.** On Linux the daemon confines itself after
-  setup. `Sandbox = normal`/`high` tightens further. Relevant if you
-  run hook scripts: under `high`, scripts that touch paths outside
-  the config/state directories will fail.
+- **Landlock sandbox.** With `Sandbox = normal` or `high`, the
+  daemon confines itself to a path allowlist after setup (Linux,
+  kernel ≥ 5.13). Off by default. Relevant if you run hook
+  scripts: under `high`, script execution is disabled entirely.
 - **systemd integration.** `Type=notify` readiness, watchdog pings
   from the event loop, and socket activation. See
   [OPERATING.md](OPERATING.md) for unit files.
 - **`LogLevel` config key.** Sets verbosity from `tinc.conf` so the
   unit file doesn't need `-d` flags.
 - **`SPTPSCipher` host key.** Selects AES-256-GCM instead of
-  ChaCha20-Poly1305 for the SPTPS record AEAD on a per-edge basis,
-  2–3× faster on AES-NI/PMULL hardware. Both ends must be tincr and
-  must agree; C tinc ignores the key, so leave it at the default for
-  any C↔Rust edge. See [OPERATING.md](OPERATING.md#sptpscipher--aes-256-gcm-opt-in).
+  ChaCha20-Poly1305 for the SPTPS record AEAD on a per-edge basis.
+  On AES-NI/PMULL hardware this raises tunnel throughput by 43–44%.
+  Both ends must be tincr and must agree. C tinc ignores the key,
+  so leave it at the default for any C↔Rust edge. See
+  [OPERATING.md](OPERATING.md#sptpscipher--aes-256-gcm-opt-in).
 - **`SPTPSKex` host key.** `x25519-mlkem768` adds an ML-KEM-768
   encapsulation to the SPTPS key exchange for post-quantum forward
   secrecy. Both ends must be tincr and must agree. See
@@ -87,7 +88,7 @@ participate.
 Things that work in both daemons but not identically.
 
 - **Socket activation takes TCP only.** Put `ListenStream=` in the
-  `.socket` unit; the daemon opens the matching UDP socket itself on
+  `.socket` unit. The daemon opens the matching UDP socket itself on
   the same address. Don't pass `ListenDatagram=`.
 - **More `ADD_EDGE` traffic.** Edge weights are re-measured from
   meta-connection ping RTT and re-advertised when they drift
@@ -106,22 +107,23 @@ Things that work in both daemons but not identically.
   broadcast the deltas the way C does. Restart the daemon after
   editing host files under `StrictSubnets = yes`.
 - **Unknown or restart-only config keys are warned about.** C
-  ignores them silently; tincr logs a warning at startup, and on
+  ignores them silently. tincr logs a warning at startup, and on
   SIGHUP logs which changed keys need a restart to take effect.
 - **Hook script environment is clean.** `tinc-up`, `host-up`, etc.
   receive only the documented `NETNAME`/`NAME`/`DEVICE`/… variables,
   not the daemon's full inherited environment. Scripts that relied
   on ambient `PATH` entries or leaked variables may need adjusting.
   Per-event hooks (`host-up`, `subnet-up`, …) are spawned without
-  waiting; only `tinc-up`/`tinc-down` block.
+  waiting. Only `tinc-up`/`tinc-down` block.
 - **Privilege drop is stricter.** All three uids/gids are set and
   verified, `no_new_privs` is always enabled, and failure to drop is
   fatal rather than logged-and-continued.
 - **`LocalDiscovery` defaults to `yes`**, matching current upstream
   git but not every 1.1pre tarball.
-- **Config files may carry a UTF-8 BOM.** Notepad-saved files work;
-  C tinc glues the BOM onto the first key. Non-UTF-8 bytes (e.g. a
-  Latin-1 comment) are tolerated like C's `fgets`, but any such byte
+- **Config files may carry a UTF-8 BOM.** Notepad-saved files work,
+  whereas C tinc glues the BOM onto the first key. Non-UTF-8 bytes
+  (e.g. a Latin-1 comment) are tolerated like C's `fgets`, but any
+  such byte
   in a key or value is replaced with U+FFFD rather than passed
   through verbatim.
 

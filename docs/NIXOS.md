@@ -1,9 +1,11 @@
 # NixOS module: `services.tincr`
 
-The flake exports `nixosModules.tincr`. Wires tincd as a Type=notify
-service with socket activation, hands the interface to systemd-networkd
-(TUN pre-created with `TUNSETOWNER=tincr`, no `CAP_NET_ADMIN` needed),
-and optionally hooks the in-mesh DNS stub into systemd-resolved.
+The flake exports `nixosModules.tincr`, a module that runs the
+whole stack declaratively. It wires tincd as a `Type=notify`
+service with socket activation, hands the interface to
+systemd-networkd (the TUN device is pre-created with
+`TUNSETOWNER=tincr`, so the daemon needs no `CAP_NET_ADMIN`), and
+can hook the in-mesh DNS stub into systemd-resolved.
 
 ## Minimal config
 
@@ -41,9 +43,9 @@ and optionally hooks the in-mesh DNS stub into systemd-resolved.
 }
 ```
 
-The Ed25519 key is **stateful**: the module never generates it. Drop
-the bytes at `ed25519PrivateKeyFile` (mode `0400`, owner `tincr`)
-before the unit starts. Bootstrap on a fresh host:
+The Ed25519 key is **stateful**: the module never generates it. You
+must place the key at `ed25519PrivateKeyFile` (mode `0400`, owner
+`tincr`) before the unit starts. To generate one on a fresh host:
 
 ```sh
 install -d -m 0700 -o tincr -g tincr /var/lib/tincr/mesh
@@ -72,9 +74,10 @@ other resolver integrations: [DNS.md](DNS.md).
 
 ## Multiple networks
 
-`services.tincr.networks` is `attrsOf`. Each name becomes the
-confbase under `/etc/tinc/`. `listenPort` defaults to 655; override
-when running more than one network:
+`services.tincr.networks` takes any number of networks. Each
+attribute name becomes a config directory under `/etc/tinc/`.
+`listenPort` defaults to 655, so override it when running more than
+one network:
 
 ```nix
 services.tincr.networks = {
@@ -85,7 +88,9 @@ services.tincr.networks = {
 
 ## What the module doesn't do
 
-Operator-driven, not declared: private keys, peer invitations
-(`tinc -n <net> invite`), and joining (`tinc -n <net> join <url>`).
-Set `socketActivation = false` to pin the daemon to
-`multi-user.target` instead of starting on the first inbound SYN.
+Some things stay operator-driven rather than declared: private
+keys, peer invitations (`tinc -n <net> invite`), and joining
+(`tinc -n <net> join <url>`).
+
+Set `socketActivation = false` to start the daemon at boot
+(`multi-user.target`) instead of on the first inbound connection.
