@@ -39,18 +39,16 @@ pub(crate) fn resolve(
     if n <= 1 {
         return 1;
     }
-    let device_type = config
+    // DeviceType unset defaults to tun.
+    let tun = config
         .lookup("DeviceType")
         .next()
-        .map(|e| e.get_str().to_ascii_lowercase());
-    let ok = device_type.as_deref() == Some("tun")
-        && config.lookup("Interface").next().is_some()
-        && settings.routing_mode == RoutingMode::Router
-        && !socket_activation;
+        .is_none_or(|e| e.get_str().eq_ignore_ascii_case("tun"));
+    let ok = tun && settings.routing_mode == RoutingMode::Router && !socket_activation;
     if !ok {
         if settings.shards.is_some() {
             log::warn!(target: "tincd",
-                "Shards > 1 needs DeviceType=tun, Interface set, Mode=router, \
+                "Shards > 1 needs DeviceType=tun, Mode=router, \
                  no socket activation; running single-threaded");
         }
         return 1;

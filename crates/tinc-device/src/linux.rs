@@ -184,8 +184,8 @@ impl Tun {
     /// for all queues.
     ///
     /// # Errors
-    /// `InvalidInput`: `n>1` with `cfg.iface = None` or `Mode::Tap`, or
-    /// iface name ≥ 16 bytes. `PermissionDenied`/`NotFound`: same as
+    /// `InvalidInput`: `n>1` with `Mode::Tap`, or iface name ≥ 16
+    /// bytes. `PermissionDenied`/`NotFound`: same as
     /// `open`. `EINVAL` on `TUNSETIFF`: kernel rejected the flag combo
     /// (kernel <3.8 — ancient; `IFF_MULTI_QUEUE`+`IFF_VNET_HDR` proven
     /// to compose on 6.19.9).
@@ -202,15 +202,7 @@ impl Tun {
             return Tun::open(cfg).map(|t| vec![t]);
         }
 
-        // n > 1: explicit name + TUN-only
-        let Some(name) = cfg.iface.as_deref() else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "multiqueue requires explicit iface name \
-                 (kernel matches subsequent TUNSETIFF by name; \
-                 auto-pick would create N independent devices)",
-            ));
-        };
+        // n > 1: TUN-only
         if cfg.mode != Mode::Tun {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -220,7 +212,9 @@ impl Tun {
         }
 
         let device = cfg.device.as_deref().unwrap_or(DEFAULT_DEVICE);
-        let ifr_name = pack_ifr_name(Some(name))?;
+        // No name: queue 0 lets the kernel pick, the rest attach to
+        // the reported name (subsequent TUNSETIFF matches by name).
+        let mut ifr_name = pack_ifr_name(cfg.iface.as_deref())?;
 
         // 0x5101. The MQ bit must be set on every TUNSETIFF —
         // tun.c:2719 rejects mismatch. Same vnet_hdr handling as
@@ -232,6 +226,9 @@ impl Tun {
         let mut queues = Vec::with_capacity(n);
         for k in 0..n {
             let (fd, iface) = open_queue(device, ifr_name, flags)?;
+            if k == 0 && cfg.iface.is_none() {
+                ifr_name = pack_ifr_name(Some(&iface))?;
+            }
 
             // Offload is per-netdev. Once. Same feature-detect
             // warning as Tun::open: failure means vnet_hdr is on
@@ -716,24 +713,18 @@ mod tests {
     use super::*;
 
     /// `open_mq(n>1)` validation happens BEFORE open (no
-    /// `CAP_NET_ADMIN` needed): rejects `iface = None` and
-    /// rejects TAP (router-mode only).
+    /// `CAP_NET_ADMIN` needed): rejects TAP (router-mode only).
+    /// `iface = None` is allowed — queue 0 takes the kernel name.
     #[test]
     fn open_mq_validation() {
-        let no_iface = DeviceConfig {
-            iface: None,
-            ..DeviceConfig::default()
-        };
         let tap = DeviceConfig {
             iface: Some("shard0".to_owned()),
             mode: Mode::Tap,
             ..DeviceConfig::default()
         };
-        for (cfg, msg) in [(&no_iface, "explicit iface name"), (&tap, "Mode::Tun")] {
-            let e = Tun::open_mq(cfg, 2).unwrap_err();
-            assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
-            assert!(e.to_string().contains(msg), "got: {e}");
-        }
+        let e = Tun::open_mq(&tap, 2).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+        assert!(e.to_string().contains("Mode::Tun"), "got: {e}");
     }
 
     // pack_ifr_name — the testable seam
