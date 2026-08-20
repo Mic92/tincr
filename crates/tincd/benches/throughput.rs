@@ -991,10 +991,13 @@ mod bench {
             .collect();
 
         // configs: alice dials every bob
+        let sptps_cipher = std::env::var("TINCD_BENCH_SPTPS_CIPHER")
+            .map(|c| format!("SPTPSCipher = {c}\n"))
+            .unwrap_or_default();
         for node in std::iter::once(&alice).chain(&bobs) {
             std::fs::create_dir_all(node.confbase.join("hosts")).unwrap();
             let mut conf = format!(
-                "Name = {}\nDeviceType = tun\nInterface = {}\nAddressFamily = ipv4\nPingTimeout = 5\n",
+                "Name = {}\nDeviceType = tun\nInterface = {}\nAddressFamily = ipv4\nPingTimeout = 5\n{sptps_cipher}",
                 node.name, node.iface
             );
             if node.name == "alice" {
