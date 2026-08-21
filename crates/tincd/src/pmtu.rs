@@ -99,13 +99,17 @@ pub(crate) struct PmtuState {
     /// A keepalive probe is outstanding — next reply is the RTT
     /// measurement.
     pub ping_sent: bool,
+    /// At least one probe attempt has been made in this discovery
+    /// cycle. Failed submissions still pace retries without claiming
+    /// that a probe is outstanding.
+    pub udp_probe_attempted: bool,
     /// Last local probe attempt, including failed submissions
     /// (`udp_ping_sent` timestamps actual sends).
     pub udp_probe_attempted_at: Instant,
     pub udp_ping_sent: Instant,
-    /// Last time a probe **reply** arrived. Diagnostic only —
-    /// [`Self::udp_timed_out`] gates on `ping_sent`/`udp_ping_sent`
-    /// instead (see that method for why).
+    /// Last authenticated evidence that our UDP reached the peer: a
+    /// probe reply or its meta-channel acknowledgement. Drives cold
+    /// idle revalidation; outstanding probes use `udp_ping_sent`.
     pub udp_reply_rx: Instant,
     pub mtu_ping_sent: Instant,
     pub maxrecentlen: u16,
@@ -154,6 +158,7 @@ impl PmtuState {
             phase: PmtuPhase::Discovery { sent: 0 },
             udp_confirmed: false,
             ping_sent: false,
+            udp_probe_attempted: false,
             udp_probe_attempted_at: now,
             udp_ping_sent: now,
             udp_reply_rx: now,
@@ -164,20 +169,33 @@ impl PmtuState {
     }
 
     /// Whether the UDP-discovery sender should emit a probe now.
-    /// Failed submissions retain the configured retry cadence.
+    /// New and timed-out paths probe on their first `try_udp` call;
+    /// subsequent attempts retain the configured cadence.
     #[must_use]
     pub(crate) fn udp_probe_due(&self, now: Instant, interval: Duration) -> bool {
-        now.saturating_duration_since(self.udp_probe_attempted_at) >= interval
+        let discovery_start =
+            !self.udp_confirmed && !self.udp_probe_attempted && self.phase.is_discovery_start();
+        discovery_start || now.saturating_duration_since(self.udp_probe_attempted_at) >= interval
     }
 
     /// Record one local probe submission attempt. Failed submissions
     /// pace retries but do not manufacture an outstanding remote probe.
     pub(crate) const fn on_udp_probe_attempt(&mut self, now: Instant, sent: bool) {
+        self.udp_probe_attempted = true;
         self.udp_probe_attempted_at = now;
         if sent {
             self.udp_ping_sent = now;
             self.ping_sent = true;
         }
+    }
+
+    /// A formerly confirmed path without authenticated UDP evidence
+    /// for one timeout window must be revalidated before carrying data.
+    #[must_use]
+    pub(crate) fn udp_needs_cold_revalidation(&self, now: Instant, timeout: Duration) -> bool {
+        self.udp_confirmed
+            && !self.ping_sent
+            && now.saturating_duration_since(self.udp_reply_rx) >= timeout
     }
 
     /// UDP-discovery timeout predicate. True iff a keepalive probe is
@@ -425,6 +443,7 @@ impl PmtuState {
         // (once re-confirmed) re-evaluate udp_timed_out against the
         // old udp_ping_sent and immediately re-trip.
         self.ping_sent = false;
+        self.udp_probe_attempted = false;
         self.udp_ping_rtt = None;
         self.maxrecentlen = 0;
         self.start_discovery();
@@ -888,6 +907,44 @@ mod tests {
         s.on_udp_probe_attempt(sent_at, true);
         assert!(s.ping_sent);
         assert_eq!(s.udp_ping_sent, sent_at);
+    }
+
+    #[test]
+    fn initial_udp_discovery_probe_is_due_immediately() {
+        let now = t0();
+        let s = PmtuState::new(now, MTU);
+
+        assert!(s.udp_probe_due(now, Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn udp_timeout_makes_rediscovery_probe_due_immediately() {
+        let now = t0();
+        let interval = Duration::from_secs(2);
+        let mut s = PmtuState::new(now, MTU);
+        s.udp_confirmed = true;
+        s.ping_sent = true;
+        s.on_udp_timeout();
+
+        assert!(s.udp_probe_due(now, interval));
+    }
+
+    #[test]
+    fn confirmed_idle_path_requires_cold_revalidation() {
+        let now = t0();
+        let timeout = Duration::from_secs(30);
+        let mut s = PmtuState::new(now, MTU);
+        s.udp_confirmed = true;
+        s.udp_reply_rx = now;
+
+        assert!(!s.udp_needs_cold_revalidation(now + timeout - Duration::from_millis(1), timeout));
+        assert!(s.udp_needs_cold_revalidation(now + timeout, timeout));
+
+        s.ping_sent = true;
+        assert!(!s.udp_needs_cold_revalidation(now + timeout, timeout));
+        s.udp_confirmed = false;
+        s.ping_sent = false;
+        assert!(!s.udp_needs_cold_revalidation(now + timeout, timeout));
     }
 
     // on_meta_ack.
