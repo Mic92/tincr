@@ -506,9 +506,8 @@ impl Daemon {
                             "fragment_v4: malformed input, dropping");
                         return false;
                     };
-                    // Mirror the normal send path below:
-                    // send_sptps_packet + try_tx for PMTU
-                    // drive.
+                    // Mirror the normal send path below: preflight
+                    // the transport before choosing TCP or UDP.
                     let n = frags.len();
                     log::debug!(target: "tincd::net",
                         "Fragmenting packet of {} bytes into \
@@ -519,11 +518,10 @@ impl Daemon {
                             tunnel.stats.add_out(1, frag.len() as u64);
                         }
                     }
-                    let mut nw = false;
+                    let mut nw = self.try_tx(to_nid, true);
                     for frag in &frags {
                         nw |= self.send_sptps_packet(to_nid, frag);
                     }
-                    nw |= self.try_tx(to_nid, true);
                     return nw;
                 }
                 // v6: no in-transit frag (RFC 8200 §5).
@@ -585,10 +583,10 @@ impl Daemon {
         let tunnel = self.dp.tunnels.entry(to_nid).or_default();
         tunnel.stats.add_out(1, len as u64);
 
-        // try_tx: every forwarded packet drives PMTU
-        // discovery one step.
-        let mut nw = self.send_sptps_packet(to_nid, data);
-        nw |= self.try_tx(to_nid, true);
+        // Preflight may demote stale UDP before transport choice;
+        // every forwarded packet still drives PMTU discovery once.
+        let mut nw = self.try_tx(to_nid, true);
+        nw |= self.send_sptps_packet(to_nid, data);
         nw
     }
 

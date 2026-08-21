@@ -389,9 +389,9 @@ impl Daemon {
         nw
     }
 
-    /// Probe-request send + gratuitous-reply keepalive. Gated on
-    /// the last local attempt: 2s when not confirmed (aggressive
-    /// discovery), 10s when confirmed (NAT keepalive).
+    /// Probe-request send + gratuitous-reply keepalive. New and
+    /// timed-out paths probe immediately; retries use 2s when not
+    /// confirmed and 10s when confirmed (NAT keepalive).
     pub(super) fn try_udp(&mut self, target: NodeId, target_name: &str, now: Instant) -> bool {
         if !self.settings.udp_discovery {
             return false;
@@ -399,26 +399,35 @@ impl Daemon {
 
         let tunnel = self.dp.tunnels.entry(target).or_default();
 
-        // UDP-discovery timeout.
-        // Outstanding keepalive probe unanswered for
-        // `udp_discovery_timeout` → path is silently dead (NAT
-        // rebind, firewall reload). Drop `udp_confirmed` so we fall
-        // back to TCP/relay instead of blackholing.
+        // Revalidate before carrying data when either an outstanding
+        // keepalive timed out or the last authenticated UDP evidence
+        // predates one timeout window. The latter catches a stale NAT
+        // mapping on the first packet after a data-driven idle gap.
         let timeout = Duration::from_secs(u64::from(self.settings.udp_discovery_timeout));
-        if let Some(p) = tunnel.pmtu.as_mut()
-            && p.udp_timed_out(now, timeout)
-        {
-            log::info!(target: "tincd::net",
-                       "Too much time has elapsed since last UDP ping response from {target_name}, stopping UDP communication");
-            p.on_udp_timeout();
+        let (timed_out, cold_stale) = tunnel.pmtu.as_ref().map_or((false, false), |p| {
+            (
+                p.udp_timed_out(now, timeout),
+                p.udp_needs_cold_revalidation(now, timeout),
+            )
+        });
+        if timed_out || cold_stale {
+            if cold_stale {
+                log::info!(target: "tincd::net",
+                           "UDP path to {target_name} is idle; revalidating before data");
+            } else {
+                log::info!(target: "tincd::net",
+                           "Too much time has elapsed since last UDP ping response from {target_name}, stopping UDP communication");
+            }
+            if let Some(p) = tunnel.pmtu.as_mut() {
+                p.on_udp_timeout();
+            }
             tunnel.status.udp_confirmed = false;
             tunnel.udp_addr_cached = None;
             if let Some(h) = self.tunnel_handles.get(&target) {
                 h.minmtu.store(0, std::sync::atomic::Ordering::Relaxed);
             }
-            // Fall through: udp_confirmed now false → probe interval
-            // below switches to udp_discovery_interval (aggressive
-            // 2s re-discovery).
+            // Fall through: discovery starts immediately, while data
+            // uses the existing TCP path until UDP is authenticated.
         }
 
         let udp_confirmed = tunnel.pmtu.as_ref().is_some_and(|p| p.udp_confirmed);
