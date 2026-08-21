@@ -25,6 +25,11 @@ class MainActivity : Activity() {
             }
         })
         setContentView(layout)
+        // adb testing: am start ... --ez autostart true (consent
+        // must already be granted, e.g. via appops ACTIVATE_VPN).
+        if (intent.getBooleanExtra("autostart", false)) {
+            prepareAndStart()
+        }
     }
 
     private fun prepareAndStart() {
