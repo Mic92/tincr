@@ -349,6 +349,18 @@ impl Ctl {
         Ok(ctl)
     }
 
+    /// `REQ_RELOAD`: `"18 1"` → ack `"18 1 RESULT"`. 0 = ok.
+    pub fn reload(&mut self) -> i32 {
+        writeln!(self.w, "18 1").unwrap();
+        let mut line = String::new();
+        self.r.read_line(&mut line).expect("reload ack");
+        line.trim_end()
+            .strip_prefix("18 1 ")
+            .expect("reload ack format")
+            .parse()
+            .expect("reload result")
+    }
+
     /// `REQ_DUMP_*`: send `"18 SUBTYPE\n"`, collect rows until the
     /// bare `"18 SUBTYPE"` terminator.
     pub fn dump(&mut self, subtype: u8) -> Vec<String> {
