@@ -4,10 +4,7 @@ import java.io.File
 
 data class CidrAddr(val address: String, val prefix: Int)
 
-/// Per-network app-side settings, next to the tinc config tree in
-/// `filesDir/networks/<name>/`. Format: `key value` lines in
-/// `vpn.conf` (address/route/dns/domain/mtu). The tinc side
-/// (tinc.conf, hosts/) lives in the same dir.
+// App-side settings from vpn.conf next to the tinc config tree.
 data class NetworkConfig(
     val dir: File,
     val addresses: List<CidrAddr>,
