@@ -1,6 +1,10 @@
 use super::*;
 use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
 use nix::sys::socket::getsockopt;
+#[cfg(target_os = "macos")]
+use socket2::SockAddr;
+#[cfg(target_os = "macos")]
+use tinc_device::{BsdTun, Device, DeviceArena, DrainResult};
 
 /// Shorthand for tests that don't care about sockopts.
 fn opts() -> SockOpts {
@@ -242,6 +246,65 @@ fn open_udp_pmtudisc_do() {
             libc::IPV6_PMTUDISC_DO,
         );
     }
+}
+
+/// `setup_udp` disables IP fragmentation on macOS so PMTU probes
+/// measure the path instead of succeeding as reassembled fragments.
+#[test]
+#[cfg(target_os = "macos")]
+fn open_udp_dontfrag() {
+    let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
+    assert!(
+        getsockopt(&listeners[0].udp.as_fd(), sockopt::IpDontFrag).unwrap(),
+        "IP_DONTFRAG not enabled"
+    );
+
+    let listeners6 = open_listeners(0, AddrFamily::Ipv6, &opts());
+    if let Some(l) = listeners6.first() {
+        assert!(
+            getsockopt(&l.udp.as_fd(), sockopt::Ipv6DontFrag).unwrap(),
+            "IPV6_DONTFRAG not enabled"
+        );
+    }
+}
+
+/// A real MTU-1500 utun underlay must reject an oversized UDP
+/// datagram instead of surfacing IP fragments to the interface.
+#[test]
+#[cfg(target_os = "macos")]
+fn open_udp_dontfrag_blocks_underlay_fragments() {
+    if !nix::unistd::geteuid().is_root() {
+        eprintln!("SKIP open_udp_dontfrag_blocks_underlay_fragments: needs root");
+        return;
+    }
+
+    let mut dev = BsdTun::open_utun(None).expect("open_utun");
+    let status = std::process::Command::new("ifconfig")
+        .args([
+            dev.iface(),
+            "inet",
+            "10.98.4.1",
+            "10.98.4.2",
+            "mtu",
+            "1500",
+            "up",
+        ])
+        .status()
+        .expect("ifconfig");
+    assert!(status.success(), "ifconfig {} failed", dev.iface());
+
+    let listeners = open_listeners(0, AddrFamily::Ipv4, &opts());
+    let dst = SockAddr::from(addr("10.98.4.2", 40002));
+    let err = listeners[0]
+        .udp
+        .send_to(&vec![0u8; 1500], &dst)
+        .expect_err("MTU-1500 underlay must reject a 1528-byte IP datagram");
+    assert_eq!(err.raw_os_error(), Some(libc::EMSGSIZE));
+
+    // A fragmented send would make the utun readable. The DF failure
+    // happens before enqueue, leaving no packet for the underlay.
+    let mut arena = DeviceArena::new(1);
+    assert_eq!(dev.drain(&mut arena, 1).unwrap(), DrainResult::Empty);
 }
 
 /// Second listener pair on the same port: TCP bind fails (REUSEADDR

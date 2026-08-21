@@ -17,7 +17,7 @@
 //! | `-4` | `Lost` | Reset → `Discovery{0}` |
 //!
 //! Events: `Tick` (driven by `try_tx`, ~1/sec), `ProbeReply{len}`,
-//! `Emsgsize{at_len}`. Actions: `SendProbe{len}`,
+//! `Emsgsize{at_len}`. Actions: `SendProbe{len, counts_miss}`,
 //! `LogFixed{mtu, after_probes}`, `LogReset`.
 //!
 //! EMSGSIZE feedback is asynchronous: `tick()` returns ONE probe,
@@ -65,8 +65,8 @@ pub(crate) enum PmtuPhase {
     /// `mtuprobes == -1`. Probe `maxmtu` (+ `maxmtu+1` increase
     /// detector) every `pinginterval`.
     Steady,
-    /// `mtuprobes ∈ -2..=-3`. `misses` = unanswered steady-state
-    /// probes (1 or 2). One `maxmtu` probe/sec.
+    /// `mtuprobes ∈ -2..=-3`. `misses` = successfully submitted,
+    /// unanswered steady-state probes (1 or 2). One `maxmtu` probe/sec.
     Revalidate { misses: u8 },
     /// `mtuprobes == -4`. Next `tick()` resets to `Discovery{0}`.
     Lost,
@@ -99,6 +99,9 @@ pub(crate) struct PmtuState {
     /// A keepalive probe is outstanding — next reply is the RTT
     /// measurement.
     pub ping_sent: bool,
+    /// Last local probe attempt, including failed submissions. Kept
+    /// separate from `udp_ping_sent`, which timestamps actual sends.
+    pub udp_probe_attempted_at: Instant,
     pub udp_ping_sent: Instant,
     /// Last time a probe **reply** arrived. Diagnostic only —
     /// [`Self::udp_timed_out`] gates on `ping_sent`/`udp_ping_sent`
@@ -114,7 +117,9 @@ pub(crate) struct PmtuState {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PmtuAction {
     /// Send a UDP probe. `len` already clamped to `>= MIN_PROBE_SIZE`.
-    SendProbe { len: u16 },
+    /// `counts_miss` marks the known-good `maxmtu` revalidation probe;
+    /// its successful submission advances the miss state separately.
+    SendProbe { len: u16, counts_miss: bool },
 
     /// Log "Fixing MTU of %s to %d after %d probes". `probes` = how
     /// many discovery probes were sent before converging (0..=20;
@@ -149,11 +154,29 @@ impl PmtuState {
             phase: PmtuPhase::Discovery { sent: 0 },
             udp_confirmed: false,
             ping_sent: false,
+            udp_probe_attempted_at: now,
             udp_ping_sent: now,
             udp_reply_rx: now,
             mtu_ping_sent: now,
             maxrecentlen: 0,
             udp_ping_rtt: None,
+        }
+    }
+
+    /// Whether the UDP-discovery sender should emit a probe now.
+    /// Failed submissions retain the configured retry cadence.
+    #[must_use]
+    pub(crate) fn udp_probe_due(&self, now: Instant, interval: Duration) -> bool {
+        now.saturating_duration_since(self.udp_probe_attempted_at) >= interval
+    }
+
+    /// Record one local probe submission attempt. Failed submissions
+    /// pace retries but do not manufacture an outstanding remote probe.
+    pub(crate) const fn on_udp_probe_attempt(&mut self, now: Instant, sent: bool) {
+        self.udp_probe_attempted_at = now;
+        if sent {
+            self.udp_ping_sent = now;
+            self.ping_sent = true;
         }
     }
 
@@ -224,12 +247,13 @@ impl PmtuState {
         }
 
         // Steady / re-validate: probe maxmtu, in Steady also maxmtu+1
-        // (increase detector). Each unanswered cycle counts a miss; a
-        // maxmtu reply rewinds to Steady (on_probe_reply).
+        // (increase detector). A successful maxmtu submission later
+        // commits the miss; a reply rewinds to Steady.
         match self.phase {
             PmtuPhase::Steady => {
                 out.push(PmtuAction::SendProbe {
                     len: self.maxmtu.max(MIN_PROBE_SIZE),
+                    counts_miss: true,
                 });
                 // saturating: maxmtu is fed from peer-influenced
                 // paths (on_meta_ack/on_probe_reply) — those clamp,
@@ -237,19 +261,15 @@ impl PmtuState {
                 if self.maxmtu.saturating_add(1) < MTU {
                     out.push(PmtuAction::SendProbe {
                         len: self.maxmtu.saturating_add(1),
+                        counts_miss: false,
                     });
                 }
-                self.phase = PmtuPhase::Revalidate { misses: 1 };
             }
-            PmtuPhase::Revalidate { misses } => {
+            PmtuPhase::Revalidate { .. } => {
                 out.push(PmtuAction::SendProbe {
                     len: self.maxmtu.max(MIN_PROBE_SIZE),
+                    counts_miss: true,
                 });
-                self.phase = if misses >= 2 {
-                    PmtuPhase::Lost
-                } else {
-                    PmtuPhase::Revalidate { misses: misses + 1 }
-                };
             }
             // Lost was reset above; Fix was consumed by try_fix_mtu.
             PmtuPhase::Lost | PmtuPhase::Fix => unreachable!(),
@@ -259,6 +279,7 @@ impl PmtuState {
                 let len = probe_size(self.minmtu, self.maxmtu, sent);
                 out.push(PmtuAction::SendProbe {
                     len: len.max(MIN_PROBE_SIZE),
+                    counts_miss: false,
                 });
                 // Probe #20 ends discovery.
                 self.phase = if sent + 1 >= 20 {
@@ -269,6 +290,18 @@ impl PmtuState {
             }
         }
         out
+    }
+
+    /// Commit one unanswered known-`maxmtu` probe after the UDP
+    /// datagram was accepted by the local socket. Failed submissions
+    /// leave the phase unchanged and are retried at normal cadence.
+    pub(crate) const fn on_counted_probe_sent(&mut self) {
+        self.phase = match self.phase {
+            PmtuPhase::Steady => PmtuPhase::Revalidate { misses: 1 },
+            PmtuPhase::Revalidate { misses } if misses >= 2 => PmtuPhase::Lost,
+            PmtuPhase::Revalidate { misses } => PmtuPhase::Revalidate { misses: misses + 1 },
+            phase => phase,
+        };
     }
 
     /// Meta-channel probe ack (`MTU_INFO` 4th field, Rust extension).
@@ -512,7 +545,9 @@ mod tests {
         let mut s = PmtuState::new(now, MTU);
         let out = s.tick(now, Duration::from_secs(60));
         assert_eq!(out.len(), 1);
-        assert!(matches!(out[0], PmtuAction::SendProbe { len } if (1329..=1330).contains(&len)));
+        assert!(
+            matches!(out[0], PmtuAction::SendProbe { len, .. } if (1329..=1330).contains(&len))
+        );
         assert_eq!(s.phase, PmtuPhase::Discovery { sent: 1 });
     }
 
@@ -544,8 +579,13 @@ mod tests {
         let out = s.tick(now + Duration::from_secs(2), Duration::from_secs(60));
         assert_eq!(s.mtu, 1400);
         assert_eq!(s.maxmtu, 1400);
-        // Fix → Steady (try_fix_mtu), then steady probe → Revalidate{1}.
-        assert_eq!(s.phase, PmtuPhase::Revalidate { misses: 1 });
+        // Fix → Steady; the emitted revalidation probe is committed
+        // separately only after local UDP submission succeeds.
+        assert_eq!(s.phase, PmtuPhase::Steady);
+        assert!(out.contains(&PmtuAction::SendProbe {
+            len: 1400,
+            counts_miss: true,
+        }));
         assert!(out.contains(&PmtuAction::LogFixed {
             mtu: 1400,
             probes: 20
@@ -686,10 +726,18 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                PmtuAction::SendProbe { len: 1400 },
-                PmtuAction::SendProbe { len: 1401 },
+                PmtuAction::SendProbe {
+                    len: 1400,
+                    counts_miss: true,
+                },
+                PmtuAction::SendProbe {
+                    len: 1401,
+                    counts_miss: false,
+                },
             ]
         );
+        assert_eq!(s.phase, PmtuPhase::Steady);
+        s.on_counted_probe_sent();
         assert_eq!(s.phase, PmtuPhase::Revalidate { misses: 1 });
     }
 
@@ -702,7 +750,36 @@ mod tests {
         s.minmtu = MTU - 1;
         s.phase = PmtuPhase::Steady;
         let out = s.tick(now + Duration::from_secs(61), Duration::from_secs(60));
-        assert_eq!(out, vec![PmtuAction::SendProbe { len: MTU - 1 }]);
+        assert_eq!(
+            out,
+            vec![PmtuAction::SendProbe {
+                len: MTU - 1,
+                counts_miss: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn failed_revalidation_submissions_do_not_count() {
+        let now = t0();
+        let mut s = PmtuState::new(now, MTU);
+        s.mtu = 1400;
+        s.minmtu = 1400;
+        s.maxmtu = 1400;
+        s.phase = PmtuPhase::Steady;
+        let pi = Duration::from_secs(60);
+
+        for second in [61, 122, 183] {
+            let out = s.tick(now + Duration::from_secs(second), pi);
+            assert!(matches!(
+                out.first(),
+                Some(PmtuAction::SendProbe {
+                    len: 1400,
+                    counts_miss: true
+                })
+            ));
+            assert_eq!(s.phase, PmtuPhase::Steady);
+        }
     }
 
     #[test]
@@ -716,10 +793,16 @@ mod tests {
         s.udp_confirmed = true;
         let pi = Duration::from_secs(60);
         s.tick(now + Duration::from_secs(61), pi);
+        assert_eq!(s.phase, PmtuPhase::Steady);
+        s.on_counted_probe_sent();
         assert_eq!(s.phase, PmtuPhase::Revalidate { misses: 1 });
         s.tick(now + Duration::from_secs(62), pi);
+        assert_eq!(s.phase, PmtuPhase::Revalidate { misses: 1 });
+        s.on_counted_probe_sent();
         assert_eq!(s.phase, PmtuPhase::Revalidate { misses: 2 });
         s.tick(now + Duration::from_secs(63), pi);
+        assert_eq!(s.phase, PmtuPhase::Revalidate { misses: 2 });
+        s.on_counted_probe_sent();
         assert_eq!(s.phase, PmtuPhase::Lost);
         // Lost → reset
         let out = s.tick(now + Duration::from_secs(64), pi);
@@ -785,6 +868,26 @@ mod tests {
         // Not confirmed.
         s.udp_confirmed = false;
         assert!(!s.udp_timed_out(now + Duration::from_secs(31), to));
+    }
+
+    #[test]
+    fn udp_probe_attempt_tracks_submission_separately() {
+        let now = t0();
+        let interval = Duration::from_secs(2);
+        let mut s = PmtuState::new(now, MTU);
+
+        let attempted_at = now + interval;
+        s.on_udp_probe_attempt(attempted_at, false);
+        assert!(!s.ping_sent);
+        assert_eq!(s.udp_probe_attempted_at, attempted_at);
+        assert_eq!(s.udp_ping_sent, now);
+        assert!(!s.udp_probe_due(attempted_at, interval));
+        assert!(s.udp_probe_due(attempted_at + interval, interval));
+
+        let sent_at = attempted_at + interval;
+        s.on_udp_probe_attempt(sent_at, true);
+        assert!(s.ping_sent);
+        assert_eq!(s.udp_ping_sent, sent_at);
     }
 
     // on_meta_ack.

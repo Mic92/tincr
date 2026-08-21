@@ -83,8 +83,11 @@ impl Fast {
     }
 }
 
-impl UdpEgress for Fast {
-    fn send_batch(&mut self, b: &EgressBatch<'_>) -> io::Result<()> {
+impl Fast {
+    fn send_batch_with<F>(&mut self, b: &EgressBatch<'_>, submit: F) -> io::Result<()>
+    where
+        F: FnOnce(libc::c_int, *const MsghdrX, libc::c_uint, libc::c_int) -> io::Result<usize>,
+    {
         // Single frame: `sendmsg_x` saves nothing over `sendto`.
         if self.disabled || b.count <= 1 || usize::from(b.count) > HDR_CAP {
             return self.fallback.send_batch(b);
@@ -125,37 +128,54 @@ impl UdpEgress for Fast {
             };
         }
 
-        // SAFETY: `hdrs[..count]` fully initialized above; `sock` is
-        // the listener dup we own. `MSG_DONTWAIT` is belt-and-
-        // suspenders: the dup shares `O_NONBLOCK` with the listener.
-        let ret = unsafe {
-            sendmsg_x(
-                sock,
-                self.hdrs.as_ptr(),
-                libc::c_uint::from(b.count),
-                libc::MSG_DONTWAIT,
-            )
-        };
-        if ret >= 0 {
-            // Partial send (`ret < count`) means sndbuf filled mid-
-            // batch. The unsent tail is dropped — same semantics as
-            // `Portable` hitting `WouldBlock` per-frame, and as
-            // `linux::Fast`'s all-or-nothing GSO send. UDP is
-            // unreliable; inner-TCP retransmits.
-            return Ok(());
-        }
-        let err = io::Error::last_os_error();
-        match err.raw_os_error() {
-            // Kernel doesn't implement it (never observed on 10.10+
-            // for UDP, but the header says "subject to change").
-            // Latch off and replay this batch via the portable path
-            // so no frames are lost.
-            Some(libc::ENOSYS) => {
+        match submit(
+            sock,
+            self.hdrs.as_ptr(),
+            libc::c_uint::from(b.count),
+            libc::MSG_DONTWAIT,
+        ) {
+            Ok(accepted) if accepted == usize::from(b.count) => Ok(()),
+            Ok(accepted) if accepted < usize::from(b.count) => {
+                // A positive short return accepted the prefix. Replay
+                // only the unsent tail through bounded per-datagram
+                // `sendto` calls; never retry the batch syscall.
+                let offset = accepted * stride;
+                let tail = EgressBatch {
+                    dst: b.dst,
+                    frames: &b.frames[offset..],
+                    stride: b.stride,
+                    count: b.count - u16::try_from(accepted).expect("accepted < u16 count"),
+                    last_len: b.last_len,
+                };
+                self.fallback.send_batch(&tail)
+            }
+            Ok(accepted) => Err(io::Error::other(format!(
+                "sendmsg_x reported {accepted} datagrams for a {}-datagram batch",
+                b.count
+            ))),
+            Err(err) if err.raw_os_error() == Some(libc::ENOSYS) => {
+                // The private syscall is documented as unstable. Stop
+                // trying it and replay the complete batch unchanged.
                 self.disabled = true;
                 self.fallback.send_batch(b)
             }
-            _ => Err(err),
+            Err(err) => Err(err),
         }
+    }
+}
+
+impl UdpEgress for Fast {
+    fn send_batch(&mut self, b: &EgressBatch<'_>) -> io::Result<()> {
+        self.send_batch_with(b, |sock, hdrs, count, flags| {
+            // SAFETY: `send_batch_with` initialized `hdrs[..count]`;
+            // each iovec borrows the live batch for this call.
+            let ret = unsafe { sendmsg_x(sock, hdrs, count, flags) };
+            if ret < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                usize::try_from(ret).map_err(io::Error::other)
+            }
+        })
     }
 }
 
@@ -212,6 +232,66 @@ mod tests {
         assert_eq!(&buf[..n], b"xxxxxxxxxx");
         let (n, _) = rx.recv_from(&mut buf).unwrap();
         assert_eq!(&buf[..n], b"yyyyyyyyyy");
+    }
+
+    /// A short positive return accepted only a prefix. The portable
+    /// fallback must send exactly the remaining tail.
+    #[test]
+    fn macos_fast_replays_partial_tail() {
+        let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let dst = SockAddr::from(rx.local_addr().unwrap());
+        let tx: Socket = UdpSocket::bind("127.0.0.1:0").unwrap().into();
+        let mut p = Fast::new(&tx).unwrap();
+        let frames = *b"AAAAAAAABBBBBBBBCCCCCCCC";
+        let batch = EgressBatch {
+            dst: &dst,
+            frames: &frames,
+            stride: 8,
+            count: 3,
+            last_len: 8,
+        };
+
+        p.send_batch_with(&batch, |sock, hdrs, _count, flags| {
+            // SAFETY: the helper initialized all three headers. Limit
+            // the real syscall to two to force a deterministic tail.
+            let ret = unsafe { sendmsg_x(sock, hdrs, 2, flags) };
+            assert_eq!(ret, 2);
+            Ok(2)
+        })
+        .unwrap();
+
+        let mut buf = [0u8; 16];
+        for expected in [b"AAAAAAAA", b"BBBBBBBB", b"CCCCCCCC"] {
+            let (n, _) = rx.recv_from(&mut buf).unwrap();
+            assert_eq!(&buf[..n], expected);
+        }
+    }
+
+    /// Zero progress is also bounded: skip the batch syscall result
+    /// and replay every datagram once through the portable path.
+    #[test]
+    fn macos_fast_replays_zero_progress() {
+        let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let dst = SockAddr::from(rx.local_addr().unwrap());
+        let tx: Socket = UdpSocket::bind("127.0.0.1:0").unwrap().into();
+        let mut p = Fast::new(&tx).unwrap();
+        let frames = *b"11112222";
+        let batch = EgressBatch {
+            dst: &dst,
+            frames: &frames,
+            stride: 4,
+            count: 2,
+            last_len: 4,
+        };
+
+        p.send_batch_with(&batch, |_sock, _hdrs, _count, _flags| Ok(0))
+            .unwrap();
+
+        let mut buf = [0u8; 8];
+        for expected in [b"1111", b"2222"] {
+            let (n, _) = rx.recv_from(&mut buf).unwrap();
+            assert_eq!(&buf[..n], expected);
+        }
     }
 
     /// `count == 1` takes the portable `sendto` fallback, not

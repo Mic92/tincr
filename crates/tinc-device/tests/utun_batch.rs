@@ -9,9 +9,12 @@
 #![cfg(target_os = "macos")]
 
 use std::net::UdpSocket;
+use std::os::fd::AsRawFd;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
+use nix::sys::time::TimeSpec;
 use tinc_device::{BsdTun, Device, DeviceArena, DrainResult};
 
 fn ifconfig(iface: &str, local: &str, peer: &str) {
@@ -76,6 +79,66 @@ fn utun_recvmsg_x_drain() {
         assert_eq!(f[14], 0x45, "IPv4");
         assert_eq!(f[14 + 28], 0xA0 + u8::try_from(i).unwrap(), "payload");
     }
+}
+
+#[test]
+fn utun_partial_drain_refires_kqueue() {
+    if !nix::unistd::geteuid().is_root() {
+        eprintln!("SKIP utun_partial_drain_refires_kqueue: needs root");
+        return;
+    }
+    let (local, peer) = ("10.98.3.1", "10.98.3.2");
+    let mut dev = BsdTun::open_utun(None).expect("open_utun");
+    ifconfig(dev.iface(), local, peer);
+
+    let fd = dev.fd().expect("utun fd").as_raw_fd();
+    let kq = Kqueue::new().expect("kqueue");
+    let change = KEvent::new(
+        usize::try_from(fd).unwrap(),
+        EventFilter::EVFILT_READ,
+        EvFlags::EV_ADD,
+        FilterFlag::empty(),
+        0,
+        0,
+    );
+    kq.kevent(&[change], &mut [], None).expect("register utun");
+
+    let tx = UdpSocket::bind((local, 0)).expect("bind");
+    for marker in 0..128u8 {
+        tx.send_to(&[marker; 32], (peer, 40001))
+            .expect("queue utun packet");
+    }
+
+    let empty = KEvent::new(
+        0,
+        EventFilter::EVFILT_READ,
+        EvFlags::empty(),
+        FilterFlag::empty(),
+        0,
+        0,
+    );
+    let mut events = [empty];
+    let timeout = *TimeSpec::from_duration(Duration::from_secs(1)).as_ref();
+    assert_eq!(kq.kevent(&[], &mut events, Some(timeout)).unwrap(), 1);
+
+    let mut arena = DeviceArena::new(64);
+    assert_eq!(
+        dev.drain(&mut arena, 64).unwrap(),
+        DrainResult::Frames { count: 64 }
+    );
+
+    // Plain EV_ADD is level-triggered. Sixty-four queued packets
+    // remain, so returning to kevent must report readability again.
+    let immediate = *TimeSpec::from_duration(Duration::from_millis(50)).as_ref();
+    assert_eq!(
+        kq.kevent(&[], &mut events, Some(immediate)).unwrap(),
+        1,
+        "utun still has queued packets after the capped drain"
+    );
+    assert!(matches!(
+        dev.drain(&mut arena, 64).unwrap(),
+        DrainResult::Frames { count: 1..=64 }
+    ));
 }
 
 #[test]
