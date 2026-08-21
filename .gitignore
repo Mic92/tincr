@@ -27,3 +27,5 @@ __pycache__
 /kat_graph/gen_graph
 android/**/build/
 android/app/src/main/jniLibs/
+android/.gradle/
+android/local.properties
