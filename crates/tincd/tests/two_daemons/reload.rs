@@ -470,3 +470,67 @@ fn del_subnet_legitimate_still_works() {
     let _ = bob_child.kill();
     let _ = bob_child.wait();
 }
+
+/// Android bundle update: rename-swap `hosts/`, reload over the
+/// control socket (no signals). A rekeyed peer must be dropped and
+/// must not re-authenticate against the stale key.
+#[test]
+fn control_reload_hosts_swap_drops_rekeyed_peer() {
+    let tmp = tmp!("hswap");
+    let alice = Node::new(tmp.path(), "alice", 0xAA);
+    let bob = Node::new(tmp.path(), "bob", 0xBB);
+
+    alice.write_config(&bob, false);
+    bob.write_config(&alice, true);
+
+    let mut alice_child = alice.spawn();
+    assert!(
+        wait_for_file(&alice.socket),
+        "alice setup failed: {}",
+        drain_stderr(alice_child)
+    );
+    let mut bob_child = bob.spawn();
+    if !wait_for_file(&bob.socket) {
+        let _ = alice_child.kill();
+        panic!("bob setup failed: {}", drain_stderr(bob_child));
+    }
+
+    let mut bob_ctl = bob.ctl();
+    poll_until(Duration::from_secs(10), || {
+        has_active_peer(&bob_ctl.dump(6), "alice").then_some(())
+    });
+
+    // mtime check is `> last_config_check`, second-granularity.
+    std::thread::sleep(Duration::from_millis(1100));
+
+    // New bundle: bob unchanged, alice rekeyed.
+    let hosts = bob.confbase.join("hosts");
+    let hosts_new = bob.confbase.join("hosts.new");
+    std::fs::create_dir(&hosts_new).unwrap();
+    std::fs::copy(hosts.join("bob"), hosts_new.join("bob")).unwrap();
+    let rotated = tinc_crypto::b64::encode(&pubkey_from_seed(&[0xEE; 32]));
+    std::fs::write(
+        hosts_new.join("alice"),
+        format!(
+            "Ed25519PublicKey = {rotated}\nAddress = 127.0.0.1 {}\n",
+            alice.port
+        ),
+    )
+    .unwrap();
+
+    std::fs::rename(&hosts, bob.confbase.join("hosts.old")).unwrap();
+    std::fs::rename(&hosts_new, &hosts).unwrap();
+    assert_eq!(bob_ctl.reload(), 0, "control reload nacked");
+
+    poll_until(Duration::from_secs(10), || {
+        (!has_active_peer(&bob_ctl.dump(6), "alice")).then_some(())
+    });
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        !has_active_peer(&bob_ctl.dump(6), "alice"),
+        "bob re-authenticated alice against a rotated key"
+    );
+
+    let _ = alice_child.kill();
+    let _ = bob_child.kill();
+}
