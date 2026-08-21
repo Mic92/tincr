@@ -35,10 +35,12 @@ mkShell (
       gnumake
       gradle
       jdk17
+      android.fullSdk
     ];
     ANDROID_NDK_ROOT = android.ndkRoot;
     ANDROID_NDK_HOME = android.ndkRoot;
-    ANDROID_HOME = android.sdkRoot;
+    ANDROID_HOME = android.fullSdkRoot;
+    ANDROID_SDK_ROOT = android.fullSdkRoot;
     JAVA_HOME = jdk17.home;
     # AGP's Maven aapt2 doesn't run on NixOS.
     GRADLE_OPTS = "-Dandroid.aapt2FromMavenOverride=${android.aapt2}";

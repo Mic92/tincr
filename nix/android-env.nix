@@ -7,17 +7,25 @@ let
     # r27 LTS, pinned so the toolchain doesn't move on nixpkgs bumps.
     ndkVersion = "27.2.12479018";
     platformVersions = [ "35" ];
-    buildToolsVersions = [ "35.0.0" ];
   };
-  sdkRoot = "${composition.androidsdk}/libexec/android-sdk";
+  # Separate so cross-compile env doesn't rebuild when this changes.
+  fullComposition = androidenv.composeAndroidPackages {
+    platformVersions = [ "35" ];
+    buildToolsVersions = [ "35.0.0" ];
+    includeEmulator = true;
+    includeSystemImages = true;
+    systemImageTypes = [ "google_apis" ];
+    abiVersions = [ "x86_64" ];
+  };
+  fullSdkRoot = "${fullComposition.androidsdk}/libexec/android-sdk";
   ndkRoot = "${composition.androidsdk}/libexec/android-sdk/ndk-bundle";
-  # NDK ships linux-x86_64 host prebuilts only.
   ndkBin = "${ndkRoot}/toolchains/llvm/prebuilt/linux-x86_64/bin";
-  api = "24"; # min API, encoded in the clang wrapper name
+  api = "24"; # min API
 in
 {
-  inherit ndkRoot sdkRoot;
-  aapt2 = "${sdkRoot}/build-tools/35.0.0/aapt2";
+  inherit ndkRoot fullSdkRoot;
+  fullSdk = fullComposition.androidsdk;
+  aapt2 = "${fullSdkRoot}/build-tools/35.0.0/aapt2";
   envFor =
     target:
     let

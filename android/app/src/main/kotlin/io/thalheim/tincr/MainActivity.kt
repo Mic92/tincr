@@ -4,10 +4,29 @@ import android.app.Activity
 import android.content.Intent
 import android.net.VpnService
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import java.io.File
 
 class MainActivity : Activity() {
+    private lateinit var logView: TextView
+    private val handler = Handler(Looper.getMainLooper())
+    private val refreshLog = object : Runnable {
+        override fun run() {
+            val f = File(filesDir, "networks/default/tincd.log")
+            logView.text = if (f.isFile) {
+                f.readLines().takeLast(100).joinToString("\n")
+            } else {
+                "(no log)"
+            }
+            handler.postDelayed(this, 2000)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -24,12 +43,23 @@ class MainActivity : Activity() {
                 )
             }
         })
+        logView = TextView(this).apply { textSize = 10f }
+        layout.addView(ScrollView(this).apply { addView(logView) })
         setContentView(layout)
-        // adb testing: am start ... --ez autostart true (consent
-        // must already be granted, e.g. via appops ACTIVATE_VPN).
+        // adb/test entry. Consent must be pre-granted via appops.
         if (intent.getBooleanExtra("autostart", false)) {
             prepareAndStart()
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        handler.post(refreshLog)
+    }
+
+    override fun onPause() {
+        handler.removeCallbacks(refreshLog)
+        super.onPause()
     }
 
     private fun prepareAndStart() {
