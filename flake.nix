@@ -70,6 +70,9 @@
               craneLib = crane.mkLib pkgs';
               fenix = fenix.packages.${system};
             };
+          tincd-android-x86_64 = self.packages.${system}.tincd-android.override {
+            target = "x86_64-linux-android";
+          };
         }
       );
 
