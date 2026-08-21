@@ -33,6 +33,7 @@ class TincrVpnService : VpnService() {
     }
 
     private fun startVpn() {
+        if (daemon != null) return
         val config = NetworkConfig.load(File(filesDir, "networks/default"))
         val tun = Builder()
             .setSession("tincr")

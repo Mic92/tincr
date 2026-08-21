@@ -16,7 +16,7 @@ class TincdRunner(context: Context, private val config: NetworkConfig) {
             "--config", confDir.absolutePath,
             "--pidfile", File(confDir, "tincd.pid").absolutePath,
             "--logfile", File(confDir, "tincd.log").absolutePath,
-            "--debug", "3",
+            "--debug", "5",
         ).redirectErrorStream(true).start()
         process = p
         Thread {
