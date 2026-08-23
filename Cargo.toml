@@ -56,7 +56,7 @@ subtle = "2.5"
 
 # Mainline DHT discovery, `node` feature only (own thread, no async).
 # 6.0.x, NOT 6.1: 6.1 pins digest =0.11.0-rc.10 against our 0.11.
-mainline = { version = "6.0", default-features = false, features = ["node"] }
+mainline = { version = "8.0", default-features = false, features = ["node"] }
 zeroize = "1.7"
 # PQ hybrid KEX (`SPTPSKex = x25519-mlkem768`). Handshake-time only,
 # pure-Rust perf is fine.
