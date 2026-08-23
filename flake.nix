@@ -101,6 +101,9 @@
           inherit tincd;
           tincd-test = tincd.tests;
         }
+        // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          inherit (self.packages.${system}) tincd-android tincd-android-x86_64;
+        }
         // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           # Rust↔Rust under upstream services.tinc.
           nixos-tinc = pkgs.callPackage ./nix/nixos-test.nix { inherit tincd; };
