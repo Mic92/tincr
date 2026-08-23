@@ -121,7 +121,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 
 # LZ4 level 12. Block format (no frame, no length prefix), matches
 # the C's LZ4_compress_fast_extState wire output. KAT proves it.
-lz4_flex = "0.13"
+lz4_flex = "0.14"
 
 # portmap: PCP (hand-rolled, RFC 6887) + UPnP-IGD fallback (hand-
 # rolled in src/portmap/igd.rs, std-only). n0's `portmapper` was
