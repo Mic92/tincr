@@ -69,6 +69,7 @@
           # Rust↔C deployment-level wire compat.
           nixos-tinc-crossimpl = pkgs.callPackage ./nix/nixos-test.nix { inherit tincd tincd-c; };
           nixos-tinc-auth = pkgs.callPackage ./nix/nixos-test-auth.nix { inherit tincd; };
+          nixos-tinc-auth-container = pkgs.callPackage ./nix/nixos-test-auth-container.nix { inherit tincd; };
           nixos-tinc-nat = pkgs.callPackage ./nix/nixos-test-nat.nix { inherit tincd; };
           nixos-tinc-systemd = pkgs.callPackage ./nix/nixos-test-systemd.nix { inherit tincd; };
           nixos-tinc-dht = pkgs.callPackage ./nix/nixos-test-dht.nix { inherit tincd; };
