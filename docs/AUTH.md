@@ -214,8 +214,30 @@ first_factor_network:
 ```
 
 The portal tries it once on page load and falls back to the
-password form for off-mesh clients. Ask on the tincr issue tracker
-for the current version of the patch.
+password form for off-mesh clients. The patch lives in this repo,
+split for Authelia's two build trees and written against Authelia
+master (0386207a7, August 2026):
+
+- [`contrib/authelia-first-factor-network.patch`](../contrib/authelia-first-factor-network.patch)
+  (Go backend)
+- [`contrib/authelia-first-factor-network-web.patch`](../contrib/authelia-first-factor-network-web.patch)
+  (login portal)
+
+Building from source, apply both with `git apply`. On NixOS the
+backend and web UI are separate derivations, so each gets its
+patch:
+
+```nix
+services.authelia.instances.main.package =
+  (pkgs.authelia.override {
+    authelia-web = pkgs.authelia.web.overrideAttrs (old: {
+      patches = (old.patches or [ ]) ++ [ ./authelia-first-factor-network-web.patch ];
+      patchFlags = [ "-p2" ]; # the web build roots in web/
+    });
+  }).overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ./authelia-first-factor-network.patch ];
+  });
+```
 
 ### Gitea
 

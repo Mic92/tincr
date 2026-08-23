@@ -1,0 +1,654 @@
+From 83a26247015d7d2aafa5a8ac4a77e230086a1dc1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B6rg=20Thalheim?= <joerg@thalheim.io>
+Date: Sun, 23 Aug 2026 14:08:11 +0200
+Subject: [PATCH] feat(handlers): add network identity first factor
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Mesh VPN users are already authenticated by their source address:
+a daemon on the Authelia host knows which node key owns it. Add an
+optional passwordless first factor that resolves the client
+address via a whois backend speaking the nginx auth_request
+protocol over a unix socket (e.g. tinc-auth, tailscale nginx-auth)
+and starts a one factor session for the user named by the
+configured response header. Off by default:
+
+    first_factor_network:
+      enable: true
+      socket: /run/tinc-auth.sock
+
+The portal attempts it once on load and silently falls back to the
+password form. Sessions carry a NetworkIdentity AMR (RFC 8176 pop,
+swk). Regulation and session handling mirror the password factor.
+
+Signed-off-by: Jörg Thalheim <joerg@thalheim.io>
+---
+ internal/authorization/amr.go                 |  11 +-
+ internal/authorization/amr_test.go            |  14 ++
+ .../configuration/schema/configuration.go     |   1 +
+ .../schema/first_factor_network.go            |  13 ++
+ internal/configuration/schema/keys.go         |   3 +
+ .../configuration/validator/configuration.go  |   2 +
+ .../validator/first_factor_network.go         |  22 ++
+ .../handlers/handler_firstfactor_network.go   | 194 ++++++++++++++++++
+ .../handler_firstfactor_network_test.go       | 105 ++++++++++
+ internal/handlers/types.go                    |  10 +
+ internal/server/handlers.go                   |   4 +
+ internal/server/public_html/index.html        |   1 +
+ internal/server/template.go                   |   5 +
+ internal/session/user_session.go              |   8 +
+ internal/session/user_session_test.go         |  17 ++
+ 15 files changed, 406 insertions(+), 4 deletions(-)
+ create mode 100644 internal/configuration/schema/first_factor_network.go
+ create mode 100644 internal/configuration/validator/first_factor_network.go
+ create mode 100644 internal/handlers/handler_firstfactor_network.go
+ create mode 100644 internal/handlers/handler_firstfactor_network_test.go
+
+diff --git a/internal/authorization/amr.go b/internal/authorization/amr.go
+index ea2bd8998..ddf5dc5b5 100644
+--- a/internal/authorization/amr.go
++++ b/internal/authorization/amr.go
+@@ -64,7 +64,10 @@ type AuthenticationMethodsReferences struct {
+ 	WebAuthnSoftware             bool
+ 	WebAuthnUserPresence         bool
+ 	WebAuthnUserVerified         bool
+-	Extra                        []string
++	// NetworkIdentity is authentication by proof of possession of a mesh VPN node key,
++	// established from the client address by an external whois backend (see FirstFactorNetwork).
++	NetworkIdentity bool
++	Extra           []string
+ }
+ 
+ // FactorKnowledge returns true if a "something you know" factor of authentication was used.
+@@ -74,7 +77,7 @@ func (r AuthenticationMethodsReferences) FactorKnowledge() bool {
+ 
+ // FactorPossession returns true if a "something you have" factor of authentication was used.
+ func (r AuthenticationMethodsReferences) FactorPossession() bool {
+-	return r.TOTP || r.Duo || r.WebAuthn || r.WebAuthnHardware || r.WebAuthnSoftware
++	return r.TOTP || r.Duo || r.WebAuthn || r.WebAuthnHardware || r.WebAuthnSoftware || r.NetworkIdentity
+ }
+ 
+ // MultiFactorAuthentication returns true if multiple factors were used.
+@@ -120,7 +123,7 @@ func (r AuthenticationMethodsReferences) MarshalRFC8176() []string {
+ 		amr = append(amr, AMRShortMessageService)
+ 	}
+ 
+-	if r.WebAuthn || r.WebAuthnHardware || r.WebAuthnSoftware {
++	if r.WebAuthn || r.WebAuthnHardware || r.WebAuthnSoftware || r.NetworkIdentity {
+ 		amr = append(amr, AMRProofOfPossession)
+ 	}
+ 
+@@ -128,7 +131,7 @@ func (r AuthenticationMethodsReferences) MarshalRFC8176() []string {
+ 		amr = append(amr, AMRHardwareSecuredKey)
+ 	}
+ 
+-	if r.WebAuthnSoftware {
++	if r.WebAuthnSoftware || r.NetworkIdentity {
+ 		amr = append(amr, AMRSoftwareSecuredKey)
+ 	}
+ 
+diff --git a/internal/authorization/amr_test.go b/internal/authorization/amr_test.go
+index 042d2a3bc..55efdf18a 100644
+--- a/internal/authorization/amr_test.go
++++ b/internal/authorization/amr_test.go
+@@ -84,6 +84,20 @@ func TestAuthenticationMethodsReferences(t *testing.T) {
+ 				RFC8176:                    []string{"otp"},
+ 			},
+ 		},
++		{
++			name: "NetworkIdentity",
++
++			have: authorization.AuthenticationMethodsReferences{NetworkIdentity: true},
++			expected: testAMRWant{
++				FactorKnowledge:            false,
++				FactorPossession:           true,
++				MultiFactorAuthentication:  false,
++				ChannelBrowser:             false,
++				ChannelService:             false,
++				MultiChannelAuthentication: false,
++				RFC8176:                    []string{"pop", "swk"},
++			},
++		},
+ 		{
+ 			name: "WebAuthn",
+ 
+diff --git a/internal/configuration/schema/configuration.go b/internal/configuration/schema/configuration.go
+index a787e3047..908999bf2 100644
+--- a/internal/configuration/schema/configuration.go
++++ b/internal/configuration/schema/configuration.go
+@@ -12,6 +12,7 @@ type Configuration struct {
+ 
+ 	Log                   Log                   `koanf:"log" yaml:"log,omitempty" toml:"log,omitempty" json:"log,omitempty" jsonschema:"title=Log" jsonschema_description:"Logging Configuration."`
+ 	IdentityProviders     IdentityProviders     `koanf:"identity_providers" yaml:"identity_providers,omitempty" toml:"identity_providers,omitempty" json:"identity_providers,omitempty" jsonschema:"title=Identity Providers" jsonschema_description:"Identity Providers Configuration."`
++	FirstFactorNetwork    FirstFactorNetwork    `koanf:"first_factor_network" yaml:"first_factor_network,omitempty" toml:"first_factor_network,omitempty" json:"first_factor_network,omitempty" jsonschema:"title=First Factor Network" jsonschema_description:"Network identity based first factor authentication."`
+ 	AuthenticationBackend AuthenticationBackend `koanf:"authentication_backend" yaml:"authentication_backend,omitempty" toml:"authentication_backend,omitempty" json:"authentication_backend,omitempty" jsonschema:"title=Authentication Backend" jsonschema_description:"Authentication Backend Configuration."`
+ 	Session               Session               `koanf:"session" yaml:"session,omitempty" toml:"session,omitempty" json:"session,omitempty" jsonschema:"title=Session" jsonschema_description:"Session Configuration."`
+ 	TOTP                  TOTP                  `koanf:"totp" yaml:"totp,omitempty" toml:"totp,omitempty" json:"totp,omitempty" jsonschema:"title=TOTP" jsonschema_description:"Time-based One-Time Password Configuration."`
+diff --git a/internal/configuration/schema/first_factor_network.go b/internal/configuration/schema/first_factor_network.go
+new file mode 100644
+index 000000000..844c77c6a
+--- /dev/null
++++ b/internal/configuration/schema/first_factor_network.go
+@@ -0,0 +1,13 @@
++package schema
++
++// FirstFactorNetwork is the configuration for network identity based passwordless first factor
++// authentication. The identity of the client address is resolved by an external whois backend
++// speaking the nginx auth_request protocol over a unix socket, for example tinc-auth or a wrapper
++// around tailscale's nginx-auth. The username from the configured response header is looked up in
++// the regular authentication backend and a one factor session is established for that user
++// without a password.
++type FirstFactorNetwork struct {
++	Enable bool   `koanf:"enable" yaml:"enable" toml:"enable" json:"enable" jsonschema:"default=false,title=Enable" jsonschema_description:"Enables network identity based first factor authentication."`
++	Socket string `koanf:"socket" yaml:"socket,omitempty" toml:"socket,omitempty" json:"socket,omitempty" jsonschema:"title=Socket Path" jsonschema_description:"The path to the whois unix socket."`
++	Header string `koanf:"header" yaml:"header,omitempty" toml:"header,omitempty" json:"header,omitempty" jsonschema:"default=Remote-User,title=Identity Header" jsonschema_description:"The whois response header which carries the username."`
++}
+diff --git a/internal/configuration/schema/keys.go b/internal/configuration/schema/keys.go
+index 5b8b133d9..f902d7f0f 100644
+--- a/internal/configuration/schema/keys.go
++++ b/internal/configuration/schema/keys.go
+@@ -128,6 +128,9 @@ var Keys = []string{
+ 	"duo_api.hostname",
+ 	"duo_api.integration_key",
+ 	"duo_api.secret_key",
++	"first_factor_network.enable",
++	"first_factor_network.header",
++	"first_factor_network.socket",
+ 	"identity_providers.oidc",
+ 	"identity_providers.oidc.authorization_policies",
+ 	"identity_providers.oidc.authorization_policies.*",
+diff --git a/internal/configuration/validator/configuration.go b/internal/configuration/validator/configuration.go
+index 419fd5e6a..ffb86a3af 100644
+--- a/internal/configuration/validator/configuration.go
++++ b/internal/configuration/validator/configuration.go
+@@ -41,6 +41,8 @@ func ValidateConfiguration(config *schema.Configuration, validator *schema.Struc
+ 
+ 	ValidateDuo(config, validator)
+ 
++	ValidateFirstFactorNetwork(config, validator)
++
+ 	ValidateTOTP(config, validator)
+ 
+ 	ValidateWebAuthn(config, validator)
+diff --git a/internal/configuration/validator/first_factor_network.go b/internal/configuration/validator/first_factor_network.go
+new file mode 100644
+index 000000000..1092dd2af
+--- /dev/null
++++ b/internal/configuration/validator/first_factor_network.go
+@@ -0,0 +1,22 @@
++package validator
++
++import (
++	"fmt"
++
++	"github.com/authelia/authelia/v4/internal/configuration/schema"
++)
++
++// ValidateFirstFactorNetwork validates the network identity first factor configuration.
++func ValidateFirstFactorNetwork(config *schema.Configuration, validator *schema.StructValidator) {
++	if !config.FirstFactorNetwork.Enable {
++		return
++	}
++
++	if config.FirstFactorNetwork.Socket == "" {
++		validator.Push(fmt.Errorf("first_factor_network: option 'socket' is required when this authentication method is enabled"))
++	}
++
++	if config.FirstFactorNetwork.Header == "" {
++		config.FirstFactorNetwork.Header = "Remote-User"
++	}
++}
+diff --git a/internal/handlers/handler_firstfactor_network.go b/internal/handlers/handler_firstfactor_network.go
+new file mode 100644
+index 000000000..ea6b1cb04
+--- /dev/null
++++ b/internal/handlers/handler_firstfactor_network.go
+@@ -0,0 +1,194 @@
++package handlers
++
++import (
++	"bufio"
++	"errors"
++	"fmt"
++	"net"
++	"net/http"
++	"net/textproto"
++	"time"
++
++	"github.com/authelia/authelia/v4/internal/authentication"
++	"github.com/authelia/authelia/v4/internal/regulation"
++	"github.com/authelia/authelia/v4/internal/session"
++
++	"github.com/authelia/authelia/v4/internal/middlewares"
++)
++
++// networkWhois asks the whois backend which user owns addr. The backend speaks the nginx
++// auth_request protocol: a request with a Remote-Addr header is answered with 204 and the
++// identity header on a match, or 401 when the address is not part of the network.
++func networkWhois(socket, header string, addr net.IP, timeout time.Duration) (username string, err error) {
++	conn, err := net.DialTimeout("unix", socket, timeout)
++	if err != nil {
++		return "", fmt.Errorf("failed to connect to whois socket: %w", err)
++	}
++
++	defer conn.Close()
++
++	if err = conn.SetDeadline(time.Now().Add(timeout)); err != nil {
++		return "", fmt.Errorf("failed to set whois socket deadline: %w", err)
++	}
++
++	if _, err = fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: whois\r\nRemote-Addr: %s\r\nConnection: close\r\n\r\n", addr); err != nil {
++		return "", fmt.Errorf("failed to write whois request: %w", err)
++	}
++
++	reader := bufio.NewReader(conn)
++
++	resp, err := http.ReadResponse(reader, nil)
++	if err != nil {
++		return "", fmt.Errorf("failed to read whois response: %w", err)
++	}
++
++	defer resp.Body.Close()
++
++	switch resp.StatusCode {
++	case http.StatusNoContent:
++		if username = resp.Header.Get(textproto.CanonicalMIMEHeaderKey(header)); username == "" {
++			return "", fmt.Errorf("whois backend answered %d without a %s header", resp.StatusCode, header)
++		}
++
++		return username, nil
++	case http.StatusUnauthorized:
++		return "", nil
++	default:
++		return "", fmt.Errorf("whois backend answered with unexpected status %d", resp.StatusCode)
++	}
++}
++
++// FirstFactorNetworkPOST is the handler performing passwordless first factor authentication from
++// network identity. The client address is resolved to a username by the whois backend and the
++// username is looked up in the authentication backend.
++func FirstFactorNetworkPOST() middlewares.RequestHandler {
++	return func(ctx *middlewares.AutheliaCtx) {
++		bodyJSON := bodyFirstFactorNetworkRequest{}
++
++		var (
++			details *authentication.UserDetails
++			err     error
++		)
++
++		if err = ctx.ParseBody(&bodyJSON); err != nil {
++			respondUnauthorized(ctx, messageAuthenticationFailed)
++
++			ctx.Logger.WithError(err).Errorf(logFmtErrParseRequestBody, regulation.AuthType1FA)
++
++			return
++		}
++
++		ip := ctx.RemoteIP()
++
++		username, err := networkWhois(ctx.Configuration.FirstFactorNetwork.Socket, ctx.Configuration.FirstFactorNetwork.Header, ip, time.Second*5)
++		if err != nil {
++			ctx.Logger.WithError(err).Error("Error occurred resolving the client address to a network identity")
++
++			respondUnauthorized(ctx, messageAuthenticationFailed)
++
++			return
++		}
++
++		if username == "" {
++			ctx.Logger.Debugf("Client address %s does not resolve to a network identity", ip)
++
++			respondUnauthorized(ctx, messageAuthenticationFailed)
++
++			return
++		}
++
++		if details, err = ctx.Providers.UserProvider.GetDetails(username); err != nil || details == nil {
++			doMarkAuthenticationAttempt(ctx, false, regulation.NewBan(regulation.BanTypeUnknown, "", nil), regulation.AuthType1FA, err)
++
++			ctx.Logger.WithError(err).Errorf("Error occurred getting details for user with network identity '%s' which usually indicates no matching user exists", username)
++
++			respondUnauthorized(ctx, messageAuthenticationFailed)
++
++			return
++		}
++
++		if ban, _, expires, err := ctx.Providers.Regulator.BanCheck(ctx, details.Username); err != nil {
++			if errors.Is(err, regulation.ErrUserIsBanned) {
++				doMarkAuthenticationAttempt(ctx, false, regulation.NewBan(ban, details.Username, expires), regulation.AuthType1FA, nil)
++
++				respondUnauthorized(ctx, messageAuthenticationFailed)
++
++				return
++			}
++
++			ctx.Logger.WithError(err).Errorf(logFmtErrRegulationFail, regulation.AuthType1FA, details.Username)
++
++			respondUnauthorized(ctx, messageAuthenticationFailed)
++
++			return
++		}
++
++		doMarkAuthenticationAttempt(ctx, true, regulation.NewBan(regulation.BanTypeNone, details.Username, nil), regulation.AuthType1FA, nil)
++
++		var provider *session.Session
++
++		if provider, err = ctx.GetSessionProvider(); err != nil {
++			ctx.Logger.WithError(err).Error("Failed to get session provider during 1FA attempt")
++
++			respondUnauthorized(ctx, messageAuthenticationFailed)
++
++			return
++		}
++
++		if err = provider.DestroySession(ctx.RequestCtx); err != nil {
++			ctx.Logger.WithError(err).Trace("Failed to destroy session during 1FA attempt")
++		}
++
++		userSession := provider.NewDefaultUserSession()
++
++		if err = provider.SaveSession(ctx.RequestCtx, userSession); err != nil {
++			ctx.Logger.WithError(err).Errorf(logFmtErrSessionReset, regulation.AuthType1FA, details.Username)
++
++			respondUnauthorized(ctx, messageAuthenticationFailed)
++
++			return
++		}
++
++		if err = provider.RegenerateSession(ctx.RequestCtx); err != nil {
++			ctx.Logger.WithError(err).Errorf(logFmtErrSessionRegenerate, regulation.AuthType1FA, details.Username)
++
++			respondUnauthorized(ctx, messageAuthenticationFailed)
++
++			return
++		}
++
++		keepMeLoggedIn := !provider.Config.DisableRememberMe && bodyJSON.KeepMeLoggedIn != nil && *bodyJSON.KeepMeLoggedIn
++
++		if keepMeLoggedIn {
++			if err = provider.UpdateExpiration(ctx.RequestCtx, provider.Config.RememberMe); err != nil {
++				ctx.Logger.WithError(err).Errorf(logFmtErrSessionSave, "updated expiration", regulation.AuthType1FA, logFmtActionAuthentication, details.Username)
++
++				respondUnauthorized(ctx, messageAuthenticationFailed)
++
++				return
++			}
++		}
++
++		ctx.Logger.Tracef(logFmtTraceProfileDetails, details.Username, details.Groups, details.Emails)
++
++		userSession.SetOneFactorNetwork(ctx.GetClock().Now(), details, keepMeLoggedIn)
++
++		if ctx.Configuration.AuthenticationBackend.RefreshInterval.Update() {
++			userSession.RefreshTTL = ctx.GetClock().Now().Add(ctx.Configuration.AuthenticationBackend.RefreshInterval.Value())
++		}
++
++		if err = provider.SaveSession(ctx.RequestCtx, userSession); err != nil {
++			ctx.Logger.WithError(err).Errorf(logFmtErrSessionSave, "updated profile", regulation.AuthType1FA, logFmtActionAuthentication, details.Username)
++
++			respondUnauthorized(ctx, messageAuthenticationFailed)
++
++			return
++		}
++
++		if len(bodyJSON.Flow) > 0 {
++			handleFlowResponse(ctx, &userSession, bodyJSON.FlowID, bodyJSON.Flow, bodyJSON.SubFlow, bodyJSON.UserCode)
++		} else {
++			Handle1FAResponse(ctx, bodyJSON.TargetURL, bodyJSON.RequestMethod, userSession.Username, userSession.Groups)
++		}
++	}
++}
+diff --git a/internal/handlers/handler_firstfactor_network_test.go b/internal/handlers/handler_firstfactor_network_test.go
+new file mode 100644
+index 000000000..0e5f2df5c
+--- /dev/null
++++ b/internal/handlers/handler_firstfactor_network_test.go
+@@ -0,0 +1,105 @@
++package handlers
++
++import (
++	"fmt"
++	"net"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func serveWhois(t *testing.T, response string) (socket string) {
++	t.Helper()
++
++	dir := t.TempDir()
++	socket = filepath.Join(dir, "whois.sock")
++
++	listener, err := net.Listen("unix", socket)
++	require.NoError(t, err)
++
++	t.Cleanup(func() {
++		listener.Close()
++	})
++
++	go func() {
++		for {
++			conn, err := listener.Accept()
++			if err != nil {
++				return
++			}
++
++			buf := make([]byte, 4096)
++
++			if _, err = conn.Read(buf); err == nil {
++				_, _ = fmt.Fprint(conn, response)
++			}
++
++			conn.Close()
++		}
++	}()
++
++	return socket
++}
++
++func TestNetworkWhois(t *testing.T) {
++	testCases := []struct {
++		name     string
++		response string
++		expected string
++		err      string
++	}{
++		{
++			"ShouldResolveNode",
++			"HTTP/1.1 204 No Content\r\nRemote-User: alice\r\nTinc-Node: alice\r\nConnection: close\r\n\r\n",
++			"alice",
++			"",
++		},
++		{
++			"ShouldTreatUnauthorizedAsNoIdentity",
++			"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
++			"",
++			"",
++		},
++		{
++			"ShouldErrorOnMissingHeader",
++			"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n",
++			"",
++			"whois backend answered 204 without a Remote-User header",
++		},
++		{
++			"ShouldErrorOnBackendFailure",
++			"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
++			"",
++			"whois backend answered with unexpected status 503",
++		},
++	}
++
++	for _, tc := range testCases {
++		t.Run(tc.name, func(t *testing.T) {
++			socket := serveWhois(t, tc.response)
++
++			username, err := networkWhois(socket, "Remote-User", net.ParseIP("10.20.0.1"), time.Second)
++
++			if tc.err == "" {
++				assert.NoError(t, err)
++				assert.Equal(t, tc.expected, username)
++			} else {
++				assert.EqualError(t, err, tc.err)
++			}
++		})
++	}
++}
++
++func TestNetworkWhoisDeadSocket(t *testing.T) {
++	dir := t.TempDir()
++	socket := filepath.Join(dir, "nowhere.sock")
++
++	_, err := networkWhois(socket, "Remote-User", net.ParseIP("10.20.0.1"), time.Second)
++	require.Error(t, err)
++	assert.ErrorContains(t, err, "failed to connect to whois socket")
++	assert.ErrorIs(t, err, os.ErrNotExist)
++}
+diff --git a/internal/handlers/types.go b/internal/handlers/types.go
+index dd89b328c..af3200245 100644
+--- a/internal/handlers/types.go
++++ b/internal/handlers/types.go
+@@ -125,6 +125,16 @@ type bodySecondFactorPasswordRequest struct {
+ 	UserCode  string `json:"userCode"`
+ }
+ 
++type bodyFirstFactorNetworkRequest struct {
++	TargetURL      string `json:"targetURL"`
++	RequestMethod  string `json:"requestMethod"`
++	KeepMeLoggedIn *bool  `json:"keepMeLoggedIn"`
++	FlowID         string `json:"flowID"`
++	Flow           string `json:"flow"`
++	SubFlow        string `json:"subflow"`
++	UserCode       string `json:"userCode"`
++}
++
+ type bodyFirstFactorReauthenticateRequest struct {
+ 	Password      string `json:"password" valid:"required"`
+ 	TargetURL     string `json:"targetURL"`
+diff --git a/internal/server/handlers.go b/internal/server/handlers.go
+index e1090eef3..bb9faaea4 100644
+--- a/internal/server/handlers.go
++++ b/internal/server/handlers.go
+@@ -252,6 +252,10 @@ func handlerMain(config *schema.Configuration, providers middlewares.Providers)
+ 	delayerPassword := middlewares.NewTimingAttackDelay(10, time.Second).SetRecord(true)
+ 
+ 	r.POST("/api/firstfactor", middlewareAPI(handlers.FirstFactorPasswordPOST(delayerPassword)))
++
++	if config.FirstFactorNetwork.Enable {
++		r.POST("/api/firstfactor/network", middlewareAPI(handlers.FirstFactorNetworkPOST()))
++	}
+ 	r.POST("/api/firstfactor/reauthenticate", middleware1FA(handlers.FirstFactorReauthenticatePOST(delayerPassword)))
+ 	r.POST("/api/logout", middlewareAPI(handlers.LogoutPOST))
+ 
+diff --git a/internal/server/public_html/index.html b/internal/server/public_html/index.html
+index 81a37a399..f8a1d3384 100644
+--- a/internal/server/public_html/index.html
++++ b/internal/server/public_html/index.html
+@@ -3,6 +3,7 @@
+   "DuoSelfEnrollment":"{{ .DuoSelfEnrollment }}",
+   "LogoOverride":"{{ .LogoOverride }}",
+   "PasskeyLogin":"{{ .PasskeyLogin }}",
++  "NetworkLogin":"{{ .NetworkLogin }}",
+   "RememberMe":"{{ .RememberMe }}",
+   "ResetPassword":"{{ .ResetPassword }}",
+   "ResetPasswordCustomURL":"{{ .ResetPasswordCustomURL }}",
+diff --git a/internal/server/template.go b/internal/server/template.go
+index 647a5f5ed..87a5569bd 100644
+--- a/internal/server/template.go
++++ b/internal/server/template.go
+@@ -215,6 +215,7 @@ func NewTemplatedFileOptions(config *schema.Configuration) (opts *TemplatedFileO
+ 		AssetPath:               config.Server.AssetPath,
+ 		DuoSelfEnrollment:       strFalse,
+ 		PasskeyLogin:            strconv.FormatBool(config.WebAuthn.EnablePasskeyLogin),
++		NetworkLogin:            strconv.FormatBool(config.FirstFactorNetwork.Enable),
+ 		RememberMe:              strconv.FormatBool(!config.Session.DisableRememberMe),
+ 		ResetPassword:           strconv.FormatBool(!config.AuthenticationBackend.PasswordReset.Disable),
+ 		ResetPasswordCustomURL:  config.AuthenticationBackend.PasswordReset.CustomURL.String(),
+@@ -250,6 +251,7 @@ type TemplatedFileOptions struct {
+ 	AssetPath              string
+ 	DuoSelfEnrollment      string
+ 	PasskeyLogin           string
++	NetworkLogin           string
+ 	RememberMe             string
+ 	ResetPassword          string
+ 	ResetPasswordCustomURL string
+@@ -286,6 +288,7 @@ func (options *TemplatedFileOptions) CommonData(base, baseURL, domain, nonce, la
+ 		LogoOverride:           logoOverride,
+ 		DuoSelfEnrollment:      options.DuoSelfEnrollment,
+ 		PasskeyLogin:           options.PasskeyLogin,
++		NetworkLogin:           options.NetworkLogin,
+ 		RememberMe:             options.RememberMe,
+ 		ResetPassword:          options.ResetPassword,
+ 		ResetPasswordCustomURL: options.ResetPasswordCustomURL,
+@@ -306,6 +309,7 @@ func (options *TemplatedFileOptions) commonDataWithRememberMe(base, baseURL, dom
+ 		LogoOverride:           logoOverride,
+ 		DuoSelfEnrollment:      options.DuoSelfEnrollment,
+ 		PasskeyLogin:           options.PasskeyLogin,
++		NetworkLogin:           options.NetworkLogin,
+ 		RememberMe:             rememberMe,
+ 		ResetPassword:          options.ResetPassword,
+ 		ResetPasswordCustomURL: options.ResetPasswordCustomURL,
+@@ -345,6 +349,7 @@ type TemplatedFileCommonData struct {
+ 	LogoOverride           string
+ 	DuoSelfEnrollment      string
+ 	PasskeyLogin           string
++	NetworkLogin           string
+ 	RememberMe             string
+ 	ResetPassword          string
+ 	ResetPasswordCustomURL string
+diff --git a/internal/session/user_session.go b/internal/session/user_session.go
+index fcc2e2a58..ebb8b609b 100644
+--- a/internal/session/user_session.go
++++ b/internal/session/user_session.go
+@@ -45,6 +45,14 @@ func (s *UserSession) SetOneFactorPassword(now time.Time, details *authenticatio
+ 	s.AuthenticationMethodRefs.UsernameAndPassword = true
+ }
+ 
++// SetOneFactorNetwork sets the 1FA AMR's and expected property values for one factor network identity
++// authentication. The possession factor is the mesh VPN node key that authenticated the client address.
++func (s *UserSession) SetOneFactorNetwork(now time.Time, details *authentication.UserDetails, keepMeLoggedIn bool) {
++	s.setOneFactor(now, details, keepMeLoggedIn)
++
++	s.AuthenticationMethodRefs.NetworkIdentity = true
++}
++
+ // SetOneFactorPasskey sets the 1FA AMR's and expected property values for one factor passkey authentication.
+ func (s *UserSession) SetOneFactorPasskey(now time.Time, details *authentication.UserDetails, keepMeLoggedIn, hardware, userPresence, userVerified bool) {
+ 	s.setOneFactor(now, details, keepMeLoggedIn)
+diff --git a/internal/session/user_session_test.go b/internal/session/user_session_test.go
+index 9fdd5f0c5..9ebdfeb83 100644
+--- a/internal/session/user_session_test.go
++++ b/internal/session/user_session_test.go
+@@ -54,6 +54,23 @@ func TestUserSession_SetFactors(t *testing.T) {
+ 				},
+ 			},
+ 		},
++		{
++			"ShouldSetOneFactorNetwork",
++			func(session *UserSession) {
++				session.SetOneFactorNetwork(time.Unix(10000, 0), &authentication.UserDetails{Username: "john", Emails: []string{"john@example.com"}, Groups: []string{"abc", "123"}}, true)
++			},
++			&UserSession{
++				Username:                  "john",
++				Groups:                    []string{"abc", "123"},
++				Emails:                    []string{"john@example.com"},
++				KeepMeLoggedIn:            true,
++				LastActivity:              10000,
++				FirstFactorAuthnTimestamp: 10000,
++				AuthenticationMethodRefs: authorization.AuthenticationMethodsReferences{
++					NetworkIdentity: true,
++				},
++			},
++		},
+ 		{
+ 			"ShouldSetTwoFactorPassword",
+ 			func(session *UserSession) {
+-- 
+2.55.0
+
