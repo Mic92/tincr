@@ -131,6 +131,7 @@ lz4_flex = "0.13"
 # parser); PCP needs the gateway addr to send to. Feature-gated,
 # default-ON to mirror C tinc's --enable-miniupnpc autoconf default.
 netdev = { version = "0.42", optional = true }
+shake = { version = "0.1", default-features = false }
 
 # LZO levels 10–11: vendored minilzo.c (GPL-2.0+, same as tinc) via
 # cc crate. lzo-sys is bindings-only (still needs system liblzo2);
