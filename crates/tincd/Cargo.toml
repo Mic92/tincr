@@ -167,7 +167,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # autoconnect.rs tests: deterministic RNG. rand_chacha is already in the
 # lockfile (transitively via rand 0.8). rand_core 0.6 trait compat.
-rand_chacha = "0.3"
+rand_chacha = "0.9"
 
 
 [features]
