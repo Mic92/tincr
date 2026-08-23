@@ -2,7 +2,7 @@ use super::super::Daemon;
 use super::{UDP_RX_BATCH, UDP_RX_BUFSZ, UdpRxBatch, ss_to_std};
 
 use std::io;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::io::IoSliceMut;
 use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
@@ -19,7 +19,7 @@ use tinc_crypto::os_rng;
 use tinc_device::{Device, GroBucket};
 
 use nix::errno::Errno;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use nix::sys::socket::{MsgFlags, recvmmsg};
 
 /// Cap on inbound pre-auth meta conns. `Tarpit` is per-IP; a
@@ -164,7 +164,7 @@ impl Daemon {
     /// `batch` borrow doesn't overlap `&mut self` at the call site.
     /// Phase 1 of UDP receive: syscall + extract (len, peer) per message.
     /// Linux: one recvmmsg(64). macOS: recvfrom loop.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn udp_recv_phase1(
         fd: std::os::fd::RawFd,
         batch: &mut UdpRxBatch,
@@ -202,7 +202,7 @@ impl Daemon {
     /// Phase 1, non-Linux: `recvmsg_x` on macOS (one syscall for up
     /// to `UDP_RX_BATCH` datagrams), `recvfrom` loop everywhere else
     /// and as the macOS `ENOSYS` fallback.
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     fn udp_recv_phase1(
         fd: std::os::fd::RawFd,
         batch: &mut UdpRxBatch,

@@ -119,9 +119,9 @@ fn recv_one_fd(stream: &impl AsRawFd) -> io::Result<OwnedFd> {
     // and our cmsgbuf was sized for one). `MSG_OOB`/`MSG_ERRQUEUE`
     // can't happen on a Unix socket; checked to match C, zero cost.
     // `MSG_ERRQUEUE` is Linux-only.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     let bad = MsgFlags::MSG_CTRUNC | MsgFlags::MSG_OOB | MsgFlags::MSG_ERRQUEUE;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     let bad = MsgFlags::MSG_CTRUNC | MsgFlags::MSG_OOB;
     if msg.flags.intersects(bad) {
         return Err(io::Error::new(
@@ -179,15 +179,18 @@ fn recv_one_fd(stream: &impl AsRawFd) -> io::Result<OwnedFd> {
 fn connect_unix(path: &Path) -> io::Result<UnixStream> {
     let bytes = path.as_os_str().as_encoded_bytes();
     if matches!(bytes.first(), Some(b'@')) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             // Abstract namespace: std adds the leading NUL, so strip `@`.
+            #[cfg(target_os = "android")]
+            use std::os::android::net::SocketAddrExt;
+            #[cfg(target_os = "linux")]
             use std::os::linux::net::SocketAddrExt;
             use std::os::unix::net::SocketAddr;
             let addr = SocketAddr::from_abstract_name(&bytes[1..])?;
             return UnixStream::connect_addr(&addr);
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "abstract Unix sockets ('@' prefix) are Linux-only",

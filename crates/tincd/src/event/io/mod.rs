@@ -20,9 +20,9 @@ use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::time::Duration;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod epoll;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use epoll::{
     Poller, RawEvent, add, create, del, empty_event, ev_readable, ev_token, ev_writable, modify,
     wait,
@@ -500,7 +500,7 @@ mod tests {
     /// the same fd twice (epoll rejects). kqueue silently replaces
     /// with `EV_ADD`, so this test is Linux-only.
     #[test]
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn add_failure_frees_slot() {
         let mut ev = EventLoop::new().unwrap();
         let (rd, _wr) = mkpipe();

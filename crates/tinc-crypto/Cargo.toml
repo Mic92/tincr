@@ -19,6 +19,9 @@ kem.workspace = true
 rand_core.workspace = true
 getrandom.workspace = true
 
+[target.'cfg(target_os = "android")'.dependencies]
+openssl-sys = { workspace = true, features = ["vendored"] }
+
 [dev-dependencies]
 hex.workspace = true
 serde.workspace = true

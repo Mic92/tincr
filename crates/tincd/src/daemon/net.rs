@@ -2,7 +2,7 @@ pub(super) use super::ListenerSlot;
 
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use nix::sys::socket::MultiHeaders;
 use nix::sys::socket::SockaddrStorage;
 
@@ -33,7 +33,7 @@ pub(crate) struct UdpRxBatch {
     /// `mem::take`-cheap (one ptr, not 128KB).
     bufs: Box<[[u8; UDP_RX_BUFSZ]; UDP_RX_BATCH]>,
     /// nix's `mmsghdr` + `sockaddr_storage` arrays. Linux only.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     headers: MultiHeaders<SockaddrStorage>,
     /// Darwin `recvmsg_x` scratch. See [`macos_rx`].
     #[cfg(target_os = "macos")]
@@ -55,7 +55,7 @@ impl UdpRxBatch {
             .expect("vec![_; 64].into_boxed_slice() has length 64");
         Self {
             bufs,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             headers: MultiHeaders::preallocate(UDP_RX_BATCH, None),
             #[cfg(target_os = "macos")]
             x: macos_rx::Scratch::new(),

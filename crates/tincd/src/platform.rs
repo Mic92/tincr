@@ -8,7 +8,7 @@
 use std::ffi::CStr;
 use std::io;
 use std::os::fd::AsFd;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::AsRawFd;
 
 use nix::sys::socket::SockFlag;
@@ -20,11 +20,11 @@ use socket2::Socket;
 #[inline]
 #[must_use]
 pub(crate) fn sock_cloexec_flag() -> SockFlag {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         SockFlag::SOCK_CLOEXEC
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         SockFlag::empty()
     }
@@ -33,24 +33,24 @@ pub(crate) fn sock_cloexec_flag() -> SockFlag {
 /// Set `SO_NOSIGPIPE` on macOS so `send()` returns `EPIPE` instead
 /// of raising `SIGPIPE` on broken TCP connections. Linux uses
 /// `MSG_NOSIGNAL` per-send instead.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub(crate) fn set_nosigpipe(fd: impl AsFd) {
     let _ = socket2::SockRef::from(&fd).set_nosigpipe(true);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[inline]
 pub(crate) fn set_nosigpipe(_fd: impl AsFd) {}
 
 /// Set `FD_CLOEXEC` via `fcntl`. Use after socket/socketpair on
 /// platforms without `SOCK_CLOEXEC`.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub(crate) fn set_cloexec(fd: impl AsFd) {
     use nix::fcntl::{FcntlArg, FdFlag, fcntl};
     let _ = fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[inline]
 pub(crate) fn set_cloexec(_fd: impl AsFd) {}
 
@@ -59,11 +59,11 @@ pub(crate) fn set_cloexec(_fd: impl AsFd) {}
 #[inline]
 #[must_use]
 pub(crate) fn msg_nosignal() -> nix::sys::socket::MsgFlags {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         nix::sys::socket::MsgFlags::MSG_NOSIGNAL
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         nix::sys::socket::MsgFlags::empty()
     }
@@ -77,7 +77,7 @@ pub(crate) fn msg_nosignal() -> nix::sys::socket::MsgFlags {
 ///
 /// # Errors
 /// `last_os_error()` from `setsockopt(2)`.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn set_int_sockopt(
     fd: impl AsFd,
     level: libc::c_int,
@@ -133,7 +133,7 @@ pub(crate) fn set_udp_tos(fd: impl AsFd, is_ipv6: bool, prio: u8) {
 ///
 /// # Errors
 /// `setsockopt(SO_BINDTODEVICE)` failure.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
     use nix::sys::socket::{setsockopt, sockopt};
     let name = std::ffi::OsString::from(iface);
@@ -143,7 +143,7 @@ pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
 
 /// # Errors
 /// Unknown interface or `setsockopt` failure.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
     use std::num::NonZeroU32;
     // macOS equivalent of SO_BINDTODEVICE: IP_BOUND_IF /
@@ -163,7 +163,7 @@ pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
 /// Disable IP fragmentation so PMTU probes reach the underlay as one
 /// datagram. Best-effort: warn only. Linux has no `DONTFRAG` toggle.
 /// `PMTUDISC_DO` sets DF and fails oversized sends with `EMSGSIZE`.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn set_udp_dontfrag(s: &Socket, ipv6: bool) {
     let (label, result) = if ipv6 {
         (
@@ -192,7 +192,7 @@ pub(crate) fn set_udp_dontfrag(s: &Socket, ipv6: bool) {
 }
 
 /// macOS: `IP{,V6}_DONTFRAG` sets DF without the kernel PMTU cache.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub(crate) fn set_udp_dontfrag(s: &Socket, ipv6: bool) {
     use nix::sys::socket::{setsockopt, sockopt};
     let (label, result) = if ipv6 {
@@ -221,11 +221,11 @@ pub(crate) fn set_udp_dontfrag(s: &Socket, ipv6: bool) {
 /// # Errors
 /// fork/setsid failure, formatted for the CLI.
 pub fn daemonize() -> Result<(), String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         nix::unistd::daemon(true, false).map_err(|e| format!("Couldn't detach from terminal: {e}"))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         // nix::unistd::daemon is Linux-only in nix 0.29.
         // Use libc::daemon directly.
