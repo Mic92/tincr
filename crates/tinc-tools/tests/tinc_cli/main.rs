@@ -35,6 +35,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 mod argv;
+mod auth_http;
 mod config;
 mod cross_impl;
 mod ctl;

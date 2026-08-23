@@ -36,6 +36,7 @@ tinc-proto = { path = "../tinc-proto" }
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize.workspace = true
 thiserror.workspace = true
+tiny_http = "0.12"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["poll", "fs", "hostname", "user", "signal", "term", "ioctl"] }
