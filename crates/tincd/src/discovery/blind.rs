@@ -20,8 +20,9 @@ use curve25519_dalek::scalar::{Scalar, clamp_integer};
 use ed25519_dalek::VerifyingKey;
 use ed25519_dalek::hazmat::{ExpandedSecretKey, raw_sign};
 use sha2::Sha512;
-use sha3::digest::{Digest, ExtendableOutput, Update, XofReader};
-use sha3::{Sha3_256, Shake256};
+use sha3::Sha3_256;
+use sha3::digest::Digest;
+use shake::{ExtendableOutput, Shake256, Update, XofReader};
 
 use tinc_crypto::sign::SigningKey;
 
