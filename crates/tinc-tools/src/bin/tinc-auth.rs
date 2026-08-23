@@ -1,70 +1,27 @@
-//! `tinc-auth` — nginx `auth_request` backend.
+//! `tinc-auth` is an nginx `auth_request` backend, same shape as
+//! Tailscale's `cmd/nginx-auth`. tinc has no humans, only nodes, so
+//! the headers name the node, not a user:
 //!
-//! Same shape as Tailscale's `cmd/nginx-auth/nginx-auth.go` (~130
-//! LOC Go), but for tinc and without the semantic lie. Tailscale's
-//! `Tailscale-User: alice@github` claims a *human* SSO'd in. tinc
-//! has no humans, only nodes — `Name=alice` is a machine identity
-//! backed by an Ed25519 key. So we say what we know:
+//! | Header        | Value       | Meaning                   |
+//! |---------------|-------------|---------------------------|
+//! | `Tinc-Node`   | `alice`     | which node owns src IP    |
+//! | `Tinc-Net`    | `mesh`      | netname (`-n`)            |
+//! | `Tinc-Subnet` | `10.20.0.2` | the matching subnet entry |
 //!
-//! | Header        | Value                | Meaning                  |
-//! |---------------|----------------------|--------------------------|
-//! | `Tinc-Node`   | `alice`              | which node owns src IP   |
-//! | `Tinc-Net`    | `mesh`               | netname (`-n`)           |
-//! | `Tinc-Subnet` | `10.20.0.2`          | the matching subnet entry|
-//!
-//! If you want `X-Webauth-User`, that's two `auth_request_set`
-//! lines in *your* nginx config. We don't pretend node = user.
-//!
-//! ## Mechanism
-//!
-//! 1. nginx subrequest hits us over a unix socket with
-//!    `Remote-Addr: $remote_addr` set (nginx config).
-//! 2. We send `REQ_DUMP_SUBNETS` to tincd's control socket and walk
-//!    the dump doing a longest-prefix match against `Remote-Addr`.
-//!    Same algorithm as `tinc info <addr>`: the daemon dumps
-//!    everything, the client filters.
-//! 3. Hit → 204 + headers. Miss / unparseable → 401. Dead daemon
-//!    → 503 so nginx fails the auth subrequest cleanly.
-//!
-//! ## One control connection per request
-//!
-//! We `connect()` for every auth request. Tailscale's
-//! `tailscale.WhoIs()` does the same (one localapi HTTP call per
-//! `WhoIs`). nginx `auth_request` is a presence gate, not a per-asset
-//! check; request rate is "page loads", not "every CSS file".
-//! Persistent control connections would mean reconnect logic, stale
-//! socket detection, daemon-restart races. Not worth it.
-//!
-//! For a 1000-node net the dump is ~60 KB. If that ever profiles
-//! hot, push the lookup daemon-side (`REQ_LOOKUP_SUBNET`, ~30 LOC).
-//! Don't pre-optimize.
-//!
-//! ## Socket activation
-//!
-//! `LISTEN_FDS`/`LISTEN_PID` like Tailscale. systemd owns the
-//! socket → we don't need root to `bind()`, the unit can be
-//! locked down. We *do* still need root to read tincd's pidfile
-//! (mode 0600, written before `-U` privdrop). In practice that
-//! means the unit runs as root, or you fix the daemon's perm
-//! model. Separate problem; this binary doesn't make it worse.
-//!
-//! ## Why hand-rolled HTTP/1.1
-//!
-//! `hyper` is 50 transitive deps. We answer exactly one request
-//! shape (`GET / HTTP/1.1` over a unix socket from nginx). No
-//! keepalive, no chunked encoding, no body. Read until `\r\n\r\n`,
-//! find one header, write a static response. ~40 lines.
+//! nginx sets `Remote-Addr: $remote_addr` on a subrequest over a
+//! unix socket. We longest-prefix match it against a fresh
+//! `REQ_DUMP_SUBNETS` dump, same algorithm as `tinc info <addr>`.
+//! Hit → 204 + headers, miss → 401, dead daemon → 503 (fail
+//! closed). One control connection per request. The `auth_request`
+//! rate is "page loads", not per-asset.
 
 // `deny` not `forbid`: `from_raw_fd` for socket activation is the
-// one unsafe call. Same tradeoff as lib.rs's `localtime_r` shim —
-// std has no safe wrapper because "this fd is uniquely yours" is
-// a runtime contract the type system can't express.
+// one unsafe call.
 #![deny(unsafe_code)]
 
-use std::io::{BufRead, BufReader, Write};
 use std::net::IpAddr;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -73,107 +30,19 @@ use tinc_proto::subnet::DEFAULT_WEIGHT;
 use tinc_tools::ctl::rows::{SubnetRow, strip_weight};
 use tinc_tools::ctl::{CtlError, CtlRequest, CtlSocket, DumpRow};
 use tinc_tools::names::{Paths, PathsInput};
+use tiny_http::{Header, Response, Server};
 
-/// systemd socket activation: first passed fd. `sd_listen_fds(3)`.
 const SD_LISTEN_FDS_START: RawFd = 3;
 
-/// Max request size we'll buffer. nginx `auth_request` subrequests
-/// are tiny (no body, `proxy_pass_request_body off`). 4 KB is
-/// over 10× a real subrequest's headers; the cap stops a slow-loris
-/// from holding a thread on a connection that never sends `\r\n\r\n`.
-const MAX_REQUEST_BYTES: usize = 4096;
-
-/// HTTP request from nginx. We only care about one header.
-struct Request {
-    /// `Remote-Addr` — nginx's `$remote_addr`. Literal string; we
-    /// parse to `IpAddr` separately so a parse failure is "401
-    /// unknown client", not "400 bad request from nginx" (the
-    /// header *was* set, the IP is just garbage).
-    remote_addr: Option<String>,
-}
-
-/// Read until `\r\n\r\n` or `MAX_REQUEST_BYTES`. Don't care about
-/// the request line — nginx only sends `GET /` here, and there's
-/// no other route to dispatch to. Tailscale's nginx-auth ignores
-/// it the same way (`mux.HandleFunc("/", ...)`).
-///
-/// Returns `None` on a malformed request (no terminator before EOF
-/// or limit). The caller responds 400.
-fn read_request(stream: &UnixStream) -> Option<Request> {
-    let mut reader = BufReader::new(stream);
-    let mut remote_addr = None;
-    let mut total = 0usize;
-
-    // Line-at-a-time. A `\r\n` line (which `read_line` gives us as
-    // `"\r\n"`) is the header terminator. We loop until we see it
-    // because nginx will block waiting for our response otherwise —
-    // `proxy_pass_request_body off` strips the body but the
-    // subrequest still has a complete header set.
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let n = reader.read_line(&mut line).ok()?;
-        if n == 0 {
-            // EOF before terminator. nginx hung up mid-request, or
-            // someone's poking the socket with `nc`. Either way: bad.
-            return None;
-        }
-        total += n;
-        if total > MAX_REQUEST_BYTES {
-            return None;
-        }
-
-        // Terminator. `read_line` includes the `\n`; nginx sends
-        // `\r\n`, so a blank line is `"\r\n"`. Match `"\r\n"` OR
-        // `"\n"` so `printf | nc` testing works without `-C`.
-        if line == "\r\n" || line == "\n" {
-            return Some(Request { remote_addr });
-        }
-
-        // Header parse. RFC 7230 §3.2: name is case-insensitive,
-        // colon, optional whitespace, value. We only want one
-        // header so we don't bother building a map.
-        //
-        // `Remote-Port`: Tailscale's nginx-auth requires it (400 if
-        // either header is unset) but never actually uses the port —
-        // its lookup is keyed by IP only. tinc subnet
-        // lookup is also IP-only — there's no per-port routing.
-        // We don't read it. nginx configs that set it work fine;
-        // configs that don't, also fine.
-        if let Some((name, value)) = line.split_once(':')
-            && name.eq_ignore_ascii_case("remote-addr")
-        {
-            remote_addr = Some(value.trim().to_owned());
-        }
-    }
-}
-
-/// One match from the subnet dump. We track prefix length so we can
-/// pick the longest — `tinc info` returns *all* matches and prints
-/// them; for auth we want the routing decision (most specific wins,
-/// same as `subnet_tree::lookup_ipv4`).
 struct Match {
     owner: String,
     subnet: String,
-    /// `0..=32` (v4) or `0..=128` (v6). Higher = more specific.
-    /// We compare across families (v6 prefixes are bigger numbers
-    /// than v4's), but a v4 query never matches a v6 subnet
-    /// (`Subnet::matches` checks type), so it's moot.
     prefix: u8,
 }
 
-/// Dump subnets, longest-prefix match, return the owner. Same as
-/// `tinc info <addr>` minus the all-matches collection.
-///
-/// `(broadcast)` subnets are filtered: they have no owner node and
-/// would 204 with `Tinc-Node: (broadcast)`, which is worse than
-/// useless for auth.
+/// Dump subnets, longest-prefix match, return the owner. Filters
+/// `(broadcast)`: it has no owner node and must not authenticate.
 fn lookup(paths: &Paths, addr: IpAddr) -> Result<Option<Match>, CtlError> {
-    // Build the query Subnet from a parsed IpAddr instead of
-    // re-parsing a string. `Subnet::from_str` would work too
-    // (a bare address parses as /32 or /128 with default weight),
-    // but we already have the typed value. `weight` is irrelevant —
-    // `matches()` ignores it.
     let find = match addr {
         IpAddr::V4(a) => Subnet::V4 {
             addr: a,
@@ -195,42 +64,24 @@ fn lookup(paths: &Paths, addr: IpAddr) -> Result<Option<Match>, CtlError> {
         match ctl.recv_row()? {
             DumpRow::End(_) => break,
             DumpRow::Row(_, body) => {
-                // `SubnetRow::parse` is two `Tok::s()` calls.
-                // Malformed row → skip. The daemon doesn't emit
-                // garbage, but this is the auth path: failing
-                // closed (no match → 401) beats failing open
-                // (panic → 500 → nginx might fall through
-                // depending on `auth_request` config).
+                // Malformed rows are skipped, not fatal: on the auth
+                // path failing closed (401) beats a 500.
                 let Ok(row) = SubnetRow::parse(&body) else {
                     continue;
                 };
                 let Ok(subnet) = row.subnet.parse::<Subnet>() else {
                     continue;
                 };
-
-                // `as_address: true` — route lookup, "is `find`
-                // INSIDE `self`". The mode where `tinc info
-                // 10.0.0.5` asks "which net routes this".
                 if !subnet.matches(&find, true) {
                     continue;
                 }
-
-                // `tinc info` doesn't filter `(broadcast)` because
-                // it's informational. We do: a 204 with no real
-                // node is a footgun.
                 if row.owner == "(broadcast)" {
                     continue;
                 }
-
-                // Longest prefix wins. `Subnet::Mac` has no prefix
-                // field, but `matches(find, true)` already returned
-                // false for type mismatch (we built a V4 or V6
-                // `find`), so it never reaches here.
                 let prefix = match subnet {
                     Subnet::V4 { prefix, .. } | Subnet::V6 { prefix, .. } => prefix,
                     Subnet::Mac { .. } => continue,
                 };
-
                 if best.as_ref().is_none_or(|b| prefix > b.prefix) {
                     best = Some(Match {
                         owner: row.owner,
@@ -245,90 +96,43 @@ fn lookup(paths: &Paths, addr: IpAddr) -> Result<Option<Match>, CtlError> {
     Ok(best)
 }
 
-/// Write a complete HTTP response. `Connection: close` always:
-/// nginx `auth_request` subrequests are one-shot, and not having to
-/// implement keepalive is the *point* of hand-rolling.
-fn respond(mut stream: &UnixStream, status: &str, extra_headers: &[(&str, &str)]) {
-    // `write!` to the socket. Errors (EPIPE if nginx already gave
-    // up on us) are dropped: the response is best-effort, there's
-    // no caller to propagate to, and we close the connection
-    // immediately after. Same posture as Tailscale's `http.Serve`
-    // — net/http logs and moves on.
-    let _ = write!(stream, "HTTP/1.1 {status}\r\n");
-    let _ = write!(stream, "Connection: close\r\n");
-    let _ = write!(stream, "Content-Length: 0\r\n");
-    for (k, v) in extra_headers {
-        let _ = write!(stream, "{k}: {v}\r\n");
-    }
-    let _ = write!(stream, "\r\n");
+fn header(name: &str, value: &str) -> Header {
+    Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("static header name")
 }
 
-fn handle(stream: &UnixStream, paths: &Paths, netname: &str) {
-    let Some(req) = read_request(stream) else {
-        respond(stream, "400 Bad Request", &[]);
-        return;
-    };
+fn handle(req: tiny_http::Request, paths: &Paths, netname: &str) {
+    let remote_addr = req
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Remote-Addr"))
+        .map(|h| h.value.as_str().trim().to_owned());
 
-    let Some(addr_s) = req.remote_addr else {
-        // nginx config bug — they didn't `proxy_set_header
-        // Remote-Addr $remote_addr`. Tailscale 400s with a log
-        // line ("set Remote-Addr to ..."); we 400 silently.
-        // `journalctl -u tinc-auth` will show the access pattern.
-        respond(stream, "400 Bad Request", &[]);
+    let Some(addr_s) = remote_addr else {
+        // nginx config bug: missing `proxy_set_header Remote-Addr`.
+        let _ = req.respond(Response::empty(400));
         return;
     };
 
     let Ok(addr) = addr_s.parse::<IpAddr>() else {
-        // The header was *set* but isn't an IP. nginx's
-        // `$remote_addr` is always a valid IP for INET listeners,
-        // so this is either someone poking the socket directly,
-        // or nginx accepted on a unix socket (then `$remote_addr`
-        // is "unix:"). 401 not 400: from nginx's view this is
-        // "unknown client", not "malformed config".
-        respond(stream, "401 Unauthorized", &[]);
+        // Header set but not an IP (e.g. nginx on a unix listener
+        // sends "unix:"): unknown client, not malformed config.
+        let _ = req.respond(Response::empty(401));
         return;
     };
 
-    match lookup(paths, addr) {
-        Ok(Some(m)) => {
-            // 204: same as Tailscale. nginx auth_request treats
-            // 2xx as "allow", 401/403 as "deny", anything else
-            // as 500. 204 over 200 because there's no body.
-            respond(
-                stream,
-                "204 No Content",
-                &[
-                    ("Tinc-Node", &m.owner),
-                    ("Tinc-Net", netname),
-                    ("Tinc-Subnet", &m.subnet),
-                ],
-            );
-        }
-        Ok(None) => {
-            // No subnet contains this IP. Either off-mesh entirely,
-            // or a node we haven't gossiped with yet. Either way:
-            // not authenticated.
-            respond(stream, "401 Unauthorized", &[]);
-        }
-        Err(_) => {
-            // Daemon dead, pidfile unreadable, socket gone. 503
-            // not 401: this is "auth backend unavailable", not
-            // "you're not authorized". nginx maps both to 500 by
-            // default but `auth_request` configs can distinguish
-            // (`error_page 500 = @fallback`).
-            respond(stream, "503 Service Unavailable", &[]);
-        }
-    }
+    let resp = match lookup(paths, addr) {
+        Ok(Some(m)) => Response::empty(204)
+            .with_header(header("Tinc-Node", &m.owner))
+            .with_header(header("Tinc-Net", netname))
+            .with_header(header("Tinc-Subnet", &m.subnet)),
+        Ok(None) => Response::empty(401),
+        Err(_) => Response::empty(503),
+    };
+    let _ = req.respond(resp);
 }
 
-/// `LISTEN_PID`/`LISTEN_FDS` parse. Same logic as
-/// `tincd::main::check_socket_activation` (which is `pub(crate)` —
-/// we copy 8 lines instead of plumbing a `pub` through tincd's
-/// crate API for a binary in a different crate).
-///
-/// Returns `Some(n)` only when systemd actually passed us sockets:
-/// `LISTEN_PID` matches our PID (proving the env wasn't inherited
-/// from a wrapper) AND `LISTEN_FDS` is a positive count.
+/// `LISTEN_PID`/`LISTEN_FDS`, same logic as tincd's
+/// `check_socket_activation`.
 fn check_socket_activation() -> Option<usize> {
     let pid_ok = std::env::var("LISTEN_PID")
         .ok()
@@ -345,12 +149,8 @@ fn check_socket_activation() -> Option<usize> {
 
 struct Args {
     input: PathsInput,
-    /// `--listen-socket PATH` (alias `--sockpath`, after Tailscale's
-    /// `-sockpath`). The socket nginx connects to — NOT tincd's
-    /// control socket, which is derived from `--pidfile` like the
-    /// `tinc` CLI does. Mutually exclusive with socket activation in
-    /// practice (if both are available we prefer the activated socket
-    /// — systemd already owns it).
+    /// The socket nginx connects to. NOT tincd's control socket,
+    /// which is derived from `--pidfile` like the `tinc` CLI does.
     listen_socket: Option<PathBuf>,
 }
 
@@ -361,9 +161,6 @@ fn parse_args() -> Result<Args, String> {
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            // Mirrors `tinc.rs`'s flag handling — same `-n` / `-c`
-            // / `--pidfile` semantics (including the `--flag=value`
-            // glued forms) so muscle memory transfers.
             "-c" | "--config" => {
                 let v = args.next().ok_or("option -c requires an argument")?;
                 input.confbase = Some(PathBuf::from(v));
@@ -385,11 +182,7 @@ fn parse_args() -> Result<Args, String> {
             s if s.starts_with("--pidfile=") => {
                 input.pidfile = Some(PathBuf::from(&s["--pidfile=".len()..]));
             }
-            // `--listen-socket` is the canonical name; `--sockpath`
-            // kept as an alias for the unit file that already uses
-            // it. The distinct name avoids confusion with tincd's
-            // `--socket` (its control socket), which this binary
-            // locates via `--pidfile` instead.
+            // `--sockpath` kept as an alias for existing unit files.
             "--listen-socket" | "--sockpath" => {
                 let v = args
                     .next()
@@ -443,46 +236,24 @@ fn main() -> ExitCode {
         }
     };
 
-    // `Tinc-Net` is the netname verbatim. `Paths` doesn't store it
-    // (only `PathsInput` does — it's consumed during construction),
-    // so keep a copy. No netname → empty header. Tailscale does the
-    // same when tailnet can't be derived (sharee nodes, see
-    // `nginx-auth.go:66`).
     let netname = args.input.netname.clone().unwrap_or_default();
 
     let mut paths = Paths::for_cli(&args.input);
     paths.resolve_runtime(&args.input);
 
-    // listener: socket activation OR --sockpath
     let listener = if let Some(n) = check_socket_activation() {
         if n != 1 {
-            // The unit file ships exactly one ListenStream; anything else
-            // is misconfiguration. Failing loud beats silently ignoring
-            // extra sockets.
             eprintln!("tinc-auth: expected exactly 1 socket from systemd, got {n}");
             return ExitCode::FAILURE;
         }
-        // Claim the inherited fd as an `OwnedFd` first, then convert
-        // — the unsafe step is only the ownership assertion, not the
-        // "this is a SOCK_STREAM AF_UNIX listener" assumption (that
-        // part is safe-on-error: accept() would just EINVAL).
-        //
         // SAFETY: socket activation contract. `LISTEN_PID` matched
-        // our pid (`check_socket_activation`), proving we were exec'd
-        // directly by systemd and not inheriting a stale env from a
-        // parent. systemd guarantees fd 3 is open and ours alone; we
-        // claim it exactly once. std has no safe wrapper because
-        // "this fd is uniquely yours" is a runtime contract the type
-        // system can't express. See lib.rs's identical reasoning for
-        // `localtime_r`.
+        // our pid, so we were exec'd by systemd and fd 3 is ours
+        // alone. We claim it exactly once.
         #[allow(unsafe_code)]
         let owned = unsafe { OwnedFd::from_raw_fd(SD_LISTEN_FDS_START) };
         UnixListener::from(owned)
     } else if let Some(path) = &args.listen_socket {
-        // `unlink` first — same as Tailscale's `os.Remove`
-        // (`nginx-auth.go:96`). A previous instance might have
-        // died without cleanup. Ignore the error: ENOENT is fine,
-        // EACCES will surface as a `bind` failure next.
+        // A previous instance might have died without cleanup.
         let _ = std::fs::remove_file(path);
         match UnixListener::bind(path) {
             Ok(l) => l,
@@ -496,23 +267,21 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
+    let server = match Server::from_listener(listener, None) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("tinc-auth: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     eprintln!("tinc-auth: listening (net={netname})");
 
-    // accept loop
-    // Single-threaded, sequential. nginx auth_request subrequests
-    // are tiny and the work per request is one ctl-socket roundtrip
-    // (~1 ms). Threadpool when it profiles hot.
-    //
-    // No graceful shutdown handling: SIGTERM kills the process,
-    // systemd restarts it on the next subrequest (socket activation
-    // means systemd holds the socket open across restarts; nginx never
-    // sees ECONNREFUSED). Same "let it crash, it will come back" posture
-    // as Tailscale's nginx-auth.
-    for stream in listener.incoming() {
-        match stream {
-            Ok(s) => handle(&s, &paths, &netname),
-            Err(e) => eprintln!("tinc-auth: accept: {e}"),
-        }
+    // Sequential: the work per request is one ctl roundtrip (~1 ms).
+    // No graceful shutdown. systemd holds the activated socket open
+    // across restarts.
+    for req in server.incoming_requests() {
+        handle(req, &paths, &netname);
     }
 
     ExitCode::SUCCESS
