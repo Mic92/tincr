@@ -17,14 +17,20 @@ fn count_open_fds(pid: u32) -> usize {
     }
     #[cfg(target_os = "macos")]
     {
-        let out = std::process::Command::new("lsof")
-            .args(["-p", &pid.to_string()])
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .count()
-            .saturating_sub(1)
+        // proc_pidinfo instead of lsof: the nix sandbox has no lsof.
+        // A null buffer returns the byte size of the fd list.
+        #[expect(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid as i32,
+                libc::PROC_PIDLISTFDS,
+                0,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        assert!(n >= 0, "proc_pidinfo({pid})");
+        n as usize / std::mem::size_of::<libc::proc_fdinfo>()
     }
 }
 
@@ -432,11 +438,13 @@ fn control_conn_churn_no_fd_leak() {
     write_config(&confbase);
 
     // dumpable, so /proc/PID/fd stays readable for fd counting
-    let mut child = tincd_at(&confbase, &pidfile, &socket)
-        .env("TINCR_ALLOW_COREDUMP", "1")
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let child = ChildWithLog::spawn(
+        tincd_at(&confbase, &pidfile, &socket)
+            .env("TINCR_ALLOW_COREDUMP", "1")
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
     assert!(wait_for_file(&socket));
 
     let pid_str = std::fs::read_to_string(&pidfile).unwrap();
@@ -468,7 +476,5 @@ fn control_conn_churn_no_fd_leak() {
         after <= baseline + 1,
         "fd leak: baseline={baseline} after-100-churn={after}"
     );
-
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(child);
 }
