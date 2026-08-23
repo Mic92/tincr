@@ -841,7 +841,9 @@ impl Daemon {
                             "Relaying SPTPS_PACKET {from_name} → {} \
                              ({} bytes)",
                             self.node_log_name(to_nid), ct.len());
-                nw |= self.send_sptps_data_relay(to_nid, from_nid, 0, Some(ct));
+                nw |= self
+                    .send_sptps_data_relay(to_nid, from_nid, 0, Some(ct))
+                    .needs_write;
             }
             nw |= self.try_tx(to_nid, true);
             return nw;
@@ -874,7 +876,9 @@ impl Daemon {
                 return nw;
             }
         };
-        nw |= self.dispatch_tunnel_outputs(from_nid, &from_name, outs);
+        nw |= self
+            .dispatch_tunnel_outputs(from_nid, &from_name, outs)
+            .needs_write;
         // Tell upstream relays our MTU floor.
         nw |= self.send_mtu_info(from_nid, &from_name, i32::from(MTU), true);
         nw

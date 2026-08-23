@@ -265,11 +265,11 @@ impl UtunBatch {
     }
 
     /// Ship all staged frames via one `sendmsg_x`. No-op when empty.
-    /// A short positive return is an accepted prefix; replay only the
+    /// A short positive return is an accepted prefix. Replay only the
     /// unsent tail with bounded per-packet writes.
     pub(super) fn flush(&mut self, fd: BorrowedFd<'_>) -> io::Result<()> {
         self.flush_with(fd, |fd, hdrs, count, flags| {
-            // SAFETY: `flush_with` initialized `hdrs[..count]`; each
+            // SAFETY: `flush_with` initialized `hdrs[..count]`. Each
             // iovec points into the live persistent write buffer.
             let ret = unsafe { sendmsg_x(fd, hdrs, count, flags) };
             if ret < 0 {
@@ -328,8 +328,7 @@ impl UtunBatch {
                 self.disabled = true;
                 0
             }
-            // A batch can make no progress when its aggregate request
-            // hits the socket limit. Per-packet fallback may still fit.
+            // Zero progress. Per-packet fallback may still fit.
             Err(err) if matches!(err.raw_os_error(), Some(libc::ENOBUFS | libc::EAGAIN)) => 0,
             Err(err) => return Err(err),
         };
@@ -345,8 +344,7 @@ impl UtunBatch {
                         format!("utun wrote {written} of {len} bytes"),
                     ));
                 }
-                // Best effort, matching the existing per-packet utun
-                // behavior. Never spin in the single-threaded daemon.
+                // Best-effort drop, same as the per-packet path.
                 Err(nix::errno::Errno::ENOBUFS | nix::errno::Errno::EAGAIN) => {}
                 Err(err) => return Err(err.into()),
             }
@@ -390,8 +388,7 @@ mod tests {
 
         batch
             .flush_with(tx.as_fd(), |fd, hdrs, _count, flags| {
-                // SAFETY: `flush_with` initialized four headers. The
-                // real syscall accepts the first two as one batch.
+                // SAFETY: four headers initialized. Send only two.
                 let sent = unsafe { sendmsg_x(fd, hdrs, 2, flags) };
                 assert_eq!(sent, 2);
                 Ok(2)

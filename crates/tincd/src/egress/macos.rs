@@ -136,9 +136,7 @@ impl Fast {
         ) {
             Ok(accepted) if accepted == usize::from(b.count) => Ok(()),
             Ok(accepted) if accepted < usize::from(b.count) => {
-                // A positive short return accepted the prefix. Replay
-                // only the unsent tail through bounded per-datagram
-                // `sendto` calls; never retry the batch syscall.
+                // Short return: prefix accepted. Replay only the tail.
                 let offset = accepted * stride;
                 let tail = EgressBatch {
                     dst: b.dst,
@@ -154,8 +152,6 @@ impl Fast {
                 b.count
             ))),
             Err(err) if err.raw_os_error() == Some(libc::ENOSYS) => {
-                // The private syscall is documented as unstable. Stop
-                // trying it and replay the complete batch unchanged.
                 self.disabled = true;
                 self.fallback.send_batch(b)
             }
@@ -167,8 +163,8 @@ impl Fast {
 impl UdpEgress for Fast {
     fn send_batch(&mut self, b: &EgressBatch<'_>) -> io::Result<()> {
         self.send_batch_with(b, |sock, hdrs, count, flags| {
-            // SAFETY: `send_batch_with` initialized `hdrs[..count]`;
-            // each iovec borrows the live batch for this call.
+            // SAFETY: `send_batch_with` initialized `hdrs[..count]`.
+            // Each iovec borrows the live batch for this call.
             let ret = unsafe { sendmsg_x(sock, hdrs, count, flags) };
             if ret < 0 {
                 Err(io::Error::last_os_error())
@@ -234,8 +230,7 @@ mod tests {
         assert_eq!(&buf[..n], b"yyyyyyyyyy");
     }
 
-    /// A short positive return accepted only a prefix. The portable
-    /// fallback must send exactly the remaining tail.
+    /// Short return: fallback must send exactly the remaining tail.
     #[test]
     fn macos_fast_replays_partial_tail() {
         let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -252,8 +247,7 @@ mod tests {
         };
 
         p.send_batch_with(&batch, |sock, hdrs, _count, flags| {
-            // SAFETY: the helper initialized all three headers. Limit
-            // the real syscall to two to force a deterministic tail.
+            // SAFETY: three headers initialized. Send only two.
             let ret = unsafe { sendmsg_x(sock, hdrs, 2, flags) };
             assert_eq!(ret, 2);
             Ok(2)
@@ -267,8 +261,7 @@ mod tests {
         }
     }
 
-    /// Zero progress is also bounded: skip the batch syscall result
-    /// and replay every datagram once through the portable path.
+    /// Zero progress: replay every datagram once via the fallback.
     #[test]
     fn macos_fast_replays_zero_progress() {
         let rx = UdpSocket::bind("127.0.0.1:0").unwrap();

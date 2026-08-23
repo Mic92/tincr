@@ -181,17 +181,12 @@ impl Daemon {
         log::debug!(target: "tincd::net",
                     "Sending type 2 probe reply length {len} to {peer_name}");
 
-        self.send_probe_record(peer, peer_name, &body)
+        self.send_probe_record(peer, peer_name, &body).needs_write
     }
 
     /// Build and send a PROBE request of `len` bytes. byte[0]=0
     /// (request), bytes[1..14]=zero, bytes[14..len]=random.
-    fn send_udp_probe_outcome(
-        &mut self,
-        peer: NodeId,
-        peer_name: &str,
-        len: u16,
-    ) -> TunnelSendOutcome {
+    fn send_udp_probe(&mut self, peer: NodeId, peer_name: &str, len: u16) -> TunnelSendOutcome {
         let len = len.max(pmtu::MIN_PROBE_SIZE);
         let mut body = vec![0u8; usize::from(len)];
         // zero[0..14], random[14..]. The 14-byte zero prefix is
@@ -203,16 +198,11 @@ impl Daemon {
 
         log::debug!(target: "tincd::net",
                     "Sending UDP probe length {len} to {peer_name}");
-        self.send_probe_record_outcome(peer, peer_name, &body)
+        self.send_probe_record(peer, peer_name, &body)
     }
 
     /// Shared path for probe requests and replies.
-    pub(super) fn send_probe_record(&mut self, peer: NodeId, peer_name: &str, body: &[u8]) -> bool {
-        self.send_probe_record_outcome(peer, peer_name, body)
-            .needs_write
-    }
-
-    fn send_probe_record_outcome(
+    pub(super) fn send_probe_record(
         &mut self,
         peer: NodeId,
         peer_name: &str,
@@ -234,7 +224,7 @@ impl Daemon {
             }
         };
         // relay decision always prefers `via` for PKT_PROBE.
-        self.dispatch_tunnel_outputs_outcome(peer, peer_name, outs)
+        self.dispatch_tunnel_outputs(peer, peer_name, outs)
     }
 
     /// The "improve the tunnel" tick. Called from TWO places:
@@ -358,7 +348,7 @@ impl Daemon {
                 }
                 for a in actions {
                     if let PmtuAction::SendProbe { len, counts_miss } = a {
-                        let outcome = self.send_udp_probe_outcome(target, &target_name, len);
+                        let outcome = self.send_udp_probe(target, &target_name, len);
                         nw |= outcome.needs_write;
                         if counts_miss
                             && outcome.udp_sent
@@ -478,7 +468,7 @@ impl Daemon {
             // Fresh clock only for a submitted probe's RTT stamp; the
             // cadence gate uses the cached loop clock.
             let attempted_at = Instant::now();
-            let outcome = self.send_udp_probe_outcome(target, target_name, pmtu::MIN_PROBE_SIZE);
+            let outcome = self.send_udp_probe(target, target_name, pmtu::MIN_PROBE_SIZE);
             nw |= outcome.needs_write;
             let mut sent = outcome.udp_sent;
 
@@ -496,8 +486,7 @@ impl Daemon {
                     if let Some(t) = self.dp.tunnels.get_mut(&target) {
                         t.status.send_locally = true;
                     }
-                    let local =
-                        self.send_udp_probe_outcome(target, target_name, pmtu::MIN_PROBE_SIZE);
+                    let local = self.send_udp_probe(target, target_name, pmtu::MIN_PROBE_SIZE);
                     nw |= local.needs_write;
                     sent |= local.udp_sent;
                     if let Some(t) = self.dp.tunnels.get_mut(&target) {

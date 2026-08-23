@@ -98,7 +98,9 @@ impl Daemon {
                     ));
                 } else {
                     // start() emits one Wire; defensive.
-                    nw |= self.send_sptps_data(to_nid, tinc_sptps::REC_HANDSHAKE, &bytes);
+                    nw |= self
+                        .send_sptps_data(to_nid, tinc_sptps::REC_HANDSHAKE, &bytes)
+                        .needs_write;
                 }
             }
         }
@@ -187,7 +189,9 @@ impl Daemon {
             log::debug!(target: "tincd::proto",
                             "Relaying SPTPS_PACKET {} → {} ({} bytes)",
                             msg.from, msg.to, data.len());
-            let mut nw = self.send_sptps_data_relay(to_nid, from_nid, 0, Some(&data));
+            let mut nw = self
+                .send_sptps_data_relay(to_nid, from_nid, 0, Some(&data))
+                .needs_write;
             nw |= self.try_tx(to_nid, true);
             return Some(nw);
         }
@@ -352,7 +356,9 @@ impl Daemon {
                 }
             };
             // `to.via == myself` trivially holds for `to == myself`.
-            let mut nw = self.dispatch_tunnel_outputs(from_nid, &msg.from, outs);
+            let mut nw = self
+                .dispatch_tunnel_outputs(from_nid, &msg.from, outs)
+                .needs_write;
             nw |= self.send_mtu_info(from_nid, &msg.from, i32::from(MTU), true);
             nw |= self.send_udp_info(from_nid, &msg.from, true);
             return Ok(nw);
@@ -482,10 +488,14 @@ impl Daemon {
         // send_sptps_data, no init special-case). receive(init's
         // KEX) just stashes - recv_outs is empty here.
         let mut nw = hint_nw;
-        nw |= self.dispatch_tunnel_outputs(from_nid, &msg.from, init_outs);
+        nw |= self
+            .dispatch_tunnel_outputs(from_nid, &msg.from, init_outs)
+            .needs_write;
         match recv_result {
             Ok((_consumed, recv_outs)) => {
-                nw |= self.dispatch_tunnel_outputs(from_nid, &msg.from, recv_outs);
+                nw |= self
+                    .dispatch_tunnel_outputs(from_nid, &msg.from, recv_outs)
+                    .needs_write;
             }
             Err(e) => {
                 log::error!(target: "tincd::proto",
@@ -636,7 +646,9 @@ impl Daemon {
             }
         };
 
-        let mut nw = self.dispatch_tunnel_outputs(from_nid, &msg.from, outs);
+        let mut nw = self
+            .dispatch_tunnel_outputs(from_nid, &msg.from, outs)
+            .needs_write;
 
         // Two gates - validkey (set above on HandshakeDone; without
         // it the addr could be a replay) + relay appended one.

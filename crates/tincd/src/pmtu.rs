@@ -99,8 +99,8 @@ pub(crate) struct PmtuState {
     /// A keepalive probe is outstanding — next reply is the RTT
     /// measurement.
     pub ping_sent: bool,
-    /// Last local probe attempt, including failed submissions. Kept
-    /// separate from `udp_ping_sent`, which timestamps actual sends.
+    /// Last local probe attempt, including failed submissions
+    /// (`udp_ping_sent` timestamps actual sends).
     pub udp_probe_attempted_at: Instant,
     pub udp_ping_sent: Instant,
     /// Last time a probe **reply** arrived. Diagnostic only —
@@ -117,8 +117,8 @@ pub(crate) struct PmtuState {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PmtuAction {
     /// Send a UDP probe. `len` already clamped to `>= MIN_PROBE_SIZE`.
-    /// `counts_miss` marks the known-good `maxmtu` revalidation probe;
-    /// its successful submission advances the miss state separately.
+    /// `counts_miss`: a `maxmtu` revalidation probe whose successful
+    /// submission must be committed via `on_counted_probe_sent`.
     SendProbe { len: u16, counts_miss: bool },
 
     /// Log "Fixing MTU of %s to %d after %d probes". `probes` = how
@@ -292,9 +292,9 @@ impl PmtuState {
         out
     }
 
-    /// Commit one unanswered known-`maxmtu` probe after the UDP
-    /// datagram was accepted by the local socket. Failed submissions
-    /// leave the phase unchanged and are retried at normal cadence.
+    /// Commit one unanswered `maxmtu` probe after the local socket
+    /// accepted the datagram. Failed submissions leave the phase
+    /// unchanged.
     pub(crate) const fn on_counted_probe_sent(&mut self) {
         self.phase = match self.phase {
             PmtuPhase::Steady => PmtuPhase::Revalidate { misses: 1 },
