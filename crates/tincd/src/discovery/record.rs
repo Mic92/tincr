@@ -52,7 +52,9 @@ pub fn open_record(d: &Derived, seq: i64, sealed: &[u8]) -> Option<Vec<u8>> {
     if sealed.len() < AEAD_OVERHEAD || &sealed[..MAGIC.len()] != MAGIC {
         return None;
     }
-    let nonce = &sealed[MAGIC.len()..MAGIC.len() + NONCE_LEN];
+    let nonce: &[u8; NONCE_LEN] = sealed[MAGIC.len()..MAGIC.len() + NONCE_LEN]
+        .try_into()
+        .ok()?;
     let ct = &sealed[MAGIC.len() + NONCE_LEN..];
     XChaCha20Poly1305::new((&d.aead_key).into())
         .decrypt(
