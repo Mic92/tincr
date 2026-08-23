@@ -425,18 +425,16 @@ pub fn node_status(rows: &[String], name: &str) -> Option<u32> {
 /// `receive` decrypts (no RNG). If this ever fires, the SPTPS state
 /// machine changed — the test should know.
 pub struct NoRng;
-impl rand_core::CryptoRng for NoRng {}
-impl rand_core::RngCore for NoRng {
-    fn next_u32(&mut self) -> u32 {
+impl rand_core::TryCryptoRng for NoRng {}
+impl rand_core::TryRng for NoRng {
+    type Error = rand_core::Infallible;
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         unreachable!("RNG touched")
     }
-    fn next_u64(&mut self) -> u64 {
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
         unreachable!("RNG touched")
     }
-    fn fill_bytes(&mut self, _: &mut [u8]) {
-        unreachable!("RNG touched")
-    }
-    fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
+    fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), Self::Error> {
         unreachable!("RNG touched")
     }
 }
@@ -491,8 +489,8 @@ impl PeerFixture {
     ///
     /// `pcap_captures_tcp_packet` uses this for `Mode = switch`.
     pub fn spawn_with_config(tag: &str, write_conf: impl FnOnce(&Path) -> [u8; 32]) -> Self {
-        use rand_core::OsRng;
         use std::io::{Read, Write};
+        use tinc_crypto::os_rng;
         use tinc_crypto::sign::SigningKey;
         use tinc_sptps::{Framing, Output, Role, Sptps};
 
@@ -567,7 +565,7 @@ impl PeerFixture {
             daemon_pub,
             label,
             0,
-            &mut OsRng,
+            &mut os_rng(),
         );
         for o in init {
             if let Output::Wire { bytes, .. } = o {

@@ -9,7 +9,7 @@ use crate::node_id::NodeId6;
 use crate::tunnel::{MTU, TunnelState};
 
 use crate::graph::NodeId;
-use rand_core::OsRng;
+use tinc_crypto::os_rng;
 use tinc_proto::Request;
 
 /// Per-send result: meta-socket write readiness + whether the local
@@ -62,7 +62,7 @@ impl Daemon {
             if crate::tcp_tunnel::random_early_drop(
                 conn.outbuf.live_len(),
                 self.settings.maxoutbufsize,
-                &mut OsRng,
+                &mut os_rng(),
             ) {
                 return true; // fake success
             }
@@ -466,7 +466,7 @@ impl Daemon {
             && crate::tcp_tunnel::random_early_drop(
                 conn.outbuf.live_len(),
                 self.settings.maxoutbufsize,
-                &mut OsRng,
+                &mut os_rng(),
             )
         {
             return true; // fake success

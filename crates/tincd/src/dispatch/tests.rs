@@ -35,7 +35,7 @@ fn mkctx(cookie: &str) -> IdCtx<'_> {
     }
 }
 
-use rand_core::OsRng;
+use tinc_crypto::os_rng;
 
 // check_gate.
 
@@ -103,7 +103,7 @@ fn id_control_rejected_on_non_unix_conn() {
         line.as_bytes(),
         &mkctx(&cookie),
         Instant::now(),
-        &mut OsRng,
+        &mut os_rng(),
     );
     assert!(matches!(r, Err(DispatchError::BadId(_))), "got {r:?}");
     assert!(!c.control);
@@ -115,7 +115,7 @@ fn id_invitation_rejected_on_outgoing_conn() {
     let mut c = mkconn();
     c.outgoing = Some(slotmap::KeyData::from_ffi(1).into());
     let line = b"0 ?AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 17.7";
-    let r = handle_id(&mut c, line, &mkctx("x"), Instant::now(), &mut OsRng);
+    let r = handle_id(&mut c, line, &mkctx("x"), Instant::now(), &mut os_rng());
     assert!(matches!(r, Err(DispatchError::BadId(_))), "got {r:?}");
     assert!(c.outbuf.is_empty());
 }
@@ -132,7 +132,7 @@ fn id_cookie_mismatch() {
         line.as_bytes(),
         &mkctx(&cookie),
         Instant::now(),
-        &mut OsRng,
+        &mut os_rng(),
     );
     assert!(matches!(r, Err(DispatchError::BadId(_))));
     // No state change on failure.
@@ -159,7 +159,7 @@ fn id_early_rejects() {
     ];
     for (i, (line, label)) in cases.iter().enumerate() {
         let mut c = mkconn();
-        let r = handle_id(&mut c, line, &mkctx("x"), Instant::now(), &mut OsRng);
+        let r = handle_id(&mut c, line, &mkctx("x"), Instant::now(), &mut os_rng());
         assert!(
             matches!(r, Err(DispatchError::BadId(_))),
             "case {i} ({label}): {line:?} → {r:?}"
@@ -230,7 +230,7 @@ fn id_peer_major_mismatch() {
     let ctx = peer_ctx(&setup, &mykey, &cookie);
 
     // 18.7 — major 18, we're 17.
-    let r = handle_id(&mut c, b"0 alice 18.7", &ctx, Instant::now(), &mut OsRng);
+    let r = handle_id(&mut c, b"0 alice 18.7", &ctx, Instant::now(), &mut os_rng());
     assert!(matches!(r, Err(DispatchError::BadId(_))));
     // Name set before version check.
     assert_eq!(c.name, "alice");
@@ -248,7 +248,7 @@ fn id_peer_unknown_identity() {
     let cookie = "a".repeat(64);
     let ctx = peer_ctx(&setup, &mykey, &cookie);
 
-    let r = handle_id(&mut c, b"0 alice 17.7", &ctx, Instant::now(), &mut OsRng);
+    let r = handle_id(&mut c, b"0 alice 17.7", &ctx, Instant::now(), &mut os_rng());
     let Err(DispatchError::BadId(msg)) = r else {
         panic!("expected BadId, got {r:?}");
     };
@@ -269,7 +269,7 @@ fn id_peer_rollback_rejected() {
     let cookie = "a".repeat(64);
     let ctx = peer_ctx(&setup, &mykey, &cookie);
 
-    let r = handle_id(&mut c, b"0 alice 17.0", &ctx, Instant::now(), &mut OsRng);
+    let r = handle_id(&mut c, b"0 alice 17.0", &ctx, Instant::now(), &mut os_rng());
     let Err(DispatchError::BadId(msg)) = r else {
         panic!("expected BadId, got {r:?}");
     };
@@ -277,7 +277,7 @@ fn id_peer_rollback_rejected() {
 
     // minor=1: C would `send_metakey`. STRICTER reject.
     let mut c = mkconn();
-    let r = handle_id(&mut c, b"0 alice 17.1", &ctx, Instant::now(), &mut OsRng);
+    let r = handle_id(&mut c, b"0 alice 17.1", &ctx, Instant::now(), &mut os_rng());
     assert!(matches!(r, Err(DispatchError::BadId(_))));
 }
 
@@ -293,7 +293,7 @@ fn id_peer_no_dot_minor_zero() {
     let cookie = "a".repeat(64);
     let ctx = peer_ctx(&setup, &mykey, &cookie);
 
-    let r = handle_id(&mut c, b"0 alice 17", &ctx, Instant::now(), &mut OsRng);
+    let r = handle_id(&mut c, b"0 alice 17", &ctx, Instant::now(), &mut os_rng());
     let Err(DispatchError::BadId(msg)) = r else {
         panic!("expected BadId, got {r:?}");
     };
@@ -326,7 +326,13 @@ fn id_invitation_bad_throwaway() {
     };
 
     // Too short (32 bytes b64 → 43 chars; this is 7).
-    let r = handle_id(&mut c, b"0 ?garbage 17.7", &ctx, Instant::now(), &mut OsRng);
+    let r = handle_id(
+        &mut c,
+        b"0 ?garbage 17.7",
+        &ctx,
+        Instant::now(),
+        &mut os_rng(),
+    );
     assert!(matches!(r, Err(DispatchError::BadId(_))));
     assert!(c.sptps.is_none());
     assert!(c.outbuf.is_empty());
@@ -391,7 +397,7 @@ fn id_bumps_ping_time() {
     let cookie = "a".repeat(64);
     let line = format!("0 ^{cookie} 0");
 
-    handle_id(&mut c, line.as_bytes(), &mkctx(&cookie), now, &mut OsRng).unwrap();
+    handle_id(&mut c, line.as_bytes(), &mkctx(&cookie), now, &mut os_rng()).unwrap();
 
     assert!(c.last_ping_time > now + std::time::Duration::from_secs(3000));
 }

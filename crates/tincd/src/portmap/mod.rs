@@ -63,7 +63,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use rand_core::{OsRng, RngCore};
+use rand_core::Rng;
+use tinc_crypto::os_rng;
 
 /// `UPnP = yes | udponly | no` — C parity (`net_setup.c:1202`).
 /// `udponly` maps the UDP listener only (the SPTPS datagram path);
@@ -449,7 +450,7 @@ fn worker(
     // second one"). One per (af × proto).
     let mut nonces = [[0u8; 12]; 4];
     for n in &mut nonces {
-        OsRng.fill_bytes(n);
+        os_rng().fill_bytes(n);
     }
 
     // LAN topology, re-derived every refresh round. See `GwState`.

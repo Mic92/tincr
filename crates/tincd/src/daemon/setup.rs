@@ -1179,10 +1179,7 @@ impl Daemon {
         // Partial Fisher-Yates. Cap 8: resolver thread is serial.
         let n = cands.len();
         for i in 0..n.min(8) {
-            let j = i
-                + (<rand_core::OsRng as rand_core::RngCore>::next_u32(&mut rand_core::OsRng)
-                    as usize)
-                    % (n - i);
+            let j = i + (rand_core::Rng::next_u32(&mut tinc_crypto::os_rng()) as usize) % (n - i);
             cands.swap(i, j);
             let (name, key) = &cands[i];
             log::debug!(target: "tincd::discovery",

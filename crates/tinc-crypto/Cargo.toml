@@ -16,11 +16,11 @@ subtle.workspace = true
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 ml-kem.workspace = true
 kem.workspace = true
-rand_core = "0.6"
+rand_core.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 hex.workspace = true
-rand_core = { version = "0.6", features = ["getrandom"] }
 serde.workspace = true
 serde_json.workspace = true
 

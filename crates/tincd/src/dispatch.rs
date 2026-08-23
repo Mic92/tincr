@@ -8,7 +8,6 @@
 use std::path::Path;
 use std::time::Instant;
 
-use rand_core::RngCore;
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 use tinc_proto::Request;
 use tinc_proto::request::{PROT_MAJOR, PROT_MINOR};
@@ -389,7 +388,7 @@ pub(crate) fn handle_id(
     line: &[u8],
     ctx: &IdCtx<'_>,
     now: Instant,
-    rng: &mut (impl RngCore + rand_core::CryptoRng),
+    rng: &mut impl rand_core::CryptoRng,
 ) -> Result<IdOk, DispatchError> {
     let (name_tok, major, minor) = parse_id_line(line)?;
 
@@ -433,7 +432,7 @@ fn id_peer(
     major: u8,
     minor: u8,
     ctx: &IdCtx<'_>,
-    rng: &mut (impl RngCore + rand_core::CryptoRng),
+    rng: &mut impl rand_core::CryptoRng,
 ) -> Result<IdOk, DispatchError> {
     let name = std::str::from_utf8(name_tok)
         .ok()
@@ -614,7 +613,7 @@ fn id_invitation(
     conn: &mut Connection,
     throwaway_b64: &[u8],
     ctx: &IdCtx<'_>,
-    rng: &mut (impl RngCore + rand_core::CryptoRng),
+    rng: &mut impl rand_core::CryptoRng,
 ) -> Result<IdOk, DispatchError> {
     let Some(inv_key) = ctx.invitation_key else {
         return Err(DispatchError::BadId(format!(

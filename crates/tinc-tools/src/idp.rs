@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use rand_core::{OsRng, RngCore};
+use rand_core::Rng;
 use rsa::RsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
 use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
@@ -26,6 +26,7 @@ use rsa::signature::{SignatureEncoding, Signer};
 use rsa::traits::PublicKeyParts;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tinc_crypto::os_rng;
 
 pub const DEFAULT_ID_TOKEN_TTL: Duration = Duration::from_mins(5);
 pub const DEFAULT_ACCESS_TOKEN_TTL: Duration = Duration::from_hours(1);
@@ -147,7 +148,7 @@ pub fn load_or_create_key(path: &Path) -> Result<RsaPrivateKey, String> {
         let pem = fs::read_to_string(path).map_err(|e| e.to_string())?;
         return RsaPrivateKey::from_pkcs8_pem(&pem).map_err(|e| e.to_string());
     }
-    let key = RsaPrivateKey::new(&mut OsRng, 2048).map_err(|e| e.to_string())?;
+    let key = RsaPrivateKey::new(&mut os_rng(), 2048).map_err(|e| e.to_string())?;
     let pem = key
         .to_pkcs8_pem(LineEnding::LF)
         .map_err(|e| e.to_string())?;
@@ -174,7 +175,7 @@ pub fn now_unix() -> u64 {
 
 fn random_token() -> String {
     let mut b = [0u8; 32];
-    OsRng.fill_bytes(&mut b);
+    os_rng().fill_bytes(&mut b);
     URL_SAFE_NO_PAD.encode(b)
 }
 
@@ -258,7 +259,7 @@ fn parse_basic_auth(header: Option<&str>) -> Option<(String, String)> {
 impl Idp {
     #[must_use]
     pub fn new(config: Config, key: RsaPrivateKey) -> Self {
-        let kid_digest = Sha256::digest(key.n().to_bytes_be());
+        let kid_digest = Sha256::digest(key.n().to_be_bytes_trimmed_vartime());
         let kid = URL_SAFE_NO_PAD.encode(&kid_digest[..8]);
         let jwks = json!({
             "keys": [{
@@ -266,8 +267,8 @@ impl Idp {
                 "use": "sig",
                 "alg": "RS256",
                 "kid": kid,
-                "n": URL_SAFE_NO_PAD.encode(key.n().to_bytes_be()),
-                "e": URL_SAFE_NO_PAD.encode(key.e().to_bytes_be()),
+                "n": URL_SAFE_NO_PAD.encode(key.n().to_be_bytes_trimmed_vartime()),
+                "e": URL_SAFE_NO_PAD.encode(key.e().to_be_bytes_trimmed_vartime()),
             }]
         });
         Self {

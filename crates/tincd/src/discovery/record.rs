@@ -6,7 +6,8 @@ use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
-use rand_core::{OsRng, RngCore};
+use rand_core::Rng;
+use tinc_crypto::os_rng;
 
 use super::blind::Derived;
 
@@ -27,7 +28,7 @@ pub const AEAD_OVERHEAD: usize = MAGIC.len() + NONCE_LEN + TAG_LEN;
 #[must_use]
 pub fn seal_record(d: &Derived, seq: i64, plaintext: &[u8]) -> Vec<u8> {
     let mut nonce = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce);
+    os_rng().fill_bytes(&mut nonce);
     let ct = XChaCha20Poly1305::new((&d.aead_key).into())
         .encrypt(
             (&nonce).into(),

@@ -19,7 +19,6 @@ use nix::errno::Errno;
 use nix::sys::socket::send;
 use nix::unistd::read;
 
-use rand_core::RngCore;
 use tinc_crypto::sign::PUBLIC_LEN;
 use tinc_proto::Request;
 use tinc_sptps::{Output, Sptps, SptpsError};
@@ -449,7 +448,7 @@ impl Connection {
     /// `receive_meta` recv-and-buffer half.
     ///
     /// `rng`: only touched on SPTPS rekey (HANDSHAKE → `send_kex`).
-    pub(crate) fn feed(&mut self, rng: &mut (impl RngCore + rand_core::CryptoRng)) -> FeedResult {
+    pub(crate) fn feed(&mut self, rng: &mut impl rand_core::CryptoRng) -> FeedResult {
         let mut stack = [0u8; MAXBUFSIZE];
 
         // Cap shrinks as inbuf fills. SPTPS mode doesn't touch inbuf
@@ -577,7 +576,7 @@ impl Connection {
         sptps: &mut Sptps,
         chunk: &[u8],
         name: &str,
-        rng: &mut (impl RngCore + rand_core::CryptoRng),
+        rng: &mut impl rand_core::CryptoRng,
     ) -> FeedResult {
         if chunk.is_empty() {
             // Common: the ID line was ALL of the recv.

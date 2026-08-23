@@ -8,7 +8,7 @@ const NOW: u64 = 1_700_000_000;
 
 fn test_key() -> &'static RsaPrivateKey {
     static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
-    KEY.get_or_init(|| RsaPrivateKey::new(&mut OsRng, 2048).unwrap())
+    KEY.get_or_init(|| RsaPrivateKey::new(&mut os_rng(), 2048).unwrap())
 }
 
 fn test_idp() -> Idp {

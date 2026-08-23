@@ -36,7 +36,7 @@
 
 #![forbid(unsafe_code)]
 
-use rand_core::RngCore;
+use rand_core::Rng;
 
 use crate::node_id::NodeId6;
 
@@ -93,7 +93,7 @@ pub(crate) fn parse_frame(blob: &[u8]) -> Option<(NodeId6, NodeId6, &[u8])> {
 /// idiom). Doesn't matter — this is congestion heuristics, not
 /// crypto.
 #[must_use]
-pub(crate) fn random_early_drop<R: RngCore>(outbuf_len: usize, max: usize, rng: &mut R) -> bool {
+pub(crate) fn random_early_drop<R: Rng>(outbuf_len: usize, max: usize, rng: &mut R) -> bool {
     // Degenerate config: max == 0 or max == 1 → half == 0. C would
     // call prng(0); our `% 0` would panic. Never drop instead — a
     // zero/tiny outbuf cap means "don't bother gating".

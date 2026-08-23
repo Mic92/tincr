@@ -44,7 +44,7 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use rand_core::OsRng;
+use tinc_crypto::os_rng;
 
 use tinc_sptps::{Framing, Output, Role, Sptps};
 use tinc_tools::keypair;
@@ -410,7 +410,7 @@ fn run(args: &Args, mut sock: Sock, mut s: Sptps) -> io::Result<()> {
             // loop iterates once. Same code handles both.
             let mut off = 0;
             while off < n {
-                match s.receive(&buf[off..n], &mut OsRng) {
+                match s.receive(&buf[off..n], &mut os_rng()) {
                     Ok((0, _)) => {
                         // Ok(0) = partial record buffered, no progress
                         // this call. Datagram mode never returns 0 (it
@@ -549,7 +549,7 @@ fn main() -> ExitCode {
         hiskey,
         b"sptps_test".to_vec(),
         16,
-        &mut OsRng,
+        &mut os_rng(),
     );
 
     // The initial KEX. Drain it now, before entering the loop. For
