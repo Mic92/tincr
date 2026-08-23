@@ -41,6 +41,8 @@ let
     # netns tests need bwrap+userns the sandbox lacks. The dev shell
     # runs the full suite; this is the deployment artifact.
     doCheck = false;
+    # Loopback-socket tests need this under the darwin sandbox.
+    __darwinAllowLocalNetworking = true;
   }
   // lib.optionalAttrs baselineCpu {
     # Env RUSTFLAGS replaces .cargo/config.toml's target.* rustflags
