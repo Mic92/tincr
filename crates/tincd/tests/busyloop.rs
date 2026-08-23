@@ -47,19 +47,22 @@ fn cpu_time(pid: u32) -> u64 {
     }
     #[cfg(target_os = "macos")]
     {
-        // `ps -p PID -o cputime=` gives MM:SS.xx — parse to centiseconds.
-        let out = std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "cputime="])
-            .output()
-            .expect("ps");
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        // Format: "M:SS.xx" or "MM:SS.xx"
-        let (min_s, rest) = s.split_once(':').expect("cputime has ':'");
-        let (sec_s, cs_s) = rest.split_once('.').unwrap_or((rest, "0"));
-        let min: u64 = min_s.parse().unwrap_or(0);
-        let sec: u64 = sec_s.parse().unwrap_or(0);
-        let cs: u64 = cs_s.parse().unwrap_or(0);
-        min * 6000 + sec * 100 + cs
+        // proc_pid_rusage instead of ps: the nix sandbox has no ps.
+        // Times are in mach ticks. Convert to centiseconds.
+        let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+        let ret = unsafe {
+            libc::proc_pid_rusage(
+                pid as i32,
+                libc::RUSAGE_INFO_V2,
+                std::ptr::from_mut(&mut info).cast(),
+            )
+        };
+        assert_eq!(ret, 0, "proc_pid_rusage({pid})");
+        let mut tb = libc::mach_timebase_info { numer: 0, denom: 0 };
+        unsafe { libc::mach_timebase_info(&mut tb) };
+        let ns =
+            (info.ri_user_time + info.ri_system_time) * u64::from(tb.numer) / u64::from(tb.denom);
+        ns / 10_000_000
     }
 }
 
