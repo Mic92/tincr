@@ -25,3 +25,5 @@ __pycache__
 # KAT generator binaries (outputs are checked in / nix-built)
 /kat/gen_kat
 /kat_graph/gen_graph
+android/**/build/
+android/app/src/main/jniLibs/
