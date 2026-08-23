@@ -7,9 +7,20 @@
 {
   craneLib,
   lib,
+  stdenv,
   installShellFiles,
   pkg-config,
   openssl,
+  # test-only inputs, see passthru.tests
+  bubblewrap ? null,
+  iproute2 ? null,
+  iputils ? null,
+  util-linux ? null,
+  miniupnpd-nftables ? null,
+  nftables ? null,
+  iperf3 ? null,
+  tincd-c ? null,
+  sptps-test-c ? null,
   # true → drop the x86-64-v3/AVX2 floor from .cargo/config.toml so
   # the binary runs on pre-Haswell x86_64. No SIGILL; the OpenSSL
   # AEAD kernels dispatch at runtime either way.
@@ -69,6 +80,42 @@ craneLib.buildPackage (
     postInstall = ''
       installManPage man/*.[0-9]
     '';
+    passthru.tests = craneLib.cargoTest (
+      common
+      // {
+        inherit cargoArtifacts;
+        doCheck = true;
+        cargoExtraArgs = "--workspace";
+        # tinc-ffi vendors the C implementation for differential tests.
+        # .cargo/config.toml points at scripts/macos-test-runner.sh.
+        src = mkSrc (
+          lib.fileset.unions [
+            rustSrc
+            ../tinc-c
+            ../scripts/macos-test-runner.sh
+          ]
+        );
+        nativeCheckInputs = [
+          iperf3
+        ]
+        ++ lib.optionals stdenv.hostPlatform.isLinux [
+          bubblewrap
+          iproute2
+          iputils
+          util-linux
+          miniupnpd-nftables
+          nftables
+        ];
+      }
+      # Cross-impl wire-compat tests gate on these; unset → SKIP.
+      // lib.optionalAttrs (tincd-c != null) {
+        TINC_C_TINCD = "${tincd-c}/sbin/tincd";
+      }
+      // lib.optionalAttrs (sptps-test-c != null) {
+        TINC_C_SPTPS_TEST = "${sptps-test-c}/bin/sptps_test";
+        TINC_C_SPTPS_KEYPAIR = "${sptps-test-c}/bin/sptps_keypair";
+      }
+    );
     meta.mainProgram = "tincd";
   }
 )

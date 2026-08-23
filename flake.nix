@@ -39,6 +39,8 @@
           tincd-c = pkgs.callPackage ./nix/tincd-c.nix { };
           tincd = pkgs.callPackage ./nix/tincd.nix {
             craneLib = crane.mkLib pkgs;
+            tincd-c = self.packages.${system}.tincd-c;
+            sptps-test-c = self.packages.${system}.sptps-test-c;
           };
           # Pre-Haswell x86_64 (no AVX2). See baselineCpu in tincd.nix.
           tincd-compat = self.packages.${system}.tincd.override { baselineCpu = true; };
@@ -62,6 +64,7 @@
         {
           formatting = treefmt.${system}.config.build.check self;
           inherit tincd;
+          tincd-test = tincd.tests;
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           # Rust↔Rust under upstream services.tinc.
