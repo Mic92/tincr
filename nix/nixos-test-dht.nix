@@ -185,6 +185,12 @@ let
           secure_mode=no
         '';
       };
+      # On slow (aarch64) boots miniupnpd can win the race against
+      # eth2's address assignment and die at startup. Retry instead.
+      systemd.services.miniupnpd.serviceConfig = {
+        Restart = "on-failure";
+        RestartSec = 1;
+      };
     };
 in
 testers.runNixOSTest {
