@@ -483,6 +483,15 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
     cfg_int!(config, "UDPDiscoveryTimeout", u32, |v| {
         settings.udp_discovery_timeout = v;
     });
+    // timeout <= keepalive interval would demote every confirmed UDP
+    // path to permanent TCP fallback. Keep the default 3:1 ratio.
+    if settings.udp_discovery_timeout <= settings.udp_discovery_keepalive_interval {
+        let clamped = settings.udp_discovery_keepalive_interval.saturating_mul(3);
+        log::warn!(target: "tincd",
+            "UDPDiscoveryTimeout {} is not above UDPDiscoveryKeepaliveInterval {}. Raising timeout to {clamped}",
+            settings.udp_discovery_timeout, settings.udp_discovery_keepalive_interval);
+        settings.udp_discovery_timeout = clamped;
+    }
     // Keep default on <=0 (less harsh on reload typo); logged above.
     cfg_int!(config, "MaxConnectionBurst", u32, |v| if v >= 1 {
         settings.max_connection_burst = v;
@@ -917,6 +926,28 @@ mod tests {
 
         // Missing file.
         assert!(read_dht_secret_file("nope", &dir).is_err());
+    }
+
+    #[test]
+    fn udp_discovery_timeout_clamped_above_keepalive() {
+        let c = cfg(&[
+            "UDPDiscoveryTimeout = 5",
+            "UDPDiscoveryKeepaliveInterval = 10",
+        ]);
+        let mut s = DaemonSettings::default();
+        apply_reloadable_settings(&c, &mut s);
+        assert!(
+            s.udp_discovery_timeout > s.udp_discovery_keepalive_interval,
+            "timeout {} must exceed keepalive interval {}",
+            s.udp_discovery_timeout,
+            s.udp_discovery_keepalive_interval
+        );
+
+        // Keepalive raised past the default timeout also trips.
+        let c = cfg(&["UDPDiscoveryKeepaliveInterval = 60"]);
+        let mut s = DaemonSettings::default();
+        apply_reloadable_settings(&c, &mut s);
+        assert!(s.udp_discovery_timeout > s.udp_discovery_keepalive_interval);
     }
 
     fn cfg(lines: &[&str]) -> tinc_conf::Config {
