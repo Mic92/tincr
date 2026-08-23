@@ -111,16 +111,18 @@ testers.runNixOSTest {
 
         alpha.wait_until_succeeds("ping -c1 -W2 10.21.0.2", timeout=30)
         beta.succeed("ping -c1 -W2 10.21.0.1")
+        # The UDP-confirmed bit needs a probe round trip, so poll.
         for m, peer in ((alpha, "beta"), (beta, "alpha")):
-            row = m.wait_until_succeeds(
-                "tinc --pidfile=/run/tincr/mesh.pid -n mesh dump nodes "
-                f"| grep '^{peer} '",
-                timeout=30,
-            )
-            match = re.search(r"status ([0-9a-f]+)", row)
-            assert match is not None, row
-            status = int(match.group(1), 16)
-            assert status & 0x80, row
+
+            def udp_confirmed(_: bool, m=m, peer=peer) -> bool:
+                row = m.succeed(
+                    "tinc --pidfile=/run/tincr/mesh.pid -n mesh dump nodes "
+                    f"| grep '^{peer} ' || true"
+                )
+                match = re.search(r"status ([0-9a-f]+)", row)
+                return match is not None and int(match.group(1), 16) & 0x80 != 0
+
+            retry(udp_confirmed, timeout_seconds=30)
 
     with subtest("DNS stub answers via systemd-resolved per-link routing"):
         for m in (alpha, beta):
