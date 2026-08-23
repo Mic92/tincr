@@ -1,4 +1,4 @@
-From 83a26247015d7d2aafa5a8ac4a77e230086a1dc1 Mon Sep 17 00:00:00 2001
+From 5165d0deea0e86924aa9f10189ff21fc6d316362 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?J=C3=B6rg=20Thalheim?= <joerg@thalheim.io>
 Date: Sun, 23 Aug 2026 14:08:11 +0200
 Subject: [PATCH] feat(handlers): add network identity first factor
@@ -62,25 +62,25 @@ index c203c48a1..66b9e3104 100644
          data-resetpassword="%VITE_RESET_PASSWORD%"
          data-resetpasswordcustomurl="%VITE_RESET_PASSWORD_CUSTOM_URL%"
 diff --git a/web/src/App.tsx b/web/src/App.tsx
-index 1d53322df..9bf47fe13 100644
+index 00b6fb6a9..d87764226 100644
 --- a/web/src/App.tsx
 +++ b/web/src/App.tsx
-@@ -23,6 +23,7 @@ import { getBasePath } from "@utils/BasePath";
+@@ -22,6 +22,7 @@ import ThemeContextProvider from "@contexts/ThemeContext";
+ import { getBasePath } from "@utils/BasePath";
  import {
-     getCSPNonce,
      getDuoSelfEnrollment,
 +    getNetworkLogin,
      getPasskeyLogin,
      getRememberMe,
      getResetPassword,
-@@ -68,6 +69,7 @@ function App() {
-                                                     <LoginPortal
-                                                         duoSelfEnrollment={getDuoSelfEnrollment()}
-                                                         passkeyLogin={getPasskeyLogin()}
-+                                                        networkLogin={getNetworkLogin()}
-                                                         rememberMe={getRememberMe()}
-                                                         resetPassword={getResetPassword()}
-                                                         resetPasswordCustomURL={getResetPasswordCustomURL()}
+@@ -67,6 +68,7 @@ function App() {
+                                             <LoginPortal
+                                                 duoSelfEnrollment={getDuoSelfEnrollment()}
+                                                 passkeyLogin={getPasskeyLogin()}
++                                                networkLogin={getNetworkLogin()}
+                                                 rememberMe={getRememberMe()}
+                                                 resetPassword={getResetPassword()}
+                                                 resetPasswordCustomURL={getResetPasswordCustomURL()}
 diff --git a/web/src/services/Api.ts b/web/src/services/Api.ts
 index 2bf276094..d91e4d231 100644
 --- a/web/src/services/Api.ts
@@ -136,10 +136,10 @@ index 000000000..6909fc15f
 +    return res ?? ({} as SignInResponse);
 +}
 diff --git a/web/src/utils/Configuration.ts b/web/src/utils/Configuration.ts
-index f3ce566fe..034aaa169 100644
+index b3e851817..29090182c 100644
 --- a/web/src/utils/Configuration.ts
 +++ b/web/src/utils/Configuration.ts
-@@ -31,6 +31,10 @@ export function getPasskeyLogin() {
+@@ -27,6 +27,10 @@ export function getPasskeyLogin() {
      return getEmbeddedVariable("passkeylogin") === "true";
  }
  
@@ -151,22 +151,22 @@ index f3ce566fe..034aaa169 100644
      return getEmbeddedVariable("resetpasswordcustomurl");
  }
 diff --git a/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.test.tsx b/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.test.tsx
-index 1f2b6e3cd..6f635bca3 100644
+index 9dd563b05..8033742a0 100644
 --- a/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.test.tsx
 +++ b/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.test.tsx
-@@ -61,6 +61,7 @@ const defaultProps = {
-     onAuthenticationSuccess: vi.fn(),
-     onChannelStateChange: vi.fn(),
-     passkeyLogin: false,
+@@ -56,6 +56,7 @@ vi.mock("@views/LoginPortal/FirstFactor/PasskeyForm", () => ({
+ 
+ const defaultProps = {
+     disabled: false,
 +    networkLogin: false,
-     rememberMe: false,
-     resetPassword: false,
-     resetPasswordCustomURL: "",
+     onAuthenticationStart: vi.fn(),
+     onAuthenticationStop: vi.fn(),
+     onAuthenticationSuccess: vi.fn(),
 diff --git a/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.tsx b/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.tsx
-index 0db97444f..43f54a8b0 100644
+index f8fd6bd09..f64a6e2c0 100644
 --- a/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.tsx
 +++ b/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.tsx
-@@ -19,12 +19,14 @@ import { useUserCode } from "@hooks/OpenIDConnect";
+@@ -28,12 +28,14 @@ import { useUserCode } from "@hooks/OpenIDConnect";
  import { useQueryParam } from "@hooks/QueryParam";
  import LoginLayout from "@layouts/LoginLayout";
  import { IsCapsLockModified } from "@services/CapsLock";
@@ -181,18 +181,18 @@ index 0db97444f..43f54a8b0 100644
      rememberMe: boolean;
      resetPassword: boolean;
      resetPasswordCustomURL: string;
-@@ -77,6 +79,37 @@ const FirstFactorForm = function (props: Props) {
+@@ -86,6 +88,37 @@ const FirstFactorForm = function (props: Props) {
          return () => clearTimeout(timeout);
      }, [focusUsername]);
  
 +    // Attempt the passwordless network identity login once on mount. A failure is expected for
 +    // clients outside the network and is silent: the regular form stays usable.
-+    const networkAttempted = useRef(false);
++    const networkAttemptedRef = useRef(false);
 +
 +    useEffect(() => {
-+        if (!props.networkLogin || networkAttempted.current) return;
++        if (!props.networkLogin || networkAttemptedRef.current) return;
 +
-+        networkAttempted.current = true;
++        networkAttemptedRef.current = true;
 +
 +        (async () => {
 +            props.onAuthenticationStart();
@@ -220,22 +220,22 @@ index 0db97444f..43f54a8b0 100644
          const handleMessage = (authenticated: boolean) => {
              if (authenticated) {
 diff --git a/web/src/views/LoginPortal/LoginPortal.test.tsx b/web/src/views/LoginPortal/LoginPortal.test.tsx
-index 0ff7cbe3e..a9638cb15 100644
+index 0ff7cbe3e..00a42c551 100644
 --- a/web/src/views/LoginPortal/LoginPortal.test.tsx
 +++ b/web/src/views/LoginPortal/LoginPortal.test.tsx
-@@ -81,6 +81,7 @@ const mockCreateErrorNotification = vi.fn();
+@@ -80,6 +80,7 @@ const mockCreateErrorNotification = vi.fn();
+ 
  const defaultProps = {
      duoSelfEnrollment: false,
-     passkeyLogin: false,
 +    networkLogin: false,
+     passkeyLogin: false,
      rememberMe: true,
      resetPassword: true,
-     resetPasswordCustomURL: "",
 diff --git a/web/src/views/LoginPortal/LoginPortal.tsx b/web/src/views/LoginPortal/LoginPortal.tsx
-index 49068aa5f..a0c52fba9 100644
+index b6150778c..ef8a77a89 100644
 --- a/web/src/views/LoginPortal/LoginPortal.tsx
 +++ b/web/src/views/LoginPortal/LoginPortal.tsx
-@@ -33,6 +33,7 @@ const SecondFactorForm = lazy(() => import("@views/LoginPortal/SecondFactor/Seco
+@@ -34,6 +34,7 @@ const SecondFactorForm = lazy(() => import("@views/LoginPortal/SecondFactor/Seco
  export interface Props {
      duoSelfEnrollment: boolean;
      passkeyLogin: boolean;
@@ -243,7 +243,7 @@ index 49068aa5f..a0c52fba9 100644
      rememberMe: boolean;
      resetPassword: boolean;
      resetPasswordCustomURL: string;
-@@ -194,6 +195,7 @@ const LoginPortal = function (props: Props) {
+@@ -195,6 +196,7 @@ const LoginPortal = function (props: Props) {
                          <FirstFactorForm
                              disabled={firstFactorDisabled}
                              passkeyLogin={props.passkeyLogin}

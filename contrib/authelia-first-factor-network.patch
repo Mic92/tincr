@@ -1,4 +1,4 @@
-From 83a26247015d7d2aafa5a8ac4a77e230086a1dc1 Mon Sep 17 00:00:00 2001
+From 5165d0deea0e86924aa9f10189ff21fc6d316362 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?J=C3=B6rg=20Thalheim?= <joerg@thalheim.io>
 Date: Sun, 23 Aug 2026 14:08:11 +0200
 Subject: [PATCH] feat(handlers): add network identity first factor
@@ -159,7 +159,7 @@ index 5b8b133d9..f902d7f0f 100644
  	"identity_providers.oidc.authorization_policies",
  	"identity_providers.oidc.authorization_policies.*",
 diff --git a/internal/configuration/validator/configuration.go b/internal/configuration/validator/configuration.go
-index 419fd5e6a..ffb86a3af 100644
+index 177ca7a12..d76267629 100644
 --- a/internal/configuration/validator/configuration.go
 +++ b/internal/configuration/validator/configuration.go
 @@ -41,6 +41,8 @@ func ValidateConfiguration(config *schema.Configuration, validator *schema.Struc
@@ -511,10 +511,10 @@ index 000000000..0e5f2df5c
 +	assert.ErrorIs(t, err, os.ErrNotExist)
 +}
 diff --git a/internal/handlers/types.go b/internal/handlers/types.go
-index dd89b328c..af3200245 100644
+index 1bf069186..0768ff65e 100644
 --- a/internal/handlers/types.go
 +++ b/internal/handlers/types.go
-@@ -125,6 +125,16 @@ type bodySecondFactorPasswordRequest struct {
+@@ -136,6 +136,16 @@ type bodySecondFactorPasswordRequest struct {
  	UserCode  string `json:"userCode"`
  }
  
@@ -528,14 +528,14 @@ index dd89b328c..af3200245 100644
 +	UserCode       string `json:"userCode"`
 +}
 +
+ // bodyFirstFactorRequest represents the JSON body received by the endpoint.
  type bodyFirstFactorReauthenticateRequest struct {
  	Password      string `json:"password" valid:"required"`
- 	TargetURL     string `json:"targetURL"`
 diff --git a/internal/server/handlers.go b/internal/server/handlers.go
-index e1090eef3..bb9faaea4 100644
+index fdee33b41..4d660382e 100644
 --- a/internal/server/handlers.go
 +++ b/internal/server/handlers.go
-@@ -252,6 +252,10 @@ func handlerMain(config *schema.Configuration, providers middlewares.Providers)
+@@ -256,6 +256,10 @@ func handlerMain(ctx context.Context, config *schema.Configuration, providers mi
  	delayerPassword := middlewares.NewTimingAttackDelay(10, time.Second).SetRecord(true)
  
  	r.POST("/api/firstfactor", middlewareAPI(handlers.FirstFactorPasswordPOST(delayerPassword)))
@@ -559,10 +559,10 @@ index 81a37a399..f8a1d3384 100644
    "ResetPassword":"{{ .ResetPassword }}",
    "ResetPasswordCustomURL":"{{ .ResetPasswordCustomURL }}",
 diff --git a/internal/server/template.go b/internal/server/template.go
-index 647a5f5ed..87a5569bd 100644
+index 50445f494..2bb5b1cc0 100644
 --- a/internal/server/template.go
 +++ b/internal/server/template.go
-@@ -215,6 +215,7 @@ func NewTemplatedFileOptions(config *schema.Configuration) (opts *TemplatedFileO
+@@ -223,6 +223,7 @@ func NewTemplatedFileOptions(config *schema.Configuration) (opts *TemplatedFileO
  		AssetPath:               config.Server.AssetPath,
  		DuoSelfEnrollment:       strFalse,
  		PasskeyLogin:            strconv.FormatBool(config.WebAuthn.EnablePasskeyLogin),
@@ -570,7 +570,7 @@ index 647a5f5ed..87a5569bd 100644
  		RememberMe:              strconv.FormatBool(!config.Session.DisableRememberMe),
  		ResetPassword:           strconv.FormatBool(!config.AuthenticationBackend.PasswordReset.Disable),
  		ResetPasswordCustomURL:  config.AuthenticationBackend.PasswordReset.CustomURL.String(),
-@@ -250,6 +251,7 @@ type TemplatedFileOptions struct {
+@@ -258,6 +259,7 @@ type TemplatedFileOptions struct {
  	AssetPath              string
  	DuoSelfEnrollment      string
  	PasskeyLogin           string
@@ -578,7 +578,7 @@ index 647a5f5ed..87a5569bd 100644
  	RememberMe             string
  	ResetPassword          string
  	ResetPasswordCustomURL string
-@@ -286,6 +288,7 @@ func (options *TemplatedFileOptions) CommonData(base, baseURL, domain, nonce, la
+@@ -294,6 +296,7 @@ func (options *TemplatedFileOptions) CommonData(base, baseURL, domain, nonce, la
  		LogoOverride:           logoOverride,
  		DuoSelfEnrollment:      options.DuoSelfEnrollment,
  		PasskeyLogin:           options.PasskeyLogin,
@@ -586,7 +586,7 @@ index 647a5f5ed..87a5569bd 100644
  		RememberMe:             options.RememberMe,
  		ResetPassword:          options.ResetPassword,
  		ResetPasswordCustomURL: options.ResetPasswordCustomURL,
-@@ -306,6 +309,7 @@ func (options *TemplatedFileOptions) commonDataWithRememberMe(base, baseURL, dom
+@@ -315,6 +318,7 @@ func (options *TemplatedFileOptions) commonDataWithRememberMe(base, baseURL, dom
  		LogoOverride:           logoOverride,
  		DuoSelfEnrollment:      options.DuoSelfEnrollment,
  		PasskeyLogin:           options.PasskeyLogin,
@@ -594,7 +594,7 @@ index 647a5f5ed..87a5569bd 100644
  		RememberMe:             rememberMe,
  		ResetPassword:          options.ResetPassword,
  		ResetPasswordCustomURL: options.ResetPasswordCustomURL,
-@@ -345,6 +349,7 @@ type TemplatedFileCommonData struct {
+@@ -354,6 +358,7 @@ type TemplatedFileCommonData struct {
  	LogoOverride           string
  	DuoSelfEnrollment      string
  	PasskeyLogin           string
@@ -603,10 +603,10 @@ index 647a5f5ed..87a5569bd 100644
  	ResetPassword          string
  	ResetPasswordCustomURL string
 diff --git a/internal/session/user_session.go b/internal/session/user_session.go
-index fcc2e2a58..ebb8b609b 100644
+index c091fab41..a563c348a 100644
 --- a/internal/session/user_session.go
 +++ b/internal/session/user_session.go
-@@ -45,6 +45,14 @@ func (s *UserSession) SetOneFactorPassword(now time.Time, details *authenticatio
+@@ -44,6 +44,14 @@ func (s *UserSession) SetOneFactorPassword(now time.Time, details *authenticatio
  	s.AuthenticationMethodRefs.UsernameAndPassword = true
  }
  
