@@ -216,7 +216,7 @@ first_factor_network:
 The portal tries it once on page load and falls back to the
 password form for off-mesh clients. The patch lives in this repo,
 split for Authelia's two build trees and written against Authelia
-master (0386207a7, August 2026):
+v4.39.20, the release nixpkgs ships:
 
 - [`contrib/authelia-first-factor-network.patch`](../contrib/authelia-first-factor-network.patch)
   (Go backend)
