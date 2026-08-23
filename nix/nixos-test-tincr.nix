@@ -57,7 +57,10 @@ let
       networking.useDHCP = false;
       networking.firewall.enable = false;
 
-      environment.systemPackages = [ pkgs.dig ];
+      environment.systemPackages = [
+        pkgs.dig
+        tincd
+      ];
     };
 in
 testers.runNixOSTest {
