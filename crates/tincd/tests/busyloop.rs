@@ -21,8 +21,10 @@ fn blackhole() -> (socket2::Socket, Vec<TcpStream>, SocketAddr) {
         .unwrap();
     s.listen(0).unwrap();
     let addr = s.local_addr().unwrap().as_socket().unwrap();
+    // macOS rounds the backlog up (somaxconn default 128), so keep
+    // connecting until the queue is actually full.
     let mut held = Vec::new();
-    for _ in 0..16 {
+    for _ in 0..1024 {
         match TcpStream::connect_timeout(&addr, Duration::from_millis(250)) {
             Ok(c) => held.push(c),
             Err(_) => break,
