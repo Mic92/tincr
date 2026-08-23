@@ -16,7 +16,6 @@ use std::os::fd::IntoRawFd;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
 use crate::bind_to_interface;
-#[cfg(target_os = "linux")]
 use nix::sys::socket::{setsockopt, sockopt};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 

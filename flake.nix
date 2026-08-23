@@ -61,6 +61,7 @@
         in
         {
           formatting = treefmt.${system}.config.build.check self;
+          inherit tincd;
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           # Rust↔Rust under upstream services.tinc.
