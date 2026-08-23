@@ -1,28 +1,30 @@
-# tinc-auth integration test: nginx auth_request → tinc-auth →
-# tincd control socket → 204 + Tinc-Node header → upstream sees it.
+# tinc-auth integration test, both modes:
+#   auth_request: nginx → tinc-auth → 204 + Tinc-Node → upstream
+#   OIDC IdP:     gitea on beta logs alpha in via the mesh IdP
 #
-# Unlike nixos-test.nix this isn't proving wire compat with the C —
-# tinc-auth has no C equivalent. This proves the deployment surface:
-# socket activation works, the unit can read tincd's pidfile, the
-# header reaches the proxied app, and an off-mesh request 401s.
-#
-# Two nodes:
-#   alpha = the client (curl from here)
-#   beta  = tincd + tinc-auth + nginx + a trivial origin
-#
-# beta also has a non-tinc loopback path to nginx so we can prove
-# the deny case in the same VM (a request from 127.0.0.1, which
-# isn't in any tinc subnet, must 401).
+# alpha = the client (curl from here), beta = tincd + tinc-auth +
+# nginx + origin + gitea. Off-mesh requests (127.0.0.1) must fail.
 {
+  lib,
   testers,
   tincd,
   writers,
 }:
 let
   keys = import ./snakeoil-keys.nix;
+  idpUrl = "http://10.20.0.2:8443";
+  giteaUrl = "http://10.20.0.2:3000";
 
-  # Same shape as nixos-test.nix's mkNode but stripped to what both
-  # nodes need. The auth machinery is beta-only and bolted on below.
+  clients = builtins.toFile "clients.json" (
+    builtins.toJSON [
+      {
+        id = "gitea";
+        secret = "snakeoil-oidc-secret";
+        redirect_uris = [ "${giteaUrl}/user/oauth2/tinc/callback" ];
+      }
+    ]
+  );
+
   mkNode =
     self: peer:
     { ... }:
@@ -71,11 +73,7 @@ let
       environment.systemPackages = [ tincd ];
     };
 
-  # Origin: echoes X-Tinc-Node back in the body so curl can grep it.
-  # BaseHTTPRequestHandler does the framing (CRLF, Content-Length,
-  # case-insensitive header lookup); we just read one header and
-  # write it back. Single-threaded HTTPServer is fine — the test
-  # sends two requests, sequentially.
+  # Echoes X-Tinc-Node back in the body so curl can grep it.
   origin = writers.writePython3 "origin" { } ''
     from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -89,9 +87,6 @@ let
             self.end_headers()
             self.wfile.write(body)
 
-        # Silence the per-request log line. ruff (which
-        # writePython3 runs at build time) wants the override
-        # not to shadow names with unused params; *_ absorbs them.
         def log_message(self, *_):
             pass
 
@@ -106,46 +101,47 @@ testers.runNixOSTest {
     alpha = mkNode "alpha" "beta";
 
     beta =
-      { pkgs, lib, ... }:
+      { pkgs, config, ... }:
       {
         imports = [ (mkNode "beta" "alpha") ];
 
-        # ─── tinc-auth: socket-activated, talks to tincd's control
-        # socket. Runs as root because the pidfile is mode 0600
-        # written before the daemon's `-U tinc-mesh` privdrop
-        # (tincd.c:658 setup_network → init_control vs :687
-        # drop_privs). Same constraint `tinc -n mesh dump` has —
-        # this binary doesn't make the perm model worse, it just
-        # inherits it.
+        # Runs as root: tincd's pidfile is 0600, written before its
+        # privdrop. Same constraint as `tinc -n mesh dump`.
         systemd.sockets.tinc-auth = {
           wantedBy = [ "sockets.target" ];
           listenStreams = [ "/run/tinc-auth.sock" ];
-          socketConfig = {
-            # 0666: the test nginx runs as `nginx`, and we don't
-            # want to plumb group membership through a single-
-            # purpose VM. A real deployment would 0660 + add
-            # nginx to a group; that's NixOS module territory,
-            # not what we're testing here.
-            SocketMode = "0666";
-          };
+          # 0666 keeps the test simple. A real deployment would
+          # 0660 + a shared group.
+          socketConfig.SocketMode = "0666";
         };
+        # wantedBy: the IdP must serve from boot, not from the
+        # first nginx subrequest. The socket fd is still passed.
         systemd.services.tinc-auth = {
-          requires = [ "tinc-auth.socket" ];
-          after = [ "tinc.mesh.service" ];
+          wantedBy = [ "multi-user.target" ];
+          requires = [
+            "tinc-auth.socket"
+            "tinc.mesh.service"
+          ];
+          after = [
+            "tinc-auth.socket"
+            "tinc.mesh.service"
+          ];
           serviceConfig = {
-            ExecStart = "${tincd}/bin/tinc-auth -n mesh --pidfile /run/tinc.mesh.pid";
-            # Exit-on-idle is unimplemented (single-threaded accept
-            # loop with no SIGTERM handler). systemd's default
-            # SIGTERM kills it; socket activation restarts on next
-            # connect. "Let it crash" — Tailscale's nginx-auth.go:112
-            # does the same.
+            ExecStart = ''
+              ${tincd}/bin/tinc-auth -n mesh --pidfile /run/tinc.mesh.pid \
+                --idp-listen 10.20.0.2:8443 \
+                --issuer ${idpUrl} \
+                --clients ${clients} \
+                --email-domain mesh.test
+            '';
+            # The bind check races tincd's control socket at boot.
             Restart = "on-failure";
+            RestartSec = "1s";
           };
         };
 
-        # ─── nginx: auth_request → tinc-auth, then proxy to origin.
-        # Shape lifted from nixpkgs nginx/tailscale-auth.nix with
-        # the header names swapped.
+        # nginx auth_request → tinc-auth → origin. Same shape as
+        # nixpkgs' tailscale-auth.nix with the headers renamed.
         services.nginx = {
           enable = true;
           virtualHosts.default = {
@@ -168,8 +164,6 @@ testers.runNixOSTest {
               proxyPass = "http://127.0.0.1:8081";
               extraConfig = ''
                 auth_request /auth;
-                # nginx lowercases response header names and
-                # underscores: Tinc-Node → $upstream_http_tinc_node.
                 auth_request_set $tinc_node $upstream_http_tinc_node;
                 auth_request_set $tinc_net  $upstream_http_tinc_net;
                 proxy_set_header X-Tinc-Node $tinc_node;
@@ -178,76 +172,123 @@ testers.runNixOSTest {
             };
           };
         };
-        networking.firewall.allowedTCPPorts = [ 80 ];
+
+        services.gitea = {
+          enable = true;
+          settings = {
+            server = {
+              HTTP_ADDR = "0.0.0.0";
+              HTTP_PORT = 3000;
+              ROOT_URL = "${giteaUrl}/";
+            };
+            # nickname = the preferred_username claim, i.e. the
+            # node name.
+            oauth2_client = {
+              ENABLE_AUTO_REGISTRATION = true;
+              USERNAME = "nickname";
+              ACCOUNT_LINKING = "auto";
+            };
+          };
+        };
+        systemd.services.gitea-oauth-setup = {
+          wantedBy = [ "multi-user.target" ];
+          requires = [ "gitea.service" ];
+          after = [ "gitea.service" ];
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            User = "gitea";
+          };
+          script = ''
+            ${lib.getExe config.services.gitea.package} \
+              --config /var/lib/gitea/custom/conf/app.ini \
+              admin auth add-oauth \
+              --name tinc \
+              --provider openidConnect \
+              --key gitea \
+              --secret snakeoil-oidc-secret \
+              --auto-discover-url ${idpUrl}/.well-known/openid-configuration
+          '';
+        };
+
+        networking.firewall.allowedTCPPorts = [
+          80
+          3000
+          8443
+        ];
 
         systemd.services.origin = {
           wantedBy = [ "multi-user.target" ];
           serviceConfig.ExecStart = origin;
         };
-        # nmap for the test script's direct ncat probes against
-        # /run/tinc-auth.sock (curl --unix-socket would work too
-        # but mangles the request line; printf | ncat is the
-        # honest way to send a hand-built HTTP request).
+        # ncat: hand-built HTTP against the unix socket.
         environment.systemPackages = [ pkgs.nmap ];
       };
   };
 
   testScript = ''
+    import json
+
     start_all()
 
     alpha.wait_for_unit("tinc.mesh.service")
     beta.wait_for_unit("tinc.mesh.service")
     beta.wait_for_unit("nginx.service")
     beta.wait_for_unit("origin.service")
+    beta.wait_for_unit("tinc-auth.service")
     beta.wait_for_file("/run/tinc-auth.sock")
 
-    # Tunnel up first. Same poll-until-ping as nixos-test.nix —
-    # the SPTPS handshake is a few round trips after the units
-    # report active.
     alpha.wait_until_succeeds("ping -c1 -W2 10.20.0.2", timeout=30)
 
-    # Subnet gossip might lag the data path by a packet or two:
-    # ADD_SUBNET arrives over the meta connection, ping just needs
-    # the route. Poll the auth path; first 401 (alpha not yet in
-    # beta's subnet table) is fine, settle on 204.
+    # Subnet gossip can lag the data path. Poll until alpha is in
+    # beta's table.
     alpha.wait_until_succeeds("curl -fsS http://10.20.0.2/ | grep -x node=alpha", timeout=30)
 
-    # ─── allow path: alpha (10.20.0.1) → beta's nginx
-    # The origin echoes X-Tinc-Node. `node=alpha` proves: tinc-auth
-    # answered 204, the header was Tinc-Node: alpha, nginx threaded
-    # it through auth_request_set → proxy_set_header → origin saw it.
+    # allow path: origin sees the header nginx threaded through
     out = alpha.succeed("curl -fsS http://10.20.0.2/")
     assert out == "node=alpha", f"expected node=alpha, got {out!r}"
 
-    # Tinc-Net too. curl -D dumps response headers; we want the
-    # auth subrequest's headers, but those don't reach the client
-    # (nginx consumes them). The proxy_set_header X-Tinc-Net path
-    # would prove it, but origin only echoes X-Tinc-Node. Direct
-    # check: hit the auth socket from beta, where Remote-Addr is a
-    # known tinc IP, and read the response headers.
     beta.succeed(
         "printf 'GET / HTTP/1.1\\r\\nRemote-Addr: 10.20.0.1\\r\\n\\r\\n' "
         "| ncat -U /run/tinc-auth.sock | grep -i '^tinc-net: mesh'"
     )
 
-    # ─── deny path: beta → its own nginx via 127.0.0.1
-    # 127.0.0.1 isn't in any tinc subnet → tinc-auth 401 → nginx
-    # auth_request maps non-2xx to 401 → curl sees 401. -f makes
-    # curl exit nonzero on 4xx, hence `fail`.
+    # deny path: 127.0.0.1 is not in any tinc subnet
     beta.fail("curl -fsS http://127.0.0.1/")
-    # And confirm it's specifically 401, not a 500 from a broken
-    # auth backend.
     code = beta.succeed("curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/").strip()
     assert code == "401", f"expected 401 for off-mesh request, got {code}"
 
-    # ─── direct deny path: garbage Remote-Addr → 401 not 400
-    # nginx's $remote_addr is always a valid IP for INET listeners,
-    # but someone poking the socket directly (or nginx accepting on
-    # a unix listener, where $remote_addr is "unix:") should be
-    # "unknown client" (401) not "you misconfigured nginx" (400).
+    # garbage Remote-Addr is "unknown client" (401), not 400
     beta.succeed(
         "printf 'GET / HTTP/1.1\\r\\nRemote-Addr: not-an-ip\\r\\n\\r\\n' "
         "| ncat -U /run/tinc-auth.sock | head -1 | grep '401'"
     )
+
+    # ─── OIDC: gitea logs alpha in via the IdP ───
+    beta.wait_for_unit("gitea.service")
+    beta.wait_for_unit("gitea-oauth-setup.service")
+    beta.wait_for_open_port(8443, addr="10.20.0.2")
+
+    disco = json.loads(alpha.succeed(
+        "curl -fsS ${idpUrl}/.well-known/openid-configuration"
+    ))
+    assert disco["issuer"] == "${idpUrl}", disco
+
+    # Full code flow through gitea: /user/oauth2/tinc redirects to
+    # the IdP, which redirects straight back with a code, and gitea
+    # exchanges it and auto-registers the node as a user.
+    alpha.succeed(
+        "curl -fsSL -c /tmp/jar -b /tmp/jar ${giteaUrl}/user/oauth2/tinc -o /tmp/login.html"
+    )
+    # /user/settings is only reachable with a session
+    alpha.succeed("curl -fsS -b /tmp/jar ${giteaUrl}/user/settings -o /dev/null")
+    who = alpha.succeed("curl -fsS -b /tmp/jar ${giteaUrl}/user/settings | grep -o 'value=\"alpha\"' | head -1")
+    assert 'alpha' in who, f"expected user alpha in settings, got {who!r}"
+
+    # beta reaches its own gitea from 10.20.0.2, so the same flow
+    # identifies it as node beta: accounts follow node identity.
+    beta.succeed("curl -fsSL -c /tmp/jar2 -b /tmp/jar2 ${giteaUrl}/user/oauth2/tinc -o /dev/null")
+    who = beta.succeed("curl -fsS -b /tmp/jar2 ${giteaUrl}/user/settings | grep -o 'value=\"beta\"' | head -1")
+    assert 'beta' in who, f"expected user beta in settings, got {who!r}"
   '';
 }
