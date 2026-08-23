@@ -77,9 +77,10 @@ Everything tinc 1.1 does, plus:
   locks itself out of everything on disk it does not need
   (Landlock on Linux, pledge/unveil-style). See
   [docs/SECURITY.md](docs/SECURITY.md).
-- **nginx integration.** `tinc-auth` is an `auth_request` backend:
-  it tells nginx which mesh node a request came from, via
-  `Tinc-Node` and `Tinc-Subnet` headers.
+- **Web auth from mesh identity.** `tinc-auth` is an nginx
+  `auth_request` backend (`Tinc-Node`/`Tinc-Subnet` headers) and an
+  OIDC provider for apps like Gitea and Grafana: being on the mesh
+  is the login. See [docs/AUTH.md](docs/AUTH.md).
 - **systemd integration.** Readiness via `Type=notify`, watchdog
   keepalive, socket activation. Example unit:
   [`contrib/tincd@.service`](contrib/tincd@.service).

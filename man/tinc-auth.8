@@ -3,13 +3,20 @@
 .Os
 .Sh NAME
 .Nm tinc-auth
-.Nd nginx auth_request backend for tinc node identity
+.Nd nginx auth_request backend and OIDC provider for tinc node identity
 .Sh SYNOPSIS
 .Nm
 .Op Fl n Ar NETNAME
 .Op Fl c Ar DIR
 .Op Fl -pidfile Ns = Ns Ar FILE
 .Op Fl -listen-socket Ns = Ns Ar PATH
+.Op Fl -idp-listen Ns = Ns Ar ADDR:PORT
+.Op Fl -issuer Ns = Ns Ar URL
+.Op Fl -clients Ns = Ns Ar FILE
+.Op Fl -groups Ns = Ns Ar FILE
+.Op Fl -email-domain Ns = Ns Ar DOMAIN
+.Op Fl -id-token-ttl Ns = Ns Ar DURATION
+.Op Fl -access-token-ttl Ns = Ns Ar DURATION
 .Sh DESCRIPTION
 .Nm
 listens on a Unix-domain socket and answers
@@ -52,6 +59,49 @@ pidfile (the control socket path is derived from it).
 .It Fl -listen-socket Ns = Ns Ar PATH , Fl -sockpath Ns = Ns Ar PATH
 Unix socket to accept nginx sub-requests on.
 Ignored under socket activation.
+.It Fl -idp-listen Ns = Ns Ar ADDR:PORT
+Serve an OIDC provider on this TCP address.
+The address must fall inside a subnet owned by this node,
+otherwise
+.Nm
+refuses to start.
+See
+.Sx OIDC PROVIDER .
+.It Fl -issuer Ns = Ns Ar URL
+OIDC issuer URL as relying parties should see it,
+typically
+.Li http:// Ns Ar ADDR:PORT
+of
+.Fl -idp-listen .
+Required with
+.Fl -idp-listen .
+.It Fl -clients Ns = Ns Ar FILE
+JSON array of relying parties:
+.Li id ,
+.Li secret
+and
+.Li redirect_uris
+(matched exactly).
+Required with
+.Fl -idp-listen .
+.It Fl -groups Ns = Ns Ar FILE
+JSON object mapping node names to group lists,
+emitted as the
+.Li groups
+claim.
+Unlisted nodes get an empty list.
+.It Fl -email-domain Ns = Ns Ar DOMAIN
+Emit an
+.Li email
+claim of the form
+.Ar node Ns @ Ns Ar DOMAIN .
+Off by default because the address is synthetic.
+.It Fl -id-token-ttl Ns = Ns Ar DURATION , Fl -access-token-ttl Ns = Ns Ar DURATION
+Token lifetimes, e.g.
+.Li 5m
+or
+.Li 1h .
+Defaults: 5m and 1h.
 .It Fl -help , Fl -version
 Print help or version and exit.
 .El
@@ -84,6 +134,45 @@ is not running or its control socket is unreachable.
 .Pp
 .Sy (broadcast)
 subnets are never reported as a match.
+.Sh OIDC PROVIDER
+With
+.Fl -idp-listen ,
+.Nm
+also serves an OpenID Connect provider for applications that speak
+OIDC natively (Gitea, Grafana, ...).
+There is no login page: a browser visiting the authorization
+endpoint from a mesh address is identified by that address, exactly
+like the
+.Sy auth_request
+path.
+The endpoints are
+.Li /.well-known/openid-configuration ,
+.Li /.well-known/jwks.json ,
+.Li /authorize ,
+.Li /token
+and
+.Li /userinfo .
+.Pp
+ID tokens are RS256-signed JWTs with claims
+.Li sub
+and
+.Li preferred_username
+(the node name),
+.Li tinc_net ,
+.Li tinc_subnet ,
+.Li groups
+and optionally
+.Li email .
+The signing key is generated on first start into
+.Pa CONFDIR/idp/oidc-key.pem .
+Authorization codes support PKCE
+.Pq S256 .
+Refresh tokens are not issued.
+.Pp
+The provider serves plain HTTP.
+The transport is the mesh, which tinc already encrypts and
+authenticates, so relying parties must be configured to accept an
+http issuer and must reach the provider over the mesh.
 .Sh EXAMPLES
 .Bd -literal -offset indent
 location = /_tinc_auth {
@@ -99,6 +188,24 @@ location / {
     proxy_pass http://backend;
 }
 .Ed
+.Pp
+OIDC provider on the node's mesh address:
+.Bd -literal -offset indent
+tinc-auth -n mesh --pidfile /run/tinc.mesh.pid \e
+    --idp-listen 10.20.0.2:8443 \e
+    --issuer http://10.20.0.2:8443 \e
+    --clients /etc/tinc-auth/clients.json
+.Ed
+.Pp
+with
+.Pa clients.json :
+.Bd -literal -offset indent
+[{"id": "gitea", "secret": "...",
+  "redirect_uris": ["http://git.mesh/user/oauth2/tinc/callback"]}]
+.Ed
+.Pp
+A full walkthrough for both modes is in
+.Pa docs/AUTH.md .
 .Sh SEE ALSO
 .Xr nginx 8 ,
 .Xr tinc 8 ,
