@@ -7,7 +7,7 @@ databases, or an SSO stack.
 
 It works in two ways. For apps that trust a header from a reverse
 proxy, it acts as an nginx `auth_request` backend: nginx asks it
-about every request, and the app sees `X-Tinc-Node: alice`. For
+about every request, and the app sees `Remote-User: alice`. For
 apps that want a real login flow, like Gitea or Grafana, it acts as
 an OpenID Connect provider. The app sends the browser to tinc-auth,
 tinc-auth looks at where the connection came from, and the browser
@@ -62,11 +62,17 @@ location = /_tinc_auth {
 }
 location / {
     auth_request /_tinc_auth;
-    auth_request_set $tinc_node $upstream_http_tinc_node;
+    auth_request_set $remote_user $upstream_http_remote_user;
+    auth_request_set $tinc_node   $upstream_http_tinc_node;
+    proxy_set_header Remote-User $remote_user;
     proxy_set_header X-Tinc-Node $tinc_node;
     proxy_pass http://backend;
 }
 ```
+
+`Remote-User` is the account name (see the mapping section) and is
+what header-auth apps usually expect. `X-Tinc-Node` is the raw node
+name if the app cares which device it was.
 
 A request from a mesh address gets a 204 with `Tinc-Node`,
 `Tinc-User` (also served as `Remote-User` for consumers that
@@ -172,6 +178,44 @@ Then a lookup for `alice-laptop` finds `uid=alice` and returns the
 canonical username, groups and email from the directory. In that
 setup you don't need `--map`, `--groups` or `--email-domain` at
 all.
+
+## Combining with Authelia
+
+If Authelia already guards your apps with LDAP users and 2FA, tinc
+can take over the login for requests that arrive over the mesh
+while everything else keeps the normal Authelia flow.
+
+For apps behind forward-auth, no patches are needed. Let Authelia
+skip mesh traffic and have nginx fill in the identity from
+tinc-auth instead:
+
+```yaml
+access_control:
+  rules:
+    - domain: app.example.com
+      networks: ["10.20.0.0/24"]
+      policy: bypass
+```
+
+Both Authelia and tinc-auth end in the same `Remote-User` header,
+so the app sees one identity as long as node names (or your
+`--map`) match the LDAP usernames.
+
+Authelia's own login portal, and with it its OIDC provider, always
+needs a session and cannot delegate its first factor to another
+OIDC provider. We maintain a patch that adds a passwordless first
+factor which asks tinc-auth's socket who the client is and signs
+the matching LDAP user in, second factor policies included:
+
+```yaml
+first_factor_network:
+  enable: true
+  socket: /run/tinc-auth.sock
+```
+
+The portal tries it once on page load and falls back to the
+password form for off-mesh clients. Ask on the tincr issue tracker
+for the current version of the patch.
 
 ### Gitea
 
