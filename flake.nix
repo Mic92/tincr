@@ -73,6 +73,9 @@
           tincd-android-x86_64 = self.packages.${system}.tincd-android.override {
             target = "x86_64-linux-android";
           };
+          tincr-app = (androidPkgsFor system).callPackage ./nix/android-app.nix {
+            inherit (self.packages.${system}) tincd-android;
+          };
         }
       );
 
@@ -102,7 +105,10 @@
           tincd-test = tincd.tests;
         }
         // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
-          inherit (self.packages.${system}) tincd-android tincd-android-x86_64;
+          inherit (self.packages.${system}) tincd-android tincd-android-x86_64 tincr-app;
+          android-mesh = (androidPkgsFor system).callPackage ./nix/android-mesh-check.nix {
+            inherit (self.packages.${system}) tincr-app;
+          };
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           # Rust↔Rust under upstream services.tinc.
