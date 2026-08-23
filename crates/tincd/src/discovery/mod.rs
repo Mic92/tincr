@@ -847,8 +847,9 @@ mod tests {
             None,
         );
 
+        // 20s budget. Loaded CI builders have blown a 5s one.
         let drain_published = |d: &mut Discovery, now: Instant| {
-            for _ in 0..100 {
+            for _ in 0..400 {
                 for e in d.tick(now).events {
                     if let DiscoveryEvent::Published { value, .. } = e {
                         return Some(value);
