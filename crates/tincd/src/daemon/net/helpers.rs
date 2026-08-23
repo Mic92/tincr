@@ -169,14 +169,19 @@ mod tests {
 
     #[test]
     fn is_udp_unreachable_errno_matches_routing_failures() {
-        for raw in [101, 113, 97, 99] {
+        for raw in [
+            libc::ENETUNREACH,
+            libc::EHOSTUNREACH,
+            libc::EAFNOSUPPORT,
+            libc::EADDRNOTAVAIL,
+        ] {
             let e = io::Error::from_raw_os_error(raw);
             assert!(
                 is_udp_unreachable_errno(&e),
                 "errno {raw} should be classified as udp-unreachable"
             );
         }
-        for raw in [90, 11] {
+        for raw in [libc::EMSGSIZE, libc::EAGAIN] {
             let e = io::Error::from_raw_os_error(raw);
             assert!(
                 !is_udp_unreachable_errno(&e),

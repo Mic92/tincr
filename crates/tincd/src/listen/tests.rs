@@ -595,10 +595,16 @@ fn adopt_dual_stack_fd_yields_dual_stack_udp() {
         !listeners[0].udp.only_v6().unwrap(),
         "UDP must inherit the adopted fd's dual-stackness"
     );
-    // The kernel maps plain-v4 destinations on a dual-stack socket.
+    // Linux maps plain-v4 destinations on a dual-stack socket.
+    // macOS requires the v4-mapped form.
+    let dst = if cfg!(target_os = "macos") {
+        "[::ffff:127.0.0.1]:9"
+    } else {
+        "127.0.0.1:9"
+    };
     listeners[0]
         .udp
-        .send_to(b"x", &"127.0.0.1:9".parse::<SocketAddr>().unwrap().into())
+        .send_to(b"x", &dst.parse::<SocketAddr>().unwrap().into())
         .expect("v4 send through dual-stack UDP socket");
 }
 
