@@ -104,7 +104,7 @@ where
 }
 
 /// Test-only readback for `IP_MTU_DISCOVER`/`IPV6_MTU_DISCOVER`.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "android")))]
 pub(crate) fn get_int_sockopt(
     fd: BorrowedFd<'_>,
     level: libc::c_int,
@@ -246,7 +246,8 @@ fn apply_common_sockopts(
         log::warn!(target: "tincd::net", "IPV6_V6ONLY{label}: {e}");
     }
 
-    // SO_MARK: Linux netfilter mark for policy routing. 0 = unset = skip.
+    // SO_MARK: Linux netfilter mark for policy routing. 0 = unset =
+    // skip. Android blocks it via SELinux, so it stays linux-only.
     #[cfg(target_os = "linux")]
     if opts.fwmark != 0
         && let Err(e) = setsockopt(&s.as_fd(), sockopt::Mark, &opts.fwmark)
@@ -437,7 +438,7 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts, v6only: bool) -> io::Result<Socke
 
     s.set_nonblocking(true)?;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     if opts.shard_group {
         s.set_reuse_port(true)?;
     }
@@ -637,7 +638,7 @@ fn open_one(
 ///
 /// # Errors
 /// Any bind/setsockopt failure. Caller falls back to `Shards = 1`.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn open_udp_siblings(
     l: &Listener,
     opts: &SockOpts,

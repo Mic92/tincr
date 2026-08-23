@@ -10,7 +10,10 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::fd::AsFd;
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, OwnedFd};
+#[cfg(unix)]
+use std::os::unix::io::RawFd;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use crate::event::{EventLoop, Io, SelfPipe, TimerId, Timers};
@@ -23,7 +26,7 @@ use tinc_proto::Subnet;
 use crate::compress;
 use crate::control::{ControlSocket, generate_cookie, write_pidfile};
 use crate::dispatch::myself_options_from_config;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
 use crate::egress::Portable;
 use crate::egress::UdpEgress;
 use crate::icmp;
@@ -161,7 +164,10 @@ fn expand_name(name: &str) -> Result<String, String> {
 /// `shards > 1` on a Linux multi-queue TUN).
 type ShardTuns = Vec<Box<dyn Device + Send>>;
 
-#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "android")),
+    allow(unused_variables)
+)]
 fn open_device(
     config: &tinc_conf::Config,
     shards: usize,
@@ -188,38 +194,35 @@ fn open_device(
         Some("dummy") => Box::new(tinc_device::Dummy),
         #[cfg(unix)]
         Some("fd") => {
-            // The fd comes from `Device = N` (inherited fd) or
-            // `--device-fd N`. The integration test creates a
-            // socketpair, writes one end's fd into `Device = N`,
-            // and pumps IP packets through it. `FdTun` reads at
-            // `+14` (raw IP, no tun_pi prefix) and synthesizes
-            // the ethertype - the framing `route()` expects.
+            // `Device` = fd number, or socket path (`@` =
+            // abstract) for SCM_RIGHTS handover.
             let dev_str = config
                 .lookup("Device")
                 .next()
                 .map(tinc_conf::Entry::get_str)
-                .ok_or_else(|| SetupError::Config("DeviceType=fd requires Device = <fd>".into()))?;
-            let raw: std::os::unix::io::RawFd = dev_str
-                .parse()
-                .map_err(|_| SetupError::Config(format!("Device = {dev_str} is not a valid fd")))?;
-            // Negative fd numbers don't exist; reject before the
-            // unsafe wrap.
-            if raw < 0 {
-                return Err(SetupError::Config(format!(
-                    "Device = {raw}: inherited fd is negative"
-                )));
-            }
-            // SAFETY: the parent process dup2'd a tun fd to this
-            // number before exec; it is open and exclusively ours.
-            // Wrap NOW so any later `?` in setup closes it on drop
-            // rather than leaking the bare int.
-            #[allow(unsafe_code)]
-            let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-            let tun = tinc_device::FdTun::open(tinc_device::FdSource::Inherited(fd))
-                .map_err(|e| SetupError::io(format!("open inherited device fd {raw}"), e))?;
+                .ok_or_else(|| {
+                    SetupError::Config("DeviceType=fd requires Device = <fd or socket path>".into())
+                })?;
+            let tun = if let Ok(raw) = dev_str.parse::<RawFd>() {
+                if raw < 0 {
+                    return Err(SetupError::Config(format!(
+                        "Device = {raw}: inherited fd is negative"
+                    )));
+                }
+                // SAFETY: the parent dup2'd an open tun fd to this
+                // number before exec. Wrapping now means later `?`
+                // closes it instead of leaking the bare int.
+                #[allow(unsafe_code)]
+                let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+                tinc_device::FdTun::open(tinc_device::FdSource::Inherited(fd))
+                    .map_err(|e| SetupError::io(format!("open inherited device fd {raw}"), e))?
+            } else {
+                tinc_device::FdTun::open(tinc_device::FdSource::UnixSocket(PathBuf::from(dev_str)))
+                    .map_err(|e| SetupError::io(format!("receive device fd from {dev_str}"), e))?
+            };
             Box::new(tun)
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         Some("tun") => {
             // Real kernel TUN via `/dev/net/tun` + TUNSETIFF.
             // Needs `CAP_NET_ADMIN`; the netns harness grants it
@@ -262,7 +265,7 @@ fn open_device(
                 .map_err(|e| SetupError::io("open TUN device /dev/net/tun", e))?;
             Box::new(tun)
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         Some("tap") => {
             // TODO: auto-derive tap when Mode != router and
             // DeviceType is unset. We only handle the explicit
@@ -351,7 +354,7 @@ fn register_listeners(
         // sends on the dup. Same file description → same bound
         // addr, same TOS (the daemon's `set_udp_tos` sets it on
         // the listener fd).
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         let egress: Box<dyn UdpEgress> = Box::new(
             crate::egress::linux::Fast::new(&l.udp)
                 .map_err(|e| SetupError::io("dup UDP socket for egress", e))?,
@@ -361,7 +364,7 @@ fn register_listeners(
             crate::egress::macos::Fast::new(&l.udp)
                 .map_err(|e| SetupError::io("dup UDP socket for egress", e))?,
         );
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
         let egress: Box<dyn UdpEgress> = Box::new(
             Portable::new(&l.udp).map_err(|e| SetupError::io("dup UDP socket for egress", e))?,
         );
@@ -656,6 +659,7 @@ impl Daemon {
         // device
         let (device, shard_tuns) = open_device(&config, n_shards, settings.shards.is_some())?;
         // open_device may have fallen back to a single queue.
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
         let n_shards = if shard_tuns.is_empty() {
             1
         } else {
@@ -1192,6 +1196,14 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use nix::sys::socket::{ControlMessage, MsgFlags, sendmsg};
+    #[cfg(unix)]
+    use std::io::IoSlice;
+    #[cfg(unix)]
+    use std::os::fd::AsRawFd;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixListener;
 
     /// Construct a Config from `key = value` lines. Test-only.
     fn cfg_from(lines: &[&str]) -> tinc_conf::Config {
@@ -1224,6 +1236,59 @@ mod tests {
         assert_eq!(a.get("mail").unwrap(), "bob");
         assert!(!a.contains_key("bob"));
         assert_eq!(a.len(), 3);
+    }
+
+    /// Serve one fd via `SCM_RIGHTS`, like the app after `establish()`.
+    #[cfg(unix)]
+    fn serve_fd_once(listener: UnixListener) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let (_keep, give) = nix::unistd::pipe().unwrap();
+            let iov = [IoSlice::new(b"X")];
+            let fds = [give.as_raw_fd()];
+            let cmsg = ControlMessage::ScmRights(&fds);
+            sendmsg::<()>(stream.as_raw_fd(), &iov, &[cmsg], MsgFlags::empty(), None).unwrap();
+        })
+    }
+
+    /// `Device = /path`: receive the tun fd over the socket.
+    #[test]
+    #[cfg(unix)]
+    fn device_fd_from_unix_socket_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tun.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let srv = serve_fd_once(listener);
+
+        let cfg = cfg_from(&["DeviceType = fd", &format!("Device = {}", path.display())]);
+        let (dev, shard_tuns) = open_device(&cfg, 1, false).unwrap();
+        assert_eq!(dev.mode(), tinc_device::Mode::Tun);
+        assert!(shard_tuns.is_empty());
+        srv.join().unwrap();
+    }
+
+    /// `Device = @name`: abstract-namespace variant.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn device_fd_from_abstract_socket() {
+        use std::os::linux::net::SocketAddrExt;
+        let name = format!("tincr-test-{}", std::process::id());
+        let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+        let listener = UnixListener::bind_addr(&addr).unwrap();
+        let srv = serve_fd_once(listener);
+
+        let cfg = cfg_from(&["DeviceType = fd", &format!("Device = @{name}")]);
+        let (dev, _) = open_device(&cfg, 1, false).unwrap();
+        assert_eq!(dev.mode(), tinc_device::Mode::Tun);
+        srv.join().unwrap();
+    }
+
+    /// Non-numeric `Device` that isn't a live socket fails.
+    #[test]
+    #[cfg(unix)]
+    fn device_fd_missing_socket_fails() {
+        let cfg = cfg_from(&["DeviceType = fd", "Device = /nonexistent/tun.sock"]);
+        assert!(open_device(&cfg, 1, false).is_err());
     }
 
     /// `build_listeners` no-config default = `open_listeners`.

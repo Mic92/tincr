@@ -8,6 +8,10 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     crane.url = "github:ipetkov/crane";
+    fenix = {
+      url = "github:nix-community/fenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -16,6 +20,7 @@
       nixpkgs,
       treefmt-nix,
       crane,
+      fenix,
     }:
     let
       systems = [
@@ -25,11 +30,22 @@
         "riscv64-linux"
       ];
       eachSystem = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
+      # androidenv needs the unfree SDK license accepted.
+      androidPkgsFor =
+        system:
+        import nixpkgs {
+          inherit system;
+          config = {
+            allowUnfree = true;
+            android_sdk.accept_license = true;
+          };
+        };
       treefmt = eachSystem (_: pkgs: treefmt-nix.lib.evalModule pkgs ./nix/treefmt.nix);
     in
     {
       packages = eachSystem (
-        system: pkgs: {
+        system: pkgs:
+        {
           default = self.packages.${system}.tincd;
           kat-vectors = pkgs.callPackage ./nix/kat-vectors.nix { };
           kat-graph = pkgs.callPackage ./nix/kat-graph.nix { };
@@ -45,12 +61,28 @@
           # Pre-Haswell x86_64 (no AVX2). See baselineCpu in tincd.nix.
           tincd-compat = self.packages.${system}.tincd.override { baselineCpu = true; };
         }
+        // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          tincd-android =
+            let
+              pkgs' = androidPkgsFor system;
+            in
+            pkgs'.callPackage ./nix/tincd-android.nix {
+              craneLib = crane.mkLib pkgs';
+              fenix = fenix.packages.${system};
+            };
+        }
       );
 
       devShells = eachSystem (
-        system: pkgs: {
+        system: pkgs:
+        {
           default = pkgs.callPackage ./nix/devshell.nix {
             inherit (self.packages.${system}) tincd-c sptps-test-c;
+          };
+        }
+        // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          android = (androidPkgsFor system).callPackage ./nix/devshell-android.nix {
+            fenix = fenix.packages.${system};
           };
         }
       );

@@ -481,10 +481,10 @@ fn drop_privs(
         let cuser = CString::new(user).map_err(|_| "username contains NUL".to_string())?;
         tincd::initgroups(&cuser, pw.gid)
             .map_err(|e| format!("System call `initgroups' failed: {e}"))?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         nix::unistd::setresgid(pw.gid, pw.gid, pw.gid)
             .map_err(|e| format!("System call `setresgid' failed: {e}"))?;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         nix::unistd::setgid(pw.gid).map_err(|e| format!("System call `setgid' failed: {e}"))?;
 
         Some((pw.uid, pw.gid))
@@ -511,7 +511,7 @@ fn drop_privs(
 
     // setresuid last (real/effective/saved); after this we can't undo.
     if let Some((uid, gid)) = uid_gid {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             nix::unistd::setresuid(uid, uid, uid)
                 .map_err(|e| format!("System call `setresuid' failed: {e}"))?;
@@ -526,7 +526,7 @@ fn drop_privs(
                 return Err(format!("setresgid did not stick: got {rg:?}, want {gid}"));
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
             let _ = gid; // gid already set via setgid above
             nix::unistd::setuid(uid).map_err(|e| format!("System call `setuid' failed: {e}"))?;
@@ -858,9 +858,9 @@ fn main() -> ExitCode {
     };
     let sandbox_paths = sandbox::Paths {
         confbase: args.confbase.clone(),
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         device: Some("/dev/net/tun".into()),
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         device: None,
         logfile: args.logfile.clone(),
         pidfile: args.pidfile.clone(),

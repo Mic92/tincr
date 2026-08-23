@@ -5,7 +5,7 @@ use super::{ConnId, Daemon, PKT_PROBE, TimerWhat, parse_subnets_from_config};
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
@@ -24,7 +24,7 @@ use tinc_crypto::os_rng;
 use tinc_proto::AddrStr;
 use tinc_proto::msg::{MtuInfo, UdpInfo};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use nix::sys::socket::{
     AddressFamily, SockFlag, SockType, SockaddrStorage, connect, getsockopt, socket, sockopt,
 };
@@ -41,7 +41,7 @@ use nix::sys::socket::{
 /// that window is stuck at MSS 536.
 ///
 /// Falls back to `MTU` on every error.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn choose_initial_maxmtu(_peer: SocketAddr) -> u16 {
     // macOS has no IP_MTU sockopt to query the kernel's PMTU cache.
     // Fall back to default MTU; the PMTU probing loop in pmtu.rs will
@@ -50,7 +50,7 @@ fn choose_initial_maxmtu(_peer: SocketAddr) -> u16 {
     MTU
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn choose_initial_maxmtu(peer: SocketAddr) -> u16 {
     // Ephemeral DGRAM socket, only for the kernel's route+PMTU
     // lookup. Never sends.

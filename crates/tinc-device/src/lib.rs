@@ -308,9 +308,9 @@ pub(crate) fn write_fd(fd: std::os::fd::BorrowedFd<'_>, buf: &[u8]) -> io::Resul
 
 // Linux TUN/TAP — `linux/device.c` (225 LOC)
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod linux;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub use linux::Tun;
 
 // fd — `fd_device.c` (Android backend).
@@ -322,9 +322,9 @@ pub use fd::{FdSource, FdTun};
 
 // raw — `raw_socket_device.c` (PF_PACKET backend). Linux-only.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod raw;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub use raw::RawSocket;
 
 // bsd — `bsd/device.c` (three backends in one file). `cfg(unix)`

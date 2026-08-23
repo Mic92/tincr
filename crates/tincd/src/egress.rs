@@ -19,7 +19,7 @@ use std::io;
 
 use socket2::{SockAddr, Socket};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) mod linux;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
@@ -314,7 +314,7 @@ impl TxBatch {
 /// `send_to` — `Portable::send_batch` with `count=1` IS one `sendto`.
 // Linux uses `linux::Fast`; `Portable` stays for the wire-equivalence
 // test in `egress/linux.rs` and as the non-Linux backend.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+#[cfg_attr(any(target_os = "linux", target_os = "android"), allow(dead_code))]
 pub(crate) struct Portable {
     /// `dup(2)` of `Listener.udp`. Same file description, so
     /// `SO_BINDTODEVICE`/`IP_TOS`/etc. set on the listener apply
@@ -323,7 +323,7 @@ pub(crate) struct Portable {
     sock: Socket,
 }
 
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+#[cfg_attr(any(target_os = "linux", target_os = "android"), allow(dead_code))]
 impl Portable {
     /// Build from a dup of the listener's UDP socket.
     ///

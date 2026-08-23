@@ -733,7 +733,7 @@ mod tests {
     /// but on a bare dial socket (no bind/connect). Proves the
     /// outgoing path actually applies the sockopt.
     #[test]
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn dial_sockopts_bind_to_interface_lo() {
         use nix::sys::socket::{getsockopt, sockopt};
         let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
@@ -766,7 +766,7 @@ mod tests {
     /// `CAP_NET_ADMIN`; skip otherwise (matches `listen.rs::
     /// open_fwmark_set`).
     #[test]
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn dial_sockopts_fwmark() {
         use nix::sys::socket::{getsockopt, sockopt};
         let euid = nix::unistd::geteuid();

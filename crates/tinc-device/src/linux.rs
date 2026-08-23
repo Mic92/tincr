@@ -339,7 +339,7 @@ fn ifreq_with_name(ifr_name: [libc::c_char; libc::IFNAMSIZ]) -> libc::ifreq {
 /// `TUNSETIFF` and `SIOCGIFHWADDR` both go through here so the
 /// unsafe surface is one audited block, not one per ioctl.
 #[allow(unsafe_code)]
-fn ioctl_ifreq(fd: BorrowedFd<'_>, req: libc::c_ulong, ifr: &mut libc::ifreq) -> io::Result<()> {
+fn ioctl_ifreq(fd: BorrowedFd<'_>, req: libc::Ioctl, ifr: &mut libc::ifreq) -> io::Result<()> {
     // SAFETY:
     //   - `fd` borrows an open fd; lifetime tied to the owning
     //     `File`, so it cannot be closed underneath us.
@@ -440,7 +440,7 @@ fn tunsetiff(
 /// dereference). Unlike `TUNSETIFF`, the encoding is honest.
 ///
 /// Not in the `libc` crate. Kernel ABI; can't change.
-const TUNSETOFFLOAD: libc::c_ulong = 0x4004_54d0;
+const TUNSETOFFLOAD: libc::Ioctl = 0x4004_54d0;
 
 /// `TUN_F_*` flags for `TUNSETOFFLOAD`. `if_tun.h:88-90`.
 /// `TUN_F_CSUM` is required for `TUN_F_TSO*` (`tun.c:2850`: TSO
@@ -488,7 +488,7 @@ fn siocgifhwaddr(fd: BorrowedFd<'_>) -> io::Result<Mac> {
 
     // Kernel reads NOTHING (TUN/TAP fd path; see above), WRITES
     // `ifr_ifru.ifru_hwaddr` (a `sockaddr`, 16 bytes at offset 16).
-    ioctl_ifreq(fd, libc::SIOCGIFHWADDR, &mut ifr)?;
+    ioctl_ifreq(fd, libc::SIOCGIFHWADDR as libc::Ioctl, &mut ifr)?;
 
     // `sockaddr.sa_data` is `[c_char; 14]`. First 6 bytes are the
     // MAC (ETH_ALEN=6).
