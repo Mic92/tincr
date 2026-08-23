@@ -45,6 +45,7 @@ mod export_import;
 mod fake_daemon;
 mod fsck;
 mod genkey;
+mod idp_http;
 mod info;
 mod init;
 mod invite_join;

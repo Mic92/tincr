@@ -25,12 +25,19 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use std::collections::HashMap;
+use std::io::Read;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
 use tinc_proto::Subnet;
 use tinc_proto::subnet::DEFAULT_WEIGHT;
 use tinc_tools::ctl::rows::{SubnetRow, strip_weight};
 use tinc_tools::ctl::{CtlError, CtlRequest, CtlSocket, DumpRow};
+use tinc_tools::idp::{self, Idp};
 use tinc_tools::names::{Paths, PathsInput};
-use tiny_http::{Header, Response, Server};
+use tiny_http::{Header, Method, Response, Server};
 
 const SD_LISTEN_FDS_START: RawFd = 3;
 
@@ -152,14 +159,99 @@ struct Args {
     /// The socket nginx connects to. NOT tincd's control socket,
     /// which is derived from `--pidfile` like the `tinc` CLI does.
     listen_socket: Option<PathBuf>,
+    idp_listen: Option<SocketAddr>,
+    issuer: Option<String>,
+    clients: Option<PathBuf>,
+    groups: Option<PathBuf>,
+    email_domain: Option<String>,
+    id_token_ttl: Duration,
+    access_token_ttl: Duration,
+}
+
+fn parse_ttl(s: &str) -> Result<Duration, String> {
+    let (num, mult) = match s.as_bytes().last() {
+        Some(b'h') => (&s[..s.len() - 1], 3600),
+        Some(b'm') => (&s[..s.len() - 1], 60),
+        Some(b's') => (&s[..s.len() - 1], 1),
+        _ => (s, 1),
+    };
+    num.parse::<u64>()
+        .map(|n| Duration::from_secs(n * mult))
+        .map_err(|_| format!("invalid duration: {s}"))
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut input = PathsInput::default();
     let mut listen_socket = None;
+    let mut idp_listen = None;
+    let mut issuer = None;
+    let mut clients = None;
+    let mut groups = None;
+    let mut email_domain = None;
+    let mut id_token_ttl = idp::DEFAULT_ID_TOKEN_TTL;
+    let mut access_token_ttl = idp::DEFAULT_ACCESS_TOKEN_TTL;
     let mut args = std::env::args().skip(1);
 
+    let next_val = |args: &mut dyn Iterator<Item = String>, flag: &str, glued: Option<&str>| {
+        glued.map_or_else(
+            || {
+                args.next()
+                    .ok_or(format!("option {flag} requires an argument"))
+            },
+            |v| Ok(v.to_owned()),
+        )
+    };
+
     while let Some(arg) = args.next() {
+        let (flag, glued) = match arg.split_once('=') {
+            Some((f, v)) if f.starts_with("--") => (f.to_owned(), Some(v.to_owned())),
+            _ => (arg.clone(), None),
+        };
+        match flag.as_str() {
+            "--idp-listen" => {
+                let v = next_val(&mut args, "--idp-listen", glued.as_deref())?;
+                idp_listen = Some(v.parse().map_err(|_| format!("invalid address: {v}"))?);
+                continue;
+            }
+            "--issuer" => {
+                issuer = Some(next_val(&mut args, "--issuer", glued.as_deref())?);
+                continue;
+            }
+            "--clients" => {
+                clients = Some(PathBuf::from(next_val(
+                    &mut args,
+                    "--clients",
+                    glued.as_deref(),
+                )?));
+                continue;
+            }
+            "--groups" => {
+                groups = Some(PathBuf::from(next_val(
+                    &mut args,
+                    "--groups",
+                    glued.as_deref(),
+                )?));
+                continue;
+            }
+            "--email-domain" => {
+                email_domain = Some(next_val(&mut args, "--email-domain", glued.as_deref())?);
+                continue;
+            }
+            "--id-token-ttl" => {
+                id_token_ttl =
+                    parse_ttl(&next_val(&mut args, "--id-token-ttl", glued.as_deref())?)?;
+                continue;
+            }
+            "--access-token-ttl" => {
+                access_token_ttl = parse_ttl(&next_val(
+                    &mut args,
+                    "--access-token-ttl",
+                    glued.as_deref(),
+                )?)?;
+                continue;
+            }
+            _ => {}
+        }
         match arg.as_str() {
             "-c" | "--config" => {
                 let v = args.next().ok_or("option -c requires an argument")?;
@@ -198,6 +290,9 @@ fn parse_args() -> Result<Args, String> {
             "-h" | "--help" => {
                 println!(
                     "Usage: tinc-auth [-n NETNAME] [-c DIR] [--pidfile FILE] [--listen-socket SOCK]\n\
+                     \x20               [--idp-listen ADDR --issuer URL --clients FILE]\n\
+                     \x20               [--groups FILE] [--email-domain DOMAIN]\n\
+                     \x20               [--id-token-ttl 5m] [--access-token-ttl 1h]\n\
                      \n\
                      nginx auth_request backend. Listens on a unix socket (via\n\
                      systemd socket activation, or --listen-socket). Replies 204 with\n\
@@ -206,6 +301,10 @@ fn parse_args() -> Result<Args, String> {
                      \n\
                      --listen-socket is the socket nginx connects to. tincd's control\n\
                      socket is located via --pidfile (or -n/-c), same as `tinc`.\n\
+                     \n\
+                     With --idp-listen the binary also serves an OIDC provider on a\n\
+                     mesh address. The bind address must belong to this node. See\n\
+                     docs/AUTH.md.\n\
                      \n\
                      This authenticates the tinc NODE, not a human user. If `alice`\n\
                      is your laptop, this is what you want. If `alice` is a server\n\
@@ -224,7 +323,123 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args {
         input,
         listen_socket,
+        idp_listen,
+        issuer,
+        clients,
+        groups,
+        email_domain,
+        id_token_ttl,
+        access_token_ttl,
     })
+}
+
+fn whois(paths: &Paths, addr: IpAddr) -> idp::Whois {
+    match lookup(paths, addr) {
+        Ok(Some(m)) => Ok(Some(idp::Node {
+            name: m.owner,
+            subnet: m.subnet,
+        })),
+        Ok(None) => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
+fn build_idp(args: &Args, paths: &Paths, netname: &str) -> Result<Idp, String> {
+    let issuer = args
+        .issuer
+        .clone()
+        .ok_or("--idp-listen requires --issuer")?;
+    let clients_path = args
+        .clients
+        .as_ref()
+        .ok_or("--idp-listen requires --clients")?;
+    let clients = std::fs::read(clients_path)
+        .map_err(|e| format!("{}: {e}", clients_path.display()))
+        .and_then(|b| {
+            serde_json::from_slice(&b).map_err(|e| format!("{}: {e}", clients_path.display()))
+        })?;
+    let groups: HashMap<String, Vec<String>> = match &args.groups {
+        None => HashMap::new(),
+        Some(p) => std::fs::read(p)
+            .map_err(|e| format!("{}: {e}", p.display()))
+            .and_then(|b| {
+                serde_json::from_slice(&b).map_err(|e| format!("{}: {e}", p.display()))
+            })?,
+    };
+    let key = idp::load_or_create_key(&paths.confbase.join("idp/oidc-key.pem"))?;
+    Ok(Idp::new(
+        idp::Config {
+            issuer,
+            netname: netname.to_owned(),
+            clients,
+            groups,
+            email_domain: args.email_domain.clone(),
+            id_token_ttl: args.id_token_ttl,
+            access_token_ttl: args.access_token_ttl,
+        },
+        key,
+    ))
+}
+
+fn handle_idp(req: tiny_http::Request, idp: &Idp, paths: &Paths) {
+    let now = idp::now_unix();
+    let url = req.url().to_owned();
+    let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
+    let auth_header = req
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Authorization"))
+        .map(|h| h.value.as_str().to_owned());
+
+    let resp = match (req.method(), path) {
+        (Method::Get, "/.well-known/openid-configuration") => idp.discovery(),
+        (Method::Get, "/.well-known/jwks.json") => idp.jwks(),
+        (Method::Get | Method::Post, "/authorize") => {
+            let peer = req.remote_addr().map(SocketAddr::ip);
+            let who = peer.map_or(Err(()), |ip| whois(paths, ip));
+            let query = query.to_owned();
+            idp.authorize(&query, who, now)
+        }
+        (Method::Post, "/token") => {
+            let mut req = req;
+            let mut body = String::new();
+            let _ = req.as_reader().take(64 * 1024).read_to_string(&mut body);
+            let resp = idp.token(&body, auth_header.as_deref(), now);
+            respond_idp(req, resp);
+            return;
+        }
+        (Method::Get, "/userinfo") => idp.userinfo(auth_header.as_deref(), now),
+        _ => idp::HttpResponse {
+            status: 404,
+            headers: Vec::new(),
+            body: Vec::new(),
+        },
+    };
+    idp.sweep(now);
+    respond_idp(req, resp);
+}
+
+fn respond_idp(req: tiny_http::Request, resp: idp::HttpResponse) {
+    let mut r = Response::from_data(resp.body).with_status_code(resp.status);
+    for (k, v) in &resp.headers {
+        r.add_header(header(k, v));
+    }
+    let _ = req.respond(r);
+}
+
+fn check_idp_bind(paths: &Paths, addr: SocketAddr) -> Result<(), String> {
+    let name = tinc_tools::cmd::exchange::get_my_name(paths)
+        .map_err(|e| format!("reading Name from tinc.conf: {e}"))?;
+    match lookup(paths, addr.ip()) {
+        Ok(Some(m)) if m.owner == name => Ok(()),
+        Ok(Some(m)) => Err(format!(
+            "{} belongs to node {}, not to this node ({name})",
+            addr.ip(),
+            m.owner
+        )),
+        Ok(None) => Err(format!("{} is not inside a mesh subnet", addr.ip())),
+        Err(e) => Err(format!("cannot verify {} against tincd: {e}", addr.ip())),
+    }
 }
 
 fn main() -> ExitCode {
@@ -251,28 +466,64 @@ fn main() -> ExitCode {
         // alone. We claim it exactly once.
         #[allow(unsafe_code)]
         let owned = unsafe { OwnedFd::from_raw_fd(SD_LISTEN_FDS_START) };
-        UnixListener::from(owned)
+        Some(UnixListener::from(owned))
     } else if let Some(path) = &args.listen_socket {
         // A previous instance might have died without cleanup.
         let _ = std::fs::remove_file(path);
         match UnixListener::bind(path) {
-            Ok(l) => l,
+            Ok(l) => Some(l),
             Err(e) => {
                 eprintln!("tinc-auth: bind {}: {e}", path.display());
                 return ExitCode::FAILURE;
             }
         }
+    } else if args.idp_listen.is_some() {
+        None
     } else {
         eprintln!("tinc-auth: no listener (use --listen-socket or systemd socket activation)");
         return ExitCode::FAILURE;
     };
 
-    let server = match Server::from_listener(listener, None) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("tinc-auth: {e}");
-            return ExitCode::FAILURE;
+    let idp_thread = match &args.idp_listen {
+        None => None,
+        Some(addr) => {
+            let idp = match build_idp(&args, &paths, &netname) {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!("tinc-auth: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Err(e) = check_idp_bind(&paths, *addr) {
+                eprintln!("tinc-auth: refusing to serve the IdP: {e}");
+                return ExitCode::FAILURE;
+            }
+            let server = match Server::http(addr) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("tinc-auth: bind {addr}: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let paths = paths.clone();
+            let idp = Arc::new(idp);
+            Some(std::thread::spawn(move || {
+                for req in server.incoming_requests() {
+                    handle_idp(req, &idp, &paths);
+                }
+            }))
         }
+    };
+
+    let server = match listener {
+        Some(l) => match Server::from_listener(l, None) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("tinc-auth: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
     };
 
     eprintln!("tinc-auth: listening (net={netname})");
@@ -280,8 +531,12 @@ fn main() -> ExitCode {
     // Sequential: the work per request is one ctl roundtrip (~1 ms).
     // No graceful shutdown. systemd holds the activated socket open
     // across restarts.
-    for req in server.incoming_requests() {
-        handle(req, &paths, &netname);
+    if let Some(server) = server {
+        for req in server.incoming_requests() {
+            handle(req, &paths, &netname);
+        }
+    } else if let Some(t) = idp_thread {
+        let _ = t.join();
     }
 
     ExitCode::SUCCESS

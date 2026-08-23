@@ -23,6 +23,10 @@ pedantic = { level = "warn", priority = -1 }
 # Thin LTO + one codegen unit: cross-crate inlining on the packet
 # path (tincd → tinc-sptps → tinc-crypto). Full LTO is marginal
 # and doubles link time.
+# Debug-build RSA keygen takes tens of seconds without this.
+[profile.dev.package.num-bigint-dig]
+opt-level = 2
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
