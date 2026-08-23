@@ -114,7 +114,9 @@ testers.runNixOSTest {
                 f"| grep '^{peer} '",
                 timeout=30,
             )
-            status = int(re.search(r"status ([0-9a-f]+)", row).group(1), 16)
+            match = re.search(r"status ([0-9a-f]+)", row)
+            assert match is not None, row
+            status = int(match.group(1), 16)
             assert status & 0x80, row
 
     with subtest("DNS stub answers via systemd-resolved per-link routing"):
