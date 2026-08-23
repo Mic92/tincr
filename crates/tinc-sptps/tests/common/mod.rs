@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use rand_core::{CryptoRng, RngCore};
+use rand_core::{Infallible, TryCryptoRng, TryRng};
 use tinc_crypto::sign::SigningKey;
 use tinc_sptps::{Framing, Output, Role, Sptps, SptpsAead, SptpsLabel};
 
@@ -22,26 +22,27 @@ pub fn keypair(tag: u8) -> (SigningKey, [u8; 32]) {
 /// nonces and ECDH so crypto quality doesn't matter.
 pub struct SeedRng(pub u64);
 // Test-only marker: not crypto-grade, drives deterministic fixtures.
-impl CryptoRng for SeedRng {}
-#[expect(clippy::cast_possible_truncation)] // intentional: PRNG output truncation
-impl RngCore for SeedRng {
-    fn next_u32(&mut self) -> u32 {
-        self.next_u64() as u32
+// `Rng`/`CryptoRng` arrive via rand_core's blanket impls over
+// infallible `TryRng`/`TryCryptoRng`.
+impl TryCryptoRng for SeedRng {}
+impl TryRng for SeedRng {
+    type Error = Infallible;
+    #[expect(clippy::cast_possible_truncation)] // intentional: PRNG output truncation
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+        self.try_next_u64().map(|x| x as u32)
     }
-    fn next_u64(&mut self) -> u64 {
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
         self.0 = self
             .0
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1);
-        self.0
+        Ok(self.0)
     }
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    #[expect(clippy::cast_possible_truncation)] // intentional: PRNG output truncation
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Infallible> {
         for b in dest {
-            *b = self.next_u64() as u8;
+            *b = self.try_next_u64()? as u8;
         }
-    }
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        self.fill_bytes(dest);
         Ok(())
     }
 }
@@ -49,18 +50,16 @@ impl RngCore for SeedRng {
 /// RNG that panics on use. For `receive` calls that must not reach
 /// `send_kex` — if they do, the panic surfaces the routing bug.
 pub struct NoRng;
-impl CryptoRng for NoRng {}
-impl RngCore for NoRng {
-    fn next_u32(&mut self) -> u32 {
+impl TryCryptoRng for NoRng {}
+impl TryRng for NoRng {
+    type Error = Infallible;
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
         panic!("RNG touched outside send_kex")
     }
-    fn next_u64(&mut self) -> u64 {
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
         panic!("RNG touched outside send_kex")
     }
-    fn fill_bytes(&mut self, _: &mut [u8]) {
-        panic!("RNG touched outside send_kex")
-    }
-    fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
+    fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), Infallible> {
         panic!("RNG touched outside send_kex")
     }
 }

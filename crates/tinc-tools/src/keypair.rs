@@ -15,7 +15,8 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 
-use rand_core::{OsRng, RngCore};
+use rand_core::Rng;
+use tinc_crypto::os_rng;
 use zeroize::Zeroizing;
 
 use tinc_conf::Config;
@@ -39,7 +40,7 @@ const PRIVATE_BLOB_LEN: usize = 96;
 #[must_use]
 pub fn generate() -> SigningKey {
     let mut seed = Zeroizing::new([0u8; 32]);
-    OsRng.fill_bytes(&mut *seed);
+    os_rng().fill_bytes(&mut *seed);
     SigningKey::from_seed(&seed)
 }
 

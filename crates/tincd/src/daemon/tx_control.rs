@@ -19,7 +19,8 @@ use crate::{autoconnect, local_addr, pmtu, udp_info};
 
 use crate::event::Io;
 use crate::graph::{NodeId, Route};
-use rand_core::{OsRng, RngCore};
+use rand_core::Rng;
+use tinc_crypto::os_rng;
 use tinc_proto::AddrStr;
 use tinc_proto::msg::{MtuInfo, UdpInfo};
 
@@ -192,7 +193,7 @@ impl Daemon {
         // zero[0..14], random[14..]. The 14-byte zero prefix is
         // convention only.
         if body.len() > 14 {
-            OsRng.fill_bytes(&mut body[14..]);
+            os_rng().fill_bytes(&mut body[14..]);
         }
         // body[0] = 0 (request marker) from vec init.
 
@@ -820,7 +821,7 @@ impl Daemon {
             &pending_outgoings,
             &ShortcutKnobs::default(),
             now,
-            &mut OsRng,
+            &mut os_rng(),
         )
     }
 
@@ -1426,7 +1427,7 @@ impl Daemon {
                 })
                 .collect();
             if let Some((addr, sock)) =
-                local_addr::choose_local(&candidates, &mut OsRng, &listener_addrs)
+                local_addr::choose_local(&candidates, &mut os_rng(), &listener_addrs)
             {
                 return Some((addr, sock));
             }
@@ -1477,7 +1478,7 @@ impl Daemon {
                 }
                 // Spread probes when multiple neighbors report
                 // different addrs (NAT).
-                let i = (OsRng.next_u32() as usize) % cands.len();
+                let i = (os_rng().next_u32() as usize) % cands.len();
                 Some(cands.swap_remove(i))
             })?;
         let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);

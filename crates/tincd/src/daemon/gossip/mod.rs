@@ -18,7 +18,8 @@ use super::{ConnId, Daemon};
 use std::fmt;
 
 use crate::graph::NodeId;
-use rand_core::{OsRng, RngCore};
+use rand_core::Rng;
+use tinc_crypto::os_rng;
 
 mod edges;
 mod graph;
@@ -159,7 +160,7 @@ impl Daemon {
 
     /// Dedup nonce. `OsRng` (overkill, but linked + not hot).
     pub(super) fn nonce() -> u32 {
-        OsRng.next_u32()
+        os_rng().next_u32()
     }
 
     /// Vec not iterator: callers `get_mut` while sending; slotmap

@@ -39,9 +39,10 @@ tinc-sptps = { path = "../tinc-sptps" }
 # connection_t* and the io_tree.generation guard; we use opaque keys.
 slotmap = "1"
 
-# C `randomize` → OsRng. control.c:149 fills 32 bytes for the cookie.
-# rand_core 0.6 (NOT 0.9) — same as tinc-tools, keeps lock unified.
-rand_core = { version = "0.6", features = ["getrandom"] }
+# C `randomize` → getrandom SysRng. control.c:149 fills 32 bytes for
+# the cookie. rand_core 0.10 cohort — same as tinc-tools/ml-kem/rsa.
+rand_core.workspace = true
+getrandom.workspace = true
 
 # sha2 for NodeId6 (node.c:126-128: sha512(name, strlen, buf), keep
 # first 6). Already in the lockfile via tinc-crypto / ed25519-dalek.
@@ -166,9 +167,8 @@ tinc-tools = { path = "../tinc-tools" }
 # + benches/throughput.rs iperf3 --json on Linux.
 serde = { workspace = true }
 serde_json = { workspace = true }
-# autoconnect.rs tests: deterministic RNG. rand_chacha is already in the
-# lockfile (transitively via rand 0.8). rand_core 0.6 trait compat.
-rand_chacha = "0.9"
+# autoconnect.rs tests: deterministic RNG. rand_core 0.10 trait compat.
+rand_chacha = "0.10"
 
 
 [features]

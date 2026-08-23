@@ -1,7 +1,7 @@
 use super::*;
 use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
 use nix::unistd::write;
-use rand_core::OsRng;
+use tinc_crypto::os_rng;
 
 // LineBuf.
 
@@ -245,18 +245,16 @@ fn take_rest_empty_after_full_line() {
 
 /// Panics if touched. Receive-only handshake doesn't `send_kex`.
 struct NoRng;
-impl rand_core::CryptoRng for NoRng {}
-impl rand_core::RngCore for NoRng {
-    fn next_u32(&mut self) -> u32 {
+impl rand_core::TryCryptoRng for NoRng {}
+impl rand_core::TryRng for NoRng {
+    type Error = rand_core::Infallible;
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         unreachable!("rng touched in receive-only path")
     }
-    fn next_u64(&mut self) -> u64 {
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
         unreachable!("rng touched in receive-only path")
     }
-    fn fill_bytes(&mut self, _: &mut [u8]) {
-        unreachable!("rng touched in receive-only path")
-    }
-    fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), rand_core::Error> {
+    fn try_fill_bytes(&mut self, _: &mut [u8]) -> Result<(), Self::Error> {
         unreachable!("rng touched in receive-only path")
     }
 }
@@ -276,7 +274,7 @@ fn feed_sptps_empty_chunk() {
         hispub,
         b"test".to_vec(),
         0,
-        &mut OsRng,
+        &mut os_rng(),
     );
 
     let r = Connection::feed_sptps(&mut sptps, &[], "test", &mut NoRng);
@@ -306,7 +304,7 @@ fn feed_sptps_two_records_one_chunk() {
         bob_pub,
         b"loop-test".to_vec(),
         0,
-        &mut OsRng,
+        &mut os_rng(),
     );
     let (mut bob, b_init) = Sptps::start(
         Role::Responder,
@@ -315,7 +313,7 @@ fn feed_sptps_two_records_one_chunk() {
         alice_pub,
         b"loop-test".to_vec(),
         0,
-        &mut OsRng,
+        &mut os_rng(),
     );
 
     let wire = |outs: Vec<Output>| -> Vec<u8> {
@@ -392,7 +390,7 @@ fn feed_sptps_partial_record() {
         hispub,
         b"partial".to_vec(),
         0,
-        &mut OsRng,
+        &mut os_rng(),
     );
 
     let r = Connection::feed_sptps(&mut sptps, &[0x00, 0x05], "test", &mut NoRng);
@@ -417,7 +415,7 @@ fn feed_sptps_decrypt_fail_is_dead() {
         hispub,
         b"fail".to_vec(),
         0,
-        &mut OsRng,
+        &mut os_rng(),
     );
 
     // App-data record pre-handshake → BadRecord.
@@ -446,7 +444,7 @@ fn sptps_conn_pair() -> (Connection, tinc_sptps::Sptps, OwnedFd) {
         bob_pub,
         b"slen".to_vec(),
         0,
-        &mut OsRng,
+        &mut os_rng(),
     );
     let (mut bob, b_init) = Sptps::start(
         Role::Responder,
@@ -455,7 +453,7 @@ fn sptps_conn_pair() -> (Connection, tinc_sptps::Sptps, OwnedFd) {
         alice_pub,
         b"slen".to_vec(),
         0,
-        &mut OsRng,
+        &mut os_rng(),
     );
 
     let wire = |outs: Vec<Output>| -> Vec<u8> {

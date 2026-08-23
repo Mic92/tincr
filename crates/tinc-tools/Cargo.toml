@@ -33,14 +33,15 @@ tinc-conf = { path = "../tinc-conf" }
 # Correct layering: tinc-proto IS the wire-format crate, Subnet IS
 # wire-format, cmd_config validates a wire-format thing.
 tinc-proto = { path = "../tinc-proto" }
-rand_core = { version = "0.6", features = ["getrandom"] }
+rand_core.workspace = true
+getrandom.workspace = true
 zeroize.workspace = true
 thiserror.workspace = true
 tiny_http = "0.12"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 base64 = "0.23.1"
-rsa = { version = "0.9", features = ["sha2"] }
+rsa = { version = "0.10.0-rc.18", features = ["sha2"] }
 subtle.workspace = true
 
 [target.'cfg(unix)'.dependencies]

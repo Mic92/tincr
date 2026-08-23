@@ -11,7 +11,7 @@ workspace = true
 [dependencies]
 tinc-crypto = { path = "../tinc-crypto" }
 zeroize.workspace = true
-rand_core = "0.6"
+rand_core.workspace = true
 
 [dev-dependencies]
 tinc-ffi = { path = "../tinc-ffi" }

@@ -8,7 +8,7 @@ use crate::local_addr;
 use crate::tunnel::{MTU, make_udp_label};
 
 use crate::graph::NodeId;
-use rand_core::OsRng;
+use tinc_crypto::os_rng;
 use tinc_crypto::sign::SigningKey;
 use tinc_proto::Request;
 use tinc_proto::msg::{AnsKey, KeyChanged, ReqKey};
@@ -47,7 +47,7 @@ impl Daemon {
             hiskey,
             tinc_sptps::SptpsLabel::with_aead(label, aead),
             self.settings.replaywin,
-            &mut OsRng,
+            &mut os_rng(),
         );
         let now = self.timers.now();
         let tunnel = self.dp.tunnels.entry(to_nid).or_default();
@@ -345,7 +345,7 @@ impl Daemon {
                            msg.from);
                 return Ok(self.send_req_key(from_nid));
             };
-            let result = sptps.receive(&data, &mut OsRng);
+            let result = sptps.receive(&data, &mut os_rng());
             let outs = match result {
                 Ok((_consumed, outs)) => outs,
                 Err(e) => {
@@ -439,11 +439,11 @@ impl Daemon {
             hiskey,
             tinc_sptps::SptpsLabel::with_aead(label, aead),
             self.settings.replaywin,
-            &mut OsRng,
+            &mut os_rng(),
         );
 
         // Feed their KEX.
-        let recv_result = sptps.receive(&kex_bytes, &mut OsRng);
+        let recv_result = sptps.receive(&kex_bytes, &mut os_rng());
 
         // Stash SPTPS before dispatching outputs.
         let now = self.timers.now();
@@ -633,7 +633,7 @@ impl Daemon {
             return Ok(self.send_req_key(from_nid));
         };
 
-        let result = sptps.receive(&hs_bytes, &mut OsRng);
+        let result = sptps.receive(&hs_bytes, &mut os_rng());
         let outs = match result {
             Ok((_consumed, outs)) => outs,
             Err(e) => {

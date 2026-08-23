@@ -40,7 +40,8 @@ use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 
-use rand_core::{OsRng, RngCore};
+use rand_core::Rng;
+use tinc_crypto::os_rng;
 
 /// 32 random bytes → 64 hex chars.
 pub(crate) const COOKIE_BYTES: usize = 32;
@@ -60,7 +61,7 @@ pub(crate) const COOKIE_HEX_LEN: usize = COOKIE_BYTES * 2;
 #[must_use]
 pub(crate) fn generate_cookie() -> String {
     let mut bytes = [0u8; COOKIE_BYTES];
-    OsRng.fill_bytes(&mut bytes);
+    os_rng().fill_bytes(&mut bytes);
     let mut hex = String::with_capacity(COOKIE_HEX_LEN);
     for b in bytes {
         use std::fmt::Write;

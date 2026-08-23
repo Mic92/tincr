@@ -19,7 +19,7 @@ use crate::tunnel::MTU;
 use crate::{invitation_serve, script, socks};
 
 use crate::event::Io;
-use rand_core::OsRng;
+use tinc_crypto::os_rng;
 use tinc_proto::Request;
 
 /// `Again`: caller should loop (kernel may have more). `Done`: stop.
@@ -85,7 +85,7 @@ impl Daemon {
     /// borrows.
     fn on_conn_readable_once(&mut self, id: ConnId) -> FeedDrain {
         let conn = self.conn_mut(id);
-        match conn.feed(&mut OsRng) {
+        match conn.feed(&mut os_rng()) {
             FeedResult::WouldBlock => return FeedDrain::Done,
             FeedResult::Dead => {
                 self.terminate(id);
@@ -238,7 +238,7 @@ impl Daemon {
             sptps_kex: self.settings.sptps_kex,
         };
         let now = self.timers.now();
-        let id_result = handle_id(conn, line, &ctx, now, &mut OsRng);
+        let id_result = handle_id(conn, line, &ctx, now, &mut os_rng());
 
         let (needs_write, init, is_invite) = match id_result {
             Ok(IdOk::Control { needs_write }) => return Some((DispatchResult::Ok, needs_write)),
@@ -279,7 +279,7 @@ impl Daemon {
                 .sptps
                 .as_deref_mut()
                 .expect("handle_id just installed it");
-            match Connection::feed_sptps(sptps, &leftover, &conn.name, &mut OsRng) {
+            match Connection::feed_sptps(sptps, &leftover, &conn.name, &mut os_rng()) {
                 FeedResult::Sptps(evs) => evs
                     .into_iter()
                     .map(|ev| match ev {
@@ -863,7 +863,7 @@ impl Daemon {
             nw |= self.send_req_key(from_nid);
             return nw;
         };
-        let result = sptps.receive(ct, &mut OsRng);
+        let result = sptps.receive(ct, &mut os_rng());
         let outs = match result {
             Ok((_consumed, outs)) => outs,
             Err(e) => {

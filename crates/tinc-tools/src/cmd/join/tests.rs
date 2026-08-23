@@ -536,7 +536,7 @@ fn invite_join_roundtrip_in_process() {
         inv_pub,
         INVITE_LABEL,
         0,
-        &mut OsRng,
+        &mut os_rng(),
     );
     let (mut server, s_init) = Sptps::start(
         Role::Responder,
@@ -549,7 +549,7 @@ fn invite_join_roundtrip_in_process() {
         throwaway_pub,
         INVITE_LABEL,
         0,
-        &mut OsRng,
+        &mut os_rng(),
     );
 
     // The pump
@@ -618,7 +618,7 @@ fn invite_join_roundtrip_in_process() {
             let mut off = 0;
             while off < inp.len() {
                 let (n, outs): (usize, Vec<Output>) =
-                    server.receive(&inp[off..], &mut OsRng).unwrap();
+                    server.receive(&inp[off..], &mut os_rng()).unwrap();
                 if n == 0 {
                     to_server.extend_from_slice(&inp[off..]);
                     break;
@@ -715,7 +715,7 @@ fn invite_join_roundtrip_in_process() {
             let mut off = 0;
             while off < inp.len() {
                 let (n, outs): (usize, Vec<Output>) =
-                    joiner.receive(&inp[off..], &mut OsRng).unwrap();
+                    joiner.receive(&inp[off..], &mut os_rng()).unwrap();
                 if n == 0 {
                     to_joiner.extend_from_slice(&inp[off..]);
                     break;

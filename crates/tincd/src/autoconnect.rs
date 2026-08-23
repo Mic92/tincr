@@ -41,8 +41,6 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use rand_core::RngCore;
-
 use crate::outgoing::OutOrigin;
 
 /// What `do_autoconnect` decided. The daemon executes.
@@ -232,7 +230,7 @@ pub(crate) fn decide(
     pending_outgoings: &[OutgoingSnapshot],
     knobs: &ShortcutKnobs,
     now: Instant,
-    rng: &mut (impl RngCore + rand_core::CryptoRng),
+    rng: &mut impl rand_core::CryptoRng,
 ) -> AutoAction {
     // Count ALL active meta conns (past ACK),
     // inbound + outbound.
@@ -354,7 +352,7 @@ fn make_new_connection(
     myself_name: &str,
     nodes: &[NodeSnapshot],
     pending_outgoings: &[OutgoingSnapshot],
-    rng: &mut (impl RngCore + rand_core::CryptoRng),
+    rng: &mut impl rand_core::CryptoRng,
 ) -> AutoAction {
     let eligible: Vec<&NodeSnapshot> = nodes
         .iter()
@@ -390,7 +388,7 @@ fn connect_to_unreachable(
     myself_name: &str,
     nodes: &[NodeSnapshot],
     pending_outgoings: &[OutgoingSnapshot],
-    rng: &mut (impl RngCore + rand_core::CryptoRng),
+    rng: &mut impl rand_core::CryptoRng,
 ) -> AutoAction {
     if nodes.is_empty() {
         return AutoAction::Noop;
@@ -426,7 +424,7 @@ fn drop_superfluous_outgoing(
     active_outgoing_conns: &[OutgoingSnapshot],
     hot_nexthops: &HashSet<&str>,
     knobs: &ShortcutKnobs,
-    rng: &mut (impl RngCore + rand_core::CryptoRng),
+    rng: &mut impl rand_core::CryptoRng,
 ) -> AutoAction {
     let droppable: Vec<&OutgoingSnapshot> = active_outgoing_conns
         .iter()
@@ -525,7 +523,7 @@ mod tests {
         nodes: &[NodeSnapshot],
         outgoing: &[OutgoingSnapshot],
         pending: &[OutgoingSnapshot],
-        rng: &mut (impl RngCore + rand_core::CryptoRng),
+        rng: &mut impl rand_core::CryptoRng,
     ) -> AutoAction {
         decide(
             myself,
@@ -810,7 +808,7 @@ mod tests {
         nodes: &[NodeSnapshot],
         outgoing: &[OutgoingSnapshot],
         pending: &[OutgoingSnapshot],
-        rng: &mut (impl RngCore + rand_core::CryptoRng),
+        rng: &mut impl rand_core::CryptoRng,
     ) -> AutoAction {
         decide(
             myself,

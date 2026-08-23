@@ -30,7 +30,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-use rand_core::RngCore;
+use rand_core::Rng;
 
 /// Contract: `current` indexes into `listener_addrs`. If
 /// `listener_addrs[current]` already matches `target`'s family, return
@@ -89,7 +89,7 @@ pub(crate) fn adapt_socket(target: &SocketAddr, current: u8, listener_addrs: &[S
 /// determinism (same pattern as `autoconnect.rs`). The `next_u32() % len`
 /// modulo bias matches C's `prng()` (`utils.h`: `xoshiro() % max`).
 #[must_use]
-pub(crate) fn choose_local<R: RngCore>(
+pub(crate) fn choose_local<R: Rng>(
     candidates: &[SocketAddr],
     rng: &mut R,
     listener_addrs: &[SocketAddr],
@@ -234,17 +234,15 @@ mod tests {
     fn choose_adapts_socket() {
         // ZeroRng: always returns 0 → picks candidates[0], picks sock=0.
         struct ZeroRng;
-        impl RngCore for ZeroRng {
-            fn next_u32(&mut self) -> u32 {
-                0
+        impl rand_core::TryRng for ZeroRng {
+            type Error = rand_core::Infallible;
+            fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+                Ok(0)
             }
-            fn next_u64(&mut self) -> u64 {
-                0
+            fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+                Ok(0)
             }
-            fn fill_bytes(&mut self, dest: &mut [u8]) {
-                dest.fill(0);
-            }
-            fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+            fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
                 dest.fill(0);
                 Ok(())
             }

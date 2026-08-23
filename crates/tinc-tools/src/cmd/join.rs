@@ -73,9 +73,9 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use rand_core::OsRng;
 use tinc_crypto::b64;
 use tinc_crypto::invite::fingerprint_hash;
+use tinc_crypto::os_rng;
 use tinc_crypto::sign::PUBLIC_LEN;
 use tinc_sptps::{Framing, Output, Role, Sptps};
 
@@ -263,7 +263,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         his_pub,
         INVITE_LABEL,
         0,
-        &mut OsRng,
+        &mut os_rng(),
     );
 
     // SPTPS pump: accumulate type-0 records, finalize on type-1, mark
@@ -347,7 +347,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         let mut off = 0;
         while off < leftover.len() {
             let (n, outs) = sptps
-                .receive(&leftover[off..], &mut OsRng)
+                .receive(&leftover[off..], &mut os_rng())
                 .map_err(|e| CmdError::BadInput(format!("SPTPS receive: {e:?}")))?;
             if n == 0 {
                 // Partial record at end of leftover; the recv loop
@@ -391,7 +391,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         let mut off = 0;
         while off < buf.len() {
             let (consumed, outs) = sptps
-                .receive(&buf[off..], &mut OsRng)
+                .receive(&buf[off..], &mut os_rng())
                 .map_err(|e| CmdError::BadInput(format!("SPTPS receive: {e:?}")))?;
             if consumed == 0 {
                 break; // partial record; need more bytes from recv

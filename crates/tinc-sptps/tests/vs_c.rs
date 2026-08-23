@@ -38,7 +38,7 @@
 mod common;
 
 use common::NoRng;
-use rand_core::{CryptoRng, RngCore};
+use rand_core::{Infallible, TryCryptoRng, TryRng};
 use tinc_crypto::sign::SigningKey;
 use tinc_ffi::{CKey, CSptps, Event, seed_rng, serial_guard};
 use tinc_sptps::{Framing, Output, Role, Sptps};
@@ -87,19 +87,20 @@ impl BridgeRng {
 }
 
 // Test-only marker: matches C `randomize()` byte for byte.
-impl CryptoRng for BridgeRng {}
-impl RngCore for BridgeRng {
-    fn next_u32(&mut self) -> u32 {
+impl TryCryptoRng for BridgeRng {}
+impl TryRng for BridgeRng {
+    type Error = Infallible;
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
         let mut b = [0u8; 4];
-        self.fill_bytes(&mut b);
-        u32::from_le_bytes(b)
+        self.try_fill_bytes(&mut b)?;
+        Ok(u32::from_le_bytes(b))
     }
-    fn next_u64(&mut self) -> u64 {
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
         let mut b = [0u8; 8];
-        self.fill_bytes(&mut b);
-        u64::from_le_bytes(b)
+        self.try_fill_bytes(&mut b)?;
+        Ok(u64::from_le_bytes(b))
     }
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Infallible> {
         // shim.c does `memset(out, 0); chacha_encrypt_bytes(ctx, out, out)`.
         // Same thing: zero the buffer, XOR in keystream.
         dest.fill(0);
@@ -112,9 +113,6 @@ impl RngCore for BridgeRng {
         let pos: u64 = self.cipher.current_pos();
         let aligned = pos.div_ceil(64) * 64;
         self.cipher.seek(aligned);
-    }
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        self.fill_bytes(dest);
         Ok(())
     }
 }

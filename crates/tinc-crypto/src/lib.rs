@@ -20,6 +20,13 @@
     clippy::doc_markdown,
 )]
 
+/// OS RNG with the pre-rand_core-0.10 `OsRng` semantics: infallible
+/// API, panics if the OS entropy source is broken.
+#[must_use]
+pub fn os_rng() -> rand_core::UnwrapErr<getrandom::SysRng> {
+    rand_core::UnwrapErr(getrandom::SysRng)
+}
+
 pub mod aead;
 pub mod b64;
 pub mod chapoly;

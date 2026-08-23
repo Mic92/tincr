@@ -769,9 +769,9 @@ fn peer_edge_triggers_reachable() {
 /// pubkey, our SIG was made with the real one → `BadSig`.
 #[test]
 fn peer_wrong_key_fails_sig() {
-    use rand_core::OsRng;
     use std::io::Read;
     use std::net::TcpStream;
+    use tinc_crypto::os_rng;
     use tinc_crypto::sign::SigningKey;
     use tinc_sptps::{Framing, Output, Role, Sptps};
 
@@ -827,7 +827,7 @@ fn peer_wrong_key_fails_sig() {
         daemon_pub,
         label,
         0,
-        &mut OsRng,
+        &mut os_rng(),
     );
     for o in init {
         if let Output::Wire { bytes, .. } = o {
@@ -855,7 +855,7 @@ fn peer_wrong_key_fails_sig() {
             // succeed. The failure is on the DAEMON's side.
             // But if it does fail: that's also a stop condition
             // (and the stderr check below disambiguates).
-            match sptps.receive(&pending[off..], &mut OsRng) {
+            match sptps.receive(&pending[off..], &mut os_rng()) {
                 #[expect(clippy::match_same_arms)] // Ok(0)/Err: same break, different why
                 Ok((0, _)) => break,
                 Ok((n, outs)) => {

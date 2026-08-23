@@ -49,9 +49,10 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use rand_core::{OsRng, RngCore};
+use rand_core::Rng;
 use tinc_conf::Config;
 use tinc_crypto::invite::{COOKIE_LEN, SLUG_PART_LEN, build_slug, cookie_filename};
+use tinc_crypto::os_rng;
 use tinc_crypto::sign::SigningKey;
 use zeroize::Zeroizing;
 
@@ -194,7 +195,7 @@ pub fn invite(
 
     // Cookie: 18 fresh random bytes. Zeroizing — the cookie is the secret.
     let mut cookie = Zeroizing::new([0u8; COOKIE_LEN]);
-    OsRng.fill_bytes(&mut *cookie);
+    os_rng().fill_bytes(&mut *cookie);
 
     // The pubkey is what fingerprint/key_hash/cookie_hash all derive
     // from. SigningKey carries it.

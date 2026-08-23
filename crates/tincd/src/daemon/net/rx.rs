@@ -15,7 +15,7 @@ use crate::tunnel::MTU;
 
 use crate::event::Io;
 use crate::graph::NodeId;
-use rand_core::OsRng;
+use tinc_crypto::os_rng;
 use tinc_device::{Device, GroBucket};
 
 use nix::errno::Errno;
@@ -559,7 +559,7 @@ impl Daemon {
         else {
             return;
         };
-        let result = sptps.receive(ct, &mut OsRng);
+        let result = sptps.receive(ct, &mut os_rng());
         let outs = match result {
             Ok((_consumed, outs)) => outs,
             Err(e) => {
