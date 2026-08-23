@@ -1,0 +1,256 @@
+From 83a26247015d7d2aafa5a8ac4a77e230086a1dc1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B6rg=20Thalheim?= <joerg@thalheim.io>
+Date: Sun, 23 Aug 2026 14:08:11 +0200
+Subject: [PATCH] feat(handlers): add network identity first factor
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Mesh VPN users are already authenticated by their source address:
+a daemon on the Authelia host knows which node key owns it. Add an
+optional passwordless first factor that resolves the client
+address via a whois backend speaking the nginx auth_request
+protocol over a unix socket (e.g. tinc-auth, tailscale nginx-auth)
+and starts a one factor session for the user named by the
+configured response header. Off by default:
+
+    first_factor_network:
+      enable: true
+      socket: /run/tinc-auth.sock
+
+The portal attempts it once on load and silently falls back to the
+password form. Sessions carry a NetworkIdentity AMR (RFC 8176 pop,
+swk). Regulation and session handling mirror the password factor.
+
+Signed-off-by: Jörg Thalheim <joerg@thalheim.io>
+---
+ web/.env.production                           |  1 +
+ web/index.html                                |  1 +
+ web/src/App.tsx                               |  2 ++
+ web/src/services/Api.ts                       |  1 +
+ web/src/services/NetworkLogin.ts              | 36 +++++++++++++++++++
+ web/src/utils/Configuration.ts                |  4 +++
+ .../FirstFactor/FirstFactorForm.test.tsx      |  1 +
+ .../FirstFactor/FirstFactorForm.tsx           | 33 +++++++++++++++++
+ .../views/LoginPortal/LoginPortal.test.tsx    |  1 +
+ web/src/views/LoginPortal/LoginPortal.tsx     |  2 ++
+ 10 files changed, 82 insertions(+)
+ create mode 100644 web/src/services/NetworkLogin.ts
+
+diff --git a/web/.env.production b/web/.env.production
+index c8036b5c0..7c7138e05 100644
+--- a/web/.env.production
++++ b/web/.env.production
+@@ -4,6 +4,7 @@ VITE_LOGO_OVERRIDE={{ .LogoOverride }}
+ VITE_PRIVACY_POLICY_ACCEPT={{ .PrivacyPolicyAccept }}
+ VITE_PRIVACY_POLICY_URL={{ .PrivacyPolicyURL }}
+ VITE_PASSKEY_LOGIN={{ .PasskeyLogin }}
++VITE_NETWORK_LOGIN={{ .NetworkLogin }}
+ VITE_REMEMBER_ME={{ .RememberMe }}
+ VITE_RESET_PASSWORD={{ .ResetPassword }}
+ VITE_RESET_PASSWORD_CUSTOM_URL={{ .ResetPasswordCustomURL }}
+diff --git a/web/index.html b/web/index.html
+index c203c48a1..66b9e3104 100644
+--- a/web/index.html
++++ b/web/index.html
+@@ -18,6 +18,7 @@
+         data-privacypolicyurl="%VITE_PRIVACY_POLICY_URL%"
+         data-privacypolicyaccept="%VITE_PRIVACY_POLICY_ACCEPT%"
+         data-passkeylogin="%VITE_PASSKEY_LOGIN%"
++        data-networklogin="%VITE_NETWORK_LOGIN%"
+         data-rememberme="%VITE_REMEMBER_ME%"
+         data-resetpassword="%VITE_RESET_PASSWORD%"
+         data-resetpasswordcustomurl="%VITE_RESET_PASSWORD_CUSTOM_URL%"
+diff --git a/web/src/App.tsx b/web/src/App.tsx
+index 1d53322df..9bf47fe13 100644
+--- a/web/src/App.tsx
++++ b/web/src/App.tsx
+@@ -23,6 +23,7 @@ import { getBasePath } from "@utils/BasePath";
+ import {
+     getCSPNonce,
+     getDuoSelfEnrollment,
++    getNetworkLogin,
+     getPasskeyLogin,
+     getRememberMe,
+     getResetPassword,
+@@ -68,6 +69,7 @@ function App() {
+                                                     <LoginPortal
+                                                         duoSelfEnrollment={getDuoSelfEnrollment()}
+                                                         passkeyLogin={getPasskeyLogin()}
++                                                        networkLogin={getNetworkLogin()}
+                                                         rememberMe={getRememberMe()}
+                                                         resetPassword={getResetPassword()}
+                                                         resetPasswordCustomURL={getResetPasswordCustomURL()}
+diff --git a/web/src/services/Api.ts b/web/src/services/Api.ts
+index 2bf276094..d91e4d231 100644
+--- a/web/src/services/Api.ts
++++ b/web/src/services/Api.ts
+@@ -9,6 +9,7 @@ export const OpenIDConnectDeviceAuthorizationPath = basePath + "/api/oidc/device
+ 
+ export const FirstFactorPath = basePath + "/api/firstfactor";
+ export const FirstFactorPasskeyPath = basePath + "/api/firstfactor/passkey";
++export const FirstFactorNetworkPath = basePath + "/api/firstfactor/network";
+ export const FirstFactorReauthenticatePath = basePath + "/api/firstfactor/reauthenticate";
+ 
+ export const TOTPRegistrationPath = basePath + "/api/secondfactor/totp/register";
+diff --git a/web/src/services/NetworkLogin.ts b/web/src/services/NetworkLogin.ts
+new file mode 100644
+index 000000000..6909fc15f
+--- /dev/null
++++ b/web/src/services/NetworkLogin.ts
+@@ -0,0 +1,36 @@
++import { FirstFactorNetworkPath } from "@services/Api";
++import { PostWithOptionalResponse } from "@services/Client";
++import { SignInResponse } from "@services/SignIn";
++
++interface PostFirstFactorNetworkBody {
++    keepMeLoggedIn: boolean;
++    targetURL?: string;
++    requestMethod?: string;
++    flowID?: string;
++    flow?: string;
++    subflow?: string;
++    userCode?: string;
++}
++
++export async function postFirstFactorNetwork(
++    rememberMe: boolean,
++    targetURL?: string,
++    requestMethod?: string,
++    flowID?: string,
++    flow?: string,
++    subflow?: string,
++    userCode?: string,
++) {
++    const data: PostFirstFactorNetworkBody = {
++        flow,
++        flowID,
++        keepMeLoggedIn: rememberMe,
++        requestMethod,
++        subflow,
++        targetURL,
++        userCode,
++    };
++
++    const res = await PostWithOptionalResponse<SignInResponse>(FirstFactorNetworkPath, data);
++    return res ?? ({} as SignInResponse);
++}
+diff --git a/web/src/utils/Configuration.ts b/web/src/utils/Configuration.ts
+index f3ce566fe..034aaa169 100644
+--- a/web/src/utils/Configuration.ts
++++ b/web/src/utils/Configuration.ts
+@@ -31,6 +31,10 @@ export function getPasskeyLogin() {
+     return getEmbeddedVariable("passkeylogin") === "true";
+ }
+ 
++export function getNetworkLogin() {
++    return getEmbeddedVariable("networklogin") === "true";
++}
++
+ export function getResetPasswordCustomURL() {
+     return getEmbeddedVariable("resetpasswordcustomurl");
+ }
+diff --git a/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.test.tsx b/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.test.tsx
+index 1f2b6e3cd..6f635bca3 100644
+--- a/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.test.tsx
++++ b/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.test.tsx
+@@ -61,6 +61,7 @@ const defaultProps = {
+     onAuthenticationSuccess: vi.fn(),
+     onChannelStateChange: vi.fn(),
+     passkeyLogin: false,
++    networkLogin: false,
+     rememberMe: false,
+     resetPassword: false,
+     resetPasswordCustomURL: "",
+diff --git a/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.tsx b/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.tsx
+index 0db97444f..43f54a8b0 100644
+--- a/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.tsx
++++ b/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.tsx
+@@ -19,12 +19,14 @@ import { useUserCode } from "@hooks/OpenIDConnect";
+ import { useQueryParam } from "@hooks/QueryParam";
+ import LoginLayout from "@layouts/LoginLayout";
+ import { IsCapsLockModified } from "@services/CapsLock";
++import { postFirstFactorNetwork } from "@services/NetworkLogin";
+ import { postFirstFactor } from "@services/Password";
+ import PasskeyForm from "@views/LoginPortal/FirstFactor/PasskeyForm";
+ 
+ export interface Props {
+     disabled: boolean;
+     passkeyLogin: boolean;
++    networkLogin: boolean;
+     rememberMe: boolean;
+     resetPassword: boolean;
+     resetPasswordCustomURL: string;
+@@ -77,6 +79,37 @@ const FirstFactorForm = function (props: Props) {
+         return () => clearTimeout(timeout);
+     }, [focusUsername]);
+ 
++    // Attempt the passwordless network identity login once on mount. A failure is expected for
++    // clients outside the network and is silent: the regular form stays usable.
++    const networkAttempted = useRef(false);
++
++    useEffect(() => {
++        if (!props.networkLogin || networkAttempted.current) return;
++
++        networkAttempted.current = true;
++
++        (async () => {
++            props.onAuthenticationStart();
++
++            try {
++                const res = await postFirstFactorNetwork(
++                    false,
++                    redirectionURL,
++                    requestMethod,
++                    flowID,
++                    flow,
++                    subflow,
++                    userCode,
++                );
++
++                await loginChannel.postMessage(true);
++                props.onAuthenticationSuccess(res ? res.redirect : undefined);
++            } catch {
++                props.onAuthenticationStop();
++            }
++        })();
++    }, [props, redirectionURL, requestMethod, flowID, flow, subflow, userCode, loginChannel]);
++
+     useEffect(() => {
+         const handleMessage = (authenticated: boolean) => {
+             if (authenticated) {
+diff --git a/web/src/views/LoginPortal/LoginPortal.test.tsx b/web/src/views/LoginPortal/LoginPortal.test.tsx
+index 0ff7cbe3e..a9638cb15 100644
+--- a/web/src/views/LoginPortal/LoginPortal.test.tsx
++++ b/web/src/views/LoginPortal/LoginPortal.test.tsx
+@@ -81,6 +81,7 @@ const mockCreateErrorNotification = vi.fn();
+ const defaultProps = {
+     duoSelfEnrollment: false,
+     passkeyLogin: false,
++    networkLogin: false,
+     rememberMe: true,
+     resetPassword: true,
+     resetPasswordCustomURL: "",
+diff --git a/web/src/views/LoginPortal/LoginPortal.tsx b/web/src/views/LoginPortal/LoginPortal.tsx
+index 49068aa5f..a0c52fba9 100644
+--- a/web/src/views/LoginPortal/LoginPortal.tsx
++++ b/web/src/views/LoginPortal/LoginPortal.tsx
+@@ -33,6 +33,7 @@ const SecondFactorForm = lazy(() => import("@views/LoginPortal/SecondFactor/Seco
+ export interface Props {
+     duoSelfEnrollment: boolean;
+     passkeyLogin: boolean;
++    networkLogin: boolean;
+     rememberMe: boolean;
+     resetPassword: boolean;
+     resetPasswordCustomURL: string;
+@@ -194,6 +195,7 @@ const LoginPortal = function (props: Props) {
+                         <FirstFactorForm
+                             disabled={firstFactorDisabled}
+                             passkeyLogin={props.passkeyLogin}
++                            networkLogin={props.networkLogin}
+                             rememberMe={props.rememberMe}
+                             resetPassword={props.resetPassword}
+                             resetPasswordCustomURL={props.resetPasswordCustomURL}
+-- 
+2.55.0
+
