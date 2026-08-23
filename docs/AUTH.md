@@ -214,7 +214,13 @@ first_factor_network:
 ```
 
 The portal tries it once on page load and falls back to the
-password form for off-mesh clients. The patch lives in this repo,
+password form for off-mesh clients.
+
+Serve the portal over https even though the mesh already encrypts
+the transport. The browser only sees the URL scheme: Authelia
+marks its session cookie Secure, so over plain http the login
+succeeds and the session is dropped on the next request. WebAuthn
+second factors need a secure context for the same reason. The patch lives in this repo,
 split for Authelia's two build trees and written against Authelia
 v4.39.20, the release nixpkgs ships:
 
