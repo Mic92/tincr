@@ -37,6 +37,11 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize.workspace = true
 thiserror.workspace = true
 tiny_http = "0.12"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+base64 = "0.23.1"
+rsa = { version = "0.9", features = ["sha2"] }
+subtle.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["poll", "fs", "hostname", "user", "signal", "term", "ioctl"] }
@@ -47,6 +52,8 @@ nix = { version = "0.31", features = ["poll", "fs", "hostname", "user", "signal"
 libc = "0.2"
 
 [dev-dependencies]
+base64 = "0.23.1"
+serde_json.workspace = true
 tempfile = "3"
 
 [lints]

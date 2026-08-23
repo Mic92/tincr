@@ -66,7 +66,7 @@ use super::{CmdError, io_err, makedir};
 /// The `InvitationExpire` config var is daemon-side — it controls how
 /// long the *daemon* honors an invitation, not how long `cmd_invite`'s
 /// sweep keeps the file. Same default but checked independently.
-pub(crate) const EXPIRY: Duration = Duration::from_secs(604_800);
+pub(crate) const EXPIRY: Duration = Duration::from_hours(168);
 
 /// `#` + 63 dashes + `#` = 65 chars. Shared with `cmd::exchange` —
 /// the invitation file format reuses the export/import separator
@@ -737,7 +737,7 @@ mod tests {
         // now = 8 days after `dead`'s mtime. `dead` is expired
         // (deadline = now - 7d = old + 1d > old). `live` has mtime
         // = real-now, well after the deadline.
-        let sweep_now = old + Duration::from_secs(8 * 86400);
+        let sweep_now = old + Duration::from_hours(192);
 
         let count = sweep_expired(&inv, sweep_now).unwrap();
         assert_eq!(count, 1, "live should be counted, dead should not");
