@@ -56,7 +56,9 @@ fn spawn_idp(dir: &std::path::Path, cb: &str, pf: &str, port: u16) -> Idp {
     )
     .unwrap();
     let groups = dir.join("groups.json");
-    std::fs::write(&groups, r#"{"alice":["admin"]}"#).unwrap();
+    std::fs::write(&groups, r#"{"ajones":["admin"]}"#).unwrap();
+    let map = dir.join("map.json");
+    std::fs::write(&map, r#"{"alice":"ajones"}"#).unwrap();
 
     let child = Command::new(bin("tinc-auth"))
         .args([
@@ -74,6 +76,8 @@ fn spawn_idp(dir: &std::path::Path, cb: &str, pf: &str, port: u16) -> Idp {
             clients.to_str().unwrap(),
             "--groups",
             groups.to_str().unwrap(),
+            "--map",
+            map.to_str().unwrap(),
             "--email-domain",
             "example.com",
         ])
@@ -220,11 +224,13 @@ fn idp_full_flow_over_http() {
         )
         .unwrap()
     };
-    assert_eq!(claims["sub"], "alice");
+    // --map rewrites node alice to account ajones
+    assert_eq!(claims["sub"], "ajones");
     assert_eq!(claims["aud"], "app");
     assert_eq!(claims["nonce"], "nn");
-    assert_eq!(claims["email"], "alice@example.com");
+    assert_eq!(claims["email"], "ajones@example.com");
     assert_eq!(claims["groups"][0], "admin");
+    assert_eq!(claims["tinc_node"], "alice");
     assert_eq!(claims["tinc_subnet"], "127.0.0.1/32");
 
     let access = t["access_token"].as_str().unwrap();
@@ -236,7 +242,7 @@ fn idp_full_flow_over_http() {
         ),
     );
     assert_eq!(ui.status, 200);
-    assert_eq!(ui.json()["preferred_username"], "alice");
+    assert_eq!(ui.json()["preferred_username"], "ajones");
 
     // replay is refused
     let replay = post_form(

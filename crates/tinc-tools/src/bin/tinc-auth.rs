@@ -5,6 +5,8 @@
 //! | Header        | Value       | Meaning                   |
 //! |---------------|-------------|---------------------------|
 //! | `Tinc-Node`   | `alice`     | which node owns src IP    |
+//! | `Tinc-User`   | `alice`     | account per `--map`, else the node name |
+//! | `Remote-User` | `alice`     | same as `Tinc-User`, for generic consumers |
 //! | `Tinc-Net`    | `mesh`      | netname (`-n`)            |
 //! | `Tinc-Subnet` | `10.20.0.2` | the matching subnet entry |
 //!
@@ -107,7 +109,15 @@ fn header(name: &str, value: &str) -> Header {
     Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("static header name")
 }
 
-fn handle(req: tiny_http::Request, paths: &Paths, netname: &str) {
+/// Node to account mapping from `--map`. Nodes without an entry map
+/// to their own name.
+type UserMap = HashMap<String, String>;
+
+fn map_user<'a>(map: &'a UserMap, node: &'a str) -> &'a str {
+    map.get(node).map_or(node, String::as_str)
+}
+
+fn handle(req: tiny_http::Request, paths: &Paths, netname: &str, map: &UserMap) {
     let remote_addr = req
         .headers()
         .iter()
@@ -130,6 +140,8 @@ fn handle(req: tiny_http::Request, paths: &Paths, netname: &str) {
     let resp = match lookup(paths, addr) {
         Ok(Some(m)) => Response::empty(204)
             .with_header(header("Tinc-Node", &m.owner))
+            .with_header(header("Tinc-User", map_user(map, &m.owner)))
+            .with_header(header("Remote-User", map_user(map, &m.owner)))
             .with_header(header("Tinc-Net", netname))
             .with_header(header("Tinc-Subnet", &m.subnet)),
         Ok(None) => Response::empty(401),
@@ -163,6 +175,7 @@ struct Args {
     issuer: Option<String>,
     clients: Option<PathBuf>,
     groups: Option<PathBuf>,
+    map: Option<PathBuf>,
     email_domain: Option<String>,
     id_token_ttl: Duration,
     access_token_ttl: Duration,
@@ -187,6 +200,7 @@ fn parse_args() -> Result<Args, String> {
     let mut issuer = None;
     let mut clients = None;
     let mut groups = None;
+    let mut map = None;
     let mut email_domain = None;
     let mut id_token_ttl = idp::DEFAULT_ID_TOKEN_TTL;
     let mut access_token_ttl = idp::DEFAULT_ACCESS_TOKEN_TTL;
@@ -229,6 +243,14 @@ fn parse_args() -> Result<Args, String> {
                 groups = Some(PathBuf::from(next_val(
                     &mut args,
                     "--groups",
+                    glued.as_deref(),
+                )?));
+                continue;
+            }
+            "--map" => {
+                map = Some(PathBuf::from(next_val(
+                    &mut args,
+                    "--map",
                     glued.as_deref(),
                 )?));
                 continue;
@@ -291,7 +313,7 @@ fn parse_args() -> Result<Args, String> {
                 println!(
                     "Usage: tinc-auth [-n NETNAME] [-c DIR] [--pidfile FILE] [--listen-socket SOCK]\n\
                      \x20               [--idp-listen ADDR --issuer URL --clients FILE]\n\
-                     \x20               [--groups FILE] [--email-domain DOMAIN]\n\
+                     \x20               [--groups FILE] [--map FILE] [--email-domain DOMAIN]\n\
                      \x20               [--id-token-ttl 5m] [--access-token-ttl 1h]\n\
                      \n\
                      nginx auth_request backend. Listens on a unix socket (via\n\
@@ -327,15 +349,26 @@ fn parse_args() -> Result<Args, String> {
         issuer,
         clients,
         groups,
+        map,
         email_domain,
         id_token_ttl,
         access_token_ttl,
     })
 }
 
-fn whois(paths: &Paths, addr: IpAddr) -> idp::Whois {
+fn load_map(path: Option<&PathBuf>) -> Result<UserMap, String> {
+    match path {
+        None => Ok(UserMap::new()),
+        Some(p) => std::fs::read(p)
+            .map_err(|e| format!("{}: {e}", p.display()))
+            .and_then(|b| serde_json::from_slice(&b).map_err(|e| format!("{}: {e}", p.display()))),
+    }
+}
+
+fn whois(paths: &Paths, addr: IpAddr, map: &UserMap) -> idp::Whois {
     match lookup(paths, addr) {
         Ok(Some(m)) => Ok(Some(idp::Node {
+            user: map_user(map, &m.owner).to_owned(),
             name: m.owner,
             subnet: m.subnet,
         })),
@@ -381,7 +414,7 @@ fn build_idp(args: &Args, paths: &Paths, netname: &str) -> Result<Idp, String> {
     ))
 }
 
-fn handle_idp(req: tiny_http::Request, idp: &Idp, paths: &Paths) {
+fn handle_idp(req: tiny_http::Request, idp: &Idp, paths: &Paths, map: &UserMap) {
     let now = idp::now_unix();
     let url = req.url().to_owned();
     let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
@@ -396,7 +429,7 @@ fn handle_idp(req: tiny_http::Request, idp: &Idp, paths: &Paths) {
         (Method::Get, "/.well-known/jwks.json") => idp.jwks(),
         (Method::Get | Method::Post, "/authorize") => {
             let peer = req.remote_addr().map(SocketAddr::ip);
-            let who = peer.map_or(Err(()), |ip| whois(paths, ip));
+            let who = peer.map_or(Err(()), |ip| whois(paths, ip, map));
             let query = query.to_owned();
             idp.authorize(&query, who, now)
         }
@@ -484,6 +517,14 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
+    let map = match load_map(args.map.as_ref()) {
+        Ok(m) => Arc::new(m),
+        Err(e) => {
+            eprintln!("tinc-auth: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let idp_thread = match &args.idp_listen {
         None => None,
         Some(addr) => {
@@ -507,9 +548,10 @@ fn main() -> ExitCode {
             };
             let paths = paths.clone();
             let idp = Arc::new(idp);
+            let map = Arc::clone(&map);
             Some(std::thread::spawn(move || {
                 for req in server.incoming_requests() {
-                    handle_idp(req, &idp, &paths);
+                    handle_idp(req, &idp, &paths, &map);
                 }
             }))
         }
@@ -533,7 +575,7 @@ fn main() -> ExitCode {
     // across restarts.
     if let Some(server) = server {
         for req in server.incoming_requests() {
-            handle(req, &paths, &netname);
+            handle(req, &paths, &netname, &map);
         }
     } else if let Some(t) = idp_thread {
         let _ = t.join();

@@ -34,7 +34,8 @@ fn test_idp() -> Idp {
 #[allow(clippy::unnecessary_wraps)] // Whois is the API type
 fn alice() -> Whois {
     Ok(Some(Node {
-        name: "alice".into(),
+        name: "alice-laptop".into(),
+        user: "alice".into(),
         subnet: "10.0.0.2/32".into(),
     }))
 }
@@ -121,6 +122,7 @@ fn full_code_flow() {
     assert_eq!(claims["exp"], NOW + 300);
     assert_eq!(claims["groups"][0], "admin");
     assert_eq!(claims["email"], "alice@example.com");
+    assert_eq!(claims["tinc_node"], "alice-laptop");
     assert_eq!(claims["tinc_net"], "mesh");
     assert_eq!(claims["tinc_subnet"], "10.0.0.2/32");
 

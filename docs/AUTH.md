@@ -69,7 +69,9 @@ location / {
 ```
 
 A request from a mesh address gets a 204 with `Tinc-Node`,
-`Tinc-Net` and `Tinc-Subnet` headers. Anything else gets a 401. If
+`Tinc-User` (also served as `Remote-User` for consumers that
+expect the generic name), `Tinc-Net` and `Tinc-Subnet` headers. Anything else
+gets a 401. If
 tincd is down, tinc-auth answers 503 and nginx denies the request,
 so a dead daemon never turns into an open door.
 
@@ -126,14 +128,50 @@ yourself:
 
 | claim | value |
 |-------|-------|
-| `sub`, `preferred_username` | node name |
+| `sub`, `preferred_username` | account name (see below) |
+| `tinc_node` | node name |
 | `tinc_net` | netname |
 | `tinc_subnet` | the subnet that matched the browser's address |
 | `groups` | from `--groups`, else `[]` |
-| `email` | `node@DOMAIN`, only with `--email-domain` |
+| `email` | `account@DOMAIN`, only with `--email-domain` |
 
-Apps key their accounts on `sub`, and `sub` is the node name. So if
-you rename a node, every app will treat it as a brand new user.
+Apps key their accounts on `sub`. So if you rename a node without a
+mapping, every app will treat it as a brand new user.
+
+### Mapping nodes to people
+
+By default the account name is the node name, which is right when
+nodes are named after their owners. When one person has several
+devices, or node names don't match your usernames, there are two
+places to put the mapping.
+
+A `--map` file, if tinc-auth should do it:
+
+```json
+{ "alice-laptop": "alice", "alice-phone": "alice" }
+```
+
+The mapped name is what appears in `Tinc-User`, in `sub` and
+`preferred_username`, and as the key into `--groups`. The original
+node name stays available in `Tinc-Node` and the `tinc_node` claim.
+Nodes without an entry keep their own name.
+
+Or the directory, if you have one. Anything that looks users up in
+LDAP by a filter can resolve a node name to an account without
+tinc-auth's help: give your users a multi-valued attribute like
+`tincNode: alice-laptop` and extend the lookup filter to match it.
+With Authelia for example:
+
+```yaml
+authentication_backend:
+  ldap:
+    users_filter: "(&(|({username_attribute}={input})(tincNode={input}))(objectClass=person))"
+```
+
+Then a lookup for `alice-laptop` finds `uid=alice` and returns the
+canonical username, groups and email from the directory. In that
+setup you don't need `--map`, `--groups` or `--email-domain` at
+all.
 
 ### Gitea
 

@@ -96,9 +96,12 @@ pub struct Config {
     pub access_token_ttl: Duration,
 }
 
-/// Node identity as established by the subnet whois.
+/// Node identity as established by the subnet whois. `user` is the
+/// account the node maps to, which is the node name itself unless a
+/// `--map` file says otherwise.
 pub struct Node {
     pub name: String,
+    pub user: String,
     pub subnet: String,
 }
 
@@ -107,6 +110,7 @@ pub type Whois = Result<Option<Node>, ()>;
 
 struct AuthCode {
     node: String,
+    user: String,
     subnet: String,
     client_id: String,
     redirect_uri: String,
@@ -345,6 +349,7 @@ impl Idp {
             code.clone(),
             AuthCode {
                 node: node.name,
+                user: node.user,
                 subnet: node.subnet,
                 client_id: client.id.clone(),
                 redirect_uri: redirect_uri.clone(),
@@ -421,7 +426,7 @@ impl Idp {
         self.state().tokens.insert(
             access.clone(),
             AccessGrant {
-                claims: self.claims_for(&ac.node, &ac.subnet),
+                claims: self.claims_for(&ac.node, &ac.user, &ac.subnet),
                 expires: now + self.config.access_token_ttl.as_secs(),
             },
         );
@@ -461,23 +466,24 @@ impl Idp {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn claims_for(&self, node: &str, subnet: &str) -> Value {
+    fn claims_for(&self, node: &str, user: &str, subnet: &str) -> Value {
         let mut v = json!({
-            "sub": node,
-            "preferred_username": node,
+            "sub": user,
+            "preferred_username": user,
+            "tinc_node": node,
             "tinc_net": self.config.netname,
             "tinc_subnet": subnet,
-            "groups": self.config.groups.get(node).cloned().unwrap_or_default(),
+            "groups": self.config.groups.get(user).cloned().unwrap_or_default(),
         });
         if let Some(d) = &self.config.email_domain {
-            v["email"] = json!(format!("{node}@{d}"));
+            v["email"] = json!(format!("{user}@{d}"));
         }
         v
     }
 
     fn sign_id_token(&self, ac: &AuthCode, now: u64) -> String {
         let header = json!({ "alg": "RS256", "typ": "JWT", "kid": self.kid });
-        let mut claims = self.claims_for(&ac.node, &ac.subnet);
+        let mut claims = self.claims_for(&ac.node, &ac.user, &ac.subnet);
         claims["iss"] = json!(self.config.issuer);
         claims["aud"] = json!(ac.client_id);
         claims["iat"] = json!(now);
