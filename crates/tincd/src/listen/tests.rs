@@ -656,9 +656,9 @@ fn adopt_listeners_mid_error_closes_tail() {
         // Can't build a contiguous range; nothing to assert.
         return;
     }
-    // Replace b with a real socket so it's distinguishable from
-    // "never opened": after the call, F_GETFD on b_raw must fail.
+    // Replace b with a real socket whose port witnesses closure.
     let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp_addr = tcp.local_addr().unwrap();
     nix::unistd::dup2(&tcp, &mut b).expect("dup2");
     drop(tcp);
 
@@ -671,13 +671,9 @@ fn adopt_listeners_mid_error_closes_tail() {
         .expect("fd a is /dev/null → ENOTSOCK");
     assert!(e.to_string().contains("Could not get address"));
 
-    // The tail fd (b) was wrapped before the failure and dropped
-    // on early return — it must be closed now. Probe via raw
-    // libc::fcntl: `BorrowedFd::borrow_raw` on a closed fd is UB,
-    // so the nix wrapper can't be used here.
-    // SAFETY: F_GETFD on an arbitrary int is harmless; -1/EBADF is
-    // the expected outcome.
-    #[allow(unsafe_code)]
-    let probe = unsafe { libc::fcntl(b_raw, libc::F_GETFD) };
-    assert_eq!(probe, -1, "tail fd {b_raw} leaked (still open)");
+    // The tail fd (b) was wrapped before the failure and dropped on
+    // early return. A closed listener frees its port, so rebinding
+    // proves closure. Probing the fd number instead would race with
+    // concurrent tests reusing it.
+    std::net::TcpListener::bind(tcp_addr).expect("tail fd leaked: port still bound");
 }
