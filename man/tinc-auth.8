@@ -203,8 +203,8 @@ location = /_tinc_auth {
 }
 location / {
     auth_request /_tinc_auth;
-    auth_request_set $tinc_node $upstream_http_tinc_node;
-    proxy_set_header X-Tinc-Node $tinc_node;
+    auth_request_set $remote_user $upstream_http_remote_user;
+    proxy_set_header Remote-User $remote_user;
     proxy_pass http://backend;
 }
 .Ed
