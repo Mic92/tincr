@@ -12,8 +12,8 @@ use crate::graph::NodeId;
 use rand_core::OsRng;
 use tinc_proto::Request;
 
-/// Transport result kept separate from the historical "meta socket
-/// needs write readiness" boolean.
+/// Per-send result: meta-socket write readiness + whether the local
+/// UDP socket accepted a datagram.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(in crate::daemon) struct TunnelSendOutcome {
     pub(in crate::daemon) needs_write: bool,
@@ -137,21 +137,12 @@ impl Daemon {
             return false;
         }
         self.send_sptps_data_relay(to_nid, self.myself, record_type, None)
+            .needs_write
     }
 
     /// SPTPS callback bridge. SPTPS returns Vec<Output> so this is
     /// both the `receive_sptps_record` and `send_sptps_data` sides.
     pub(in crate::daemon) fn dispatch_tunnel_outputs(
-        &mut self,
-        peer: NodeId,
-        peer_name: &str,
-        outs: Vec<tinc_sptps::Output>,
-    ) -> bool {
-        self.dispatch_tunnel_outputs_outcome(peer, peer_name, outs)
-            .needs_write
-    }
-
-    pub(in crate::daemon) fn dispatch_tunnel_outputs_outcome(
         &mut self,
         peer: NodeId,
         peer_name: &str,
@@ -162,7 +153,7 @@ impl Daemon {
         for o in outs {
             match o {
                 Output::Wire { record_type, bytes } => {
-                    outcome.merge(self.send_sptps_data_outcome(peer, record_type, &bytes));
+                    outcome.merge(self.send_sptps_data(peer, record_type, &bytes));
                 }
                 Output::HandshakeDone => {
                     let tunnel = self.dp.tunnels.entry(peer).or_default();
@@ -420,18 +411,8 @@ impl Daemon {
         to_nid: NodeId,
         record_type: u8,
         ct: &[u8],
-    ) -> bool {
-        self.send_sptps_data_outcome(to_nid, record_type, ct)
-            .needs_write
-    }
-
-    fn send_sptps_data_outcome(
-        &mut self,
-        to_nid: NodeId,
-        record_type: u8,
-        ct: &[u8],
     ) -> TunnelSendOutcome {
-        self.send_sptps_data_relay_outcome(to_nid, self.myself, record_type, Some(ct))
+        self.send_sptps_data_relay(to_nid, self.myself, record_type, Some(ct))
     }
 
     /// Relay decision: TCP vs UDP, `via` vs `nexthop`.
@@ -554,17 +535,6 @@ impl Daemon {
     /// `from_nid`: ORIGINAL source. For relay forwarding it's the
     /// original sender's `NodeId` — wire prefix carries THEIR `src_id6`.
     pub(in crate::daemon) fn send_sptps_data_relay(
-        &mut self,
-        to_nid: NodeId,
-        from_nid: NodeId,
-        record_type: u8,
-        ct: Option<&[u8]>,
-    ) -> bool {
-        self.send_sptps_data_relay_outcome(to_nid, from_nid, record_type, ct)
-            .needs_write
-    }
-
-    fn send_sptps_data_relay_outcome(
         &mut self,
         to_nid: NodeId,
         from_nid: NodeId,

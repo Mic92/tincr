@@ -71,14 +71,14 @@ pub(crate) fn msg_nosignal() -> nix::sys::socket::MsgFlags {
 
 /// Raw `setsockopt` for `c_int`-valued options that neither nix nor
 /// socket2 wrap. After routing TOS/TCLASS/`BOUND_IF` through socket2
-/// the only remaining caller is `IP{,V6}_MTU_DISCOVER` in `listen.rs`
-/// (Linux-only), so this is gated to keep the unsafe surface minimal
-/// on other targets.
+/// the only remaining caller is `IP{,V6}_MTU_DISCOVER` in
+/// [`set_udp_dontfrag`] (Linux-only), so this is gated to keep the
+/// unsafe surface minimal on other targets.
 ///
 /// # Errors
 /// `last_os_error()` from `setsockopt(2)`.
 #[cfg(target_os = "linux")]
-pub fn set_int_sockopt(
+fn set_int_sockopt(
     fd: impl AsFd,
     level: libc::c_int,
     optname: libc::c_int,
@@ -158,6 +158,57 @@ pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
         s.bind_device_by_index_v4(Some(ifindex))
     };
     res.map_err(|e| io::Error::other(format!("Can't bind to interface {iface}: {e}")))
+}
+
+/// Disable IP fragmentation so PMTU probes reach the underlay as one
+/// datagram. Best-effort: warn only. Linux has no `DONTFRAG` toggle.
+/// `PMTUDISC_DO` sets DF and fails oversized sends with `EMSGSIZE`.
+#[cfg(target_os = "linux")]
+pub(crate) fn set_udp_dontfrag(s: &Socket, ipv6: bool) {
+    let (label, result) = if ipv6 {
+        (
+            "IPV6_MTU_DISCOVER",
+            set_int_sockopt(
+                s.as_fd(),
+                libc::IPPROTO_IPV6,
+                libc::IPV6_MTU_DISCOVER,
+                libc::IPV6_PMTUDISC_DO,
+            ),
+        )
+    } else {
+        (
+            "IP_MTU_DISCOVER",
+            set_int_sockopt(
+                s.as_fd(),
+                libc::IPPROTO_IP,
+                libc::IP_MTU_DISCOVER,
+                libc::IP_PMTUDISC_DO,
+            ),
+        )
+    };
+    if let Err(e) = result {
+        log::warn!(target: "tincd::net", "{label}: {e}");
+    }
+}
+
+/// macOS: `IP{,V6}_DONTFRAG` sets DF without the kernel PMTU cache.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn set_udp_dontfrag(s: &Socket, ipv6: bool) {
+    use nix::sys::socket::{setsockopt, sockopt};
+    let (label, result) = if ipv6 {
+        (
+            "IPV6_DONTFRAG",
+            setsockopt(&s.as_fd(), sockopt::Ipv6DontFrag, &true),
+        )
+    } else {
+        (
+            "IP_DONTFRAG",
+            setsockopt(&s.as_fd(), sockopt::IpDontFrag, &true),
+        )
+    };
+    if let Err(e) = result {
+        log::warn!(target: "tincd::net", "{label}: {e}");
+    }
 }
 
 /// `daemon(3)`: fork, parent `_exit(0)`, child `setsid()` and

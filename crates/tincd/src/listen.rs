@@ -17,7 +17,6 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
 use crate::bind_to_interface;
 #[cfg(target_os = "linux")]
-use crate::set_int_sockopt;
 use nix::sys::socket::{setsockopt, sockopt};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
@@ -105,8 +104,7 @@ where
     }
 }
 
-/// Raw `getsockopt` sibling of [`set_int_sockopt`]. Test-only readback
-/// for `IP_MTU_DISCOVER`/`IPV6_MTU_DISCOVER`.
+/// Test-only readback for `IP_MTU_DISCOVER`/`IPV6_MTU_DISCOVER`.
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) fn get_int_sockopt(
     fd: BorrowedFd<'_>,
@@ -451,46 +449,7 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts, v6only: bool) -> io::Result<Socke
         log::warn!(target: "tincd::net", "SO_BROADCAST: {e}");
     }
 
-    // PMTU probes must reach the underlay as one datagram. Linux and
-    // macOS use different socket options to disable IP fragmentation.
-    #[cfg(target_os = "linux")]
-    {
-        let (level, optname, optval, label) = if domain == Domain::IPV6 {
-            (
-                libc::IPPROTO_IPV6,
-                libc::IPV6_MTU_DISCOVER,
-                libc::IPV6_PMTUDISC_DO,
-                "IPV6_MTU_DISCOVER",
-            )
-        } else {
-            (
-                libc::IPPROTO_IP,
-                libc::IP_MTU_DISCOVER,
-                libc::IP_PMTUDISC_DO,
-                "IP_MTU_DISCOVER",
-            )
-        };
-        if let Err(e) = set_int_sockopt(s.as_fd(), level, optname, optval) {
-            log::warn!(target: "tincd::net", "{label}: {e}");
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let (label, result) = if domain == Domain::IPV6 {
-            (
-                "IPV6_DONTFRAG",
-                setsockopt(&s.as_fd(), sockopt::Ipv6DontFrag, &true),
-            )
-        } else {
-            (
-                "IP_DONTFRAG",
-                setsockopt(&s.as_fd(), sockopt::IpDontFrag, &true),
-            )
-        };
-        if let Err(e) = result {
-            log::warn!(target: "tincd::net", "{label}: {e}");
-        }
-    }
+    crate::platform::set_udp_dontfrag(&s, domain == Domain::IPV6);
 
     // SO_RCVBUF/SO_SNDBUF via `set_udp_buffer`. Default 1MB each.
     // Best-effort.

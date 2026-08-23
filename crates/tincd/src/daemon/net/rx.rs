@@ -597,7 +597,9 @@ impl Daemon {
             }
         }
 
-        let nw = self.dispatch_tunnel_outputs(from_nid, &from_name, outs);
+        let nw = self
+            .dispatch_tunnel_outputs(from_nid, &from_name, outs)
+            .needs_write;
         // Clear udppacket (deferred, see above).
         if let Some(t) = self.dp.tunnels.get_mut(&from_nid) {
             t.status.udppacket = false;
@@ -663,7 +665,9 @@ impl Daemon {
                         "Relaying UDP packet from {from_name} to {} \
                          ({} bytes)",
                         self.node_log_name(to_nid), ct.len());
-            let mut nw = self.send_sptps_data_relay(to_nid, from_nid, 0, Some(ct));
+            let mut nw = self
+                .send_sptps_data_relay(to_nid, from_nid, 0, Some(ct))
+                .needs_write;
             nw |= self.try_tx(to_nid, true);
             if nw {
                 self.maybe_set_write_any();
