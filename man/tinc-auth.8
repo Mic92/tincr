@@ -14,6 +14,7 @@
 .Op Fl -issuer Ns = Ns Ar URL
 .Op Fl -clients Ns = Ns Ar FILE
 .Op Fl -groups Ns = Ns Ar FILE
+.Op Fl -map Ns = Ns Ar FILE
 .Op Fl -email-domain Ns = Ns Ar DOMAIN
 .Op Fl -id-token-ttl Ns = Ns Ar DURATION
 .Op Fl -access-token-ttl Ns = Ns Ar DURATION
@@ -90,6 +91,16 @@ emitted as the
 .Li groups
 claim.
 Unlisted nodes get an empty list.
+.It Fl -map Ns = Ns Ar FILE
+JSON object mapping node names to account names, e.g.
+.Li {"alice-laptop": "alice"} .
+Mapped names appear in the
+.Sy Tinc-User
+header and as the OIDC
+.Li sub
+claim.
+Nodes without an entry map to their own name, which is also the
+behavior without this option.
 .It Fl -email-domain Ns = Ns Ar DOMAIN
 Emit an
 .Li email
@@ -114,6 +125,12 @@ The response carries:
 .Bl -tag -width "Tinc-Subnet" -offset indent -compact
 .It Sy Tinc-Node
 Owning node name.
+.It Sy Tinc-User , Sy Remote-User
+Account name per
+.Fl -map ,
+otherwise the node name.
+Served under both names so generic consumers need no
+tinc-specific configuration.
 .It Sy Tinc-Net
 .Ar NETNAME
 (empty if none was given).
@@ -157,7 +174,10 @@ ID tokens are RS256-signed JWTs with claims
 .Li sub
 and
 .Li preferred_username
-(the node name),
+(the account per
+.Fl -map ,
+otherwise the node name),
+.Li tinc_node ,
 .Li tinc_net ,
 .Li tinc_subnet ,
 .Li groups

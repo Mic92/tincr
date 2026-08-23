@@ -120,6 +120,8 @@ fn auth_http_flow() {
     let r = request(&auth.sock, Some("10.0.0.2"));
     assert_eq!(r.status, 204);
     assert_eq!(r.header("Tinc-Node"), Some("bob"));
+    // no --map given: the account defaults to the node name
+    assert_eq!(r.header("Tinc-User"), Some("bob"));
     assert_eq!(r.header("Tinc-Net"), Some("mesh"));
     assert_eq!(r.header("Tinc-Subnet"), Some("10.0.0.2/32"));
 
