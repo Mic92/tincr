@@ -80,6 +80,22 @@ craneLib.buildPackage (
     postInstall = ''
       installManPage man/*.[0-9]
     '';
+    # `--workspace` needs tinc-c (tinc-ffi's build.rs compiles it).
+    passthru.clippy = craneLib.cargoClippy (
+      common
+      // {
+        inherit cargoArtifacts;
+        src = mkSrc (
+          lib.fileset.unions [
+            rustSrc
+            ../clippy.toml
+            ../tinc-c
+          ]
+        );
+        cargoExtraArgs = "--workspace";
+        cargoClippyExtraArgs = "--all-targets -- -D warnings";
+      }
+    );
     passthru.tests = craneLib.cargoTest (
       common
       // {
