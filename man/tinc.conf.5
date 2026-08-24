@@ -208,17 +208,6 @@ port.
 SSDP discovery timeout.
 .It Va UPnPRefreshPeriod Li = Ar SECONDS Pq 60
 Re-request the port mapping at this interval.
-.It Va DhtDiscovery Li = yes | no Po no Pc Bq tincr extension
-Publish this node's reflexive address(es) to the BitTorrent Mainline
-DHT (BEP\ 44, keyed by the Ed25519 public key) and resolve peers'
-addresses the same way.
-.It Va DhtBootstrap Li = Ar HOST:PORT Bq multiple, tincr extension
-DHT bootstrap nodes; replaces the built-in public seed list.
-.It Va DhtSecretFile Li = Ar PATH Bq tincr extension
-32-byte mesh-wide secret (raw or one base64 line) mixed into the DHT
-record key derivation, so that
-.Pa hosts/ Ns Ar NAME
-alone is insufficient to locate or decrypt a published record.
 .It Va DNSAddress Li = Ar ADDRESS Bq multiple, tincr extension
 Serve a DNS stub resolver on
 .Ar ADDRESS

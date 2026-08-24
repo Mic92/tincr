@@ -8,7 +8,7 @@
 //!    completed handshake. Most-recently-working first. This is the
 //!    only tier persisted to disk.
 //! 2. **known** — addresses learnt at runtime from sources other than
-//!    config: edge gossip ("alice last saw bob at …"), DHT records,
+//!    config: edge gossip ("alice last saw bob at …"),
 //!    off-thread DNS results. The daemon rebuilds this set wholesale
 //!    on every retry, so stale gossip doesn't linger.
 //! 3. **config** — literal-IP `Address =` lines from `hosts/bob`.
@@ -142,7 +142,7 @@ impl AddressCache {
     }
 
     /// Replace tier 2 with a fresh snapshot. Called once per retry
-    /// with the current edge-walk + DHT + DNS hints. *Replaces*, not
+    /// with the current edge-walk + DNS hints. *Replaces*, not
     /// appends — the topology may have churned between retries and
     /// stale gossip is worse than none. Dedups against tier 1 and
     /// itself; resets the cursor (tier-2 length changed, the old

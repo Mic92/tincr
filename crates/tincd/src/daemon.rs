@@ -44,7 +44,7 @@ mod setup;
 mod tx_control;
 
 pub(crate) use dp::DataPlane;
-pub use settings::{DaemonSettings, ForwardingMode, RoutingMode, read_dht_secret_file};
+pub use settings::{DaemonSettings, ForwardingMode, RoutingMode};
 
 // `UPnP` config knob. With the feature off the type still exists
 // (settings.rs stores it unconditionally) but only `No` is reachable
@@ -429,14 +429,6 @@ pub struct Daemon {
     /// `has_address` annotation on top.
     pub(crate) has_address: HashSet<String>,
 
-    /// Names of nodes whose `hosts/NAME` file has an Ed25519 public
-    /// key. Populated by `load_all_nodes`. Read by
-    /// `autoconnect::decide` (widens the `has_address` dial-candidacy
-    /// gate when `DhtDiscovery=yes`: a pubkey is enough to BEP44-
-    /// resolve an address) and by the cold-start pre-resolve in
-    /// `spawn_dht_discovery`.
-    pub(crate) has_dht_key: HashSet<String>,
-
     /// In-flight sim-open punches by peer. One per peer max.
     /// Cleared on dial / expiry / peer connecting another way.
     pub(crate) punches: HashMap<NodeId, punch::PunchEntry>,
@@ -558,17 +550,12 @@ pub struct Daemon {
     /// pcap.
     pub(crate) any_pcap: bool,
 
-    /// DHT actor. `Some` iff `dht_discovery` set and spawn succeeded.
-    /// Polled from `on_periodic_tick`; drop joins the thread.
-    pub(crate) discovery: Option<crate::discovery::Discovery>,
-
     /// Off-thread `getaddrinfo`. Owns the only call sites that hit
     /// libc DNS after setup. Drained in `on_periodic_tick`.
     pub(crate) dns_worker: crate::bgresolve::DnsWorker,
 
     /// Off-thread DNS results for `Address=` hostnames, by node name.
-    /// Chained into `addr_cache.known` alongside edge-walk + DHT hints
-    /// in `setup_outgoing_connection`. Cleared on `retry_outgoing` so
+    /// Chained into `addr_cache.known` alongside the edge-walk in `setup_outgoing_connection`. Cleared on `retry_outgoing` so
     /// each round re-resolves (dynamic DNS).
     pub(crate) dns_hints: HashMap<String, Vec<SocketAddr>>,
 
@@ -578,21 +565,9 @@ pub struct Daemon {
     /// connection` dials `[0]`.
     pub(crate) proxy_addrs: Vec<SocketAddr>,
 
-    /// DHT-resolved addrs by node name. Separate map, not stuffed into
-    /// `addr_cache.known`: the edge-walk replaces `known` wholesale on
-    /// every retry; we merge at read time in `setup_outgoing_connection`.
-    pub(crate) dht_hints: HashMap<String, Vec<SocketAddr>>,
-
-    /// Port-probe demux gate (≤3 entries). Cleared/repopulated each
-    /// round so stale targets don't latch a late reply. Why source addr,
-    /// not packet shape: see `handle_incoming_vpn_packet`.
-    pub(crate) dht_probe_sent: HashSet<SocketAddr>,
-
     /// UPnP-IGD/NAT-PMP refresh thread (Rust port of C `upnp.c`).
     /// `Some` iff `UPnP != no` and the feature is compiled in. Polled
-    /// from `on_periodic_tick`; the TCP `Mapped` event feeds
-    /// `discovery.set_portmapped_tcp` so the BEP44 record gains a
-    /// dialable `tcp=` field.
+    /// from `on_periodic_tick`.
     #[cfg(feature = "upnp")]
     pub(crate) portmapper: Option<crate::portmap::Portmapper>,
 
@@ -615,18 +590,6 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    /// Persisted DHT routing table. Same writable-dir rule as the
-    /// addrcache: `$STATE_DIRECTORY/addrcache` (the one subdir we
-    /// chown + Landlock-allow) else `confbase`.
-    pub(crate) fn dht_nodes_path(&self) -> PathBuf {
-        std::env::var_os("STATE_DIRECTORY")
-            .map_or_else(
-                || self.confbase.clone(),
-                |s| PathBuf::from(s).join("addrcache"),
-            )
-            .join("dht_nodes")
-    }
-
     /// Refresh the TX snapshot's subnet trie. Called after each
     /// `subnets.add()`/`del()` (gossip, MAC lease, purge, reload).
     /// Clones the `BTreeMap` (O(n) String clones); subnet churn is
@@ -893,21 +856,6 @@ impl Drop for Daemon {
         // in Drop, so check the actual state.
         if self.device_enabled {
             self.run_script("tinc-down");
-        }
-        // Persist the DHT routing table so the next start can skip
-        // the DNS-seed round-trip. Same lifecycle as the addrcache
-        // (written from Drop, post-drop_privs ownership). Mainline's
-        // actor thread is still alive until `self.discovery` drops
-        // below, so `to_bootstrap()` works.
-        if let Some(d) = &self.discovery {
-            let nodes = d.routing_nodes();
-            if !nodes.is_empty()
-                && let Err(e) =
-                    crate::discovery::save_persisted_nodes(&self.dht_nodes_path(), &nodes)
-            {
-                log::debug!(target: "tincd::discovery",
-                            "dht_nodes save failed: {e}");
-            }
         }
         let _ = std::fs::remove_file(&self.pidfile);
         // Signal handlers stay installed (SelfPipe::drop doesn't del

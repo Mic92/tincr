@@ -4,13 +4,9 @@
 //!
 //! A home-NAT'd node's TCP listener at `:655` is unreachable from
 //! the WAN side: nothing tells the Fritzbox/consumer-router to DNAT
-//! inbound `:655` to us. The DHT-published `v4=` is the UDP-reflexive
-//! port (good for the punch, useless for an inbound meta-connection).
-//! `tcp=` needs a *router-installed* forwarding rule. On v6 there's
-//! no NAT but the same router usually drops unsolicited inbound; PCP
-//! asks it to open a firewall pinhole to our GUA, which feeds
-//! `tcp6=` so peers can dial the meta-connection over v6 without a
-//! Tier-0 punch.
+//! inbound `:655` to us. On v6 there's no NAT but the same router
+//! usually drops unsolicited inbound; PCP asks it to open a firewall
+//! pinhole to our GUA.
 //!
 //! C tinc spawns a `pthread` that loops `upnpDiscover` →
 //! `UPNP_AddPortMapping` every `UPnPRefreshPeriod` seconds, lease =
@@ -25,7 +21,7 @@
 //!
 //! ## Integration
 //!
-//! Same shape as `discovery.rs`: a `std::thread` does the blocking
+//! A `std::thread` does the blocking
 //! protocol work, an mpsc channel reports `PortmapEvent`s, the
 //! daemon's `on_periodic_tick` drains them. The thread sleeps in 1 s
 //! slices and checks `stop` between, so daemon shutdown joins
@@ -68,8 +64,7 @@ use tinc_crypto::os_rng;
 
 /// `UPnP = yes | udponly | no` — C parity (`net_setup.c:1202`).
 /// `udponly` maps the UDP listener only (the SPTPS datagram path);
-/// `yes` also maps TCP (the meta-connection listener — this is what
-/// feeds `tcp=`/`tcp6=` in the DHT record).
+/// `yes` also maps TCP (the meta-connection listener).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UpnpMode {
     #[default]
@@ -98,9 +93,8 @@ impl UpnpMode {
 /// Why a gateway-supplied external address was rejected. The IGD
 /// and PCP responses are unauthenticated UDP/HTTP from the LAN; a
 /// rogue responder (any host on the broadcast domain for SSDP, the
-/// default-route hop for PCP) can hand back an arbitrary address
-/// that would otherwise flow verbatim into the DHT-published
-/// `tcp=`/`tcp6=` record. See `is_publishable_ext`.
+/// default-route hop for PCP) can hand back an arbitrary address.
+/// See `is_publishable_ext`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BadExt {
     Loopback,
@@ -122,21 +116,14 @@ impl fmt::Display for BadExt {
     }
 }
 
-/// Is this `(ip, port)` plausibly a public endpoint we should
-/// publish? Returns the reject reason rather than a bare `bool` so
-/// the worker can log it.
+/// Is this `(ip, port)` plausibly a public endpoint? Returns the
+/// reject reason rather than a bare `bool` so the worker can log it.
 ///
-/// Intentionally **does not** reject RFC1918 / ULA / documentation
+/// Intentionally does not reject RFC1918 / ULA / documentation
 /// ranges: a CGNAT'd or lab gateway legitimately hands back
 /// `100.64/10` / `10/8` here, and the NixOS test mesh runs entirely
-/// in `2001:db8::/32`. Publishing those is harmless — peers'
-/// record-ingest filter (D2, `discovery::parse_record`) drops
-/// unroutable addrs on receipt. Filtering at the source would break
-/// the double-NAT-with-hairpin case where the inner address *is*
-/// reachable from same-site peers. The categories rejected here are
-/// the ones that can never be a useful dial target from *any* peer
-/// and that a rogue responder would use to make peers hit
-/// themselves / their LAN.
+/// in `2001:db8::/32`. The categories rejected here are the ones that
+/// can never be a useful dial target from any peer.
 pub(crate) fn is_publishable_ext(ip: IpAddr, port: u16) -> Result<(), BadExt> {
     if port == 0 {
         return Err(BadExt::ZeroPort);
@@ -467,9 +454,7 @@ fn worker(
                            "default route changed ({gw:?} → {cur:?}); re-mapping");
                 // Force a fresh `Mapped` event even if the new
                 // router hands back the identical external addr:
-                // the mapping is on a different box now, and
-                // discovery's `tcp=` republish keys off the event,
-                // not the value.
+                // the mapping is on a different box now.
                 last = [None; 4];
             }
             gw = cur;

@@ -530,14 +530,8 @@ impl Daemon {
                 let (addr, port, _, _) = self.edge_addrs.get(&rev)?;
                 local_addr::parse_addr_port(addr.as_str(), port.as_str())
             })
-            // DHT hints chained AFTER edge-walk: edge addrs are
-            // observed-live, DHT addrs are self-report (≤5min stale).
-            // Empty unless `retry_outgoing` fired → degrades to C
-            // edge-walk. `add_known_addresses` dedups.
-            .chain(self.dht_hints.get(&name).into_iter().flatten().copied())
-            // Same gate as `discovery::parse_record`: ADD_EDGE addrs
-            // are peer-authored gossip, dht_hints are peer self-
-            // report. Neither may steer us at loopback/link-local.
+            // ADD_EDGE addrs are peer-authored gossip; don't let them
+            // steer us at loopback/link-local.
             .filter(|sa| !crate::addr::is_unwanted_dial_addr(sa))
             // Off-thread getaddrinfo results for `Address=` hostnames
             // are operator-authored config, NOT peer input — chain
@@ -743,22 +737,6 @@ impl Daemon {
         // (NXDOMAIN or worker hasn't answered). A working proxy addr
         // is stable for the daemon lifetime.
         self.request_proxy_resolve();
-
-        // Addr cache exhausted (every `retry_outgoing` call site is
-        // reached via `next_addr()==None`). Fire-and-forget resolve;
-        // result lands in `dht_hints` via `on_periodic_tick`, next
-        // retry reads it. Clear stale hints (a previous resolve gave
-        // addrs, connect still failed ⇒ record outdated). Dedup is
-        // inside `request_resolve` — can't storm.
-        if let Some(d) = self.discovery.as_mut() {
-            self.dht_hints.remove(&name);
-            // Same pubkey-read as `gossip.rs::on_req_key`. No key →
-            // no resolve (couldn't verify SPTPS anyway).
-            let cfg = crate::keys::read_host_config(&self.confbase, &name);
-            if let Some(key) = crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, &name) {
-                d.request_resolve(&name, key);
-            }
-        }
 
         // Every candidate failed on a shortcut slot: try a sim-open
         // punch through the relay. One attempt per backoff cycle.

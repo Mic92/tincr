@@ -80,19 +80,12 @@ pub(crate) enum AutoAction {
 /// The *peer's* edge count from the gossiped graph. Dropping our conn
 /// to a peer with `edge_count < 2` would isolate it.
 #[derive(Debug, Clone)]
-#[expect(clippy::struct_excessive_bools)] // snapshot of independent flags
 pub(crate) struct NodeSnapshot {
     pub name: String,
     /// `n->status.reachable`. From sssp.
     pub reachable: bool,
     /// We have a `hosts/` file with `Address =` for this node.
     pub has_address: bool,
-    /// We have a `hosts/` file with an `Ed25519PublicKey` for this
-    /// node AND `DhtDiscovery=yes`. Widens dial-candidacy: a peer's
-    /// address can be DHT-resolved on demand from its pubkey, so a
-    /// pubkey-only `hosts/NAME` is enough to dial. Kept separate from
-    /// `has_address` (that bit gates other things, e.g. `dump nodes`).
-    pub has_dht_key: bool,
     /// We have a direct meta conn (inbound OR outbound).
     pub directly_connected: bool,
     /// How many edges this node has in the gossiped graph.
@@ -180,7 +173,7 @@ pub(crate) struct ShortcutKnobs {
 /// Don't re-add a peer as a shortcut for this long after dropping it.
 /// Belt-and-braces (the `tx_rate`-keyed drop test already prevents
 /// flap); sim shows flat sensitivity 30..120s.
-pub(crate) const SHORTCUT_BACKOFF: Duration = Duration::from_secs(60);
+pub(crate) const SHORTCUT_BACKOFF: Duration = Duration::from_mins(1);
 
 impl Default for ShortcutKnobs {
     fn default() -> Self {
@@ -269,7 +262,7 @@ pub(crate) fn decide(
             .filter(|n| {
                 n.name != myself_name
                     && !n.directly_connected
-                    && (n.has_address || n.has_dht_key)
+                    && n.has_address
                     && n.relay_rate_bps > knobs.relay_hi_bps
                     && n.backoff_until.is_none_or(|t| now >= t)
                     && !pending_outgoings.iter().any(|p| p.name == n.name)
@@ -357,9 +350,7 @@ fn make_new_connection(
     let eligible: Vec<&NodeSnapshot> = nodes
         .iter()
         .filter(|n| {
-            n.name != myself_name
-                && !n.directly_connected
-                && (n.has_address || n.has_dht_key || n.reachable)
+            n.name != myself_name && !n.directly_connected && (n.has_address || n.reachable)
         })
         .collect();
 
@@ -399,11 +390,7 @@ fn connect_to_unreachable(
     let n = &nodes[r];
 
     // Ineligible → return. NOT continue. THIS is the back-off.
-    if n.name == myself_name
-        || n.directly_connected
-        || n.reachable
-        || !(n.has_address || n.has_dht_key)
-    {
+    if n.name == myself_name || n.directly_connected || n.reachable || !n.has_address {
         return AutoAction::Noop;
     }
     if pending_outgoings.iter().any(|p| p.name == n.name) {
@@ -478,7 +465,6 @@ mod tests {
             tx_rate_bps: 0,
             nexthop: None,
             backoff_until: None,
-            has_dht_key: false,
         }
     }
 
@@ -775,30 +761,6 @@ mod tests {
                 other => panic!("seed {seed}: expected Disconnect, got {other:?}"),
             }
         }
-    }
-
-    /// DHT-only bootstrap: nobody has `Address=`, everybody has a
-    /// pubkey, `DhtDiscovery=yes`. nc=0 → `make_new_connection` must
-    /// pick one (the gate widens to `has_address || has_dht_key`).
-    #[test]
-    fn connect_when_only_dht_key() {
-        let mut nodes = vec![node("me", true, false, false, 0)];
-        for n in ["a", "b", "c", "d", "e"] {
-            let mut s = node(n, false, false, false, 0);
-            s.has_dht_key = true;
-            nodes.push(s);
-        }
-        for seed in 0..20 {
-            let mut rng = ChaCha8Rng::seed_from_u64(seed);
-            match legacy_decide("me", &nodes, &[], &[], &mut rng) {
-                AutoAction::Connect { name, origin } => {
-                    assert!(["a", "b", "c", "d", "e"].contains(&name.as_str()));
-                    assert_eq!(origin, OutOrigin::AutoBackbone);
-                }
-                other => panic!("seed {seed}: expected Connect, got {other:?}"),
-            }
-        }
-        // Negative (`has_dht_key=false`) is `connect_skips_ineligible`.
     }
 
     // shortcut behaviour.

@@ -45,13 +45,6 @@ These have no equivalent in C tinc. All are off-mesh or
 backwards-compatible on the wire. A C node simply doesn't
 participate.
 
-- **DHT discovery.** A node can publish its current dialable address
-  to the BitTorrent Mainline DHT and resolve peers from it, removing
-  the need for at least one statically-addressed relay. Records are
-  encrypted and published under a key only mesh members can derive.
-  Setting `DhtSecretFile` additionally gates resolution to nodes
-  holding the secret. New keys: `DhtDiscovery`, `DhtSecretFile`,
-  `DhtBootstrap`. New tool: `tinc-dht-seed`.
 - **IPv6 firewall pinhole.** Port mapping speaks PCP in addition to
   UPnP-IGD, and uses it over IPv6 to open inbound through consumer
   router firewalls. That way a node with only a global v6 address
@@ -135,6 +128,5 @@ Things that work in both daemons but not identically.
 | `Cipher`, `Digest`, `MACLength`           | Warned, ignored.                      |
 | `PrivateKey`, `PrivateKeyFile`, `PublicKey` (RSA) | Warned, ignored. Use the Ed25519 equivalents. |
 | `UPnP`                                    | Same values as C; also drives PCP.    |
-| `DhtDiscovery`, `DhtSecretFile`, `DhtBootstrap` | New.                          |
 | `Sandbox`                                 | New (`off`/`normal`/`high`).          |
 | `LogLevel`                                | New.                                  |

@@ -16,7 +16,7 @@ use crate::tunnel::TunnelState;
 use super::ListenerSlot;
 
 /// Re-warn cadence for [`handle_udp_unreachable`].
-const UDP_UNREACHABLE_WARN_INTERVAL: Duration = Duration::from_secs(60);
+const UDP_UNREACHABLE_WARN_INTERVAL: Duration = Duration::from_mins(1);
 
 /// Confirm a peer's UDP address: flip `udp_confirmed`, cache the
 /// `SockAddr` + sock index, mirror into the lock-free fast-path handle.

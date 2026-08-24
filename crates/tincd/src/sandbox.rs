@@ -271,7 +271,7 @@ fn discover_paths(level: Level, paths: &Paths) -> SandboxPaths {
         paths.confbase.join("addrcache"),
         paths.confbase.join("invitations"),
     ];
-    // addrcache + dht_nodes fall back to `$STATE_DIRECTORY/addrcache`
+    // addrcache falls back to `$STATE_DIRECTORY/addrcache`
     // when confbase is read-only (NixOS store). Allow it so the
     // fallback survives Landlock too.
     if let Some(sd) = std::env::var_os("STATE_DIRECTORY") {

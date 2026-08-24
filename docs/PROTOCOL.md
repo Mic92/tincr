@@ -25,7 +25,6 @@ flowchart TB
         data --> d_sptps
     end
     meta -. "REQ_KEY / ANS_KEY<br/>carry the UDP handshake" .-> d_sptps
-    DHT["Mainline DHT<br/>(out-of-band rendezvous)"] -. "dialable address" .-> TCP
 ```
 
 1. **SPTPS** is the cryptographic transport: an authenticated key
@@ -41,9 +40,6 @@ flowchart TB
 3. **Data framing** is how encrypted VPN packets ride UDP: an SPTPS
    datagram with a short cleartext routing prefix in front, so a
    relay can forward without being able to decrypt.
-
-A fourth piece, **DHT rendezvous**, sits entirely outside the mesh
-protocol and is covered at the end.
 
 ## SPTPS
 
@@ -312,37 +308,3 @@ wrapped as `SPTPS_PACKET` and relayed over the TCP meta-connection to
 the nexthop. **TcpFallback** has a session but no working UDP path
 yet; **DirectUDP** is the steady state. Any state returns to
 **NoSession** when the graph marks the node unreachable.
-
-## DHT rendezvous (out of band)
-
-This part has no equivalent in C tinc. Its job is to remove the last
-piece of static configuration: the `Address =` line pointing at a
-relay someone has to keep on a fixed IP.
-
-The mechanism is BEP 44 mutable items on the public BitTorrent
-Mainline DHT — millions of nodes, no infrastructure of ours. The
-problem with publishing to a public DHT, of course, is that it's
-public: a crawler shouldn't be able to enumerate mesh members or
-watch a node move between networks. So two layers of blinding:
-
-1. **The lookup key** is the node's Ed25519 identity *blinded* with a
-   factor derived from the mesh name, the public key, and the current
-   day. Anyone holding the node's host file can derive today's key
-   and verify the signature; anyone without it sees a fresh random
-   key every 24 h, unlinkable to yesterday's and to the identity. The
-   DHT storer can verify the record is signed by the key it's stored
-   under — that's all BEP 44 requires — without learning whose
-   identity that key belongs to.
-
-2. **The value** — the actual address list — is encrypted with
-   XChaCha20-Poly1305 under a key derived from the same inputs plus
-   an optional mesh-wide secret. With no secret configured, holding
-   any host file is enough to read records. With one configured,
-   resolution is gated to nodes that also hold the secret, so a
-   leaked host file alone is useless.
-
-A peer that wants to find a node derives today's blinded key, fetches
-the item, decrypts it, and dials. Neither side needed a fixed
-address; nothing on the DHT links the record to the mesh; and a C
-tinc node in the same mesh is simply unaware any of this happened —
-it sees an inbound connection like any other.

@@ -272,39 +272,22 @@ impl Daemon {
             self.execute_auto_action(action);
         }
 
-        // PCP/UPnP portmapper drain. Non-blocking; the refresh.
-        // thread already did the protocol work. The v4 TCP mapping
-        // feeds `discovery.set_portmapped_tcp` so the next BEP44
-        // publish carries a `tcp=` peers can dial without a punch;
-        // the v6 TCP pinhole feeds `tcp6=` (separate field: v4 is a
-        // DNAT'd public addr, v6 is our own GUA, both can coexist).
-        // UDP mappings are logged only — the published `v4=` already
-        // carries the reflexive UDP port (it's the *correct* socket's
-        // mapping; the portmapped UDP port is a second route to the
-        // same listener and consumer routers usually hand back the
-        // same number anyway).
+        // PCP/UPnP portmapper drain. Non-blocking; the refresh thread
+        // already did the protocol work.
         #[cfg(feature = "upnp")]
         if let Some(pm) = self.portmapper.as_ref() {
-            use crate::portmap::{Af, PortmapEvent, Proto};
+            use crate::portmap::PortmapEvent;
             for ev in pm.tick() {
                 match ev {
                     PortmapEvent::Mapped {
-                        af,
                         proto,
                         local_port,
                         ext,
                         via,
+                        ..
                     } => {
                         log::info!(target: "tincd::portmap",
                                    "Portmapped {proto:?} {local_port} → {ext} (via {via})");
-                        if proto == Proto::Tcp
-                            && let Some(d) = self.discovery.as_mut()
-                        {
-                            match af {
-                                Af::V4 => d.set_portmapped_tcp(Some(ext)),
-                                Af::V6 => d.set_portmapped_tcp6(Some(ext)),
-                            };
-                        }
                     }
                     PortmapEvent::Lost {
                         af,
@@ -315,74 +298,8 @@ impl Daemon {
                         log::warn!(target: "tincd::portmap",
                                    "Port mapping lost ({af:?}/{proto:?} {local_port} → {ext}); \
                                     will retry next refresh");
-                        if proto == Proto::Tcp
-                            && let Some(d) = self.discovery.as_mut()
-                        {
-                            match af {
-                                Af::V4 => d.set_portmapped_tcp(None),
-                                Af::V6 => d.set_portmapped_tcp6(None),
-                            };
-                        }
                     }
                 }
-            }
-        }
-
-        // DHT discovery poll (Rust extension). tick() is.
-        // non-blocking: every mainline call (info/to_bootstrap/
-        // put_mutable/get_mutable) runs on the tinc-dht thread; here
-        // we only drain its result channel and read cached state.
-        if self.settings.dht_discovery
-            && let Some(d) = self.discovery.as_mut()
-        {
-            // tick() first: it moves Resolved results off the worker
-            // channel into the buffer that drain_resolved() returns.
-            let r = d.tick(self.timers.now());
-
-            for (name, addrs) in d.drain_resolved() {
-                if addrs.is_empty() {
-                    log::debug!(target: "tincd::discovery",
-                                "DHT resolve {name}: no record");
-                } else {
-                    log::info!(target: "tincd::discovery",
-                               "DHT resolved {name}: {addrs:?}");
-                    self.dht_hints.insert(name, addrs);
-                }
-            }
-
-            for ev in r.events {
-                match ev {
-                    crate::discovery::DiscoveryEvent::PublicV4 { ip, firewalled } => {
-                        log::info!(target: "tincd::discovery",
-                                   "DHT voted public v4: {ip} \
-                                    (firewalled={firewalled})");
-                    }
-                    crate::discovery::DiscoveryEvent::Published { seq, value } => {
-                        log::debug!(target: "tincd::discovery",
-                                    "published seq={seq}: {value}");
-                    }
-                }
-            }
-
-            // Port-probe from tincd's *own* socket so the BEP 42 echo
-            // carries the NAT mapping for the correct port. Doubles as
-            // a keepalive (25s cadence vs 30–180s conntrack timeouts).
-            // mainline is v4-only → first v4 listener; no v4 → skip.
-            if r.wants_port_probe
-                && let targets = d.probe_targets()
-                && !targets.is_empty()
-                && let Some(slot) = self.listeners.iter().find(|s| s.listener.local.is_ipv4())
-            {
-                self.dht_probe_sent.clear();
-                for tgt in &targets {
-                    let dst = socket2::SockAddr::from(SocketAddr::V4(*tgt));
-                    let _ = slot
-                        .listener
-                        .udp
-                        .send_to(crate::discovery::PORT_PROBE_PING, &dst);
-                    self.dht_probe_sent.insert(SocketAddr::V4(*tgt));
-                }
-                d.probe_sent(self.timers.now());
             }
         }
 

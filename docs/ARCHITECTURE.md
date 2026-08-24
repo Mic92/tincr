@@ -22,7 +22,6 @@ flowchart LR
         cp -- "routing snapshot" --> dp
     end
     subgraph workers ["worker threads"]
-        dht["tinc-dht"]
         dns["tinc-dns"]
         pm["tinc-portmap"]
         scr["tinc-script"]
@@ -32,7 +31,6 @@ flowchart LR
     udp <--> dp
     tcp <--> cp
     cp  <-.-> workers
-    dht --- mainline["Mainline DHT"]
     pm  --- gw["gateway<br/>PCP / UPnP"]
 ```
 
@@ -53,8 +51,8 @@ below is in service of:
 
 2. **One thread on the hot path, and it never blocks.** Mesh VPN
    traffic is latency-sensitive and bursty. A packet that arrives
-   while the forwarding thread is parked on a DNS lookup, a DHT
-   query, or a lock is a packet that's late. We'd rather have one
+   while the forwarding thread is parked on a DNS lookup or a
+   lock is a packet that's late. We'd rather have one
    thread that is *always* runnable than four threads negotiating
    ownership of a socket.
 
@@ -66,13 +64,7 @@ below is in service of:
    we're doing more than a handful of syscalls per burst, that's a
    bug.
 
-4. **Zero-config rendezvous.** A new node should be able to find the
-   mesh with nothing but its invite — no `Address =` line pointing at
-   a relay someone has to keep running on a static IP. This is the
-   one place we add protocol surface, and it's deliberately
-   out-of-band so C nodes don't need to know it exists.
-
-5. **Degrade, don't fall over.** Hostile or broken input — a rogue
+4. **Degrade, don't fall over.** Hostile or broken input — a rogue
    gateway on the LAN, garbage on the UDP socket, a peer flooding
    `ADD_EDGE` — should cost at most a log line and a dropped packet,
    never unbounded memory or a stalled event loop.
@@ -89,9 +81,8 @@ satisfy goal 2. With one owner there is nothing to lock, and "is the
 forwarding path waiting on anything?" has a one-word answer.
 
 The trade-off, of course, is that the one thread genuinely must not
-block. Anything that *can't* be made non-blocking — and there are
-exactly two such things today, DHT operations and NAT port-mapping
-round-trips — is moved onto a small worker thread. Workers don't
+block. Anything that *can't* be made non-blocking — and today
+DNS lookups, NAT port-mapping round-trips and hook scripts — is moved onto a small worker thread. Workers don't
 share state with the main thread; they take a request over a channel,
 go away for however long it takes, and post a result back. The main
 thread polls the result channel without waiting. If a worker dies,
@@ -201,8 +192,8 @@ per burst is O(1) rather than O(packets).
 
 Forwarding over UDP is the goal, but it presupposes the two ends can
 address each other. Behind consumer NAT and stateful firewalls they
-generally can't, at least not at first. Three mechanisms close the
-gap, in increasing order of independence:
+generally can't, at least not at first. Two mechanisms close the
+gap:
 
 - **Reflexive discovery.** Once *any* meta-connection exists, peers
   report the source address they observe on each other's packets, and
@@ -213,20 +204,7 @@ gap, in increasing order of independence:
 - **Port mapping.** A worker thread asks the local gateway — PCP
   first, UPnP-IGD as fallback — to forward a TCP/UDP port (on IPv4)
   or open a firewall pinhole (on IPv6). When it works, the node has
-  an address that accepts unsolicited inbound, and we publish it.
-  When it doesn't, nothing else is affected.
-
-- **DHT rendezvous.** This is the piece that delivers goal 4. The
-  node publishes its current dialable address to the public
-  BitTorrent DHT, encrypted under a key that only mesh members can
-  derive, signed under a key that rotates daily so records can't be
-  linked over time. A peer holding the right host file derives
-  today's lookup key, fetches the record, decrypts it, and dials —
-  without either side having a fixed address and without leaking mesh
-  membership to anyone crawling the DHT. The DHT client lives on its
-  own worker thread because a publish or lookup can take seconds, and
-  per goal 2 those seconds must not be the forwarding thread's
-  problem.
+  an address that accepts unsolicited inbound. When it doesn't, nothing else is affected.
 
 Until a UDP path is confirmed, traffic falls back to the
 meta-connection's TCP stream or to a relay. As soon as it is, traffic
@@ -238,7 +216,6 @@ moves over.
 | ------------ | ------------------------------------------------------------------------------------------ |
 | main         | Event loop, all sockets, TUN device, all daemon state. Must not block.                     |
 | tinc-dns     | `getaddrinfo` for outgoing/reconnect. Main thread enqueues hostnames, polls results.       |
-| tinc-dht     | The Mainline DHT client. Publish/resolve round-trips. Main thread enqueues, polls results. |
 | tinc-portmap | PCP and UPnP-IGD round-trips. Each exchange wall-clock-bounded.                            |
 | tinc-script  | FIFO runner for `host-up`/`subnet-up` hooks and address-cache writes. Drains on shutdown.  |
 

@@ -283,27 +283,6 @@ pub static VARS: &[Var] = &[
     // array (the spot_check test asserts the alpha-break boundary at
     // [48]).
     //
-    // DhtBootstrap: SERVER+MULTIPLE (bootstrap nodes are a list, like
-    // ConnectTo). NOT SAFE — an invitation that sets DhtBootstrap routes
-    // every publish + every port-probe to an attacker's seed: they get
-    // the pubkey in cleartext from the BEP 44 put, and they control the
-    // BEP 42 ip echo (can fake the reflexive address we publish). The
-    // threat model resembles ConnectTo (which IS safe) but the DHT is
-    // sideband, not the mesh's authenticated channel. Conservative.
-    v("DhtBootstrap", S.union(M)),
-    // DhtDiscovery: SERVER only, NOT SAFE — turning on DHT publish via
-    // invitation hands a passive observer this node's online/offline
-    // pattern + every published v4/v6 candidate, and opens a NAT hole
-    // (the port-probe keepalive) on a port the operator may not have
-    // intended to expose. Opt-in must be deliberate.
-    v("DhtDiscovery", S),
-    // DhtSecretFile: SERVER, NOT SAFE — an inviter who can set the
-    // mesh-wide secret can also *change* it, partitioning the invitee
-    // from the existing mesh's published records. Operator-set only.
-    // File-only (no inline DhtSecret) for the same reason
-    // Ed25519PrivateKeyFile has no inline form: tinc.conf is
-    // world-readable on most deploys and ends up in the Nix store.
-    v("DhtSecretFile", S),
     // DNS stub (Rust-only). SERVER, MULTIPLE for DNSAddress (one v4
     // + one v6). NOT SAFE: an invitation that sets DNSAddress points
     // every name lookup at an attacker-chosen resolver.
@@ -329,7 +308,7 @@ pub static VARS: &[Var] = &[
 /// Tripwire: C tinc's table has 74 entries, plus our Rust-side keys.
 /// Drift in the 74 means a config key was added or removed in C tinc
 /// and this table is stale.
-const _: () = assert!(VARS.len() == 74 + 9);
+const _: () = assert!(VARS.len() == 74 + 6);
 
 /// Look up by name, case-insensitive.
 ///

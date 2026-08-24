@@ -111,7 +111,7 @@ impl Daemon {
             }
             still_armed = true;
             // Refresh idle-reap window while we're actively streaming.
-            conn.last_ping_time = now + Duration::from_secs(3600);
+            conn.last_ping_time = now + Duration::from_hours(1);
 
             // snaplen=0 → no clip.
             let snap = usize::from(conn.pcap_snaplen);

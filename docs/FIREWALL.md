@@ -8,8 +8,8 @@ should accept inbound connections. Nodes that only dial out
 If you changed `Port` in `tinc.conf` / `hosts/NAME`, substitute that
 number everywhere below.
 
-The DHT client and the UPnP/PCP port-mapper use outbound UDP only.
-Their replies are accepted by the `ct state established` rule every
+The UPnP/PCP port-mapper uses outbound UDP only.
+Its replies are accepted by the `ct state established` rule every
 stateful firewall already has, so they need no extra inbound rule.
 
 ## nftables
@@ -66,9 +66,7 @@ networking.firewall.allowedUDPPorts = [ 655 ];
 Either forward TCP+UDP 655 to the node manually, or set `UPnP = yes`
 in `tinc.conf` and let the daemon ask the router via PCP or
 UPnP-IGD. The mapped external address is logged as
-`Portmapped Tcp 655 → EXT_IP:EXT_PORT` and, with `DhtDiscovery`
-enabled, published in the node's DHT record so peers dial it
-directly.
+`Portmapped Tcp 655 → EXT_IP:EXT_PORT`.
 
 ### Enabling UPnP/PCP on the router
 

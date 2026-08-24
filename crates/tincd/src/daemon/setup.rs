@@ -19,7 +19,6 @@ use std::time::{Duration, SystemTime};
 use crate::event::{EventLoop, Io, SelfPipe, TimerId, Timers};
 use crate::graph::Graph;
 use slotmap::SlotMap;
-use tinc_crypto::sign::SigningKey;
 use tinc_device::{Device, DeviceArena, GroBucket};
 use tinc_proto::Subnet;
 
@@ -651,7 +650,7 @@ impl Daemon {
         }
 
         // settings
-        let mut settings = load_settings(&config, confbase)?;
+        let mut settings = load_settings(&config)?;
 
         let n_shards = resolve_shards(&settings, &config);
         settings.sockopts.shard_group = n_shards > 1;
@@ -910,7 +909,6 @@ impl Daemon {
             outgoings: SlotMap::with_key(),
             outgoing_timers: slotmap::SecondaryMap::new(),
             has_address: HashSet::new(),
-            has_dht_key: HashSet::new(),
             punches: HashMap::new(),
             punch_timers: HashMap::new(),
             punch_socks: HashMap::new(),
@@ -944,12 +942,9 @@ impl Daemon {
             watchdog,
             running: true,
             any_pcap: false,
-            discovery: None,
             dns_worker: crate::bgresolve::DnsWorker::spawn(),
             dns_hints: HashMap::new(),
             proxy_addrs: Vec::new(),
-            dht_hints: HashMap::new(),
-            dht_probe_sent: HashSet::new(),
             #[cfg(feature = "upnp")]
             portmapper: None,
             tx_snap: None,
@@ -994,16 +989,9 @@ impl Daemon {
         // last keeps the "load every name from disk" step in one place.
         daemon.load_all_nodes();
 
-        // DHT discovery spawn (Rust extension). After listeners
-        // (need `my_udp_port` resolved) and the ConnectTo loop
-        // (preresolve gates on `outgoings.is_empty()`). Non-fatal.
-        daemon.spawn_dht_discovery();
-
-        // PCP/UPnP portmapper. After listeners (need the
-        // resolved port), before drop_privs (PCP/SSDP send from
-        // unprivileged sockets, spawn alongside DHT for symmetry so
-        // the first refresh runs while tinc-up is still configuring
-        // the iface.
+        // PCP/UPnP portmapper. After listeners (needs the resolved
+        // port); spawned early so the first refresh runs while tinc-up
+        // is still configuring the iface.
         #[cfg(feature = "upnp")]
         if daemon.settings.upnp != crate::portmap::UpnpMode::No {
             log::info!(target: "tincd::portmap",
@@ -1092,104 +1080,6 @@ impl Daemon {
         });
 
         Ok(daemon)
-    }
-
-    /// Spawn the DHT discovery actor if enabled. Non-fatal on failure.
-    /// After listeners: needs `my_udp_port` resolved.
-    fn spawn_dht_discovery(&mut self) {
-        if !self.settings.dht_discovery {
-            return;
-        }
-        // SigningKey doesn't impl Clone by design.
-        let key = SigningKey::from_blob(&self.mykey.to_blob());
-        let bootstrap = if self.settings.dht_bootstrap.is_empty() {
-            None
-        } else {
-            Some(self.settings.dht_bootstrap.as_slice())
-        };
-        // Warm-start: feed last run's routing table back as extra
-        // bootstrap nodes so a restart doesn't re-hit DNS seeds.
-        // File lives next to the addrcache (`$STATE_DIRECTORY` if
-        // set, else `confbase`); written post-`drop_privs` by
-        // `Daemon::drop`. Missing/garbage → empty, cold bootstrap.
-        let extra = crate::discovery::load_persisted_nodes(&self.dht_nodes_path());
-        if !extra.is_empty() {
-            log::debug!(target: "tincd::discovery",
-                        "loaded {} persisted DHT node(s) for warm bootstrap",
-                        extra.len());
-        }
-        match crate::discovery::Discovery::spawn(
-            key,
-            self.my_udp_port,
-            self.settings.dht_secret,
-            bootstrap,
-            &extra,
-        ) {
-            Ok(d) => {
-                log::info!(target: "tincd::discovery",
-                "DHT discovery enabled (port {}, secret: {}, bootstrap: {})",
-                self.my_udp_port,
-                if self.settings.dht_secret.is_some() { "yes" } else { "no" },
-                bootstrap.map_or_else(
-                    || "mainline".to_owned(),
-                    |b| b.join(", ")
-                ));
-                self.discovery = Some(d);
-                self.preresolve_dht();
-            }
-            Err(e) => {
-                log::warn!(target: "tincd::discovery",
-                           "DHT actor spawn failed (continuing \
-                            without): {e}");
-            }
-        }
-    }
-
-    /// Cold-start pre-resolve: with no `ConnectTo` and `AutoConnect`
-    /// on, the first dial is ~5s away (periodic tick) and would hit
-    /// an empty addr cache → Exhausted → resolve → wait another 5s.
-    /// Kick a resolve for up to 8 random pubkey-only `hosts/*` NOW so
-    /// by the time `AutoConnect` picks one the hint has landed.
-    /// Shuffled so a freshly-provisioned mesh doesn't all dial the
-    /// alphabetically-first node.
-    fn preresolve_dht(&mut self) {
-        // ConnectTo present → retry_outgoing drives resolves already.
-        if !self.settings.autoconnect || !self.outgoings.is_empty() {
-            return;
-        }
-        let Some(d) = self.discovery.as_mut() else {
-            return;
-        };
-        let hosts_dir = self.confbase.join("hosts");
-        let Ok(dir) = std::fs::read_dir(&hosts_dir) else {
-            return;
-        };
-        let mut cands: Vec<(String, [u8; 32])> = dir
-            .flatten()
-            .filter_map(|ent| {
-                let fname = ent.file_name().to_str()?.to_owned();
-                if !tinc_proto::check_id(&fname) || fname == self.name {
-                    return None;
-                }
-                let cfg = crate::keys::read_host_config(&self.confbase, &fname);
-                // Address= present → dialable without DHT; skip.
-                if cfg.lookup("Address").next().is_some() {
-                    return None;
-                }
-                let key = crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, &fname)?;
-                Some((fname, key))
-            })
-            .collect();
-        // Partial Fisher-Yates. Cap 8: resolver thread is serial.
-        let n = cands.len();
-        for i in 0..n.min(8) {
-            let j = i + (rand_core::Rng::next_u32(&mut tinc_crypto::os_rng()) as usize) % (n - i);
-            cands.swap(i, j);
-            let (name, key) = &cands[i];
-            log::debug!(target: "tincd::discovery",
-                        "cold-start pre-resolve: {name}");
-            d.request_resolve(name, *key);
-        }
     }
 }
 

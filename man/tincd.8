@@ -225,10 +225,8 @@ is set.
 .It Ev WATCHDOG_USEC
 Arms periodic watchdog keep-alives at half the given interval.
 .It Ev STATE_DIRECTORY
-When set, the address cache and
-.Pa dht_nodes
-persistence file are stored under it instead of the configuration
-directory.
+When set, the address cache is stored under it instead of the
+configuration directory.
 .It Ev TINCR_ALLOW_COREDUMP
 If set, equivalent to
 .Fl -allow-coredump .
@@ -258,9 +256,6 @@ Unix-domain control socket.
 Default log file when detaching.
 .It Pa $STATE_DIRECTORY/cache/
 Per-peer address cache.
-.It Pa $STATE_DIRECTORY/dht_nodes
-Persisted Mainline DHT routing-table seeds
-.Pq tincr extension .
 .El
 .Sh EXIT STATUS
 .Ex -std
@@ -272,8 +267,7 @@ exits 1.
 .Sh SEE ALSO
 .Xr tinc.conf 5 ,
 .Xr tinc 8 ,
-.Xr tinc-auth 8 ,
-.Xr tinc-dht-seed 8
+.Xr tinc-auth 8
 .Sh AUTHORS
 .An -nosplit
 tincr is maintained at

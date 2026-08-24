@@ -45,18 +45,14 @@ debug = true
 # csrc/shim.c's keystream. The hot-path AEAD is OpenSSL (tinc-crypto).
 chacha20 = "0.9"
 openssl-sys = "0.9"
-# digest-0.11 cohort: mainline pins ed25519-dalek 3.0-pre → sha2
-# 0.11; one dalek/sha2/digest version workspace-wide. KATs pin the
-# wire bytes across the 2→3-pre bump.
+# digest-0.11 cohort: one dalek/sha2/digest version workspace-wide.
+# KATs pin the wire bytes across the 2→3-pre bump.
 curve25519-dalek = { version = "5.0.0-pre.6", features = ["digest"] }
 ed25519-dalek = { version = "3.0.0-pre.6", features = ["hazmat", "digest"] }
 sha2 = "0.11"
 hmac = "0.13"
 subtle = "2.5"
 
-# Mainline DHT discovery, `node` feature only (own thread, no async).
-# 6.0.x, NOT 6.1: 6.1 pins digest =0.11.0-rc.10 against our 0.11.
-mainline = { version = "6.0", default-features = false, features = ["node"] }
 zeroize = "1.7"
 # PQ hybrid KEX (`SPTPSKex = x25519-mlkem768`). Handshake-time only,
 # pure-Rust perf is fine.
