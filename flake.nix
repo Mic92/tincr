@@ -103,6 +103,7 @@
           formatting = treefmt.${system}.config.build.check self;
           inherit tincd;
           tincd-test = tincd.tests;
+          clippy = tincd.clippy;
         }
         // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
           inherit (self.packages.${system}) tincd-android tincd-android-x86_64 tincr-app;
