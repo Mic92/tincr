@@ -1,17 +1,21 @@
-//! Rust↔Rust round-trip tests for the zero-alloc fast-path methods
-//! (`seal_data_into` / `open_data_into`). Unlike `vs_c.rs` these don't
-//! need the C harness, so they always run.
+//! The zero-alloc data path (`seal_data_into` / `open_data_into`) and
+//! the handle-based variants the shards use, checked against the plain
+//! `send_record`/`receive` path.
 
-mod common;
+use crate::common::{Pair, SeedRng, wire, wires};
+use tinc_sptps::SptpsError;
 
-use common::{REPLAYWIN, SeedRng, handshake_pair, keypair};
-use tinc_sptps::{Framing, Role, Sptps, SptpsError};
+const HEADROOM: usize = 14;
+
+fn pair() -> (tinc_sptps::Sptps, tinc_sptps::Sptps) {
+    Pair::datagram().handshake()
+}
 
 /// `seal_data_into` → `open_data_into` round-trip with nonzero headroom
 /// on both sides. Asserts byte equality and that headroom is zero-filled.
 #[test]
 fn seal_into_open_into_roundtrip() {
-    let (mut alice, mut bob) = handshake_pair(Framing::Datagram, b"fast");
+    let (mut alice, mut bob) = pair();
 
     let body = b"the quick brown fox jumps over the lazy dog";
     let mut tx = Vec::new();
@@ -39,23 +43,67 @@ fn seal_into_open_into_roundtrip() {
     assert_eq!(rx.capacity(), cap_before, "rx scratch reallocated");
 }
 
-/// `open_data_into` before handshake completes → `InvalidState` (no incipher).
 #[test]
-fn open_data_into_pre_handshake() {
-    let (alice_key, _) = keypair(1);
-    let (_, bob_pub) = keypair(2);
-    let (mut alice, _) = Sptps::start(
-        Role::Initiator,
-        Framing::Datagram,
-        alice_key,
-        bob_pub,
-        b"x".to_vec(),
-        REPLAYWIN,
-        &mut SeedRng(1),
-    );
+fn open_data_into_pre_handshake_is_invalid_state() {
+    let mut bob = Pair::datagram().responder();
     let mut rx = Vec::new();
-    let err = alice.open_data_into(&[0u8; 32], &mut rx, 0).unwrap_err();
-    assert_eq!(err, SptpsError::InvalidState);
+    assert_eq!(
+        bob.open_data_into(&[0u8; 32], &mut rx, 0),
+        Err(SptpsError::InvalidState)
+    );
+}
+
+/// On any error `out` must be back to `[0; headroom]`; `BadSeqno`
+/// once left the decrypted plaintext in place.
+#[test]
+fn open_data_into_scrubs_out_on_error() {
+    let (mut alice, mut bob) = pair();
+    let mut tx = Vec::new();
+    alice
+        .seal_data_into(7, b"must not survive", &mut tx, 0)
+        .unwrap();
+    let mut out = Vec::new();
+    bob.open_data_into(&tx, &mut out, HEADROOM).unwrap();
+    assert_eq!(
+        bob.open_data_into(&tx, &mut out, HEADROOM),
+        Err(SptpsError::BadSeqno)
+    );
+    assert_eq!(out, vec![0u8; HEADROOM]);
+
+    let kex = wire(alice.force_kex(&mut SeedRng(0xCC)).unwrap());
+    assert_eq!(
+        bob.open_data_into(&kex, &mut out, HEADROOM),
+        Err(SptpsError::BadRecord)
+    );
+    assert_eq!(out, vec![0u8; HEADROOM]);
+
+    // Too short for seqno + tag: an error before decrypt, never a panic.
+    for len in [0, 4, 20, 64] {
+        assert!(
+            bob.open_data_into(&vec![0u8; len], &mut out, HEADROOM)
+                .is_err()
+        );
+    }
+}
+
+/// `BadRecord` (a handshake record on the fast path) must not advance
+/// the replay window: the daemon retries that packet via `receive()`,
+/// which would then see a duplicate.
+#[test]
+fn open_data_into_badrecord_keeps_window() {
+    let (mut alice, mut bob) = pair();
+    let mut data = Vec::new();
+    alice.seal_data_into(0, b"x", &mut data, 0).unwrap();
+    let kex = wire(alice.force_kex(&mut SeedRng(0xCC)).unwrap());
+
+    let mut out = Vec::new();
+    assert_eq!(
+        bob.open_data_into(&kex, &mut out, 0),
+        Err(SptpsError::BadRecord)
+    );
+    bob.open_data_into(&data, &mut out, 0).unwrap();
+    let (_, outs) = bob.receive(&kex, &mut SeedRng(0xDD)).unwrap();
+    assert_eq!(wires(outs).len(), 1);
 }
 
 /// `alloc_seqnos(N)` + N×`seal_with_seqno` MUST be byte-identical to
@@ -64,8 +112,8 @@ fn open_data_into_pre_handshake() {
 #[test]
 fn alloc_seqnos_seal_with_seqno_byte_identical() {
     // Two pairs from identical seeds → identical sessions.
-    let (mut a1, _b1) = handshake_pair(Framing::Datagram, b"fast");
-    let (mut a2, _b2) = handshake_pair(Framing::Datagram, b"fast");
+    let (mut a1, _b1) = pair();
+    let (mut a2, _b2) = pair();
 
     let bodies: [&[u8]; 5] = [
         b"one",
@@ -112,7 +160,7 @@ fn alloc_seqnos_seal_with_seqno_byte_identical() {
 
     // RX side: open_with_seqno + replay_check produces the same body
     // open_data_into would, modulo the type-byte strip.
-    let (_a3, mut bob) = handshake_pair(Framing::Datagram, b"fast");
+    let (_a3, mut bob) = pair();
     for body in &bodies {
         let wire = ref_wires.remove(0);
         let mut rx = Vec::new();
@@ -140,8 +188,8 @@ fn handle_based_seal_byte_identical() {
     use std::sync::atomic::Ordering;
     use tinc_crypto::chapoly::ChaPoly;
 
-    let (mut a1, _b1) = handshake_pair(Framing::Datagram, b"fast");
-    let (a2, mut b2) = handshake_pair(Framing::Datagram, b"fast");
+    let (mut a1, _b1) = pair();
+    let (a2, mut b2) = pair();
 
     let bodies: [&[u8]; 4] = [b"x", b"", &[0xAB; 1400], b"after-handshake"];
 

@@ -6,9 +6,7 @@
 //! `expect` on `None`). The test forges the bytes directly since
 //! `handshake_pair` can't inject a small-order point.
 
-mod common;
-
-use common::{SeedRng, keypair};
+use crate::common::{SeedRng, keypair};
 use tinc_crypto::sign::{SIG_LEN, SigningKey};
 use tinc_sptps::{
     Framing, KEX_LEN, KEX_LEN_HYBRID, NONCE_LEN, Output, REC_HANDSHAKE, Role, Sptps, SptpsAead,
@@ -58,7 +56,7 @@ fn run_case(kex_mode: SptpsKex, label: &[u8]) {
         bkey,
         apub,
         SptpsLabel::with_aead(label, SptpsAead::default()),
-        common::REPLAYWIN,
+        crate::common::REPLAYWIN,
         &mut SeedRng(0xBB),
     );
     let bob_kex_body = kex_body_of(&b_out);
