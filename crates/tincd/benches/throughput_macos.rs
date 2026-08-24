@@ -1,40 +1,15 @@
-//! macOS-native throughput benchmark: two real utun devices on the
-//! single host routing table, two `tincd` daemons, `iperf3` between
-//! their tunnel addresses. The Linux `throughput` bench's bwrap+netns
-//! re-exec doesn't port (no namespaces on Darwin); this is the
-//! closest equivalent that still pushes packets through the kernel
-//! utun read/write path — NOT `DeviceType=fd`/socketpair, which
-//! bypasses exactly the code we want to measure (`BsdTun` AF-prefix
-//! framing, kqueue dispatch, the per-packet `read`/`write` syscall).
+//! macOS throughput: two tincd on real utuns, iperf3 between them.
 //!
 //! ```sh
-//! scripts/macos-bench-runner.sh                 # all (sudo internal)
-//! scripts/macos-bench-runner.sh -- rust_rust    # filter
-//! TINCD_PERF=1 scripts/macos-bench-runner.sh    # + sample(1)
+//! scripts/macos-bench-runner.sh [-- rust_rust]   # TINCD_PERF=1 adds sample(1)
 //! ```
 //!
-//! ## Short-circuit guard
-//!
-//! Both tunnel endpoints are local addresses on one routing table.
-//! Left alone the kernel resolves `10.44.1.1` as local-via-`lo0` and
-//! never touches a utun. iperf3 on Darwin has no `--bind-dev`
-//! (`SO_BINDTODEVICE` is Linux-only), so we instead **rewrite the
-//! host routes**: delete the auto-installed `RTF_LOCAL` /32 for each
-//! tunnel IP and re-add it pointing at the *peer's* utun. Output
-//! routing now sends `BOB_IP` into `utun210`; input delivery still
-//! works because `ip_input` matches local addresses via the
-//! interface-address list, not the routing table. After the run we
-//! read each daemon's `REQ_DUMP_TRAFFIC` counters and hard-assert
-//! they roughly match iperf3's transferred bytes — if the kernel
-//! ever short-circuits past the utun, the bench FAILS instead of
-//! printing a loopback number.
-//!
-//! ## What it reports
-//!
-//! Rust↔Rust only by default; Rust↔C and C↔C if `TINC_C_TINCD` is
-//! set (the devshell sets it). Same ratio interpretation as the
-//! Linux bench — absolute Mbps is machine-local, the Rust/C ratio is
-//! what you compare across commits.
+//! Both tunnel addresses are local to the one routing table, so left
+//! alone the kernel would deliver over `lo0`. The bench replaces each
+//! address's `RTF_LOCAL` host route with one via the *peer's* utun and
+//! afterwards checks the daemons' traffic counters against iperf3's
+//! byte count, failing rather than reporting a loopback number.
+//! C pairings run when `TINC_C_TINCD` is set.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
