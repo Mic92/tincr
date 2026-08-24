@@ -49,7 +49,7 @@ use tinc_device::{Device, DeviceConfig, Mode, Tun, VNET_HDR_LEN};
 const GSO_TCPV4: u8 = 1;
 const GSO_NONE: u8 = 0;
 
-// ════════════════════════ bwrap re-exec wrapper ══════════════════════
+// bwrap re-exec wrapper
 
 fn enter_netns(test_name: &str) -> bool {
     if std::env::var_os("BWRAP_INNER").is_some() {
@@ -118,7 +118,7 @@ fn run_ip(args: &[&str]) {
     assert!(status.success(), "ip {args:?} failed: {status:?}");
 }
 
-// ═════════════════ Test: vnet_hdr present on multiqueue ═════════════
+// Test: vnet_hdr present on multiqueue
 //
 // Opens 4 queues, runs the hairpin echo, asserts:
 //   1. open_mq(4) succeeds (kernel accepts 0x5101)
@@ -144,7 +144,6 @@ fn mq_vnet_hdr_on_queue0() {
     let queues =
         Tun::open_mq(&cfg, N).expect("open_mq: kernel rejected IFF_MULTI_QUEUE|IFF_VNET_HDR");
     assert_eq!(queues.len(), N);
-    eprintln!("✓ open_mq({N}): TUNSETIFF accepted flags=0x5101, {N} queues attached");
 
     run_ip(&["addr", "add", "10.77.0.1/24", "dev", "shard0"]);
     run_ip(&["link", "set", "shard0", "up"]);
@@ -242,13 +241,10 @@ fn mq_vnet_hdr_on_queue0() {
 
     std::thread::sleep(Duration::from_millis(100)); // let echo settle
     let blob = vec![0xABu8; 64 * 1024];
-    let mut tcp_established = false;
     if let Ok(mut s) = std::net::TcpStream::connect_timeout(
         &"10.77.0.2:19999".parse().unwrap(),
         Duration::from_secs(3),
     ) {
-        tcp_established = true;
-        eprintln!("✓ TCP handshake completed via TUN hairpin");
         let _ = s.set_write_timeout(Some(Duration::from_secs(3)));
         let _ = std::io::Write::write_all(&mut s, &blob);
         std::thread::sleep(Duration::from_millis(200));
@@ -272,15 +268,10 @@ fn mq_vnet_hdr_on_queue0() {
         "no packets captured — multiqueue read path broken \
          (kernel never delivered to any queue fd)"
     );
-    eprintln!("captured {} packets across {N} queues:", cap.len());
 
     let mut tso_seen = false;
     let mut csum_offload_seen = false;
     for &(gso_type, gso_size, csum_start, ip_ver, len) in cap.iter().take(12) {
-        eprintln!(
-            "  gso_type={gso_type} gso_size={gso_size} \
-             csum_start={csum_start} ip_ver={ip_ver} len={len}"
-        );
         // The hard assert: ip_ver must be 4 or 6. If vnet_hdr were
         // absent or wrong-sized, we'd be reading IP bytes at the
         // wrong offset → garbage nibble (kernel sends some IPv6
@@ -303,18 +294,6 @@ fn mq_vnet_hdr_on_queue0() {
     drop(cap);
     drop(queues);
 
-    eprintln!(
-        "─────────────────────────────────────────────\n\
-         ✓ open_mq({N}) + vnet_hdr coexist\n\
-         {} csum offload seen (SYN packets, csum_start∈[20,60])\n\
-         {} TSO super seen (gso_type=TCPV4, gso_size>0, len>1600)\n\
-         {} TCP handshake via hairpin\n\
-         ─────────────────────────────────────────────",
-        if csum_offload_seen { "✓" } else { "○" },
-        if tso_seen { "✓" } else { "○" },
-        if tcp_established { "✓" } else { "○" },
-    );
-
     // The gate: at minimum, SYN packets must have a populated
     // vnet_hdr. If even THAT is missing, the design is dead.
     assert!(
@@ -324,7 +303,7 @@ fn mq_vnet_hdr_on_queue0() {
     );
 }
 
-// ═════════════════ Test: n=1 ≡ single-queue ═════════════════════════
+// Test: n=1 ≡ single-queue
 //
 // open_mq(1) takes the no-MQ-flag branch. Weak smoke: just open it,
 // bring it up, verify the iface name. No traffic — Tun::open's path
@@ -344,7 +323,6 @@ fn mq_one_queue_is_plain_open() {
     };
     let queues = Tun::open_mq(&cfg, 1).expect("open_mq(1)");
     assert_eq!(queues.len(), 1);
-    eprintln!("✓ open_mq(1) → 1 queue, iface={}", queues[0].iface());
 
     // The device exists with NO multiqueue flag: a second open
     // (regular, no MQ) should ATTACH (would EINVAL if the device

@@ -11,6 +11,8 @@
 //! not the test.
 
 use serde::Deserialize;
+use tinc_crypto::aead::{SptpsAead, SptpsCipher};
+use tinc_crypto::chapoly::{KEY_LEN, TAG_LEN};
 use tinc_crypto::{b64, chapoly, ecdh, invite, prf, sign};
 
 const VECTORS_JSON: &str = include_str!("kat/vectors.json");
@@ -406,4 +408,33 @@ fn invitation_crypto_kernel_matches_c() {
         assert_eq!(parsed_cookie, cookie, "case {i}: parsed cookie");
         assert_eq!(parsed_hash, kh, "case {i}: parsed key_hash");
     }
+}
+
+/// AES-256-GCM has no C tinc reference, and `SptpsCipher`'s IV
+/// (`0⁸ ‖ seqno_be⁴`) matches no published NIST vector, so this pins
+/// the backend's output for a fixed (key, seqno 3, 52-byte SPTPS-shaped
+/// body) triple. Reproducible with `openssl enc -aes-256-gcm`; the
+/// point is that a dependency bump changing wire bytes fails here, not
+/// as a confusing `DecryptFailed` elsewhere.
+#[test]
+fn aes256gcm_known_answer() {
+    let h = |s: &str| hex::decode(s).unwrap();
+    let key32 = h("e3c08a8f06c6e3ad95a70557b23f75483ce33021a9c72b7025666204c69c0b72");
+    let pt = h("08000001020304050607c0a87b01000000000000000000000000\
+         00000000000000000000000000000000000000000000000000000000");
+    let ct = h("a3a9b358a81a6313b4d9c9dee73119b8928fba339095f05ec7cf\
+         4241e8a9a3a9d14683107cd0cc5028bf70c185758b29994c4e5b6705");
+    let tag = h("a5cbb70116da1a9cd932117ce95bdd8f");
+    let seqno = 3u64;
+
+    let mut key = [0u8; KEY_LEN];
+    key[..32].copy_from_slice(&key32);
+    let cipher = SptpsCipher::new(SptpsAead::Aes256Gcm, &key);
+
+    let sealed = cipher.seal(seqno, &pt);
+    assert_eq!(sealed.len(), pt.len() + TAG_LEN);
+    assert_eq!(&sealed[..pt.len()], ct.as_slice(), "ciphertext mismatch");
+    assert_eq!(&sealed[pt.len()..], tag.as_slice(), "tag mismatch");
+
+    assert_eq!(cipher.open(seqno, &sealed).unwrap(), pt);
 }
