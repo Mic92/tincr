@@ -320,6 +320,14 @@ impl Ctl {
             .expect("control result code")
     }
 
+    /// `REQ_STOP`. The ack may or may not make it out before the
+    /// daemon closes; EOF is the contract.
+    pub fn stop(mut self) {
+        writeln!(self.writer, "18 0").unwrap();
+        let mut line = String::new();
+        while self.reader.read_line(&mut line).is_ok_and(|n| n > 0) {}
+    }
+
     pub fn reload(&mut self) -> i32 {
         self.request(1)
     }

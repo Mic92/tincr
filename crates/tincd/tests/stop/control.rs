@@ -1,14 +1,12 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::UdpSocket;
 use std::os::unix::net::UnixStream;
-use std::process::Stdio;
 use std::time::Duration;
 
 use super::common::*;
-use super::write_config;
+use super::testnode;
 
-/// Count open fds for `pid`. Used by `daemon_stop_drains_fds`; not in
-/// `common::` because it's a one-test helper.
-fn count_open_fds(pid: u32) -> usize {
+fn count_open_fds(pid: nix::unistd::Pid) -> usize {
     #[cfg(target_os = "linux")]
     {
         std::fs::read_dir(format!("/proc/{pid}/fd"))
@@ -17,330 +15,185 @@ fn count_open_fds(pid: u32) -> usize {
     }
     #[cfg(target_os = "macos")]
     {
-        // proc_pidinfo instead of lsof: the nix sandbox has no lsof.
-        // A null buffer returns the byte size of the fd list.
-        #[expect(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
-        let n = unsafe {
+        // No lsof in the nix sandbox; a null buffer returns the list size.
+        let bytes = unsafe {
             libc::proc_pidinfo(
-                pid as i32,
+                pid.as_raw(),
                 libc::PROC_PIDLISTFDS,
                 0,
                 std::ptr::null_mut(),
                 0,
             )
         };
-        assert!(n >= 0, "proc_pidinfo({pid})");
-        n as usize / std::mem::size_of::<libc::proc_fdinfo>()
-    }
-}
-
-/// `REQ_LOG`: live log streaming over the ctl socket. The control
-/// arm flags the conn; the logger walks log conns on each
-/// `logger()` call. Our tap pushes to a thread-local buffer drained
-/// once per event-loop turn.
-///
-/// Test shape: connect ctl#1, send `REQ_LOG`. Connect ctl#2 — the
-/// daemon's `on_unix_accept` logs "Connection from ... (control)"
-/// at Debug level. ctl#1 receives that line as `"18 15 <len>\n"` +
-/// `<len>` raw bytes (no trailing `\n`, `send_meta`).
-#[test]
-fn req_log_streams() {
-    use std::io::Read;
-
-    let tmp = tmp!("req-log");
-    let (confbase, pidfile, socket) = tmp.std_paths();
-    write_config(&confbase);
-
-    // RUST_LOG=warn: prove the tap raises max_level INDEPENDENTLY of
-    // the stderr filter. The "Connection from" log is Debug; stderr
-    // won't print it but the tap MUST capture it (set_active bumps
-    // max_level to Trace).
-    let mut child = tincd_at(&confbase, &pidfile, &socket)
-        .env("RUST_LOG", "warn")
-        .env("TINCR_ALLOW_COREDUMP", "1")
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-
-    assert!(
-        wait_for_file(&socket),
-        "tincd didn't start; stderr: {}",
-        drain_stderr(child)
-    );
-
-    let cookie = read_cookie(&pidfile);
-
-    // ctl#1: greeting + REQ_LOG
-    let log_stream = UnixStream::connect(&socket).unwrap();
-    log_stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let mut log_r = BufReader::new(&log_stream);
-    let mut log_w = &log_stream;
-    writeln!(log_w, "0 ^{cookie} 0").unwrap();
-    let mut greet = String::new();
-    log_r.read_line(&mut greet).unwrap();
-    assert_eq!(greet, "0 testnode 17.7\n");
-    let mut ack = String::new();
-    log_r.read_line(&mut ack).unwrap();
-    assert!(ack.starts_with("4 0 "));
-
-    // `"18 15 <level> <use_color>"`. level=2 maps
-    // to Debug on the daemon side; the "Connection from" log we'll
-    // trigger is Debug. use_color=0 (ignored anyway).
-    writeln!(log_w, "18 15 2 0").unwrap();
-    // No reply (`return true` without control_ok).
-
-    // ctl#2: trigger an Info-level log inside the daemon
-    // `on_unix_accept` logs "Connection from localhost port unix
-    // (control)" at Debug. That happens INSIDE the event loop turn
-    // that processes the accept; flush_log_tap drains it at the
-    // bottom of the same turn.
-    let trigger = UnixStream::connect(&socket).unwrap();
-    let mut trig_r = BufReader::new(&trigger);
-    let mut trig_w = &trigger;
-    writeln!(trig_w, "0 ^{cookie} 0").unwrap();
-    // Drain the greeting so this conn is fully established (the
-    // daemon's accept is async; reading proves the round trip).
-    let mut t1 = String::new();
-    trig_r.read_line(&mut t1).unwrap();
-    let mut t2 = String::new();
-    trig_r.read_line(&mut t2).unwrap();
-
-    // read on ctl#1: framed log line
-    // Format: `"18 15 <len>\n"` then `<len>` raw bytes. There may
-    // be MULTIPLE log lines (the REQ_LOG arm itself doesn't log,
-    // but the trigger conn's accept + greeting may produce >1).
-    // Read until we find the "Connection from" message.
-    let mut found = false;
-    for _ in 0..10 {
-        let mut header = String::new();
-        let n = log_r.read_line(&mut header).expect("log header read");
-        assert_ne!(n, 0, "EOF before log line; header: {header:?}");
-        let header = header.trim_end();
-        let mut parts = header.split_whitespace();
-        assert_eq!(parts.next(), Some("18"), "CONTROL: {header:?}");
-        assert_eq!(parts.next(), Some("15"), "REQ_LOG: {header:?}");
-        let len: usize = parts
-            .next()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| panic!("len field: {header:?}"));
-
-        // Body: `len` raw bytes, NO newline (`send_meta`).
-        let mut body = vec![0u8; len];
-        log_r.read_exact(&mut body).expect("log body read");
-        let msg = String::from_utf8_lossy(&body);
-
-        // log_tap prefixes `LEVEL target:`; match on the message
-        // substring so the test is independent of that formatting.
-        if msg.contains("Connection from") && msg.contains("(control)") {
-            found = true;
-            break;
+        assert!(bytes >= 0, "proc_pidinfo({pid})");
+        #[expect(clippy::cast_sign_loss)]
+        {
+            bytes as usize / std::mem::size_of::<libc::proc_fdinfo>()
         }
     }
-    assert!(
-        found,
-        "never received 'Connection from ... (control)' log line"
-    );
-
-    // cleanup
-    drop(trigger);
-    drop(log_stream);
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
-/// `REQ_SET_DEBUG` round-trip. Reply with the PREVIOUS level (sent
-/// BEFORE the assignment), then update if
-/// `level >= 0`. Negative → query-only.
-///
-/// This is the `tinc debug N` operator workflow: "daemon's
-/// misbehaving, crank up logging without restart". Before this
-/// arm existed, the daemon fell through to `REQ_INVALID` and the
-/// CLI's `recv_ack(SetDebug)` failed the ack-shape check.
+fn control_socket(node: &Node) -> (BufReader<UnixStream>, UnixStream) {
+    let socket = UnixStream::connect(&node.socket).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    writeln!(&mut &socket, "0 ^{} 0", read_cookie(&node.pidfile)).unwrap();
+    let mut reader = BufReader::new(socket.try_clone().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert_eq!(line, "0 testnode 17.7\n");
+    reader.read_line(&mut line).unwrap();
+    (reader, socket)
+}
+
+fn request_line(reader: &mut BufReader<UnixStream>, writer: &UnixStream, request: &str) -> String {
+    writeln!(&mut &*writer, "{request}").unwrap();
+    let mut reply = String::new();
+    reader.read_line(&mut reply).unwrap();
+    reply
+}
+
+/// Garbage on the UDP port (a stale peer, a scanner) is read and
+/// dropped; the daemon neither dies nor spins on a level-triggered fd
+/// it never drains. UDP shares the TCP port number.
 #[test]
-fn set_debug_level_roundtrip() {
+fn stray_udp_is_drained() {
+    let tmp = tmp!("udp-stray");
+    let mut node = testnode(tmp.path());
+    node.start();
+
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    for _ in 0..5 {
+        sender
+            .send_to(b"not a tinc packet", node.tcp_addr())
+            .unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(100));
+
+    node.assert_alive();
+    let _ = node.ctl().dump(3);
+    let log = node.stop();
+    assert!(!log.contains("panicked"), "{log}");
+}
+
+/// `REQ_LOG` turns a control connection into a log sink that receives
+/// records regardless of the stderr filter: with `RUST_LOG=warn` the
+/// debug-level "Connection from" line still arrives.
+#[test]
+fn req_log_streams_records_below_stderr_level() {
+    let tmp = tmp!("req-log");
+    let mut node = testnode(tmp.path()).log_level("warn");
+    node.start();
+
+    let (mut log_reader, log_writer) = control_socket(&node);
+    // level 2 ≈ debug, colour off; no ack.
+    writeln!(&mut &log_writer, "18 15 2 0").unwrap();
+
+    // Opening another control connection makes the daemon log.
+    let _trigger = control_socket(&node);
+
+    let mut seen = Vec::new();
+    let found = (0..10).any(|_| {
+        let mut header = String::new();
+        assert_ne!(log_reader.read_line(&mut header).unwrap(), 0, "EOF");
+        let len: usize = header
+            .strip_prefix("18 15 ")
+            .and_then(|rest| rest.trim_end().parse().ok())
+            .unwrap_or_else(|| panic!("log header: {header:?}"));
+        let mut body = vec![0u8; len];
+        log_reader.read_exact(&mut body).unwrap();
+        let message = String::from_utf8_lossy(&body).into_owned();
+        let is_accept = message.contains("Connection from") && message.contains("(control)");
+        seen.push(message);
+        is_accept
+    });
+    assert!(found, "no accept record among {seen:#?}");
+}
+
+/// `REQ_SET_DEBUG N` replies with the previous level and then applies
+/// N if it is non-negative; the level reverts when the connection
+/// closes. A request without a level is a protocol error.
+#[test]
+fn set_debug_reports_previous_and_reverts_on_close() {
     let tmp = tmp!("set-debug");
-    let (confbase, pidfile, socket) = tmp.std_paths();
+    let mut node = testnode(tmp.path());
+    let mut cmd = tincd_at(&node.confbase, &node.pidfile, &node.socket);
+    cmd.env_remove("RUST_LOG")
+        .stderr(std::process::Stdio::piped());
+    node.start_command(cmd);
 
-    write_config(&confbase);
+    let (mut reader, writer) = control_socket(&node);
+    assert_eq!(request_line(&mut reader, &writer, "18 9 5"), "18 9 0\n");
+    assert_eq!(request_line(&mut reader, &writer, "18 9 -1"), "18 9 5\n");
+    assert_eq!(request_line(&mut reader, &writer, "18 9 2"), "18 9 5\n");
+    assert_eq!(request_line(&mut reader, &writer, "18 9 -1"), "18 9 2\n");
+    assert_eq!(request_line(&mut reader, &writer, "18 9"), "", "dropped");
 
-    // No -d flag, no RUST_LOG → debug_level seeds at 0.
-    let mut child = tincd_at(&confbase, &pidfile, &socket)
-        .env_remove("RUST_LOG")
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn tincd");
-
-    assert!(wait_for_file(&socket), "tincd didn't bind socket");
-
-    // connect + greeting
-    let cookie = read_cookie(&pidfile);
-    let stream = UnixStream::connect(&socket).expect("connect to tincd");
-    let mut reader = BufReader::new(&stream);
-    let mut writer = &stream;
-    writeln!(writer, "0 ^{cookie} 0").unwrap();
-    let mut greet = String::new();
-    reader.read_line(&mut greet).unwrap();
-    assert_eq!(greet, "0 testnode 17.7\n");
-    let mut ack = String::new();
-    reader.read_line(&mut ack).unwrap(); // "4 0 <pid>"
-
-    // set debug 5 → reply previous (0)
-    // `send_request(..., debug_level)` BEFORE the assignment.
-    // Startup level was 0 (no -d).
-    writeln!(writer, "18 9 5").unwrap();
-    let mut reply = String::new();
-    reader.read_line(&mut reply).unwrap();
-    assert_eq!(reply, "18 9 0\n", "reply with PREVIOUS level (0)");
-
-    // query (-1) → reply current (5), no change
-    // `if(new_level >= 0)` — negative is query-only.
-    writeln!(writer, "18 9 -1").unwrap();
-    let mut reply = String::new();
-    reader.read_line(&mut reply).unwrap();
-    assert_eq!(reply, "18 9 5\n", "query reads back the set value");
-
-    // set debug 2 → reply previous (5)
-    // Proves the i32 actually updated (lossless: not derived
-    // from log::max_level() inverse-mapping).
-    writeln!(writer, "18 9 2").unwrap();
-    let mut reply = String::new();
-    reader.read_line(&mut reply).unwrap();
-    assert_eq!(reply, "18 9 5\n", "previous was 5");
-
-    // query again → 2
-    writeln!(writer, "18 9 -1").unwrap();
-    let mut reply = String::new();
-    reader.read_line(&mut reply).unwrap();
-    assert_eq!(reply, "18 9 2\n");
-
-    // malformed (no level) → conn dropped
-    // `if(sscanf(...) != 1) return false`. The ONLY ctl arm that
-    // does this (others reply REQ_INVALID and stay up). `return
-    // false` → `receive_request` → "Bogus data" + terminate.
-    writeln!(writer, "18 9").unwrap();
-    let mut reply = String::new();
-    let n = reader.read_line(&mut reply).unwrap();
-    assert_eq!(n, 0, "EOF: daemon dropped the conn (`return false`)");
-
-    // reconnect: level was restored on close
-    let stream = UnixStream::connect(&socket).expect("reconnect");
-    let mut reader = BufReader::new(&stream);
-    let mut writer = &stream;
-    writeln!(writer, "0 ^{cookie} 0").unwrap();
-    reader.read_line(&mut String::new()).unwrap();
-    reader.read_line(&mut String::new()).unwrap();
-    writeln!(writer, "18 9 -1").unwrap();
-    let mut reply = String::new();
-    reader.read_line(&mut reply).unwrap();
-    assert_eq!(reply, "18 9 0\n", "debug level restored after conn close");
-
-    // cleanup
-    let _ = child.kill();
-    let _ = child.wait();
+    let (mut reader, writer) = control_socket(&node);
+    assert_eq!(request_line(&mut reader, &writer, "18 9 -1"), "18 9 0\n");
 }
 
-/// `chdir(confbase)` before everything else. Script execution does
-/// no chdir of its own — scripts inherit the
-/// daemon's cwd. A `tinc-up` doing `cat hosts/$NODE` (relative)
-/// works under C only because of that early chdir.
-///
-/// We launch tincd from `/` (NOT confbase) to make the test
-/// meaningful: without the fix, `pwd` in tinc-up would print `/`.
+/// Scripts inherit the daemon's cwd, and C tinc chdirs to confbase
+/// early, so `tinc-up` scripts using relative `hosts/…` paths rely on
+/// it. Launch from `/` to make the check meaningful.
 #[test]
-fn tinc_up_runs_with_confbase_cwd() {
+fn tinc_up_runs_in_confbase() {
     use std::os::unix::fs::PermissionsExt;
 
     let tmp = tmp!("tinc-up-cwd");
-    let (confbase, pidfile, socket) = tmp.std_paths();
-    write_config(&confbase);
-
-    // Probe file OUTSIDE confbase (absolute path) so the
-    // relative-vs-absolute question doesn't taint the test.
-    let probe = tmp.path().join("cwd.txt");
-    let tinc_up = confbase.join("tinc-up");
+    let mut node = testnode(tmp.path());
+    let cwd_file = tmp.path().join("cwd.txt");
+    let tinc_up = node.confbase.join("tinc-up");
     std::fs::write(
         &tinc_up,
-        format!("#!/bin/sh\npwd > '{}'\n", probe.display()),
+        format!("#!/bin/sh\npwd > '{}'\n", cwd_file.display()),
     )
     .unwrap();
     std::fs::set_permissions(&tinc_up, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let mut child = tincd_at(&confbase, &pidfile, &socket)
-        // Launch from a DIFFERENT cwd. Without the fix, pwd would
-        // print THIS, not confbase.
-        .current_dir("/")
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn tincd");
-
+    let mut cmd = tincd_at(&node.confbase, &node.pidfile, &node.socket);
+    cmd.current_dir("/").stderr(std::process::Stdio::piped());
+    node.start_command(cmd);
+    // tinc-up runs after the socket appears.
     assert!(
-        wait_for_file(&socket),
-        "tincd should start; stderr: {}",
-        drain_stderr(child)
+        wait_for_file(&cwd_file),
+        "tinc-up did not run:\n{}",
+        node.stop()
     );
-    // Socket appears at "Ready"; tinc-up fires AFTER that. Wait for
-    // the probe itself, not just the socket, or we kill the daemon
-    // mid-fork on slow (macOS, loaded) hosts.
-    assert!(wait_for_file(&probe), "tinc-up never wrote probe");
+    node.stop();
 
-    let _ = child.kill();
-    let _ = child.wait();
-
-    let got = std::fs::read_to_string(&probe).expect("tinc-up should have run and written its cwd");
-    let want = confbase.canonicalize().unwrap();
-    let got = std::path::Path::new(got.trim()).canonicalize().unwrap();
-    assert_eq!(got, want, "tinc-up cwd should be confbase");
+    let script_cwd = std::fs::read_to_string(&cwd_file).unwrap();
+    assert_eq!(
+        std::path::Path::new(script_cwd.trim())
+            .canonicalize()
+            .unwrap(),
+        node.confbase.canonicalize().unwrap()
+    );
 }
 
-/// fd-leak guard: open+close N control connections, assert
-/// fd count returns to baseline. Covers `terminate()`'s
-/// `ev.del`-before-close ordering and `OwnedFd` drop.
 #[test]
-fn control_conn_churn_no_fd_leak() {
+fn control_connection_churn_leaks_no_fds() {
     let tmp = tmp!("fd-churn");
-    let (confbase, pidfile, socket) = tmp.std_paths();
-    write_config(&confbase);
+    let mut node = testnode(tmp.path());
+    // Dumpable so /proc/PID/fd stays readable.
+    let mut cmd = tincd_at(&node.confbase, &node.pidfile, &node.socket);
+    cmd.env("TINCR_ALLOW_COREDUMP", "1")
+        .stderr(std::process::Stdio::piped());
+    node.start_command(cmd);
 
-    // dumpable, so /proc/PID/fd stays readable for fd counting
-    let child = ChildWithLog::spawn(
-        tincd_at(&confbase, &pidfile, &socket)
-            .env("TINCR_ALLOW_COREDUMP", "1")
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
-    assert!(wait_for_file(&socket));
-
-    let pid_str = std::fs::read_to_string(&pidfile).unwrap();
-    let daemon_pid: u32 = pid_str.split_whitespace().next().unwrap().parse().unwrap();
-    let count_fds = move || -> usize { count_open_fds(daemon_pid) };
-    let baseline = count_fds();
-
-    let cookie = read_cookie(&pidfile);
+    let pid = node.pid();
+    let baseline = count_open_fds(pid);
     for _ in 0..100 {
-        let mut s = UnixStream::connect(&socket).unwrap();
-        // Greeting so on_unix_accept's read path runs (not just
-        // accept+EOF).
-        writeln!(s, "0 ^{cookie} 0").unwrap();
-        let mut r = BufReader::new(&s);
-        let mut line = String::new();
-        let _ = r.read_line(&mut line);
-        let _ = r.read_line(&mut line);
-        // drop(s) → daemon sees EOF → terminate()
+        let _ = control_socket(&node);
     }
-
-    // Daemon needs a turn to reap each EOF; poll.
-    let after = poll_until(Duration::from_secs(5), || {
-        let n = count_fds();
-        // Allow +1 slack: read_dir on /proc/self/fd races with the
-        // dirfd it opens; daemon-side has no such race but be lenient.
-        (n <= baseline + 1).then_some(n)
+    // +1 slack: read_dir's own dirfd shows up in the listing.
+    let settled = poll_until(Duration::from_secs(5), || {
+        let open = count_open_fds(pid);
+        (open <= baseline + 1).then_some(open)
     });
     assert!(
-        after <= baseline + 1,
-        "fd leak: baseline={baseline} after-100-churn={after}"
+        settled <= baseline + 1,
+        "baseline={baseline} after={settled}"
     );
-    drop(child);
 }

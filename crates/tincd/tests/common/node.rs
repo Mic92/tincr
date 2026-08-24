@@ -203,6 +203,18 @@ impl Node {
             .unwrap_or_default()
     }
 
+    /// Wait for the daemon to exit by itself; panics on timeout.
+    pub fn wait_exit(&mut self) -> std::process::ExitStatus {
+        let name = self.name.clone();
+        let mut daemon = self
+            .daemon
+            .take()
+            .unwrap_or_else(|| panic!("{name} not started"));
+        daemon
+            .wait_exit(std::time::Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("{name} did not exit; stderr:\n{}", daemon.log_snapshot()))
+    }
+
     pub fn is_running(&self) -> bool {
         self.daemon.is_some()
     }
