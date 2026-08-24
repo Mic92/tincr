@@ -1,430 +1,189 @@
-//! Regression: autoconnect never promotes a hot relay path to a
-//! direct meta-connection.
-//!
-//! `alice — {mid,mid2,mid3} — bob` with bob's UDP blackholed: alice's
-//! data to bob rides `SPTPS_PACKET` over TCP through mid at 2× RTT,
-//! forever, because plain autoconnect is satisfied at
-//! degree ≥3 and never looks at the data plane.
-//!
-//! Three hubs (not one) so alice reaches `nc=3` and the shortcut arm
-//! actually fires — at `nc<3` the random-backbone arm early-returns.
-//! All knobs are hardcoded (`autoconnect.rs::ShortcutKnobs`); the
-//! only config here is `AutoConnect = yes` on alice and `= no`
-//! everywhere else so the hubs/bob don't dial around the test.
-//!
-//! Asserts: a flood at >`RELAY_HI` (32 KiB/s) makes alice open a
-//! direct meta connection to bob within ~6 ticks; once the flood
-//! stops, the shortcut is dropped within EWMA-decay (~9 ticks).
+//! `alice — {mid,mid2,mid3} — bob` with bob's UDP blackholed, so
+//! alice's data to bob is relayed over TCP through mid. Three hubs
+//! give alice the degree at which the autoconnect shortcut arm runs;
+//! only alice has `AutoConnect = yes`.
 
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
-use super::common::linux::*;
 use super::common::*;
 use super::rig::*;
+use super::tcp_fallback::iptables;
 
-/// alice has a direct meta-conn to `name`?
-fn has_direct_conn(ctl: &mut Ctl, name: &str) -> bool {
-    ctl.dump(6).iter().any(|r| {
-        r.strip_prefix("18 6 ")
-            .and_then(|b| b.split_whitespace().next())
-            == Some(name)
-    })
+struct Mesh {
+    pair: TunPair,
+    hubs: Vec<Node>,
 }
 
+impl Mesh {
+    /// Everything up, bob reachable via mid, alice at three meta
+    /// connections and none to bob. `None` if iptables is unusable.
+    fn start(netns: NetNs, tmp: &TmpGuard) -> Option<Self> {
+        let TunPair {
+            netns,
+            mut alice,
+            mut bob,
+        } = TunPair::new(netns, tmp, "");
+        alice = alice.log_level("tincd=info");
+        bob = bob.with_conf("AutoConnect = no").log_level("tincd=info");
+        let mut hubs: Vec<Node> = [("mid", 0xFC), ("mid2", 0xFD), ("mid3", 0xFE)]
+            .into_iter()
+            .map(|(name, seed)| Node::new(tmp.path(), name, seed).with_conf("AutoConnect = no"))
+            .collect();
+        for index in 0..3 {
+            let mut peers: Vec<&Node> = hubs.iter().collect();
+            peers.remove(index);
+            peers.extend([&alice, &bob]);
+            hubs[index].write_config_multi(&peers, &[]);
+        }
+        for hub in &mut hubs {
+            hub.start();
+        }
+        bob.write_config_multi(&[&hubs[0], &alice], &[&hubs[0]]);
+        bob.start();
+        if !iptables(&[
+            "-I",
+            "INPUT",
+            "-p",
+            "udp",
+            "--dport",
+            &bob.port.to_string(),
+            "-j",
+            "DROP",
+        ]) {
+            return None;
+        }
+        let hub_refs: Vec<&Node> = hubs.iter().collect();
+        let mut peers = hub_refs.clone();
+        peers.push(&bob);
+        alice.write_config_multi(&peers, &hub_refs);
+        // Not a ConnectTo, but the shortcut needs to know where bob is.
+        alice.write_host_file(&bob, true);
+        alice.start();
+        netns.place_devices();
+
+        let mesh = Self {
+            pair: TunPair { netns, alice, bob },
+            hubs,
+        };
+        poll_until(Duration::from_secs(10), || {
+            let reachable = node_status(&mesh.pair.alice.ctl().dump(3), "bob")? & 0x10 != 0;
+            (reachable && mesh.meta_connections() >= 3).then_some(())
+        });
+        assert!(!mesh.alice_connected_to_bob());
+        Some(mesh)
+    }
+
+    fn meta_connections(&self) -> usize {
+        self.pair
+            .alice
+            .ctl()
+            .dump(6)
+            .iter()
+            .filter(|row| !row.contains("<control>"))
+            .count()
+    }
+
+    /// Any meta connection row for bob, in whatever state.
+    fn alice_connected_to_bob(&self) -> bool {
+        self.pair.alice.ctl().dump(6).iter().any(|row| {
+            row.strip_prefix("18 6 ")
+                .and_then(|body| body.split_whitespace().next())
+                == Some("bob")
+        })
+    }
+
+    /// ~100 KiB/s alice→bob, above the 32 KiB/s relay threshold.
+    fn flood(extra: &[&str]) -> Child {
+        Command::new("ping")
+            .args(["-i", "0.01", "-s", "1000", "-q"])
+            .args(extra)
+            .arg("10.42.0.2")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn ping flood")
+    }
+
+    /// Flood until alice dials bob directly (≤ 6 ticks × 5s).
+    fn flood_until_shortcut(&self) -> bool {
+        let mut flood = Self::flood(&[]);
+        let promoted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            poll_until(Duration::from_secs(30), || {
+                self.alice_connected_to_bob().then_some(())
+            });
+        }))
+        .is_ok();
+        let _ = flood.kill();
+        let _ = flood.wait();
+        promoted
+    }
+
+    fn finish(mut self) -> String {
+        for hub in &mut self.hubs {
+            hub.stop();
+        }
+        self.pair.finish().0
+    }
+}
+
+/// Relayed load makes alice open a direct connection; once idle (after
+/// the 60s minimum hold plus rate decay) she drops it again.
 #[test]
 fn autoconnect_shortcut_promotes_hot_relay() {
     let Some(netns) = enter_netns("autoconnect_shortcut::autoconnect_shortcut_promotes_hot_relay")
     else {
         return;
     };
-
     let tmp = tmp!("ac-shortcut");
-    let alice = tun_node(tmp.path(), "alice", 0xFA, "tinc0", "10.42.0.1/32");
-    // Hubs: dummy device, AutoConnect=no. Only mid is on the data
-    // path to bob; mid2/mid3 exist purely to fill alice's degree-3
-    // backbone so the shortcut arm is reachable.
-    let off = "AutoConnect = no\n";
-    let bob = tun_node(tmp.path(), "bob", 0xFB, "tinc1", "10.42.0.2/32").with_conf(off);
-    let mid = Node::with_alloc_port(tmp.path(), "mid", 0xFC).with_conf(off);
-    let mid2 = Node::with_alloc_port(tmp.path(), "mid2", 0xFD).with_conf(off);
-    let mid3 = Node::with_alloc_port(tmp.path(), "mid3", 0xFE).with_conf(off);
-
-    mid.write_config_multi(&[&alice, &bob, &mid2, &mid3], &[]);
-    mid2.write_config_multi(&[&alice, &mid, &mid3], &[]);
-    mid3.write_config_multi(&[&alice, &mid, &mid2], &[]);
-    bob.write_config_multi(&[&mid, &alice], &[&mid]);
-    // alice: AutoConnect=yes (default), ConnectTo all three hubs.
-    // bob's hosts/ file MUST carry `Address` so `has_address` is set
-    // — write_config_multi only writes Address for ConnectTo targets,
-    // so patch it in afterwards.
-    alice.write_config_multi(&[&mid, &mid2, &mid3, &bob], &[&mid, &mid2, &mid3]);
-    std::fs::write(
-        alice.confbase.join("hosts").join("bob"),
-        format!(
-            "Ed25519PublicKey = {}\nAddress = 127.0.0.1 {}\n",
-            tinc_crypto::b64::encode(&bob.pubkey()),
-            bob.port,
-        ),
-    )
-    .unwrap();
-
-    let log = "tincd=info";
-    let mut hubs: Vec<_> = [&mid, &mid2, &mid3]
-        .iter()
-        .map(|n| {
-            let c = n.spawn_with_log(log);
-            assert!(wait_for_file(&n.socket), "{} setup", n.confbase.display());
-            c
-        })
-        .collect();
-    let mut bob_child = bob.spawn_with_log(log);
-    if !wait_for_file(&bob.socket) {
-        for h in &mut hubs {
-            let _ = h.kill();
-            let _ = h.wait();
-        }
-        panic!("bob setup; stderr:\n{}", drain_stderr(bob_child));
-    }
-
-    // Blackhole bob's UDP listener: alice↔mid* UDP works (so the
-    // PACKET 17 short-circuit fires for the hubs and relay_rate=0
-    // there), but alice→bob UDP never confirms — data goes via mid
-    // over TCP and bumps relay_tx_bytes[bob].
-    let ipt = Command::new("iptables")
-        .args([
-            "-I",
-            "INPUT",
-            "-p",
-            "udp",
-            "--dport",
-            &bob.port.to_string(),
-            "-j",
-            "DROP",
-        ])
-        .output()
-        .expect("spawn iptables");
-    if !ipt.status.success() {
-        for h in &mut hubs {
-            let _ = h.kill();
-            let _ = h.wait();
-        }
-        let _ = bob_child.kill();
-        let _ = bob_child.wait();
-        eprintln!(
-            "SKIP autoconnect_shortcut: iptables failed: {}",
-            String::from_utf8_lossy(&ipt.stderr).trim()
-        );
+    let Some(mesh) = Mesh::start(netns, &tmp) else {
         return;
-    }
-
-    let alice_child = alice.spawn_with_log(log);
-    if !wait_for_file(&alice.socket) {
-        for h in &mut hubs {
-            let _ = h.kill();
-            let _ = h.wait();
-        }
-        let _ = bob_child.kill();
-        let _ = bob_child.wait();
-        panic!("alice setup; stderr:\n{}", drain_stderr(alice_child));
-    }
-
-    assert!(wait_for_carrier("tinc0", Duration::from_secs(2)));
-    assert!(wait_for_carrier("tinc1", Duration::from_secs(2)));
-    netns.place_devices();
-
-    let mut alice_ctl = alice.ctl();
-
-    // mesh up: bob reachable (via mid), alice at nc≥3
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        poll_until(Duration::from_secs(10), || {
-            let a = alice_ctl.dump(3);
-            let bob_reach = node_status(&a, "bob").is_some_and(|s| s & 0x10 != 0);
-            let nc = alice_ctl
-                .dump(6)
-                .iter()
-                .filter(|r| r.starts_with("18 6 ") && !r.contains("<control>"))
-                .count();
-            (bob_reach && nc >= 3).then_some(())
-        });
-    }));
-    if r.is_err() {
-        for h in &mut hubs {
-            let _ = h.kill();
-            let _ = h.wait();
-        }
-        let _ = bob_child.kill();
-        let _ = bob_child.wait();
-        panic!(
-            "mesh up timed out;\n=== alice ===\n{}",
-            drain_stderr(alice_child)
-        );
-    }
-    // Precondition: NO direct conn to bob yet.
+    };
     assert!(
-        !has_direct_conn(&mut alice_ctl, "bob"),
-        "precondition: alice must not be directly connected to bob yet"
+        mesh.flood_until_shortcut(),
+        "shortcut not added\n{}",
+        mesh.finish()
     );
-
-    // flood alice→bob above RELAY_HI (32 KiB/s)
-    // 0.01s × 1000B payload ≈ 100 KiB/s. Runs in background.
-    let mut flood = Command::new("ping")
-        .args(["-i", "0.01", "-s", "1000", "-q", "10.42.0.2"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn ping flood");
-
-    // ≤6 ticks × 5s = 30s.
-    let promoted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        poll_until(Duration::from_secs(30), || {
-            has_direct_conn(&mut alice_ctl, "bob").then_some(())
-        });
-    }));
-    let _ = flood.kill();
-    let _ = flood.wait();
-
-    if promoted.is_err() {
-        for h in &mut hubs {
-            let _ = h.kill();
-            let _ = h.wait();
-        }
-        let _ = bob_child.kill();
-        let _ = bob_child.wait();
-        panic!(
-            "shortcut not added within 30s;\n=== alice ===\n{}",
-            drain_stderr(alice_child)
-        );
-    }
-
-    // flood stopped → shortcut dropped
-    // min_hold (60s post-activation) must elapse first, then
-    // tx_rate decays ×0.7/tick; from ~100 KiB/s to <4 KiB/s ≈ 9
-    // ticks ≈ 45s. nc=4>D_LO so the idle-reap arm fires.
     let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         poll_until(Duration::from_secs(90), || {
-            (!has_direct_conn(&mut alice_ctl, "bob")).then_some(())
+            (!mesh.alice_connected_to_bob()).then_some(())
         });
     }));
-
-    drop(alice_ctl);
-    for h in &mut hubs {
-        let _ = h.kill();
-    }
-    let _ = bob_child.kill();
-    let alice_stderr = drain_stderr(alice_child);
-    let bob_stderr = drain_stderr(bob_child);
-    for h in hubs {
-        let _ = drain_stderr(h);
-    }
-
+    let alice_log = mesh.finish();
     assert!(
         dropped.is_ok(),
-        "shortcut not dropped after idle;\n=== alice ===\n{alice_stderr}\n\
-         === bob ===\n{bob_stderr}",
+        "shortcut not dropped after idle\n{alice_log}"
     );
-
-    drop(netns);
 }
 
-/// Regression: shortcut conn must not flap when the load that
-/// triggered it pauses briefly. Same alice-hub-bob shape, but after
-/// the direct conn activates, STOP the flood for 30s, then resume.
-/// Without `min_hold` the idle-reap drops the seconds-old conn during
-/// the gap and the resumed flood re-adds it → ≥2 activations.
+/// Regression: a 30s pause in the load (shorter than the minimum
+/// hold) must not drop and re-add the shortcut.
 #[test]
 fn shortcut_survives_traffic_gap() {
     let Some(netns) = enter_netns("autoconnect_shortcut::shortcut_survives_traffic_gap") else {
         return;
     };
-
     let tmp = tmp!("ac-shortcut-gap");
-    let alice = tun_node(tmp.path(), "alice", 0xEA, "tinc0", "10.42.0.1/32");
-    let off = "AutoConnect = no\n";
-    let bob = tun_node(tmp.path(), "bob", 0xEB, "tinc1", "10.42.0.2/32").with_conf(off);
-    let mid = Node::with_alloc_port(tmp.path(), "mid", 0xEC).with_conf(off);
-    let mid2 = Node::with_alloc_port(tmp.path(), "mid2", 0xED).with_conf(off);
-    let mid3 = Node::with_alloc_port(tmp.path(), "mid3", 0xEE).with_conf(off);
-
-    mid.write_config_multi(&[&alice, &bob, &mid2, &mid3], &[]);
-    mid2.write_config_multi(&[&alice, &mid, &mid3], &[]);
-    mid3.write_config_multi(&[&alice, &mid, &mid2], &[]);
-    bob.write_config_multi(&[&mid, &alice], &[&mid]);
-    alice.write_config_multi(&[&mid, &mid2, &mid3, &bob], &[&mid, &mid2, &mid3]);
-    std::fs::write(
-        alice.confbase.join("hosts").join("bob"),
-        format!(
-            "Ed25519PublicKey = {}\nAddress = 127.0.0.1 {}\n",
-            tinc_crypto::b64::encode(&bob.pubkey()),
-            bob.port,
-        ),
-    )
-    .unwrap();
-
-    let log = "tincd=info";
-    let mut hubs: Vec<_> = [&mid, &mid2, &mid3]
-        .iter()
-        .map(|n| {
-            let c = n.spawn_with_log(log);
-            assert!(wait_for_file(&n.socket), "{} setup", n.confbase.display());
-            c
-        })
-        .collect();
-    let mut bob_child = bob.spawn_with_log(log);
-    if !wait_for_file(&bob.socket) {
-        for h in &mut hubs {
-            let _ = h.kill();
-            let _ = h.wait();
-        }
-        panic!("bob setup; stderr:\n{}", drain_stderr(bob_child));
-    }
-
-    let ipt = Command::new("iptables")
-        .args([
-            "-I",
-            "INPUT",
-            "-p",
-            "udp",
-            "--dport",
-            &bob.port.to_string(),
-            "-j",
-            "DROP",
-        ])
-        .output()
-        .expect("spawn iptables");
-    if !ipt.status.success() {
-        for h in &mut hubs {
-            let _ = h.kill();
-            let _ = h.wait();
-        }
-        let _ = bob_child.kill();
-        let _ = bob_child.wait();
-        eprintln!(
-            "SKIP shortcut_survives_traffic_gap: iptables failed: {}",
-            String::from_utf8_lossy(&ipt.stderr).trim()
-        );
+    let Some(mesh) = Mesh::start(netns, &tmp) else {
         return;
-    }
-
-    let alice_child = alice.spawn_with_log(log);
-    if !wait_for_file(&alice.socket) {
-        for h in &mut hubs {
-            let _ = h.kill();
-            let _ = h.wait();
-        }
-        let _ = bob_child.kill();
-        let _ = bob_child.wait();
-        panic!("alice setup; stderr:\n{}", drain_stderr(alice_child));
-    }
-
-    assert!(wait_for_carrier("tinc0", Duration::from_secs(2)));
-    assert!(wait_for_carrier("tinc1", Duration::from_secs(2)));
-    netns.place_devices();
-
-    let mut alice_ctl = alice.ctl();
-
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        poll_until(Duration::from_secs(10), || {
-            let a = alice_ctl.dump(3);
-            let bob_reach = node_status(&a, "bob").is_some_and(|s| s & 0x10 != 0);
-            let nc = alice_ctl
-                .dump(6)
-                .iter()
-                .filter(|r| r.starts_with("18 6 ") && !r.contains("<control>"))
-                .count();
-            (bob_reach && nc >= 3).then_some(())
-        });
-    }));
-    if r.is_err() {
-        for h in &mut hubs {
-            let _ = h.kill();
-            let _ = h.wait();
-        }
-        let _ = bob_child.kill();
-        let _ = bob_child.wait();
-        panic!(
-            "mesh up timed out;\n=== alice ===\n{}",
-            drain_stderr(alice_child)
-        );
-    }
-    assert!(!has_direct_conn(&mut alice_ctl, "bob"));
-
-    // flood → shortcut activates
-    let mut flood = Command::new("ping")
-        .args(["-i", "0.01", "-s", "1000", "-q", "10.42.0.2"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn ping flood");
-    let promoted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        poll_until(Duration::from_secs(30), || {
-            has_direct_conn(&mut alice_ctl, "bob").then_some(())
-        });
-    }));
-    let _ = flood.kill();
-    let _ = flood.wait();
-    if promoted.is_err() {
-        for h in &mut hubs {
-            let _ = h.kill();
-            let _ = h.wait();
-        }
-        let _ = bob_child.kill();
-        let _ = bob_child.wait();
-        panic!(
-            "shortcut not added within 30s;\n=== alice ===\n{}",
-            drain_stderr(alice_child)
-        );
-    }
-
-    // 30s gap (no traffic)
-    // Shorter than min_hold (60s) — the conn must stay up the whole
-    // time. Poll the conn list so a flap is caught immediately, not
-    // just inferred from the activation count at the end.
-    let gap_start = std::time::Instant::now();
+    };
+    assert!(
+        mesh.flood_until_shortcut(),
+        "shortcut not added\n{}",
+        mesh.finish()
+    );
+    let gap_start = Instant::now();
     let mut flapped = false;
-    while gap_start.elapsed() < Duration::from_secs(30) {
-        if !has_direct_conn(&mut alice_ctl, "bob") {
-            flapped = true;
-            break;
-        }
+    while gap_start.elapsed() < Duration::from_secs(30) && !flapped {
+        flapped = !mesh.alice_connected_to_bob();
         std::thread::sleep(Duration::from_millis(500));
     }
-
-    // resume flood briefly
-    let mut flood2 = Command::new("ping")
-        .args(["-i", "0.01", "-s", "1000", "-q", "-w", "10", "10.42.0.2"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn ping flood");
-    let _ = flood2.wait();
-
-    drop(alice_ctl);
-    for h in &mut hubs {
-        let _ = h.kill();
-    }
-    let _ = bob_child.kill();
-    let alice_stderr = drain_stderr(alice_child);
-    let _ = drain_stderr(bob_child);
-    for h in hubs {
-        let _ = drain_stderr(h);
-    }
-
-    // Exactly one "Connection with bob ... activated" over the whole
-    // run. Pre-fix: ≥2 (gap drops, resume re-adds).
-    let activations = alice_stderr
+    let _ = Mesh::flood(&["-w", "10"]).wait();
+    let alice_log = mesh.finish();
+    let activations = alice_log
         .lines()
-        .filter(|l| l.contains("Connection with bob") && l.contains("activated"))
+        .filter(|line| line.contains("Connection with bob") && line.contains("activated"))
         .count();
-    assert!(
-        !flapped,
-        "shortcut dropped during 30s traffic gap;\n=== alice ===\n{alice_stderr}"
-    );
-    assert_eq!(
-        activations, 1,
-        "expected exactly 1 bob activation, got {activations};\n\
-         === alice ===\n{alice_stderr}"
-    );
-
-    drop(netns);
+    assert!(!flapped, "shortcut dropped during gap\n{alice_log}");
+    assert_eq!(activations, 1, "{alice_log}");
 }
