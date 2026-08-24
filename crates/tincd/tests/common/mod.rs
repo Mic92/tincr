@@ -124,6 +124,22 @@ pub fn alloc_port() -> u16 {
     panic!("alloc_port: no port free on both TCP and UDP after 512 tries");
 }
 
+/// A loopback TCP port that answers ECONNREFUSED for as long as the
+/// returned socket lives: bound but never `listen()`ed, so no other
+/// test can grab it either.
+pub fn refusing_port() -> (socket2::Socket, u16) {
+    let sock = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    sock.bind(
+        &"127.0.0.1:0"
+            .parse::<std::net::SocketAddr>()
+            .unwrap()
+            .into(),
+    )
+    .unwrap();
+    let port = sock.local_addr().unwrap().as_socket().unwrap().port();
+    (sock, port)
+}
+
 /// Kill, reap, return stderr. Only for children spawned with
 /// `Stdio::piped()` and *without* a `ChildWithLog` around them.
 pub fn drain_stderr(mut child: Child) -> String {
@@ -310,14 +326,20 @@ impl Ctl {
     /// One-line control request `18 REQ` (reload = 1, purge = 8,
     /// retry = 10); returns the daemon's result code (0 = ok).
     pub fn request(&mut self, request: u8) -> i32 {
-        writeln!(self.writer, "18 {request}").unwrap();
-        let mut line = String::new();
-        self.reader.read_line(&mut line).expect("control ack");
-        line.trim_end()
+        let reply = self.request_line(&format!("18 {request}"));
+        reply
             .strip_prefix(&format!("18 {request} "))
-            .unwrap_or_else(|| panic!("control ack: {line:?}"))
+            .unwrap_or_else(|| panic!("control ack: {reply:?}"))
             .parse()
             .expect("control result code")
+    }
+
+    /// Send one raw line, return the one-line reply (trimmed).
+    pub fn request_line(&mut self, line: &str) -> String {
+        writeln!(self.writer, "{line}").unwrap();
+        let mut reply = String::new();
+        self.reader.read_line(&mut reply).expect("control reply");
+        reply.trim_end().to_owned()
     }
 
     /// `REQ_STOP`. The ack may or may not make it out before the

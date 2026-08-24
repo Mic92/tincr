@@ -35,8 +35,8 @@ pub struct Node {
     pub extra_conf: String,
     /// `DeviceType = tun` + `Interface =`; netns tests precreate it.
     pub iface: Option<String>,
-    /// `Subnet =` in `hosts/SELF`.
-    pub subnet: Option<String>,
+    /// `Subnet =` lines in `hosts/SELF`.
+    pub subnets: Vec<String>,
     /// `DeviceType = fd`: inherited socketpair end.
     pub device_fd: Option<RawFd>,
     pub rust_log: String,
@@ -54,7 +54,7 @@ impl Node {
             port: 0,
             extra_conf: String::new(),
             iface: None,
-            subnet: None,
+            subnets: Vec::new(),
             device_fd: None,
             rust_log: "tincd=info".to_owned(),
             daemon: None,
@@ -84,7 +84,7 @@ impl Node {
     }
     #[must_use]
     pub fn subnet(mut self, subnet: &str) -> Self {
-        self.subnet = Some(subnet.to_owned());
+        self.subnets.push(subnet.to_owned());
         self
     }
     #[must_use]
@@ -130,7 +130,7 @@ impl Node {
         std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
 
         let mut own_host = format!("Port = {}\n", self.port);
-        if let Some(subnet) = &self.subnet {
+        for subnet in &self.subnets {
             writeln!(own_host, "Subnet = {subnet}").unwrap();
         }
         std::fs::write(self.confbase.join("hosts").join(&self.name), own_host).unwrap();
