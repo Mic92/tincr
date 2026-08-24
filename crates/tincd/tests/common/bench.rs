@@ -21,8 +21,7 @@ pub fn iperf3_available() -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// `Rust` = `CARGO_BIN_EXE_tincd`; `C(path)` = `TINC_C_TINCD`.

@@ -585,7 +585,7 @@ fn id_control(
     conn.allow_request = Some(Request::Control);
     // Push last_ping_time an hour ahead so the ping sweep skips
     // control connections.
-    conn.last_ping_time = now + std::time::Duration::from_secs(3600);
+    conn.last_ping_time = now + std::time::Duration::from_hours(1);
     conn.name = "<control>".to_string();
 
     let needs_write = conn.send(format_args!(

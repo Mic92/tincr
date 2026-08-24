@@ -399,7 +399,7 @@ fn id_bumps_ping_time() {
 
     handle_id(&mut c, line.as_bytes(), &mkctx(&cookie), now, &mut os_rng()).unwrap();
 
-    assert!(c.last_ping_time > now + std::time::Duration::from_secs(3000));
+    assert!(c.last_ping_time > now + std::time::Duration::from_mins(50));
 }
 
 // handle_control.

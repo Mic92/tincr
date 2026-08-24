@@ -344,7 +344,7 @@ impl Default for DaemonSettings {
             broadcast_mode: broadcast::BroadcastMode::Mst,
             macexpire: mac_lease::DEFAULT_EXPIRE_SECS,
             maxoutbufsize: 10 * MTU as usize,
-            invitation_lifetime: Duration::from_secs(604_800), // 1 week
+            invitation_lifetime: Duration::from_hours(168), // 1 week
             local_discovery: true,
             shards: None,
             bind_to_address: None,

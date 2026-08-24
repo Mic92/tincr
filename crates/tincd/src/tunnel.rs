@@ -547,8 +547,8 @@ mod tests {
     #[test]
     fn prev_sptps_reap_predicate() {
         use std::time::Duration;
-        let pi2 = Duration::from_secs(120);
-        let ke = Duration::from_secs(3600);
+        let pi2 = Duration::from_mins(2);
+        let ke = Duration::from_hours(1);
         let t0 = Instant::now();
 
         // Stalled: validkey=false, last_req_key fresh → not yet.
@@ -601,7 +601,7 @@ mod tests {
     #[test]
     fn periodic_rekey_due_gates() {
         use std::time::Duration;
-        let pi = Duration::from_secs(60);
+        let pi = Duration::from_mins(1);
         let t0 = Instant::now();
         let late = t0 + pi + Duration::from_secs(1);
         // (validkey, waiting, rekey_due, last_req_key, now) -> want

@@ -328,7 +328,7 @@ fn drive_tcp(port: u16, bytes: usize) -> bool {
         while !lstop.load(Ordering::Relaxed) {
             if let Ok((mut s, _)) = listener.accept() {
                 let _ = s.set_nonblocking(false);
-                while s.read(&mut buf).map(|n| n > 0).unwrap_or(false) {}
+                while s.read(&mut buf).is_ok_and(|n| n > 0) {}
             }
             std::thread::sleep(Duration::from_millis(5));
         }

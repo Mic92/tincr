@@ -960,6 +960,6 @@ mod tests {
         assert_eq!(step(101, 101, 20), (40, Duration::from_secs(20)));
         // Cap at 3600.
         assert_eq!(step(101, 101, 2000), (3600, Duration::from_secs(2000)));
-        assert_eq!(step(101, 101, 3600), (3600, Duration::from_secs(3600)));
+        assert_eq!(step(101, 101, 3600), (3600, Duration::from_hours(1)));
     }
 }

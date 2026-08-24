@@ -339,7 +339,7 @@ impl Daemon {
         let now = self.timers.now();
         let conn = self.conn_mut(id);
         // Refresh idle-reap window on any client activity.
-        conn.last_ping_time = now + std::time::Duration::from_secs(3600);
+        conn.last_ping_time = now + std::time::Duration::from_hours(1);
         let (r, nw) = handle_control(conn, line);
         match r {
             DispatchResult::DumpSubnets => {

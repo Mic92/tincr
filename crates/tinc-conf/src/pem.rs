@@ -170,7 +170,7 @@ pub fn write_pem(mut w: impl Write, ty: &str, body: &[u8]) -> io::Result<()> {
         // `b64::encode` returns `String`, freshly allocated.
         // Key material → zeroize before drop.
         let line = Zeroizing::new(b64::encode(chunk));
-        writeln!(w, "{}", &*line)?;
+        writeln!(w, "{}", *line)?;
     }
     writeln!(w, "-----END {ty}-----")?;
     Ok(())
