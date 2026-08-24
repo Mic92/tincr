@@ -62,8 +62,8 @@ mod bench {
     use common::macos::{route_del_host, run, wait_for_utun};
     use common::node::Node;
     use common::{
-        ChildWithLog, Ctl, TmpGuard, node_status, node_traffic, poll_until, wait_for_file,
-        write_ed25519_privkey,
+        ChildWithLog, Ctl, TmpGuard, alloc_port, node_status, node_traffic, poll_until,
+        wait_for_file, write_ed25519_privkey,
     };
 
     // High utun unit numbers: dodge VPN clients / leftover devices.
@@ -117,7 +117,7 @@ mod bench {
         }
         std::fs::write(me.confbase.join("tinc.conf"), conf).unwrap();
         std::fs::write(
-            me.confbase.join("hosts").join(me.name),
+            me.confbase.join("hosts").join(&me.name),
             format!("Port = {}\nSubnet = {subnet}\n", me.port),
         )
         .unwrap();
@@ -126,7 +126,7 @@ mod bench {
         if connect_to {
             let _ = writeln!(peer_cfg, "Address = 127.0.0.1 {}", peer.port);
         }
-        std::fs::write(me.confbase.join("hosts").join(peer.name), peer_cfg).unwrap();
+        std::fs::write(me.confbase.join("hosts").join(&peer.name), peer_cfg).unwrap();
         write_ed25519_privkey(&me.confbase, &me.seed);
     }
 
@@ -200,8 +200,10 @@ mod bench {
     fn setup_tunnel(tag: &str, alice_impl: &Impl, bob_impl: &Impl) -> TunnelHandle {
         let tmp = tmp(tag);
 
-        let alice = Node::with_alloc_port(tmp.path(), "alice", 0xAC);
-        let bob = Node::with_alloc_port(tmp.path(), "bob", 0xBC);
+        let mut alice = Node::new(tmp.path(), "alice", 0xAC);
+        let mut bob = Node::new(tmp.path(), "bob", 0xBC);
+        alice.port = alloc_port();
+        bob.port = alloc_port();
         write_macos_config(&bob, &alice, BOB_IFACE, &format!("{BOB_IP}/32"), false);
         write_macos_config(&alice, &bob, ALICE_IFACE, &format!("{ALICE_IP}/32"), true);
 

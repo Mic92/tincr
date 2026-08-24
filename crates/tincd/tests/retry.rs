@@ -6,12 +6,13 @@ use std::time::Duration;
 #[macro_use]
 mod common;
 use common::node::Node;
-use common::{poll_until, refusing_port};
+use common::refusing_port;
 
 const BACKOFF_5S: &str = "re-establish outgoing connection in 5 seconds";
 
-/// testnode dialing a peer that refuses connections, already in its
-/// first 5s backoff. The socket keeps the dead port reserved.
+/// testnode dialing a dead peer, already in its first 5s backoff. The
+/// socket keeps the dead port reserved. Linux refuses the connect at
+/// once; macOS drops the SYN, so there each dial takes `PingTimeout`.
 fn node_in_backoff(dir: &std::path::Path) -> (Node, socket2::Socket) {
     let (dead_socket, dead_port) = refusing_port();
     let mut deadpeer = Node::new(dir, "deadpeer", 0xDE);
@@ -19,29 +20,34 @@ fn node_in_backoff(dir: &std::path::Path) -> (Node, socket2::Socket) {
     let mut node = Node::new(dir, "testnode", 0x42).with_conf("PingTimeout = 3");
     node.write_config(&deadpeer, true);
     node.start();
-    poll_until(Duration::from_secs(5), || {
-        node.log().contains(BACKOFF_5S).then_some(())
+    wait_log(&node, Duration::from_secs(5), |log| {
+        log.contains(BACKOFF_5S)
     });
     (node, dead_socket)
 }
 
-fn dial_attempts(node: &Node) -> usize {
-    node.log().matches("Trying to connect to deadpeer").count()
+/// Fails with the daemon log.
+fn wait_log(node: &Node, timeout: Duration, done: impl Fn(&str) -> bool) {
+    let deadline = std::time::Instant::now() + timeout;
+    while !done(&node.log()) {
+        assert!(std::time::Instant::now() < deadline, "{}", node.log());
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Without retry the second dial would come after 5s; 2s proves the
-/// timer was reset. The second backoff being 5s again (not 10s)
+/// timer was reset (and its outcome lands within `PingTimeout`). The second backoff being 5s again (not 10s)
 /// proves the accumulated backoff was zeroed too.
 #[test]
 fn sigalrm_retries_now() {
     let tmp = tmp!("sigalrm");
     let (mut node, _dead) = node_in_backoff(tmp.path());
     node.signal(nix::sys::signal::Signal::SIGALRM);
-    poll_until(Duration::from_secs(2), || {
-        (dial_attempts(&node) >= 2).then_some(())
+    wait_log(&node, Duration::from_secs(2), |log| {
+        log.matches("Trying to connect to deadpeer").count() >= 2
     });
-    poll_until(Duration::from_secs(2), || {
-        (node.log().matches(BACKOFF_5S).count() == 2).then_some(())
+    wait_log(&node, Duration::from_secs(4), |log| {
+        log.matches(BACKOFF_5S).count() == 2
     });
     let log = node.stop();
     assert!(log.contains("Got SIGALRM"), "{log}");
@@ -53,8 +59,8 @@ fn req_retry_retries_now() {
     let tmp = tmp!("req-retry");
     let (node, _dead) = node_in_backoff(tmp.path());
     assert_eq!(node.ctl().retry(), 0);
-    poll_until(Duration::from_secs(2), || {
-        (dial_attempts(&node) >= 2).then_some(())
+    wait_log(&node, Duration::from_secs(2), |log| {
+        log.matches("Trying to connect to deadpeer").count() >= 2
     });
 }
 
