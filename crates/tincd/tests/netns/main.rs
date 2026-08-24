@@ -11,6 +11,7 @@ mod common;
 mod rig;
 
 mod autoconnect_shortcut;
+mod bpf_steer;
 mod chaos;
 mod crossimpl;
 mod ping;

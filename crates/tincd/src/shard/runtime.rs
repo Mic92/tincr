@@ -80,7 +80,7 @@ impl ShardRuntime {
             }
         }
         #[cfg(not(target_os = "linux"))]
-        let _ = snap;
+        let _ = (self, snap);
     }
 
     /// Worker `k`'s punt queue + wake eventfd, as cloned Arcs.
@@ -92,7 +92,7 @@ impl ShardRuntime {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = k;
+            let _ = (self, k);
             None
         }
     }

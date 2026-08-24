@@ -77,6 +77,72 @@ fn stray_udp_is_drained() {
     assert!(!log.contains("panicked"), "{log}");
 }
 
+/// Regression: purge before any peer or graph run took a path that
+/// had no snapshot yet.
+#[test]
+fn purge_on_fresh_daemon_acks() {
+    let tmp = tmp!("purge-fresh");
+    let mut node = testnode(tmp.path());
+    node.start();
+    let (mut reader, writer) = control_socket(&node);
+    assert_eq!(request_line(&mut reader, &writer, "18 8"), "18 8 0\n");
+    let log = node.stop();
+    assert!(!log.contains("panicked"), "{log}");
+}
+
+/// Requests before auth, bad cookies, an oversized line, every verb
+/// with a garbage argument, and clients vanishing mid-dump: each only
+/// costs that connection.
+#[test]
+fn control_abuse_keeps_serving() {
+    let tmp = tmp!("ctl-abuse");
+    let mut node = testnode(tmp.path());
+    node.start();
+    let cookie = read_cookie(&node.pidfile);
+    let dropped = |greeting: &[u8]| {
+        let socket = UnixStream::connect(&node.socket).unwrap();
+        (&socket).write_all(greeting).unwrap();
+        let mut reply = Vec::new();
+        BufReader::new(&socket).read_to_end(&mut reply).unwrap();
+        assert!(reply.is_empty(), "{greeting:?} answered: {reply:?}");
+    };
+    dropped(b"18 0\n");
+    for cookie in [&cookie[..32], "deadbeef", ""] {
+        dropped(format!("0 ^{cookie} 0\n").as_bytes());
+    }
+    {
+        let (mut reader, writer) = control_socket(&node);
+        (&writer).write_all(&[b'x'; 4000]).unwrap();
+        let mut reply = Vec::new();
+        // EOF or ECONNRESET.
+        let _ = reader.read_to_end(&mut reply);
+    }
+    {
+        let (mut reader, writer) = control_socket(&node);
+        // Not 0 (stop) or 9 (set_debug drops the conn on a bad level).
+        for subtype in [1, 3, 4, 5, 6, 8, 10, 12, 13, 14, 15, 99, -1] {
+            writeln!(&mut &writer, "18 {subtype} !!garbage!!").unwrap();
+        }
+        writeln!(&mut &writer, "18 6").unwrap();
+        let mut line = String::new();
+        while line != "18 6\n" {
+            line.clear();
+            assert_ne!(
+                reader.read_line(&mut line).unwrap(),
+                0,
+                "dropped after verb fuzz"
+            );
+        }
+    }
+    for _ in 0..10 {
+        let (_, writer) = control_socket(&node);
+        (&writer)
+            .write_all(b"18 3\n18 4\n18 5\n18 6\n18 13\n")
+            .unwrap();
+    }
+    assert!(!node.ctl().dump(3).is_empty());
+}
+
 /// `REQ_LOG` turns a control connection into a log sink that receives
 /// records regardless of the stderr filter: with `RUST_LOG=warn` the
 /// debug-level "Connection from" line still arrives.

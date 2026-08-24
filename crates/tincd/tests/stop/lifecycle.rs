@@ -73,6 +73,22 @@ fn tinc_start_waits_for_umbilical() {
     poll_until(Duration::from_secs(5), || (!pidfile.exists()).then_some(()));
 }
 
+/// `TINC_UMBILICAL` naming a stdio fd must be ignored rather than
+/// getting the NUL-then-close treatment.
+#[test]
+fn umbilical_on_stderr_is_ignored() {
+    let tmp = tmp!("umbilical-stderr");
+    let mut node = testnode(tmp.path());
+    let mut cmd = tincd_at(&node.confbase, &node.pidfile, &node.socket);
+    cmd.env("TINC_UMBILICAL", "2 0").stderr(Stdio::piped());
+    node.start_command(cmd);
+    std::thread::sleep(Duration::from_millis(300));
+    node.assert_alive();
+    // Would also be EOF here had fd 2 been closed.
+    assert!(!node.log().contains('\0'), "NUL on stderr");
+    let _ = node.ctl().dump(3);
+}
+
 /// Daemon half only: we hold the other end of the umbilical and
 /// expect exactly one NUL byte once setup is done.
 #[test]
@@ -152,23 +168,24 @@ fn usr1_usr2_winch_are_ignored() {
     assert!(node.wait_exit().success());
 }
 
+/// The second daemon must fail on the socket bind before it gets to
+/// (over)write the shared pidfile.
 #[test]
 fn second_daemon_on_same_socket_is_refused() {
     let tmp = tmp!("second");
     let mut first = testnode(tmp.path());
     first.start();
+    let cookie = read_cookie(&first.pidfile);
 
-    let second = tincd_at(
-        &first.confbase,
-        tmp.path().join("second.pid"),
-        &first.socket,
-    )
-    .stderr(Stdio::piped())
-    .output()
-    .unwrap();
+    let second = tincd_at(&first.confbase, &first.pidfile, &first.socket)
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
     let stderr = String::from_utf8_lossy(&second.stderr);
     assert!(!second.status.success(), "{stderr}");
     assert!(stderr.contains("already in use"), "{stderr}");
+    first.assert_alive();
+    assert_eq!(read_cookie(&first.pidfile), cookie, "pidfile clobbered");
 }
 
 /// With `PingTimeout = 1` the periodic timer fires and re-arms within

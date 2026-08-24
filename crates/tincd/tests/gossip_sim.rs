@@ -402,8 +402,8 @@ impl Simulation {
         self.msg_count += 1;
         self.nonce_counter += nonce_used;
 
-        for (s, d, m, n) in outgoing {
-            self.send_msg(&s, &d, m, n);
+        for (sender, dest, msg, nonce) in outgoing {
+            self.send_msg(&sender, &dest, msg, nonce);
         }
     }
 
@@ -411,8 +411,6 @@ impl Simulation {
         self.nodes.values().map(|n| n.contradictions).sum()
     }
 }
-
-// tests
 
 /// Timing-gap scenario that triggered issue #4.
 ///
@@ -446,11 +444,11 @@ fn timing_gap_zero_contradictions() {
 
     // Verify full reachability.
     {
-        let t = &sim.nodes["node1"];
+        let node1 = &sim.nodes["node1"];
         for name in ["hub1", "hub2", "hub3", "carol", "dave"] {
-            let nid = t.node_ids[name];
+            let nid = node1.node_ids[name];
             assert!(
-                t.graph.node(nid).unwrap().reachable,
+                node1.graph.node(nid).unwrap().reachable,
                 "pre: node1 should see {name} reachable"
             );
         }
@@ -464,13 +462,13 @@ fn timing_gap_zero_contradictions() {
 
     assert_eq!(sim.total_contradictions(), 0, "no contradictions after fix");
 
-    let t = &sim.nodes["node1"];
+    let node1 = &sim.nodes["node1"];
     assert!(
-        t.graph.node(t.node_ids["carol"]).unwrap().reachable,
+        node1.graph.node(node1.node_ids["carol"]).unwrap().reachable,
         "carol reachable via hub3 after convergence"
     );
     assert!(
-        t.graph.node(t.node_ids["dave"]).unwrap().reachable,
+        node1.graph.node(node1.node_ids["dave"]).unwrap().reachable,
         "dave reachable via hub3→carol after convergence"
     );
 }
@@ -511,9 +509,13 @@ fn multi_node_zero_contradictions() {
 
     // All nodes converge to full reachability.
     for obs in ["n1", "n2", "n3"] {
-        let n = &sim.nodes[obs];
+        let observer = &sim.nodes[obs];
         assert!(
-            n.graph.node(n.node_ids["carol"]).unwrap().reachable,
+            observer
+                .graph
+                .node(observer.node_ids["carol"])
+                .unwrap()
+                .reachable,
             "{obs}: carol should be reachable"
         );
     }

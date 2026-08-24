@@ -228,3 +228,26 @@ fn indirect_upgrade_can_increase_distance() {
         "weighted_distance is from the OLD (indirect) path's nexthop update"
     );
 }
+
+/// `i32::MAX`-weight hops must not wrap negative and win against a
+/// cheap path.
+#[test]
+fn sssp_weight_overflow_does_not_hijack_nexthop() {
+    let mut graph = Graph::new();
+    let src = graph.add_node("src");
+    let evil = graph.add_node("evil");
+    let good = graph.add_node("good");
+    let dst = graph.add_node("dst");
+    for (a, b, weight) in [
+        (src, evil, i32::MAX),
+        (evil, dst, i32::MAX),
+        (src, good, 10),
+        (good, dst, 10),
+    ] {
+        graph.add_edge(a, b, weight, 0);
+        graph.add_edge(b, a, weight, 0);
+    }
+    let route = graph.sssp(src)[dst.0 as usize].expect("dst reachable");
+    assert!(route.weighted_distance >= 0, "{}", route.weighted_distance);
+    assert_eq!(route.nexthop, good);
+}
