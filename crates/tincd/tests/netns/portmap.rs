@@ -1,35 +1,16 @@
-//! UPnP-IGD / NAT-PMP port mapping against a real `miniupnpd`.
-//!
-//! Topology (all inside the bwrap re-exec; three child netns + the
-//! outer bwrap netns acting as "internet"):
+//! `UPnP = yes` against a real `miniupnpd` (nftables backend, which
+//! works unprivileged in a userns) and against a hostile hand-rolled
+//! gateway.
 //!
 //! ```text
 //!   alice-ns 192.168.77.2/24 ─veth-lan─┐
-//!                                      gw-ns: ip_forward=1, MASQUERADE -o veth-wan
-//!                                             miniupnpd: ext_ifname=veth-wan
-//!                                                        listening_ip=veth-lan
-//!   outer-ns 10.77.0.1/24    ─veth-wan─┘     enable_upnp=yes enable_natpmp=yes
+//!                                      gw-ns: forwarding, masquerade, miniupnpd
+//!   outer-ns 10.77.0.1/24    ─veth-wan─┘      ("internet" = the bwrap netns)
 //! ```
-//!
-//! The daemon in alice-ns sets `UPnP=yes`. The portmapper thread
-//! tries NAT-PMP first (one round-trip to the default-gw), falls
-//! back to SSDP→IGD on failure. miniupnpd answers both. We assert:
-//!
-//!   (a) tincd logs `Portmapped TCP 655 → 10.77.0.2:NNNN`
-//!   (b) `iptables -t nat -L` in gw-ns shows the DNAT rule miniupnpd
-//!       installed (a real kernel rule, not just a SOAP 200)
-//!   (c) outer-ns can `nc -zv 10.77.0.2 NNNN` and reach alice's :6550
-//!       — the mapping actually delivers
-//!
-//! Runs unprivileged via the **nftables** backend: nfnetlink works in
-//! a userns (the kernel namespaces nft tables per-netns), whereas the
-//! legacy libiptc backend doesn't. The devshell ships the
-//! `miniupnpd-nftables` build + `nft`; the test SKIPs cleanly if
-//! either is missing or if `nft` can't open netlink in this kernel.
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -38,7 +19,10 @@ use super::common::linux::run_ip;
 use super::common::{tincd_bin, wait_for_file_with, write_ed25519_privkey};
 use super::rig::{enter_bwrap, make_child_netns, veth_pair};
 
-/// Run a command inside `ip netns exec NS`. Panic on nonzero.
+/// The daemon's own port. Not 655: no `CAP_NET_BIND_SERVICE` in the
+/// userns.
+const ALICE_PORT: u16 = 6550;
+
 fn nsexec(ns: &str, argv: &[&str]) -> String {
     let out = Command::new("ip")
         .args(["netns", "exec", ns])
@@ -54,24 +38,111 @@ fn nsexec(ns: &str, argv: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// miniupnpd (nftables backend) in gw-ns, foreground (`-d`), config
-/// in a tmpfile. We pre-create the `inet filter` table with the
-/// chains it expects and hook prerouting so the DNAT it installs is
-/// actually consulted. The shipped `nft_init.sh` does the same but
-/// also installs a `forward { policy drop }` chain — we want a
-/// permissive forward, so do the minimum by hand.
-struct Miniupnpd(ChildWithLog);
+/// `nft -f` in `ns`; `false` (logged as SKIP) when nfnetlink is not
+/// usable from this userns.
+fn load_nft(ns: &str, test_name: &str, path: &std::path::Path, rules: &str) -> bool {
+    std::fs::write(path, rules).unwrap();
+    let out = Command::new("ip")
+        .args(["netns", "exec", ns, "nft", "-f"])
+        .arg(path)
+        .output()
+        .expect("spawn nft");
+    if !out.status.success() {
+        eprintln!(
+            "SKIP {test_name}: nft -f in {ns}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    out.status.success()
+}
 
-impl Miniupnpd {
-    fn spawn(tmp: &std::path::Path, bin: &str, natpmp: bool) -> Option<Self> {
-        let ruleset = tmp.join("nft.rules");
-        std::fs::write(
-            &ruleset,
-            // MASQUERADE here too (replaces the iptables -A above);
-            // miniupnpd default chain names: miniupnpd /
-            // prerouting_miniupnpd / postrouting_miniupnpd, default
-            // table name `filter` for both filter and nat.
-            "table inet filter {\n\
+fn which(bin: &str) -> Option<String> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(bin))
+        .find(|path| path.is_file())
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+/// Feature-detect before the bwrap re-exec (PATH lookups are cheaper
+/// to report out here), then enter it. Returns the miniupnpd path.
+fn enter_bwrap_with_miniupnpd(test_name: &str) -> Option<String> {
+    if std::env::var_os("BWRAP_INNER").is_none() {
+        let Some(bin) = which("miniupnpd") else {
+            eprintln!("SKIP {test_name}: miniupnpd not on PATH");
+            return None;
+        };
+        if which("nft").is_none() {
+            eprintln!("SKIP {test_name}: nft not on PATH");
+            return None;
+        }
+        // SAFETY: nextest runs one test per process.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("MINIUPNPD_BIN", bin);
+        }
+    }
+    enter_bwrap(test_name).then(|| std::env::var("MINIUPNPD_BIN").unwrap())
+}
+
+/// alice-ns and gw-ns wired as in the module doc, alice with a
+/// stateful drop-by-default input firewall, and miniupnpd running in
+/// gw-ns.
+struct Gateway {
+    upnpd: ChildWithLog,
+    sleepers: [Child; 2],
+}
+
+impl Drop for Gateway {
+    fn drop(&mut self) {
+        let _ = self.upnpd.child.kill();
+        for sleeper in &mut self.sleepers {
+            let _ = sleeper.kill();
+            let _ = sleeper.wait();
+        }
+    }
+}
+
+impl Gateway {
+    fn start(
+        test_name: &str,
+        tmp: &std::path::Path,
+        miniupnpd_bin: &str,
+        natpmp: bool,
+    ) -> Option<Self> {
+        let sleepers = [make_child_netns("alice"), make_child_netns("gw")];
+        veth_pair(
+            ("alice", "veth-a", "192.168.77.2/24"),
+            ("gw", "veth-lan", "192.168.77.1/24"),
+        );
+        // PID 1 in here is bwrap, so `netns 1` can't name the outer
+        // ns: create the pair out here and move one end.
+        run_ip(&[
+            "link", "add", "veth-out", "type", "veth", "peer", "name", "veth-wan",
+        ]);
+        run_ip(&["link", "set", "veth-wan", "netns", "gw"]);
+        run_ip(&["addr", "add", "10.77.0.1/24", "dev", "veth-out"]);
+        run_ip(&["link", "set", "veth-out", "up"]);
+        nsexec(
+            "gw",
+            &["ip", "addr", "add", "10.77.0.2/24", "dev", "veth-wan"],
+        );
+        nsexec("gw", &["ip", "link", "set", "veth-wan", "up"]);
+        nsexec(
+            "alice",
+            &["ip", "route", "add", "default", "via", "192.168.77.1"],
+        );
+        nsexec("gw", &["sysctl", "-w", "net.ipv4.ip_forward=1"]);
+        let cleanup = |mut sleepers: [Child; 2]| {
+            for sleeper in &mut sleepers {
+                let _ = sleeper.kill();
+                let _ = sleeper.wait();
+            }
+        };
+
+        // The chains miniupnpd expects (its nft_init.sh would also add
+        // a drop-policy forward chain), plus masquerade. Doubles as the
+        // probe for nft working in this userns at all.
+        let gw_rules = "table inet filter {\n\
                chain miniupnpd { }\n\
                chain prerouting_miniupnpd { }\n\
                chain postrouting_miniupnpd { }\n\
@@ -83,545 +154,297 @@ impl Miniupnpd {
                  type nat hook postrouting priority 100; policy accept;\n\
                  oifname \"veth-wan\" masquerade\n\
                }\n\
-             }\n",
-        )
-        .unwrap();
-        // This is the userns capability probe: nft talking nfnetlink.
-        // Any failure here ⇒ SKIP (kernel without USERNS nft, or
-        // CONFIG_NF_TABLES off).
-        let out = Command::new("ip")
-            .args(["netns", "exec", "gw", "nft", "-f"])
-            .arg(&ruleset)
-            .output()
-            .expect("spawn nft");
-        if !out.status.success() {
-            eprintln!(
-                "SKIP upnp_miniupnpd_gateway: nft -f failed in userns: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+             }\n";
+        // NixOS-firewall shape on alice. Regression: the multicast
+        // SSDP query and the gateway's unicast reply are different
+        // conntrack tuples, so the reply is only let in because the
+        // IGD client first sends a unicast M-SEARCH from the same
+        // socket.
+        let alice_rules = format!(
+            "table inet fw {{\n\
+               chain input {{\n\
+                 type filter hook input priority 0; policy drop;\n\
+                 ct state established,related accept\n\
+                 iif lo accept\n\
+                 tcp dport {ALICE_PORT} accept\n\
+               }}\n\
+             }}\n"
+        );
+        if !load_nft("gw", test_name, &tmp.join("gw.nft"), gw_rules)
+            || !load_nft("alice", test_name, &tmp.join("alice.nft"), &alice_rules)
+        {
+            cleanup(sleepers);
             return None;
         }
 
-        // `secure_mode=no`: alice asks to map to her own LAN IP
-        // anyway, but igd-next/natpmp don't always pass the right
-        // internal-client field on every router; secure_mode=no
-        // sidesteps a class of test-only failures.
-        // `ext_allow_private_ipv4=yes` + `ext_ip=`: 10.77.0.2 IS
-        // rfc1918; by default miniupnpd refuses port-forwarding
-        // when the WAN address is private (it assumes double-NAT),
-        // and even with the allow flag `GetExternalIPAddress`
-        // returns the empty string for a reserved interface addr
-        // unless `ext_ip` pins it explicitly (upnpsoap.c:372,
-        // ≤2.3.9).
+        // 10.77.0.2 is RFC 1918, which miniupnpd treats as double NAT:
+        // refuses mappings unless allowed, and reports an empty
+        // external address unless `ext_ip` pins it.
         let conf = tmp.join("miniupnpd.conf");
-        let natpmp = if natpmp { "yes" } else { "no" };
         std::fs::write(
             &conf,
             format!(
                 "ext_ifname=veth-wan\n\
-             listening_ip=veth-lan\n\
-             enable_upnp=yes\n\
-             enable_natpmp={natpmp}\n\
-             secure_mode=no\n\
-             ext_allow_private_ipv4=yes\n\
-             ext_ip=10.77.0.2\n\
-             uuid=00000000-0000-0000-0000-000000000000\n\
-             allow 0-65535 192.168.77.0/24 0-65535\n\
-             deny 0-65535 0.0.0.0/0 0-65535\n"
+                 listening_ip=veth-lan\n\
+                 enable_upnp=yes\n\
+                 enable_natpmp={}\n\
+                 secure_mode=no\n\
+                 ext_allow_private_ipv4=yes\n\
+                 ext_ip=10.77.0.2\n\
+                 uuid=00000000-0000-0000-0000-000000000000\n\
+                 allow 0-65535 192.168.77.0/24 0-65535\n\
+                 deny 0-65535 0.0.0.0/0 0-65535\n",
+                if natpmp { "yes" } else { "no" }
             ),
         )
         .unwrap();
+        // `-d` is foreground and chatty; ChildWithLog keeps the pipe
+        // drained so it doesn't block mid-response.
+        let mut upnpd = ChildWithLog::spawn(
+            Command::new("ip")
+                .args(["netns", "exec", "gw", miniupnpd_bin, "-d", "-f"])
+                .arg(&conf)
+                .arg("-P")
+                .arg(tmp.join("miniupnpd.pid"))
+                .stdin(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn miniupnpd"),
+        );
+        let ready_port = if natpmp { ":5351" } else { ":1900" };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !nsexec("gw", &["ss", "-uln"]).contains(ready_port) {
+            if let Ok(Some(status)) = upnpd.child.try_wait() {
+                cleanup(sleepers);
+                panic!(
+                    "miniupnpd exited early ({status:?}):\n{}",
+                    upnpd.kill_and_log()
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "miniupnpd didn't bind {ready_port}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Some(Self { upnpd, sleepers })
+    }
 
-        let pid = tmp.join("miniupnpd.pid");
-        let child = Command::new("ip")
-            .args(["netns", "exec", "gw"])
-            .arg(bin)
-            .arg("-d") // foreground + debug to stderr
-            .arg("-f")
-            .arg(&conf)
-            .arg("-P")
-            .arg(&pid)
-            .stdin(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn miniupnpd");
-        // ChildWithLog drains stderr on a thread — `-d` is chatty
-        // and the 64KiB pipe filling would wedge the daemon
-        // mid-SOAP-response.
-        Some(Self(ChildWithLog::spawn(child)))
+    fn dnat_rules() -> String {
+        nsexec(
+            "gw",
+            &[
+                "nft",
+                "list",
+                "chain",
+                "inet",
+                "filter",
+                "prerouting_miniupnpd",
+            ],
+        )
     }
 }
 
-/// Write a minimal one-node config: `DeviceType=dummy`, fixed
-/// `Port=655`, `UPnP=yes`. We don't need a peer — only the listener
-/// + portmapper thread.
-fn write_alice_config(confbase: &std::path::Path, refresh: u32) {
+/// Peerless dummy-device daemon in alice-ns with `UPnP = yes`.
+fn start_alice(tmp: &std::path::Path, refresh_period: u32) -> ChildWithLog {
+    let confbase = tmp.join("alice");
     std::fs::create_dir_all(confbase.join("hosts")).unwrap();
     std::fs::write(
         confbase.join("tinc.conf"),
         format!(
-            "Name = alice\n\
-             DeviceType = dummy\n\
-             AddressFamily = ipv4\n\
-             AutoConnect = no\n\
-             UPnP = yes\n\
-             UPnPRefreshPeriod = {refresh}\n"
+            "Name = alice\nDeviceType = dummy\nAddressFamily = ipv4\n\
+             AutoConnect = no\nUPnP = yes\nUPnPRefreshPeriod = {refresh_period}\n"
         ),
     )
     .unwrap();
-    // 6550, not 655: bwrap's userns doesn't grant
-    // CAP_NET_BIND_SERVICE; the daemon's bind(655) gets EACCES.
-    // The mapping logic doesn't care which port it forwards.
-    std::fs::write(confbase.join("hosts").join("alice"), "Port = 6550\n").unwrap();
-    write_ed25519_privkey(confbase, &[0xA1; 32]);
+    std::fs::write(
+        confbase.join("hosts").join("alice"),
+        format!("Port = {ALICE_PORT}\n"),
+    )
+    .unwrap();
+    write_ed25519_privkey(&confbase, &[0xA1; 32]);
+    let socket = tmp.join("alice.socket");
+    let alice = ChildWithLog::spawn(
+        Command::new("ip")
+            .args(["netns", "exec", "alice"])
+            .arg(tincd_bin())
+            .arg("-D")
+            .arg("-c")
+            .arg(&confbase)
+            .arg("--pidfile")
+            .arg(tmp.join("alice.pid"))
+            .arg("--socket")
+            .arg(&socket)
+            .env("RUST_LOG", "tincd=debug,tincd::portmap=debug")
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn tincd in netns"),
+    );
+    assert!(
+        wait_for_file_with(&socket, Duration::from_secs(5)),
+        "alice setup failed:\n{}",
+        alice.kill_and_log()
+    );
+    alice
+}
+
+/// Poll alice's log until `done(log)`; panics with the log after
+/// `timeout` or as soon as `must_not` appears.
+fn wait_log(
+    alice: &ChildWithLog,
+    timeout: Duration,
+    must_not: Option<&str>,
+    done: impl Fn(&str) -> bool,
+) -> String {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let log = alice.log_snapshot();
+        if done(&log) {
+            return log;
+        }
+        if let Some(needle) = must_not {
+            assert!(!log.contains(needle), "`{needle}` in:\n{log}");
+        }
+        assert!(Instant::now() < deadline, "timed out; alice:\n{log}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+const MAPPED: &str = "Portmapped Tcp 6550";
+
+/// A mapping is logged via `expect_via`, miniupnpd installed a real
+/// DNAT rule for it, and a connect from the "internet" side reaches
+/// alice's listener through it.
+fn mapping_works(test_name: &str, natpmp: bool, expect_via: &str) {
+    let Some(miniupnpd_bin) = enter_bwrap_with_miniupnpd(test_name) else {
+        return;
+    };
+    let tmp = tmp!("portmap");
+    let Some(_gateway) = Gateway::start(test_name, tmp.path(), &miniupnpd_bin, natpmp) else {
+        return;
+    };
+    let alice = start_alice(tmp.path(), 5);
+
+    // NAT-PMP is sub-second; the IGD fallback waits ~5s on SSDP.
+    let log = wait_log(&alice, Duration::from_secs(20), None, |log| {
+        log.contains(MAPPED)
+    });
+    let line = log.lines().find(|line| line.contains(MAPPED)).unwrap();
+    assert!(line.contains(expect_via), "{line}");
+    let ext_port: u16 = line
+        .rsplit_once("10.77.0.2:")
+        .and_then(|(_, rest)| {
+            rest.split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse()
+                .ok()
+        })
+        .unwrap_or_else(|| panic!("no ext port in: {line}"));
+
+    let dnat = Gateway::dnat_rules();
+    assert!(
+        dnat.contains("dnat") && dnat.contains("192.168.77.2") && dnat.contains("6550"),
+        "{dnat}"
+    );
+    // Nothing listens on gw itself, so a completed handshake can only
+    // be alice via the DNAT rule.
+    let probe = TcpStream::connect_timeout(
+        &SocketAddr::from(([10, 77, 0, 2], ext_port)),
+        Duration::from_secs(3),
+    );
+    let alice_log = alice.kill_and_log();
+    assert!(probe.is_ok(), "{probe:?}\n{dnat}\n{alice_log}");
 }
 
 #[test]
 fn upnp_miniupnpd_gateway() {
-    run("portmap::upnp_miniupnpd_gateway", true, "PCP");
+    mapping_works("portmap::upnp_miniupnpd_gateway", true, "PCP");
 }
 
-/// `enable_natpmp=no` ⇒ forces the SSDP→SOAP fallback path. This is
-/// the acceptance test for the hand-rolled `portmap::igd` client:
-/// real miniupnpd, real wire format, real DNAT rule installed.
+/// NAT-PMP off on the gateway forces the hand-rolled SSDP→SOAP client.
 #[test]
 fn upnp_miniupnpd_gateway_igd_only() {
-    run(
+    mapping_works(
         "portmap::upnp_miniupnpd_gateway_igd_only",
         false,
         "UPnP-IGD",
     );
 }
 
-fn run(test_name: &str, natpmp: bool, expect_via: &str) {
-    // feature-detect BEFORE bwrap
-    if std::env::var_os("BWRAP_INNER").is_none() {
-        let Ok(bin) = which("miniupnpd") else {
-            eprintln!("SKIP {test_name}: miniupnpd not on PATH");
-            return;
-        };
-        if which("nft").is_err() {
-            eprintln!("SKIP {test_name}: nft not on PATH");
-            return;
-        }
-        // SAFETY: nextest = process-per-test.
-        #[allow(unsafe_code)]
-        unsafe {
-            std::env::set_var("MINIUPNPD_BIN", bin);
-        }
-    }
-    if !enter_bwrap(test_name) {
-        return;
-    }
-    let miniupnpd_bin =
-        std::env::var("MINIUPNPD_BIN").expect("outer pass sets MINIUPNPD_BIN; bwrap inherits env");
-
-    let tmp = tmp!("portmap");
-
-    // topology
-    let mut sleepers = [make_child_netns("alice"), make_child_netns("gw")];
-    // ifnames must be unique in the outer ns at create time (both
-    // ends exist there until the per-end `netns` move).
-    veth_pair(
-        ("alice", "veth-a", "192.168.77.2/24"),
-        ("gw", "veth-lan", "192.168.77.1/24"),
-    );
-    // Outer bwrap netns is "internet". `ip link set ... netns 1`
-    // won't work (PID 1 inside bwrap is bwrap itself, not us);
-    // instead create the veth in the outer ns and only move ONE
-    // end into gw.
-    run_ip(&[
-        "link", "add", "veth-out", "type", "veth", "peer", "name", "veth-wan",
-    ]);
-    run_ip(&["link", "set", "veth-wan", "netns", "gw"]);
-    run_ip(&["addr", "add", "10.77.0.1/24", "dev", "veth-out"]);
-    run_ip(&["link", "set", "veth-out", "up"]);
-    nsexec(
-        "gw",
-        &["ip", "addr", "add", "10.77.0.2/24", "dev", "veth-wan"],
-    );
-    nsexec("gw", &["ip", "link", "set", "veth-wan", "up"]);
-
-    // alice's default route → gw (so NAT-PMP's get_default_gateway()
-    // and the SSDP multicast both go out veth-lan).
-    nsexec(
-        "alice",
-        &["ip", "route", "add", "default", "via", "192.168.77.1"],
-    );
-
-    // gw: forward on. MASQUERADE installed by the nft ruleset below.
-    nsexec("gw", &["sysctl", "-w", "net.ipv4.ip_forward=1"]);
-
-    // miniupnpd (nft chains + spawn)
-    let Some(mut upnpd) = Miniupnpd::spawn(tmp.path(), &miniupnpd_bin, natpmp) else {
-        for s in &mut sleepers {
-            let _ = s.kill();
-        }
-        return;
-    };
-    // Wait for it to bind — proves init succeeded. NAT-PMP on
-    // :5351 when enabled, otherwise SSDP on :1900.
-    let ready_port = if natpmp { ":5351" } else { ":1900" };
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let ss = nsexec("gw", &["ss", "-uln"]);
-        if ss.contains(ready_port) {
-            break;
-        }
-        if let Ok(Some(st)) = upnpd.0.child.try_wait() {
-            panic!(
-                "miniupnpd exited early ({st:?}):\n{}",
-                upnpd.0.kill_and_log()
-            );
-        }
-        assert!(
-            Instant::now() < deadline,
-            "miniupnpd didn't bind {ready_port}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-
-    // alice host firewall (nixos-fw shape)
-    // Stateful `policy drop` on input: reproduces the real-world
-    // failure where the SSDP multicast query creates a conntrack
-    // entry for (us↔239.255.255.250:1900) but the IGD's *unicast*
-    // reply from gw:1900 is a different 5-tuple → NEW → dropped.
-    // PCP (unicast both ways) is unaffected, so the `natpmp=true`
-    // variant exercises this too without breaking. The fix under
-    // test: `igd::discover()` pre-punches with a unicast M-SEARCH
-    // to gw:1900 on the same socket, so the reply matches
-    // ESTABLISHED. SKIP if the kernel lacks `ct state` in userns.
-    let alice_fw = tmp.path().join("alice-fw.nft");
-    std::fs::write(
-        &alice_fw,
-        "table inet fw {\n\
-           chain input {\n\
-             type filter hook input priority 0; policy drop;\n\
-             ct state established,related accept\n\
-             iif lo accept\n\
-             tcp dport 6550 accept\n\
-           }\n\
-         }\n",
-    )
-    .unwrap();
-    let out = Command::new("ip")
-        .args(["netns", "exec", "alice", "nft", "-f"])
-        .arg(&alice_fw)
-        .output()
-        .expect("spawn nft");
-    if !out.status.success() {
-        eprintln!(
-            "SKIP {test_name}: nft ct-state ruleset failed in alice-ns: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-        let _ = upnpd.0.kill_and_log();
-        for s in &mut sleepers {
-            let _ = s.kill();
-        }
-        return;
-    }
-
-    // alice tincd
-    let confbase = tmp.path().join("alice");
-    let pidfile = tmp.path().join("alice.pid");
-    let socket = tmp.path().join("alice.socket");
-    write_alice_config(&confbase, 5);
-    let alice = ChildWithLog::spawn(
-        Command::new("ip")
-            .args(["netns", "exec", "alice"])
-            .arg(tincd_bin())
-            .arg("-D")
-            .arg("-c")
-            .arg(&confbase)
-            .arg("--pidfile")
-            .arg(&pidfile)
-            .arg("--socket")
-            .arg(&socket)
-            .env("RUST_LOG", "tincd=debug,tincd::portmap=debug")
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn tincd in netns"),
-    );
-    assert!(
-        wait_for_file_with(&socket, Duration::from_secs(5)),
-        "alice setup failed:\n{}",
-        alice.kill_and_log()
-    );
-
-    // (a) journal: Portmapped TCP 655 → 10.77.0.2:NNNN
-    // 20 s budget: NAT-PMP is sub-second; if that path fails for
-    // any reason the IGD fallback's SSDP discover wait is ~5 s.
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let ext_port: u16 = loop {
-        let log = alice.log_snapshot();
-        if let Some(line) = log.lines().find(|l| l.contains("Portmapped Tcp 6550")) {
-            assert!(
-                line.contains(expect_via),
-                "expected mapping via {expect_via}, got: {line}"
-            );
-            break line
-                .rsplit_once("10.77.0.2:")
-                .and_then(|(_, rest)| {
-                    rest.split(|c: char| !c.is_ascii_digit())
-                        .next()?
-                        .parse()
-                        .ok()
-                })
-                .unwrap_or_else(|| panic!("no ext port in: {line}"));
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no `Portmapped TCP` line within 20s; alice stderr:\n{}",
-            alice.kill_and_log()
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    };
-    eprintln!("portmapped: 10.77.0.2:{ext_port} → 192.168.77.2:6550");
-
-    // (b) gw-ns nft shows the dnat rule
-    let nat = nsexec(
-        "gw",
-        &[
-            "nft",
-            "list",
-            "chain",
-            "inet",
-            "filter",
-            "prerouting_miniupnpd",
-        ],
-    );
-    assert!(
-        nat.contains("dnat") && nat.contains("192.168.77.2") && nat.contains("6550"),
-        "dnat rule for alice:6550 not found in prerouting_miniupnpd:\n{nat}"
-    );
-
-    // (c) outer-ns can reach the mapped port
-    // Don't depend on `nc`: a bare `TcpStream::connect` from the
-    // outer bwrap netns is the same probe and saves a devshell dep.
-    let probe = std::net::TcpStream::connect_timeout(
-        &format!("10.77.0.2:{ext_port}").parse().unwrap(),
-        Duration::from_secs(3),
-    );
-    assert!(
-        probe.is_ok(),
-        "connect 10.77.0.2:{ext_port} from outer-ns failed: {probe:?}\n\
-         nat table:\n{nat}\nalice stderr:\n{}",
-        alice.kill_and_log()
-    );
-    // The 3-way handshake completing is proof: gw-ns has nothing
-    // listening on 6550, so the SYN-ACK can only have come from
-    // alice's listener via the DNAT rule. (tincd accept-side waits
-    // for the initiator's ID line; nothing to read.)
-    drop(probe);
-
-    eprint!("{}", alice.kill_and_log());
-    let _ = upnpd.0.kill_and_log();
-    for s in &mut sleepers {
-        let _ = s.kill();
-    }
-}
-
-/// Roaming: after the first mapping succeeds, swap alice's LAN IP
-/// (`.2` → `.3`) underneath the running daemon. The portmap worker
-/// re-derives the LAN IP each refresh round (see `portmap.rs`
-/// worker loop), so the next round must (a) log the route-change
-/// notice, (b) re-emit `Portmapped Tcp` (even though the external
-/// addr is unchanged — `last[]` is force-cleared on LAN-IP change),
-/// and (c) install a fresh DNAT rule pointing at `.3`.
+/// Renumbering alice's LAN address under the running daemon: the next
+/// refresh round must notice, log a new mapping (forced even though
+/// the external side is unchanged) and have miniupnpd DNAT to the new
+/// address.
 #[test]
 fn upnp_gateway_ip_change() {
-    if std::env::var_os("BWRAP_INNER").is_none() {
-        let Ok(bin) = which("miniupnpd") else {
-            eprintln!("SKIP upnp_gateway_ip_change: miniupnpd not on PATH");
-            return;
-        };
-        if which("nft").is_err() {
-            eprintln!("SKIP upnp_gateway_ip_change: nft not on PATH");
-            return;
-        }
-        // SAFETY: nextest = process-per-test.
-        #[allow(unsafe_code)]
-        unsafe {
-            std::env::set_var("MINIUPNPD_BIN", bin);
-        }
-    }
-    if !enter_bwrap("portmap::upnp_gateway_ip_change") {
+    let test_name = "portmap::upnp_gateway_ip_change";
+    let Some(miniupnpd_bin) = enter_bwrap_with_miniupnpd(test_name) else {
         return;
-    }
-    let miniupnpd_bin =
-        std::env::var("MINIUPNPD_BIN").expect("outer pass sets MINIUPNPD_BIN; bwrap inherits env");
-
+    };
     let tmp = tmp!("portmap-roam");
-
-    let mut sleepers = [make_child_netns("alice"), make_child_netns("gw")];
-    veth_pair(
-        ("alice", "veth-a", "192.168.77.2/24"),
-        ("gw", "veth-lan", "192.168.77.1/24"),
-    );
-    run_ip(&[
-        "link", "add", "veth-out", "type", "veth", "peer", "name", "veth-wan",
-    ]);
-    run_ip(&["link", "set", "veth-wan", "netns", "gw"]);
-    run_ip(&["addr", "add", "10.77.0.1/24", "dev", "veth-out"]);
-    run_ip(&["link", "set", "veth-out", "up"]);
-    nsexec(
-        "gw",
-        &["ip", "addr", "add", "10.77.0.2/24", "dev", "veth-wan"],
-    );
-    nsexec("gw", &["ip", "link", "set", "veth-wan", "up"]);
-    nsexec(
-        "alice",
-        &["ip", "route", "add", "default", "via", "192.168.77.1"],
-    );
-    nsexec("gw", &["sysctl", "-w", "net.ipv4.ip_forward=1"]);
-
-    let Some(mut upnpd) = Miniupnpd::spawn(tmp.path(), &miniupnpd_bin, true) else {
-        for s in &mut sleepers {
-            let _ = s.kill();
-        }
+    let Some(_gateway) = Gateway::start(test_name, tmp.path(), &miniupnpd_bin, true) else {
         return;
     };
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if nsexec("gw", &["ss", "-uln"]).contains(":5351") {
-            break;
-        }
-        if let Ok(Some(st)) = upnpd.0.child.try_wait() {
-            panic!(
-                "miniupnpd exited early ({st:?}):\n{}",
-                upnpd.0.kill_and_log()
-            );
-        }
-        assert!(Instant::now() < deadline, "miniupnpd didn't bind 5351");
-        std::thread::sleep(Duration::from_millis(100));
+    let alice = start_alice(tmp.path(), 2);
+    wait_log(&alice, Duration::from_secs(20), None, |log| {
+        log.contains(MAPPED)
+    });
+
+    // Removing the only address drops the default route with it.
+    for args in [
+        ["ip", "addr", "del", "192.168.77.2/24", "dev", "veth-a"],
+        ["ip", "addr", "add", "192.168.77.3/24", "dev", "veth-a"],
+        ["ip", "route", "add", "default", "via", "192.168.77.1"],
+    ] {
+        nsexec("alice", &args);
     }
-
-    let confbase = tmp.path().join("alice");
-    let pidfile = tmp.path().join("alice.pid");
-    let socket = tmp.path().join("alice.socket");
-    // Refresh every 2 s so the post-swap round lands well inside the
-    // test budget.
-    write_alice_config(&confbase, 2);
-    let alice = ChildWithLog::spawn(
-        Command::new("ip")
-            .args(["netns", "exec", "alice"])
-            .arg(tincd_bin())
-            .arg("-D")
-            .arg("-c")
-            .arg(&confbase)
-            .arg("--pidfile")
-            .arg(&pidfile)
-            .arg("--socket")
-            .arg(&socket)
-            .env("RUST_LOG", "tincd=debug,tincd::portmap=debug")
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn tincd in netns"),
-    );
-    assert!(
-        wait_for_file_with(&socket, Duration::from_secs(5)),
-        "alice setup failed:\n{}",
-        alice.kill_and_log()
-    );
-
-    // first Portmapped (LAN .2)
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if alice.log_snapshot().contains("Portmapped Tcp 6550") {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no first `Portmapped Tcp` within 20s:\n{}",
-            alice.kill_and_log()
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    }
-
-    // swap alice's LAN IP .2 → .3
-    // Deleting the only on-link addr also drops the default route
-    // (no more nexthop source); re-add both. The daemon's listener
-    // is bound to 0.0.0.0 so it survives the renumber.
-    nsexec(
-        "alice",
-        &["ip", "addr", "del", "192.168.77.2/24", "dev", "veth-a"],
-    );
-    nsexec(
-        "alice",
-        &["ip", "addr", "add", "192.168.77.3/24", "dev", "veth-a"],
-    );
-    nsexec(
-        "alice",
-        &["ip", "route", "add", "default", "via", "192.168.77.1"],
-    );
-
-    // (a) route-change INFO + (b) second Portmapped
-    // periodic tick is 5 s and the worker refresh is 2 s, so the
-    // re-emitted event surfaces within one tick after the next
-    // refresh round — budget 20 s for slop.
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let log = loop {
-        let log = alice.log_snapshot();
-        let mapped = log.matches("Portmapped Tcp 6550").count();
-        if log.contains("default route changed") && mapped >= 2 {
-            break log;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no route-change notice / re-map within 20s:\n{}",
-            alice.kill_and_log()
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    };
+    let log = wait_log(&alice, Duration::from_secs(20), None, |log| {
+        log.contains("default route changed") && log.matches(MAPPED).count() >= 2
+    });
     assert!(
         log.contains("192.168.77.2") && log.contains("192.168.77.3"),
-        "route-change line missing old/new IPs:\n{log}"
+        "{log}"
     );
-
-    // (c) miniupnpd's DNAT now targets .3
-    let nat = nsexec(
-        "gw",
-        &[
-            "nft",
-            "list",
-            "chain",
-            "inet",
-            "filter",
-            "prerouting_miniupnpd",
-        ],
-    );
-    assert!(
-        nat.contains("192.168.77.3"),
-        "dnat rule for .3 not found in prerouting_miniupnpd:\n{nat}\n\
-         alice stderr:\n{}",
-        alice.kill_and_log()
-    );
-
-    eprint!("{}", alice.kill_and_log());
-    let _ = upnpd.0.kill_and_log();
-    for s in &mut sleepers {
-        let _ = s.kill();
-    }
+    let dnat = Gateway::dnat_rules();
+    let alice_log = alice.kill_and_log();
+    assert!(dnat.contains("192.168.77.3"), "{dnat}\n{alice_log}");
 }
 
-/// Hostile gateway: **this test process** serves rogue PCP + SSDP +
-/// rootdesc + SOAP. PCP hands back `::ffff:127.0.0.1` port 0; SSDP
-/// first points `LOCATION` at `127.0.0.1` (not the route-table
-/// gateway from alice's view), then at the real gw; SOAP returns
-/// `<NewExternalIPAddress>127.0.0.1</NewExternalIPAddress>`.
-///
-/// The daemon must drop the off-gateway `LOCATION` (no SSRF
-/// connect), reject both loopback ext addrs via
-/// `is_publishable_ext`, and never emit `Portmapped … 127.0.0.1`.
+/// A UDP responder on the gateway address until the returned sender
+/// is dropped.
+fn serve_udp(
+    port: u16,
+    reply: impl Fn(&[u8]) -> Vec<Vec<u8>> + Send + 'static,
+) -> (mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let socket = UdpSocket::bind(("192.168.77.1", port)).expect("bind udp");
+    socket
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let thread = std::thread::spawn(move || {
+        let mut buf = [0u8; 1500];
+        while stop_rx.try_recv() != Err(mpsc::TryRecvError::Disconnected) {
+            if let Ok((len, src)) = socket.recv_from(&mut buf) {
+                for packet in reply(&buf[..len]) {
+                    let _ = socket.send_to(&packet, src);
+                }
+            }
+        }
+    });
+    (stop_tx, thread)
+}
+
+/// This process plays gateway: PCP answers with external address
+/// `::ffff:127.0.0.1`, SSDP first points LOCATION off-gateway
+/// (127.0.0.1, an SSRF attempt) then at our HTTP server, whose SOAP
+/// reports external address 127.0.0.1. None of that may be dialled
+/// or published.
 #[test]
 fn upnp_rogue_gateway_ext_addr_rejected() {
     if !enter_bwrap("portmap::upnp_rogue_gateway_ext_addr_rejected") {
         return;
     }
     let tmp = tmp!("portmap-rogue");
-
-    // topology: outer bwrap ns = rogue gateway 192.168.77.1,
-    //    child ns "alice" = victim 192.168.77.2, default → .1.
     let mut sleeper = make_child_netns("alice");
     run_ip(&[
         "link", "add", "veth-gw", "type", "veth", "peer", "name", "veth-a",
@@ -629,200 +452,101 @@ fn upnp_rogue_gateway_ext_addr_rejected() {
     run_ip(&["link", "set", "veth-a", "netns", "alice"]);
     run_ip(&["addr", "add", "192.168.77.1/24", "dev", "veth-gw"]);
     run_ip(&["link", "set", "veth-gw", "up"]);
-    nsexec(
-        "alice",
-        &["ip", "addr", "add", "192.168.77.2/24", "dev", "veth-a"],
-    );
-    nsexec("alice", &["ip", "link", "set", "veth-a", "up"]);
-    nsexec(
-        "alice",
+    for args in [
+        ["ip", "addr", "add", "192.168.77.2/24", "dev", "veth-a"].as_slice(),
+        &["ip", "link", "set", "veth-a", "up"],
         &["ip", "route", "add", "default", "via", "192.168.77.1"],
-    );
+    ] {
+        nsexec("alice", args);
+    }
 
-    // rogue HTTP/SOAP on the gw addr
     let http = TcpListener::bind(("192.168.77.1", 0)).unwrap();
     let http_port = http.local_addr().unwrap().port();
 
-    // rogue SSDP on the gw addr (unicast pre-punch lands here).
-    //    First reply tries the SSRF (`LOCATION` → 127.0.0.1); after
-    //    that, hand back the real gw URL so the IGD path proceeds
-    //    far enough to exercise the ext-addr filter.
-    // rogue PCP on the gw addr: echo the request's nonce, return
-    //    assigned-ext = `::ffff:127.0.0.1`, port = 0. Daemon tries
-    //    PCP before IGD; `check_ext` must reject and fall through.
-    let pcp = UdpSocket::bind(("192.168.77.1", 5351)).expect("bind :5351");
-    pcp.set_read_timeout(Some(Duration::from_millis(200))).ok();
-    let (pcp_stop_tx, pcp_stop_rx) = mpsc::channel::<()>();
-    let pcp_thr = std::thread::spawn(move || {
-        let mut buf = [0u8; 1100];
-        loop {
-            if pcp_stop_rx.try_recv() == Err(mpsc::TryRecvError::Disconnected) {
-                return;
-            }
-            let Ok((n, src)) = pcp.recv_from(&mut buf) else {
-                continue;
-            };
-            if n < 60 {
-                continue;
-            }
-            let mut r = [0u8; 60];
-            r[0] = 2; // version
-            r[1] = 0x81; // R|MAP
-            r[24..36].copy_from_slice(&buf[24..36]); // echo nonce
-            r[36] = buf[36]; // proto
-            r[40..42].copy_from_slice(&buf[40..42]); // int port
-            // assigned ext port = 0, ext addr = ::ffff:127.0.0.1
-            r[44..60].copy_from_slice(&Ipv4Addr::LOCALHOST.to_ipv6_mapped().octets());
-            let _ = pcp.send_to(&r, src);
+    let (pcp_stop, pcp_thread) = serve_udp(5351, |request| {
+        if request.len() < 60 {
+            return vec![];
         }
+        let mut response = vec![0u8; 60];
+        response[0] = 2; // version
+        response[1] = 0x81; // response | MAP
+        response[24..36].copy_from_slice(&request[24..36]); // nonce
+        response[36] = request[36]; // protocol
+        response[40..42].copy_from_slice(&request[40..42]); // internal port
+        // external port 0, external address ::ffff:127.0.0.1
+        response[44..60].copy_from_slice(&Ipv4Addr::LOCALHOST.to_ipv6_mapped().octets());
+        vec![response]
     });
-
-    let ssdp = UdpSocket::bind(("192.168.77.1", 1900)).expect("bind :1900");
-    ssdp.set_read_timeout(Some(Duration::from_millis(200))).ok();
-    let (stop_tx, stop_rx) = mpsc::channel::<()>();
-    let ssdp_thr = std::thread::spawn(move || {
-        // From alice-ns 127.0.0.1 is *not* the route-table gateway;
-        // `igd::discover`'s host check must drop this reply before
-        // any connect (asserted via the `ignored SSDP LOCATION
-        // host` log line below).
-        let ssrf = "HTTP/1.1 200 OK\r\n\
-             ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\
-             LOCATION: http://127.0.0.1:9/pwn\r\n\r\n";
-        let real = format!(
+    let ssdp_reply = |location: String| {
+        format!(
             "HTTP/1.1 200 OK\r\n\
              ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\
-             LOCATION: http://192.168.77.1:{http_port}/rootDesc.xml\r\n\r\n"
-        );
-        let mut buf = [0u8; 1500];
-        loop {
-            if stop_rx.try_recv() == Err(mpsc::TryRecvError::Disconnected) {
-                return;
-            }
-            if let Ok((_, src)) = ssdp.recv_from(&mut buf) {
-                let _ = ssdp.send_to(ssrf.as_bytes(), src);
-                let _ = ssdp.send_to(real.as_bytes(), src);
-            }
-        }
-    });
-
-    let slurp = |s: &mut TcpStream| {
-        s.set_read_timeout(Some(Duration::from_millis(200))).ok();
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 4096];
-        loop {
-            match s.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            }
-        }
-        String::from_utf8_lossy(&buf).into_owned()
+             LOCATION: {location}\r\n\r\n"
+        )
+        .into_bytes()
     };
-    let http_thr = std::thread::spawn(move || {
-        let rootdesc = "<?xml version=\"1.0\"?><root><device><serviceList><service>\
-            <serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>\
-            <controlURL>/ctl</controlURL></service></serviceList></device></root>";
-        let soap_ok = |inner: &str| {
+    let ssrf = ssdp_reply("http://127.0.0.1:9/pwn".into());
+    let real = ssdp_reply(format!("http://192.168.77.1:{http_port}/rootDesc.xml"));
+    let (ssdp_stop, ssdp_thread) = serve_udp(1900, move |_| vec![ssrf.clone(), real.clone()]);
+
+    let http_thread = std::thread::spawn(move || {
+        let soap = |body: &str| {
             format!(
-                "HTTP/1.1 200 OK\r\nConnection: close\r\n\
-                 Content-Type: text/xml\r\n\r\n\
-                 <s:Envelope><s:Body>{inner}</s:Body></s:Envelope>"
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/xml\r\n\r\n\
+                 <s:Envelope><s:Body>{body}</s:Body></s:Envelope>"
             )
         };
-        for s in http.incoming() {
-            let Ok(mut s) = s else { return };
-            let req = slurp(&mut s);
-            let resp = if req.starts_with("GET /rootDesc.xml") {
-                format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{rootdesc}")
-            } else if req.contains("GetExternalIPAddress") {
-                soap_ok(
+        for stream in http.incoming() {
+            let Ok(mut stream) = stream else { return };
+            stream
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .ok();
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while let Ok(len @ 1..) = stream.read(&mut chunk) {
+                raw.extend_from_slice(&chunk[..len]);
+            }
+            let request = String::from_utf8_lossy(&raw);
+            let response = if request.starts_with("GET /rootDesc.xml") {
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n\
+                 <?xml version=\"1.0\"?><root><device><serviceList><service>\
+                 <serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>\
+                 <controlURL>/ctl</controlURL></service></serviceList></device></root>"
+                    .to_owned()
+            } else if request.contains("GetExternalIPAddress") {
+                soap(
                     "<u:GetExternalIPAddressResponse>\
                      <NewExternalIPAddress>127.0.0.1</NewExternalIPAddress>\
                      </u:GetExternalIPAddressResponse>",
                 )
-            } else if req.contains("AddPortMapping") {
-                soap_ok("<u:AddPortMappingResponse/>")
+            } else if request.contains("AddPortMapping") {
+                soap("<u:AddPortMappingResponse/>")
             } else {
                 "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".to_owned()
             };
-            let _ = s.write_all(resp.as_bytes());
-            let _ = s.shutdown(std::net::Shutdown::Both);
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     });
 
-    // victim daemon
-    let confbase = tmp.path().join("alice");
-    write_alice_config(&confbase, 5);
-    let pidfile = tmp.path().join("alice.pid");
-    let socket = tmp.path().join("alice.socket");
-    let alice = ChildWithLog::spawn(
-        Command::new("ip")
-            .args(["netns", "exec", "alice"])
-            .arg(tincd_bin())
-            .arg("-D")
-            .arg("-c")
-            .arg(&confbase)
-            .arg("--pidfile")
-            .arg(&pidfile)
-            .arg("--socket")
-            .arg(&socket)
-            .env("RUST_LOG", "tincd=debug,tincd::portmap=debug")
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn tincd"),
-    );
-    assert!(
-        wait_for_file_with(&socket, Duration::from_secs(5)),
-        "alice setup failed:\n{}",
-        alice.kill_and_log()
-    );
-
-    // wait for the worker to complete one IGD round
-    let deadline = Instant::now() + Duration::from_secs(25);
-    let log = loop {
-        let log = alice.log_snapshot();
-        if log.contains("rejected ext addr 127.0.0.1:0 from PCP")
+    let alice = start_alice(tmp.path(), 5);
+    let log = wait_log(&alice, Duration::from_secs(25), Some(MAPPED), |log| {
+        log.contains("rejected ext addr 127.0.0.1:0 from PCP")
             && log.contains("rejected ext addr 127.0.0.1:6550 from UPnP-IGD (loopback)")
-        {
-            break log;
-        }
-        assert!(
-            !log.contains("Portmapped Tcp 6550"),
-            "rogue ext addr published verbatim:\n{}",
-            alice.kill_and_log()
-        );
-        assert!(
-            Instant::now() < deadline,
-            "no `rejected ext addr` line within 25 s; alice stderr:\n{}",
-            alice.kill_and_log()
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    };
+    });
     assert!(
         log.contains("ignored SSDP LOCATION host 127.0.0.1"),
         "off-gateway LOCATION not dropped:\n{log}"
     );
-    assert!(
-        !log.contains("Portmapped Tcp"),
-        "rogue ext addr published:\n{log}"
-    );
+    drop(alice);
 
-    eprint!("{}", alice.kill_and_log());
-    drop(pcp_stop_tx);
-    pcp_thr.join().unwrap();
-    drop(stop_tx);
-    ssdp_thr.join().unwrap();
+    drop(pcp_stop);
+    drop(ssdp_stop);
+    pcp_thread.join().unwrap();
+    ssdp_thread.join().unwrap();
+    // Unblock `incoming()`; the thread then exits on its own.
     let _ = TcpStream::connect(SocketAddr::from(([192, 168, 77, 1], http_port)));
-    drop(http_thr);
+    drop(http_thread);
     let _ = sleeper.kill();
     let _ = sleeper.wait();
-}
-
-fn which(bin: &str) -> Result<String, ()> {
-    std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-        .map(|d| d.join(bin))
-        .find(|p| p.is_file())
-        .map(|p| p.to_string_lossy().into_owned())
-        .ok_or(())
 }
