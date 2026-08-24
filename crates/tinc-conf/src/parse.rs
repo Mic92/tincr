@@ -803,6 +803,28 @@ Subnet = 10.0.0.0/24
         assert_eq!(entries[0].value, "655"); // not "655\r"
     }
 
+    /// C reads raw bytes with `fgets`; a Latin-1 byte in a comment must
+    /// not fail the whole file here either.
+    #[test]
+    fn file_non_utf8_tolerated() {
+        let input: &[u8] = b"# caf\xe9\nName = alice\n";
+        let entries = parse_reader(input, Path::new("f")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            (entries[0].variable.as_str(), entries[0].value.as_str()),
+            ("Name", "alice")
+        );
+    }
+
+    /// Notepad writes a UTF-8 BOM; C glues it onto the first variable
+    /// name, we strip it.
+    #[test]
+    fn file_bom_stripped() {
+        let input = "\u{feff}Name = alice\n";
+        let entries = parse_reader(input.as_bytes(), Path::new("f")).unwrap();
+        assert_eq!(entries[0].variable, "Name");
+    }
+
     /// Unterminated PEM: no `-----END`. C just runs to EOF in ignore
     /// mode. We do too.
     #[test]
