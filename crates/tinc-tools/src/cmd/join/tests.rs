@@ -289,9 +289,11 @@ fn finalize_secondary_chunks() {
     assert!(!bob_host.contains("vpn.example"));
 }
 
-/// Chunk-2 is verbatim except `*KeyFile` vars, which name local paths.
+/// Chunk-2 is verbatim except vars that name local paths or commands
+/// (`*KeyFile`, `Proxy`, `ScriptsInterpreter`), which the inviter has
+/// no business setting.
 #[test]
-fn finalize_secondary_chunk_drops_file_pointer_keys() {
+fn finalize_secondary_chunk_drops_dangerous_keys() {
     let cd = ConfDir::bare();
     let p = cd.paths().clone();
 
@@ -304,13 +306,35 @@ fn finalize_secondary_chunk_drops_file_pointer_keys() {
          ed25519privatekeyfile=/etc/shadow\n\
          PublicKeyFile = /etc/shadow\n\
          PrivateKeyFile = /etc/shadow\n\
+         Proxy = exec /bin/sh -c id\n\
+         ScriptsInterpreter = /bin/sh\n\
          Ed25519PublicKey = AAAA\n\
-         Address = vpn.example\n"
+         # comment\n\
+         Address = vpn.example\n\
+         Subnet = 10.0.0.0/24\n"
     );
     finalize_join(blob.as_bytes(), &p, false).unwrap();
 
     let alice = fs::read_to_string(p.host_file("alice")).unwrap();
-    assert_eq!(alice, "Ed25519PublicKey = AAAA\nAddress = vpn.example\n");
+    assert_eq!(
+        alice,
+        "Ed25519PublicKey = AAAA\n# comment\nAddress = vpn.example\nSubnet = 10.0.0.0/24\n"
+    );
+}
+
+/// `hosts/Bob` and `hosts/bob` are the same file on a case-folding
+/// filesystem.
+#[test]
+fn finalize_self_clobber_is_case_insensitive() {
+    let cd = ConfDir::bare();
+    let p = cd.paths().clone();
+    let sep = invite::SEPARATOR;
+    let blob = format!("Name = bob\n{sep}\nName = Bob\nAddress = 1.2.3.4\n");
+    let CmdError::BadInput(msg) = finalize_join(blob.as_bytes(), &p, false).unwrap_err() else {
+        panic!()
+    };
+    assert!(msg.contains("overwrite our own"));
+    assert!(!p.host_file("Bob").exists());
 }
 
 /// Secondary chunk with our own name → bail. Malicious inviter

@@ -546,6 +546,9 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            if let Some(bound) = server.server_addr().to_ip() {
+                eprintln!("tinc-auth: IdP listening on {bound}");
+            }
             let paths = paths.clone();
             let idp = Arc::new(idp);
             let map = Arc::clone(&map);
