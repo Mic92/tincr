@@ -12,6 +12,7 @@ mod rig;
 
 mod autoconnect_shortcut;
 mod chaos;
+mod crossimpl;
 mod ping;
 mod portmap;
 mod sandbox;

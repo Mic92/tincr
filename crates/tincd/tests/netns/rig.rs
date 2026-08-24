@@ -8,7 +8,7 @@ use super::common::{TmpGuard, node_status, poll_until};
 /// Re-exec this test inside bwrap and set up the standard two-TUN
 /// topology. `Some` only in the inner (sandboxed) pass.
 pub(crate) fn enter_netns(test_name: &str) -> Option<NetNs> {
-    enter_bwrap(test_name).then(NetNs::setup)
+    enter_bwrap(test_name).then(|| NetNs::setup(false))
 }
 
 /// Outer pass: probe for bwrap + unprivileged userns (SKIP if
@@ -213,32 +213,44 @@ pub(crate) struct NetNs {
 }
 
 impl NetNs {
-    pub(crate) fn setup() -> Self {
-        // Persistent so the test process (not just the daemon that
-        // TUNSETIFFs it) may move tinc1 between namespaces. Admin-up
-        // now because carrier is only reported on up devices.
+    /// Persistent devices so the test process (not just the daemon
+    /// that TUNSETIFFs it) may move tinc1 between namespaces. TAP
+    /// devices stay down until `place_devices`: an up TAP emits
+    /// router solicitations etc. on its own, and both ends doing so
+    /// mid key exchange makes `REQ_KEY` race in a loop.
+    pub(crate) fn setup(tap: bool) -> Self {
         for dev in ["tinc0", "tinc1"] {
-            run_ip(&["tuntap", "add", "mode", "tun", "name", dev]);
-            run_ip(&["link", "set", dev, "up"]);
+            run_ip(&[
+                "tuntap",
+                "add",
+                "mode",
+                if tap { "tap" } else { "tun" },
+                "name",
+                dev,
+            ]);
+            if !tap {
+                run_ip(&["link", "set", dev, "up"]);
+            }
         }
         Self {
             sleeper: make_child_netns("bobside"),
         }
     }
 
-    /// alice only: address tinc0 in the outer netns.
+    /// alice only: address tinc0 in the outer netns. Carrier (daemon
+    /// attached) is only reported on admin-up devices.
     #[expect(clippy::unused_self)]
     pub(crate) fn place_alice(&self) {
+        run_ip(&["link", "set", "tinc0", "up"]);
         assert!(wait_for_carrier("tinc0", Duration::from_secs(2)));
         run_ip(&["addr", "add", "10.42.0.1/24", "dev", "tinc0"]);
-        run_ip(&["link", "set", "tinc0", "up"]);
     }
 
-    /// Call after both daemons attached (carrier up). The fd→device
-    /// binding survives the move; addresses do not, so configure
-    /// afterwards.
+    /// Call after both daemons started. The fd→device binding
+    /// survives the move; addresses do not, so configure afterwards.
     pub(crate) fn place_devices(&self) {
         self.place_alice();
+        run_ip(&["link", "set", "tinc1", "up"]);
         assert!(wait_for_carrier("tinc1", Duration::from_secs(2)));
         run_ip(&["link", "set", "tinc1", "netns", "bobside"]);
         let bobside = |args: &[&str]| {

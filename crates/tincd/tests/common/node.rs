@@ -13,11 +13,11 @@ use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::os::fd::{OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use super::{
-    ChildWithLog, Ctl, alloc_port, pubkey_from_seed, read_tcp_addr, tincd_at, wait_for_file,
+    ChildWithLog, Ctl, pubkey_from_seed, read_tcp_addr, tincd_at, wait_for_file,
     write_ed25519_privkey,
 };
 
@@ -33,8 +33,12 @@ pub struct Node {
     /// default, and tinc-conf is first-occurrence-wins, so they can
     /// override it.
     pub extra_conf: String,
-    /// `DeviceType = tun` + `Interface =`; netns tests precreate it.
+    /// `DeviceType = tun` (or `tap`) + `Interface =`; netns tests
+    /// precreate it.
     pub iface: Option<String>,
+    pub tap: bool,
+    /// Run this C tincd binary instead of ours.
+    pub c_tincd: Option<PathBuf>,
     /// `Subnet =` lines in `hosts/SELF`.
     pub subnets: Vec<String>,
     /// `DeviceType = fd`: inherited socketpair end.
@@ -54,19 +58,13 @@ impl Node {
             port: 0,
             extra_conf: String::new(),
             iface: None,
+            tap: false,
+            c_tincd: None,
             subnets: Vec::new(),
             device_fd: None,
             rust_log: "tincd=info".to_owned(),
             daemon: None,
         }
-    }
-
-    /// Transitional: pre-allocated port for tests not yet converted to
-    /// start-then-configure ordering.
-    pub fn with_alloc_port(dir: &Path, name: &str, seed: u8) -> Self {
-        let mut node = Self::new(dir, name, seed);
-        node.port = alloc_port();
-        node
     }
 
     #[must_use]
@@ -80,6 +78,16 @@ impl Node {
     #[must_use]
     pub fn iface(mut self, iface: &str) -> Self {
         self.iface = Some(iface.to_owned());
+        self
+    }
+    #[must_use]
+    pub fn tap(mut self) -> Self {
+        self.tap = true;
+        self
+    }
+    #[must_use]
+    pub fn c_tincd(mut self, bin: PathBuf) -> Self {
+        self.c_tincd = Some(bin);
         self
     }
     #[must_use]
@@ -117,7 +125,11 @@ impl Node {
 
         let mut tinc_conf = format!("Name = {}\nAddressFamily = ipv4\n", self.name);
         match (&self.iface, self.device_fd) {
-            (Some(iface), _) => writeln!(tinc_conf, "DeviceType = tun\nInterface = {iface}"),
+            (Some(iface), _) => writeln!(
+                tinc_conf,
+                "DeviceType = {}\nInterface = {iface}",
+                if self.tap { "tap" } else { "tun" }
+            ),
             (None, Some(fd)) => writeln!(tinc_conf, "DeviceType = fd\nDevice = {fd}"),
             (None, None) => writeln!(tinc_conf, "DeviceType = dummy"),
         }
@@ -161,7 +173,18 @@ impl Node {
     }
 
     fn command(&self) -> std::process::Command {
-        let mut cmd = tincd_at(&self.confbase, &self.pidfile, &self.socket);
+        let mut cmd = if let Some(bin) = &self.c_tincd {
+            // No `--socket`: C derives it from the pidfile as
+            // `s/.pid$/.socket/`, which is what `self.socket` is.
+            let mut cmd = std::process::Command::new(bin);
+            cmd.args(["-D", "-d5", "-c"])
+                .arg(&self.confbase)
+                .arg("--pidfile")
+                .arg(&self.pidfile);
+            cmd
+        } else {
+            tincd_at(&self.confbase, &self.pidfile, &self.socket)
+        };
         cmd.env("RUST_LOG", &self.rust_log).stderr(Stdio::piped());
         cmd
     }
@@ -349,22 +372,6 @@ impl Node {
         self.start();
         self.wait_for_peer(&listener.name, true, Duration::from_secs(10));
         listener.wait_for_peer(&self.name, true, Duration::from_secs(10));
-    }
-
-    /// Transitional: raw child for tests not yet moved to `start()`.
-    pub fn spawn(&self) -> Child {
-        self.command().spawn().expect("spawn tincd")
-    }
-    pub fn spawn_with_log(&self, rust_log: &str) -> Child {
-        self.command()
-            .env("RUST_LOG", rust_log)
-            .spawn()
-            .expect("spawn tincd")
-    }
-    pub fn spawn_with_fd(&self, fd: &OwnedFd) -> Child {
-        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
-        fcntl(fd, FcntlArg::F_SETFD(FdFlag::empty())).expect("clear CLOEXEC");
-        self.spawn_with_log("tincd=debug")
     }
 }
 
