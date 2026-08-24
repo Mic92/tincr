@@ -5,9 +5,9 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
+use super::common::node::*;
 use super::common::*;
 use super::fd_tunnel::*;
-use super::node::*;
 
 fn which_sleep() -> String {
     for p in std::env::var("PATH").unwrap_or_default().split(':') {
@@ -25,8 +25,8 @@ fn slow_host_up_does_not_stall_forwarding() {
     // Longer PingTimeout: with the OLD code alice's loop is dead for
     // 2 s, which would otherwise trip bob's 1 s auth-timeout sweep
     // and tear the conn down — masking the latency we want to see.
-    let alice = Node::new(tmp.path(), "alice", 0xA9).with_conf("PingTimeout = 10\n");
-    let bob = Node::new(tmp.path(), "bob", 0xB9).with_conf("PingTimeout = 10\n");
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA9).with_conf("PingTimeout = 10\n");
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB9).with_conf("PingTimeout = 10\n");
 
     let (alice_tun, alice_far) = sockpair_datagram();
     let (bob_tun, bob_far) = sockpair_datagram();

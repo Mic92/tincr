@@ -321,5 +321,7 @@ pub(crate) fn tun_node(
     iface: &'static str,
     subnet: &'static str,
 ) -> Node {
-    Node::new(tmp, name, seed).iface(iface).subnet(subnet)
+    Node::with_alloc_port(tmp, name, seed)
+        .iface(iface)
+        .subnet(subnet)
 }

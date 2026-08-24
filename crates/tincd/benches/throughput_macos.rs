@@ -200,8 +200,8 @@ mod bench {
     fn setup_tunnel(tag: &str, alice_impl: &Impl, bob_impl: &Impl) -> TunnelHandle {
         let tmp = tmp(tag);
 
-        let alice = Node::new(tmp.path(), "alice", 0xAC);
-        let bob = Node::new(tmp.path(), "bob", 0xBC);
+        let alice = Node::with_alloc_port(tmp.path(), "alice", 0xAC);
+        let bob = Node::with_alloc_port(tmp.path(), "bob", 0xBC);
         write_macos_config(&bob, &alice, BOB_IFACE, &format!("{BOB_IP}/32"), false);
         write_macos_config(&alice, &bob, ALICE_IFACE, &format!("{ALICE_IP}/32"), true);
 

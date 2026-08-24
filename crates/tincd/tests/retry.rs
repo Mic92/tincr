@@ -190,13 +190,7 @@ fn req_retry_retries_now() {
 
     // send REQ_RETRY over ctl socket
     // `Ctl::connect` does the greeting dance.
-    let mut ctl = Ctl::connect(&socket, &pidfile);
-    writeln!(ctl.w, "18 10").unwrap();
-
-    // `control_ok` → `"%d %d %d", CONTROL, type, 0` → `"18 10 0\n"`.
-    let mut ack = String::new();
-    ctl.r.read_line(&mut ack).expect("retry ack");
-    assert_eq!(ack.trim_end(), "18 10 0", "REQ_RETRY ack");
+    assert_eq!(Ctl::connect(&socket, &pidfile).retry(), 0, "REQ_RETRY ack");
 
     // second connect attempt arrives FAST
     let retry_deadline = armed_at + Duration::from_secs(2);
@@ -209,7 +203,6 @@ fn req_retry_retries_now() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    drop(ctl);
     let _ = log.kill_and_log();
 }
 

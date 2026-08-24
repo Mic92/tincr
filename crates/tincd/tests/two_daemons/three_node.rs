@@ -2,9 +2,9 @@ use std::os::fd::AsRawFd;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use super::common::node::*;
 use super::common::*;
 use super::fd_tunnel::*;
-use super::node::*;
 
 /// Three daemons, relay path: alice ← mid → bob, no direct
 /// alice↔bob `ConnectTo`. Alice's packet to bob's subnet is
@@ -30,9 +30,9 @@ use super::node::*;
 #[test]
 fn three_daemon_relay() {
     let tmp = tmp!("relay3");
-    let alice = Node::new(tmp.path(), "alice", 0xA3);
-    let mid = Node::new(tmp.path(), "mid", 0xC3);
-    let bob = Node::new(tmp.path(), "bob", 0xB3);
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA3);
+    let mid = Node::with_alloc_port(tmp.path(), "mid", 0xC3);
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB3);
 
     let (alice_tun, alice_far) = sockpair_datagram();
     let (bob_tun, bob_far) = sockpair_datagram();
@@ -44,9 +44,9 @@ fn three_daemon_relay() {
     mid.write_config_multi(&[&alice, &bob], &[]);
     // alice: ConnectTo=mid, owns 10.0.0.1/32. Knows bob's pubkey
     // (needed for the per-tunnel SPTPS handshake).
-    alice.write_config_multi(&[&mid, &bob], &["mid"]);
+    alice.write_config_multi(&[&mid, &bob], &[&mid]);
     // bob: ConnectTo=mid, owns 10.0.0.2/32. Knows alice's pubkey.
-    bob.write_config_multi(&[&mid, &alice], &["mid"]);
+    bob.write_config_multi(&[&mid, &alice], &[&mid]);
 
     // Spawn mid first (the hub); debug logging so the relay log
     // lines can be asserted.
@@ -265,10 +265,10 @@ fn three_daemon_relay() {
 #[test]
 fn three_daemon_tunnelserver() {
     let tmp = tmp!("tunnelserver3");
-    let alice = Node::new(tmp.path(), "alice", 0xA4);
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA4);
     // mid: TunnelServer = yes. The whole point.
-    let mid = Node::new(tmp.path(), "mid", 0xC4).with_conf("TunnelServer = yes\n");
-    let bob = Node::new(tmp.path(), "bob", 0xB4);
+    let mid = Node::with_alloc_port(tmp.path(), "mid", 0xC4).with_conf("TunnelServer = yes\n");
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB4);
 
     let (alice_tun, alice_far) = sockpair_datagram();
 
@@ -299,11 +299,11 @@ fn three_daemon_tunnelserver() {
     // bob's pubkey (irrelevant here — she'll never start a tunnel
     // to bob because she never learns he exists).
     let alice = alice.fd(alice_far.as_raw_fd()).subnet("10.0.0.1/32");
-    alice.write_config_multi(&[&mid, &bob], &["mid"]);
+    alice.write_config_multi(&[&mid, &bob], &[&mid]);
     // bob: ConnectTo=mid, owns 10.0.0.2/32. dummy device (we only
     // assert from alice's side).
     let bob = bob.subnet("10.0.0.2/32");
-    bob.write_config_multi(&[&mid, &alice], &["mid"]);
+    bob.write_config_multi(&[&mid, &alice], &[&mid]);
 
     let mut mid_child = tincd_at(&mid.confbase, &mid.pidfile, &mid.socket)
         .env("RUST_LOG", "tincd=debug")
@@ -528,10 +528,10 @@ fn three_daemon_tunnelserver() {
 fn three_daemon_strictsubnets() {
     let tmp = tmp!("strictsubnets3");
     // alice: StrictSubnets = yes. The RECEIVER of gossip.
-    let alice = Node::new(tmp.path(), "alice", 0xA5).with_conf("StrictSubnets = yes\n");
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA5).with_conf("StrictSubnets = yes\n");
     // mid: plain relay. NOT strict (so we can prove it accepts).
-    let mid = Node::new(tmp.path(), "mid", 0xC5);
-    let bob = Node::new(tmp.path(), "bob", 0xB5);
+    let mid = Node::with_alloc_port(tmp.path(), "mid", 0xC5);
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB5);
 
     let (alice_tun, alice_far) = sockpair_datagram();
 
@@ -543,9 +543,9 @@ fn three_daemon_strictsubnets() {
     // bob's pubkey. CRITICALLY: alice's hosts/bob (written by
     // write_config_multi) has NO `Subnet =` line. That's exactly
     // what we want: bob's subnet is unauthorized.
-    alice.write_config_multi(&[&mid, &bob], &["mid"]);
+    alice.write_config_multi(&[&mid, &bob], &[&mid]);
     // bob: ConnectTo=mid, owns 10.0.0.2/32. dummy device.
-    bob.write_config_multi(&[&mid, &alice], &["mid"]);
+    bob.write_config_multi(&[&mid, &alice], &[&mid]);
 
     let mut mid_child = mid.spawn();
     assert!(
@@ -653,7 +653,7 @@ fn three_daemon_strictsubnets() {
     // Re-write tinc.conf with the new fd (DeviceType=fd / Device=N).
     // hosts/ files persist (we just appended to hosts/bob above).
     let alice = alice.fd(alice_far2.as_raw_fd());
-    alice.write_config_multi(&[&mid, &bob], &["mid"]);
+    alice.write_config_multi(&[&mid, &bob], &[&mid]);
     // write_config_multi re-truncates hosts/bob. Re-append.
     let mut bob_cfg = std::fs::read_to_string(&bob_hosts).unwrap();
     bob_cfg.push_str("Subnet = 10.0.0.2/32\n");
@@ -725,16 +725,16 @@ fn read_udp_port(ctl: &mut Ctl, name: &str) -> u16 {
 #[test]
 fn udp_relay_gate_unauthenticated_sender() {
     let tmp = tmp!("relay-gate");
-    let alice = Node::new(tmp.path(), "alice", 0xA4);
-    let mid = Node::new(tmp.path(), "mid", 0xC4);
-    let bob = Node::new(tmp.path(), "bob", 0xB4);
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA4);
+    let mid = Node::with_alloc_port(tmp.path(), "mid", 0xC4);
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB4);
 
     // mid is the hub (no device, no subnet, no ConnectTo).
     let alice = alice.subnet("10.0.0.1/32");
     let bob = bob.subnet("10.0.0.2/32");
     mid.write_config_multi(&[&alice, &bob], &[]);
-    alice.write_config_multi(&[&mid, &bob], &["mid"]);
-    bob.write_config_multi(&[&mid, &alice], &["mid"]);
+    alice.write_config_multi(&[&mid, &bob], &[&mid]);
+    bob.write_config_multi(&[&mid, &alice], &[&mid]);
 
     // mid runs at debug-level so we can assert the gate log line.
     let mut mid_child = tincd_at(&mid.confbase, &mid.pidfile, &mid.socket)
@@ -882,10 +882,10 @@ fn three_daemon_forwarding_off_drops_transit() {
     let tmp = tmp!("fmode-off");
     // alice: StrictSubnets so she ignores bob's gossiped subnet
     // and routes purely off her hosts/ preloads (mid's /24).
-    let alice = Node::new(tmp.path(), "alice", 0xAF).with_conf("StrictSubnets = yes\n");
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xAF).with_conf("StrictSubnets = yes\n");
     // mid: Forwarding = off. The whole point.
-    let mid = Node::new(tmp.path(), "mid", 0xCF).with_conf("Forwarding = off\n");
-    let bob = Node::new(tmp.path(), "bob", 0xBF);
+    let mid = Node::with_alloc_port(tmp.path(), "mid", 0xCF).with_conf("Forwarding = off\n");
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xBF);
 
     let (alice_tun, alice_far) = sockpair_datagram();
     let (bob_tun, bob_far) = sockpair_datagram();
@@ -895,9 +895,9 @@ fn three_daemon_forwarding_off_drops_transit() {
     let bob = bob.fd(bob_far.as_raw_fd()).subnet("10.0.0.2/32");
     mid.write_config_multi(&[&alice, &bob], &[]);
     // alice: ConnectTo=mid, owns 10.0.0.1/32, fd device.
-    alice.write_config_multi(&[&mid, &bob], &["mid"]);
+    alice.write_config_multi(&[&mid, &bob], &[&mid]);
     // bob: ConnectTo=mid, owns 10.0.0.2/32, fd device.
-    bob.write_config_multi(&[&mid, &alice], &["mid"]);
+    bob.write_config_multi(&[&mid, &alice], &[&mid]);
 
     // alice's hosts/mid: claim 10.0.0.0/24. With StrictSubnets it
     // is preloaded and bob's gossiped /32 is rejected, so alice's
