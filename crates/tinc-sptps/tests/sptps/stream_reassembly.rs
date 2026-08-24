@@ -1,13 +1,8 @@
-//! `receive_stream`'s two-phase reassembly buffer (`state.rs:1004-`).
-//! `vs_c.rs` feeds whole records — the partial-read early returns
-//! (mid-length-header, mid-body, exactly-at-boundary) are dark there.
-//!
-//! Property: chopping the wire byte stream at arbitrary offsets
-//! yields the same `Output` sequence as feeding it whole.
+//! Stream reassembly: chopping the handshake byte stream at arbitrary
+//! offsets (mid length header, mid body, at a boundary) yields the same
+//! `Output` sequence as feeding whole records.
 
-mod common;
-
-use common::{SeedRng, feed_stream, keypair, wire_only};
+use crate::common::{SeedRng, feed, keypair, wires};
 use proptest::prelude::*;
 use tinc_sptps::{Framing, Output, Role, Sptps};
 
@@ -36,14 +31,14 @@ fn reference(aseed: u64, bseed: u64) -> (Vec<u8>, Vec<u8>, Vec<Output>, Vec<Outp
         &mut SeedRng(bseed),
     );
 
-    let mut a2b: Vec<u8> = wire_only(&a0).into_iter().flatten().collect();
-    let mut b2a: Vec<u8> = wire_only(&b0).into_iter().flatten().collect();
+    let mut a2b: Vec<u8> = wires(a0).concat();
+    let mut b2a: Vec<u8> = wires(b0).concat();
     let mut alice_obs = Vec::new();
     let mut bob_obs = Vec::new();
 
     let step = |s: &mut Sptps, bytes: &[u8], obs: &mut Vec<Output>| -> Vec<u8> {
         let mut tx = Vec::new();
-        for o in feed_stream(s, bytes) {
+        for o in feed(s, bytes).unwrap() {
             if let Output::Wire { bytes, .. } = &o {
                 tx.extend_from_slice(bytes);
             }
@@ -96,7 +91,7 @@ fn feed_chopped(role: Role, seed: u64, bytes: &[u8], cuts: &[usize]) -> Vec<Outp
     let mut obs = Vec::new();
     let mut prev = 0;
     for &c in cuts.iter().chain(std::iter::once(&bytes.len())) {
-        obs.extend(feed_stream(&mut sptps, &bytes[prev..c]));
+        obs.extend(feed(&mut sptps, &bytes[prev..c]).unwrap());
         prev = c;
     }
     obs

@@ -1,24 +1,15 @@
-//! `ReplayWindow::check` (`state.rs:202-255`). The bitmap arithmetic
-//! is ported verbatim from C — `(seqno / 8 % win)` indexing,
-//! `farfuture` heuristic, `late` polarity inverted from intuition.
-//! Dense enough to merit a black-box check.
-//!
-//! Property: with all packets inside one window width, every
-//! first-delivery decrypts to its body and every duplicate is
-//! `BadSeqno`. The `farfuture` and out-of-window paths don't fire
-//! by construction — covering those needs a reference model.
+//! `ReplayWindow::check`, black box: with all packets inside one window
+//! width, every first delivery decrypts to its body and every duplicate
+//! is `BadSeqno`. The far-future and out-of-window paths do not fire by
+//! construction; covering those needs a reference model.
 
-mod common;
-
-use common::{SeedRng, handshake_pair, wire_only};
+use crate::common::{Pair, SeedRng, wire};
 use proptest::prelude::*;
-use tinc_sptps::{Framing, Output, SptpsError};
+use tinc_sptps::{Output, SptpsError};
 
 proptest! {
     #[test]
     fn in_window_reorder_is_lossless(
-        aseed in any::<u64>(),
-        bseed in any::<u64>(),
         // ≤64 packets, 128-slot window: max gap is 63, farfuture
         // (≥128 ahead) and too_old (≥128 behind) never fire.
         bodies in prop::collection::vec(
@@ -29,12 +20,10 @@ proptest! {
         // (duplicates) and omissions (drops).
         schedule_raw in prop::collection::vec(any::<usize>(), 0..128),
     ) {
-        // handshake_pair uses fixed RNG seeds; perturb keys per case.
-        let _ = (aseed, bseed); // see TODO below
-        let (mut alice, mut bob) = handshake_pair(Framing::Datagram, b"replay");
+        let (mut alice, mut bob) = Pair::datagram().handshake();
 
         let packets: Vec<Vec<u8>> = bodies.iter()
-            .map(|b| wire_only(&alice.send_record(0, b).unwrap()).into_iter().next().unwrap())
+            .map(|body| wire(alice.send_record(0, body).unwrap()))
             .collect();
 
         let schedule: Vec<usize> =
@@ -62,7 +51,3 @@ proptest! {
         }
     }
 }
-
-// TODO: a reference-model property covering farfuture resync and
-// out-of-window. Model is a `BTreeSet<u32>` of accepted seqnos +
-// the same threshold counter. ~2 hours; see docs/testing-strategy.md.

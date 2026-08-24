@@ -1399,7 +1399,7 @@ impl Sptps {
 
         // ORDER-SENSITIVE FROM HERE
         // C lines 357..375. Don't reorder without re-reading the doc
-        // comment above and `rust_vs_c_rekey` in tests/vs_c.rs.
+        // comment above and `stream_rekey_rust_initiator` in tests/vs_c.rs.
 
         // The discriminant for "was this a rekey?". Captured before any
         // sends — send_sig/send_ack don't touch outcipher, but reading it

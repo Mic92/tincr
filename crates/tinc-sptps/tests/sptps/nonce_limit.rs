@@ -2,16 +2,16 @@
 //! and the par-encrypt path (`alloc_seqnos` + `seal_with_seqno`) used
 //! to bump the counter without the per-key limit gate.
 
-use super::common::{SeedRng, handshake_pair, wire_only};
+use crate::common::{Pair, SeedRng, pump, wires};
 use std::sync::atomic::Ordering;
-use tinc_sptps::{Framing, SEAL_KEY_LIMIT, SEAL_REKEY_THRESHOLD};
+use tinc_sptps::{SEAL_KEY_LIMIT, SEAL_REKEY_THRESHOLD};
 
 /// The bug: `alloc_seqnos` past 2^32 records would hand back a wrapped
 /// seqno, and `seal_with_seqno` would emit a ciphertext byte-identical
 /// to the one sealed at that seqno under the same key.
 #[test]
 fn alloc_seqnos_refuses_before_nonce_wrap() {
-    let (alice, _bob) = handshake_pair(Framing::Datagram, b"wrap");
+    let (alice, _bob) = Pair::datagram().handshake();
     let base = alice.out_key_base();
 
     let s0 = alice.alloc_seqnos(1).unwrap();
@@ -42,7 +42,7 @@ fn alloc_seqnos_refuses_before_nonce_wrap() {
 
 #[test]
 fn rekey_due_at_soft_threshold() {
-    let (mut alice, _bob) = handshake_pair(Framing::Datagram, b"soft");
+    let (mut alice, _bob) = Pair::datagram().handshake();
     assert!(!alice.rekey_due());
     let base = alice.out_key_base();
     alice
@@ -59,7 +59,7 @@ fn rekey_due_at_soft_threshold() {
 #[test]
 fn inband_datagram_rekey_rebases_key_counter() {
     let mut rng = SeedRng(0x5EED);
-    let (mut alice, mut bob) = handshake_pair(Framing::Datagram, b"rekey-reset");
+    let (mut alice, mut bob) = Pair::datagram().handshake();
 
     // One pre-rekey packet so bob's replay window has inseqno > 0.
     let mut tx = Vec::new();
@@ -67,14 +67,8 @@ fn inband_datagram_rekey_rebases_key_counter() {
     let mut rx = Vec::new();
     bob.open_data_into(&tx, &mut rx, 0).unwrap();
 
-    let kex_a = wire_only(&alice.force_kex(&mut rng).unwrap()).remove(0);
-    let kex_b = wire_only(&bob.receive(&kex_a, &mut rng).unwrap().1).remove(0);
-    let sig_a = wire_only(&alice.receive(&kex_b, &mut rng).unwrap().1).remove(0);
-    let bob_out = wire_only(&bob.receive(&sig_a, &mut rng).unwrap().1);
-    let (sig_b, ack_b) = (bob_out[0].clone(), bob_out[1].clone());
-    let ack_a = wire_only(&alice.receive(&sig_b, &mut rng).unwrap().1).remove(0);
-    bob.receive(&ack_a, &mut rng).unwrap();
-    alice.receive(&ack_b, &mut rng).unwrap();
+    let kex = wires(alice.force_kex(&mut rng).unwrap());
+    pump(&mut alice, &mut bob, kex, Vec::new()).unwrap();
 
     assert!(alice.out_key_base() > 0);
     assert_eq!(alice.sealed_count(), 0);
