@@ -1,26 +1,7 @@
-//! Adversarial / fuzz-style inputs for the wire parsers.
-//!
-//! The KATs in `src/` and the round-trip proptests in `roundtrip.rs`
-//! exercise the *valid* grammar. This file throws garbage at every
-//! `parse()` entry point and asserts it returns `Err` (or a defined
-//! `Ok`) — never panics. The point is to pin the "malformed → clean
-//! reject" contract so a hostile peer can't crash the daemon by
-//! hand-crafting protocol lines.
-//!
-//! Coverage shape:
-//!
-//! 1. Hand-picked nasty strings (overflow, truncation, embedded NUL,
-//!    wrong-type tokens) per message struct — table-driven so adding
-//!    a case is one line.
-//! 2. A single proptest that feeds *arbitrary bytes* (lossy-UTF-8)
-//!    to every parser. No assertion on the result, only that it
-//!    doesn't panic. This is the cheap stand-in for a cargo-fuzz
-//!    harness and catches the "forgot a bounds check" class.
-//!
-//! Anything that *should* be rejected but currently isn't (i.e. a
-//! C-compat divergence, not a crash) is pinned as `Ok` in the tables
-//! below with a comment, so a future tightening shows up as a test
-//! diff rather than a silent behaviour change.
+//! Malformed input to every parser: tables of hand-picked lines with
+//! their expected Ok/Err, plus a proptest that only checks for panics.
+//! Lines accepted for C compatibility are pinned as `Ok` so tightening
+//! them is a visible test change.
 
 use proptest::prelude::*;
 
@@ -30,20 +11,8 @@ use tinc_proto::msg::{
 };
 use tinc_proto::{MAX_STRING, Request, Subnet, check_id};
 
-// Table-driven reject cases.
-//
-// Each table entry is a line that MUST NOT panic. Most are expected
-// to `Err`; a few are `Ok` (extra trailing tokens — sscanf ignores
-// them, so do we) and are marked as such so a future tightening
-// doesn't silently change behaviour.
-
-/// One adversarial probe: feed `line` to `parse`, assert it doesn't
-/// panic, and that the Ok/Err shape matches `want_ok`.
 fn probe<T, E>(what: &str, line: &str, want_ok: bool, parse: impl FnOnce(&str) -> Result<T, E>) {
-    // catch_unwind: the whole point of this file. If a parser
-    // indexes past end / unwraps on bad input, we want a clear
-    // "PANIC on input X" failure, not a thread-abort that nextest
-    // reports as "test failed" with no context.
+    // So a panic names the input.
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse(line)));
     match r {
         Err(p) => panic!("{what}: PANIC on {line:?}: {p:?}"),
@@ -59,7 +28,6 @@ fn probe<T, E>(what: &str, line: &str, want_ok: bool, parse: impl FnOnce(&str) -
 
 #[test]
 fn request_peek_garbage() {
-    // peek() returns Option, never panics. All of these are None.
     for s in [
         "",
         " ",
@@ -79,13 +47,11 @@ fn request_peek_garbage() {
 
 #[test]
 fn check_id_garbage() {
-    // check_id is the path-traversal gate. None of these may pass.
+    // The path-traversal gate.
     for s in ["", ".", "..", "../x", "a/b", "a\0b", "a b", "a\n", "ä"] {
         assert!(!check_id(s), "check_id({s:?}) accepted");
     }
-    // No length cap in check_id itself (C tinc has none either; the
-    // charset gate already prevents path traversal). Pinned so a
-    // future cap is a deliberate test change.
+    // No length cap, as in C.
     let huge = "a".repeat(MAX_STRING);
     assert!(check_id(&huge));
 }
@@ -126,11 +92,9 @@ fn add_edge_adversarial() {
     for &(line, ok) in cases {
         probe("AddEdge", line, ok, AddEdge::parse);
     }
-    // 2048-char name: Tok::s accepts (== MAX_STRING), check_id accepts.
-    // Pinned as Ok — same as C; charset gate is the security boundary.
+    // MAX_STRING is 2048.
     let huge = format!("12 0 {} b 1.1.1.1 655 0 1", "a".repeat(MAX_STRING));
     probe("AddEdge", &huge, true, AddEdge::parse);
-    // 2049-char name: Tok::s rejects.
     let huger = format!("12 0 {} b 1.1.1.1 655 0 1", "a".repeat(MAX_STRING + 1));
     probe("AddEdge", &huger, false, AddEdge::parse);
 }
@@ -196,19 +160,16 @@ fn subnet_adversarial() {
 
 #[test]
 fn key_msgs_adversarial() {
-    // KeyChanged: just one token after %*d %*x — almost anything goes.
     for &(line, ok) in &[
         ("14", false),
         ("14 0", false),
-        // NUL is not ascii whitespace → it's a 1-byte token. KeyChanged
-        // doesn't check_id → accepted. Pins current (C-compat) behaviour.
+        // NUL is a token; KeyChanged does not check_id (as in C).
         ("14 0 \0", true),
         ("14 0 anything!goes", true),
     ] {
         probe("KeyChanged", line, ok, KeyChanged::parse);
     }
 
-    // ReqKey: lone-trailing-addr already in `msg/key.rs`.
     for &(line, ok) in &[
         ("15", false),
         ("15 a", false),
@@ -220,7 +181,6 @@ fn key_msgs_adversarial() {
         probe("ReqKey", line, ok, ReqKey::parse);
     }
 
-    // AnsKey: 8-field reject already in `msg/key.rs`.
     for &(line, ok) in &[
         ("16 a b k 0 0 0", false),                      // 6 fields
         ("16 a b k 0 0 18446744073709551616 0", false), // maclen > u64
@@ -233,7 +193,6 @@ fn key_msgs_adversarial() {
 
 #[test]
 fn misc_msgs_adversarial() {
-    // TcpPacket -1/32768 boundary: see `msg/misc.rs::tcp_packet`.
     for &(line, ok) in &[
         ("17", false),
         ("17 ", false),
@@ -249,7 +208,6 @@ fn misc_msgs_adversarial() {
     ] {
         probe("UdpInfo", line, ok, UdpInfo::parse);
     }
-    // MtuInfo non-int already in `msg/misc.rs`.
     for &(line, ok) in &[
         ("23 a b", false),
         ("23 a b 2147483648", false), // i32 overflow
@@ -259,14 +217,7 @@ fn misc_msgs_adversarial() {
     }
 }
 
-// Blind fuzz: arbitrary bytes → every parser. No result assertion;
-// only that nothing panics. `from_utf8_lossy` because the parsers
-// take &str — non-UTF-8 is handled one layer up (tincd's
-// `parse_add_edge` etc. do the `from_utf8` check) and that layer is
-// covered by the integration test.
-
-/// Feed `s` to every public parse entry point. Results discarded; the
-/// proptest assertion is "nothing panicked".
+/// Non-UTF-8 is rejected a layer up in tincd, hence `&str` here.
 fn parse_all(s: &str) {
     let _ = Request::peek(s);
     let _ = check_id(s);
@@ -291,10 +242,7 @@ proptest! {
         parse_all(&String::from_utf8_lossy(&bytes));
     }
 
-    /// Same, but with the input space biased toward "looks like a
-    /// protocol line": digits + spaces + a few punctuation chars.
-    /// Arbitrary bytes above will mostly bounce off the first-token
-    /// int parse; this gets deeper.
+    /// Biased towards protocol-looking lines to get past the first token.
     #[test]
     fn arbitrary_tokens_never_panic(s in r"[0-9a-fA-F.:/_# +\-]{0,200}") {
         parse_all(&s);
