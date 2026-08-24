@@ -270,7 +270,7 @@ mod tests {
         (tmp, cookie)
     }
 
-    const WEEK: Duration = Duration::from_secs(604_800);
+    const WEEK: Duration = Duration::from_hours(168);
 
     // serve_cookie.
 
@@ -333,7 +333,7 @@ mod tests {
         let key = test_key();
         let (tmp, cookie) = setup_invitation("expired", &key, "Name = bob\n");
 
-        let far_future = SystemTime::now() + WEEK + Duration::from_secs(86_400);
+        let far_future = SystemTime::now() + WEEK + Duration::from_hours(24);
 
         let err = serve_cookie(tmp.path(), &key, &cookie, "alice", WEEK, far_future).unwrap_err();
         assert!(matches!(err, ServeError::Expired));

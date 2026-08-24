@@ -108,7 +108,7 @@ impl<W: Copy> Timers<W> {
         let when = self
             .now
             .checked_add(after)
-            .unwrap_or_else(|| self.now + Duration::from_secs(86400 * 365));
+            .unwrap_or_else(|| self.now + Duration::from_hours(8760));
         self.seq += 1;
         let key = (when, self.seq);
         slot.at = Some(key);
@@ -262,7 +262,7 @@ mod tests {
         let ping = t.add(What::Ping);
         t.set(ping, Duration::from_millis(1));
         // Re-arm to far future before the old one fires.
-        t.set(ping, Duration::from_secs(3600));
+        t.set(ping, Duration::from_hours(1));
 
         sleep(Duration::from_millis(5));
         let mut out = Vec::new();
@@ -405,7 +405,7 @@ mod tests {
         let c = t.add(What::Retry(3));
         t.set(a, Duration::from_millis(1));
         t.set(b, Duration::from_millis(2));
-        t.set(c, Duration::from_secs(3600)); // far future
+        t.set(c, Duration::from_hours(1)); // far future
 
         sleep(Duration::from_millis(10));
         let mut out = Vec::new();

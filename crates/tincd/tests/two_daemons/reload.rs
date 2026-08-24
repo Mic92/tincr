@@ -532,5 +532,7 @@ fn control_reload_hosts_swap_drops_rekeyed_peer() {
     );
 
     let _ = alice_child.kill();
+    let _ = alice_child.wait();
     let _ = bob_child.kill();
+    let _ = bob_child.wait();
 }

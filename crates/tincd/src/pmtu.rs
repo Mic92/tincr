@@ -562,7 +562,7 @@ mod tests {
     fn tick_discovery_advances_phase() {
         let now = t0();
         let mut s = PmtuState::new(now, MTU);
-        let out = s.tick(now, Duration::from_secs(60));
+        let out = s.tick(now, Duration::from_mins(1));
         assert_eq!(out.len(), 1);
         assert!(
             matches!(out[0], PmtuAction::SendProbe { len, .. } if (1329..=1330).contains(&len))
@@ -574,11 +574,11 @@ mod tests {
     fn tick_gated_by_333ms() {
         let now = t0();
         let mut s = PmtuState::new(now, MTU);
-        s.tick(now, Duration::from_secs(60));
-        let out = s.tick(now + Duration::from_millis(100), Duration::from_secs(60));
+        s.tick(now, Duration::from_mins(1));
+        let out = s.tick(now + Duration::from_millis(100), Duration::from_mins(1));
         assert!(out.is_empty());
         assert_eq!(s.phase, PmtuPhase::Discovery { sent: 1 });
-        let out = s.tick(now + Duration::from_millis(400), Duration::from_secs(60));
+        let out = s.tick(now + Duration::from_millis(400), Duration::from_mins(1));
         assert_eq!(out.len(), 1);
         assert_eq!(s.phase, PmtuPhase::Discovery { sent: 2 });
     }
@@ -590,12 +590,12 @@ mod tests {
         s.phase = PmtuPhase::Discovery { sent: 19 };
         s.minmtu = 1400;
         // Probe #19 → Fix.
-        let out = s.tick(now + Duration::from_secs(1), Duration::from_secs(60));
+        let out = s.tick(now + Duration::from_secs(1), Duration::from_mins(1));
         assert_eq!(out.len(), 1);
         assert!(matches!(out[0], PmtuAction::SendProbe { .. }));
         assert_eq!(s.phase, PmtuPhase::Fix);
         // try_fix_mtu fires.
-        let out = s.tick(now + Duration::from_secs(2), Duration::from_secs(60));
+        let out = s.tick(now + Duration::from_secs(2), Duration::from_mins(1));
         assert_eq!(s.mtu, 1400);
         assert_eq!(s.maxmtu, 1400);
         // Fix → Steady; the emitted revalidation probe is committed
@@ -739,9 +739,9 @@ mod tests {
         s.maxmtu = 1400;
         s.phase = PmtuPhase::Steady;
         s.mtu_ping_sent = now;
-        let out = s.tick(now + Duration::from_secs(30), Duration::from_secs(60));
+        let out = s.tick(now + Duration::from_secs(30), Duration::from_mins(1));
         assert!(out.is_empty());
-        let out = s.tick(now + Duration::from_secs(61), Duration::from_secs(60));
+        let out = s.tick(now + Duration::from_secs(61), Duration::from_mins(1));
         assert_eq!(
             out,
             vec![
@@ -768,7 +768,7 @@ mod tests {
         s.maxmtu = MTU - 1;
         s.minmtu = MTU - 1;
         s.phase = PmtuPhase::Steady;
-        let out = s.tick(now + Duration::from_secs(61), Duration::from_secs(60));
+        let out = s.tick(now + Duration::from_secs(61), Duration::from_mins(1));
         assert_eq!(
             out,
             vec![PmtuAction::SendProbe {
@@ -786,7 +786,7 @@ mod tests {
         s.minmtu = 1400;
         s.maxmtu = 1400;
         s.phase = PmtuPhase::Steady;
-        let pi = Duration::from_secs(60);
+        let pi = Duration::from_mins(1);
 
         for second in [61, 122, 183] {
             let out = s.tick(now + Duration::from_secs(second), pi);
@@ -810,7 +810,7 @@ mod tests {
         s.maxmtu = 1400;
         s.phase = PmtuPhase::Steady;
         s.udp_confirmed = true;
-        let pi = Duration::from_secs(60);
+        let pi = Duration::from_mins(1);
         s.tick(now + Duration::from_secs(61), pi);
         assert_eq!(s.phase, PmtuPhase::Steady);
         s.on_counted_probe_sent();
@@ -873,12 +873,12 @@ mod tests {
         s.ping_sent = false;
         s.udp_ping_sent = now;
         s.udp_reply_rx = now; // 60s old at check time
-        assert!(!s.udp_timed_out(now + Duration::from_secs(60), to));
+        assert!(!s.udp_timed_out(now + Duration::from_mins(1), to));
 
         // Probe outstanding, fresh.
         s.ping_sent = true;
         s.udp_ping_sent = now + Duration::from_secs(55);
-        assert!(!s.udp_timed_out(now + Duration::from_secs(60), to));
+        assert!(!s.udp_timed_out(now + Duration::from_mins(1), to));
 
         // Probe outstanding, stale.
         s.udp_ping_sent = now;
@@ -937,7 +937,8 @@ mod tests {
         s.udp_confirmed = true;
         s.udp_reply_rx = now;
 
-        assert!(!s.udp_needs_cold_revalidation(now + timeout - Duration::from_millis(1), timeout));
+        let just_before = now + Duration::from_millis(29_999);
+        assert!(!s.udp_needs_cold_revalidation(just_before, timeout));
         assert!(s.udp_needs_cold_revalidation(now + timeout, timeout));
 
         s.ping_sent = true;
@@ -1071,7 +1072,7 @@ mod tests {
     fn discovery_timeout_with_only_tiny_replies_fixes_at_zero() {
         let now = t0();
         let mut s = PmtuState::new(now, MTU);
-        let pi = Duration::from_secs(60);
+        let pi = Duration::from_mins(1);
         let mut t = now;
         for _ in 0..25 {
             t += Duration::from_secs(1);
@@ -1119,7 +1120,7 @@ mod tests {
         s.minmtu = 600;
         s.maxmtu = 431;
         s.phase = PmtuPhase::Fix;
-        let _ = s.tick(now + Duration::from_secs(1), Duration::from_secs(60));
+        let _ = s.tick(now + Duration::from_secs(1), Duration::from_mins(1));
         assert!(
             s.minmtu == 0 || s.minmtu >= MINMTU,
             "invariant: {}",

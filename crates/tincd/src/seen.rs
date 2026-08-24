@@ -230,7 +230,7 @@ mod tests {
         let t0 = Instant::now();
         s.check(ADD_EDGE, t0);
         let t1 = t0 + Duration::from_secs(61);
-        s.age(t1, Duration::from_secs(60));
+        s.age(t1, Duration::from_mins(1));
         // Gone: re-seeing it is a miss again.
         assert!(!s.check(ADD_EDGE, t1));
     }
@@ -241,7 +241,7 @@ mod tests {
         let t0 = Instant::now();
         s.check(ADD_EDGE, t0);
         let t1 = t0 + Duration::from_secs(30);
-        s.age(t1, Duration::from_secs(60));
+        s.age(t1, Duration::from_mins(1));
         // Still there: still a dup.
         assert!(s.check(ADD_EDGE, t1));
     }
@@ -253,7 +253,7 @@ mod tests {
         s.check(ADD_EDGE, t0); // old
         let t1 = t0 + Duration::from_secs(61);
         s.check(ADD_SUBNET, t1); // young
-        let (deleted, left) = s.age(t1, Duration::from_secs(60));
+        let (deleted, left) = s.age(t1, Duration::from_mins(1));
         assert_eq!((deleted, left), (1, 1));
     }
 
@@ -264,7 +264,7 @@ mod tests {
         assert!(!s.check(ADD_EDGE, t0));
         assert!(s.check(ADD_EDGE, t0));
         let t1 = t0 + Duration::from_secs(61);
-        s.age(t1, Duration::from_secs(60));
+        s.age(t1, Duration::from_mins(1));
         assert!(!s.check(ADD_EDGE, t1));
     }
 
@@ -290,9 +290,9 @@ mod tests {
         }
         assert!(s.check("12 0 brand new", now));
         assert!(s.check("12 0 n0 b", now));
-        let (_, left) = s.age(now, Duration::from_secs(3600));
+        let (_, left) = s.age(now, Duration::from_hours(1));
         assert_eq!(left, SEEN_CAP);
-        s.age(now + Duration::from_secs(3601), Duration::from_secs(60));
+        s.age(now + Duration::from_secs(3601), Duration::from_mins(1));
         assert!(!s.check("12 0 brand new", now));
     }
 
@@ -319,7 +319,7 @@ mod tests {
         let mut f = FloodLimiter::new();
         let t0 = Instant::now();
         assert!(f.allow(t0)); // anchor last_refill
-        let t1 = t0 + Duration::from_secs(7 * 24 * 3600);
+        let t1 = t0 + Duration::from_hours(168);
         for _ in 0..FLOOD_BURST {
             assert!(f.allow(t1));
         }
@@ -333,8 +333,8 @@ mod tests {
         let mut s = SeenRequests::new();
         let t0 = Instant::now();
         s.check(ADD_EDGE, t0);
-        let t1 = t0 + Duration::from_secs(60);
-        let (deleted, left) = s.age(t1, Duration::from_secs(60));
+        let t1 = t0 + Duration::from_mins(1);
+        let (deleted, left) = s.age(t1, Duration::from_mins(1));
         assert_eq!((deleted, left), (1, 0));
     }
 }

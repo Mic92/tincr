@@ -10,10 +10,10 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 /// B's wait for A's `PUNCH` reply.
-pub(crate) const AWAIT_CONNECT_TIMEOUT: Duration = Duration::from_millis(2000);
+pub(crate) const AWAIT_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A's wait for `SYNC` after replying.
-pub(crate) const AWAIT_SYNC_TIMEOUT: Duration = Duration::from_millis(3000);
+pub(crate) const AWAIT_SYNC_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Floor for B's delayed dial.
 pub(crate) const MIN_DIAL_DELAY: Duration = Duration::from_millis(20);
@@ -298,7 +298,7 @@ mod tests {
                 addrs: vec![],
                 fire_at: t0
             },
-            t0 + Duration::from_secs(3600)
+            t0 + Duration::from_hours(1)
         ));
     }
 }

@@ -71,7 +71,7 @@ impl Daemon {
             let now = self.timers.now();
             if self
                 .pending_meta_warned_at
-                .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(60))
+                .is_none_or(|t| now.duration_since(t) >= Duration::from_mins(1))
             {
                 log::warn!(target: "tincd::conn",
                            "Too many unauthenticated connections ({}), \

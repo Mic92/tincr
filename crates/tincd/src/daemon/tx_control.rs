@@ -1524,7 +1524,7 @@ impl Daemon {
                     continue;
                 };
                 // Refresh idle-reap window while we're actively streaming.
-                conn.last_ping_time = now + Duration::from_secs(3600);
+                conn.last_ping_time = now + Duration::from_hours(1);
                 // Header line; send() appends `\n`. Then raw body,
                 // no newline.
                 nw |= conn.send(format_args!(

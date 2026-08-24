@@ -20,9 +20,7 @@ use super::common::*;
 use super::rig::*;
 
 fn count_fds(pid: u32) -> usize {
-    std::fs::read_dir(format!("/proc/{pid}/fd"))
-        .map(std::iter::Iterator::count)
-        .unwrap_or(0)
+    std::fs::read_dir(format!("/proc/{pid}/fd")).map_or(0, std::iter::Iterator::count)
 }
 
 // 1. link flap
