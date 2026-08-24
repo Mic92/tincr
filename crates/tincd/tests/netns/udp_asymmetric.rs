@@ -34,19 +34,17 @@ fn udp_asymmetric_meta_confirm() {
     pair.start_direct();
     pair.wait_validkey();
 
-    let confirmed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        poll_until(Duration::from_secs(15), || {
-            ping_once("10.42.0.2");
-            let nodes = pair.alice.ctl().dump(3);
-            let udp_confirmed = node_status(&nodes, "bob")? & 0x80 != 0;
-            let (_, minmtu, _) = node_pmtu(&nodes, "bob")?;
-            (udp_confirmed && minmtu >= 1400).then_some(())
-        });
-    }));
+    let confirmed = try_poll(Duration::from_secs(15), || {
+        ping_once("10.42.0.2");
+        let nodes = pair.alice.ctl().dump(3);
+        let udp_confirmed = node_status(&nodes, "bob")? & 0x80 != 0;
+        let (_, minmtu, _) = node_pmtu(&nodes, "bob")?;
+        (udp_confirmed && minmtu >= 1400).then_some(())
+    });
     let bob_nodes = pair.bob.ctl().dump(3);
     let (alice_log, bob_log) = pair.finish();
     assert!(
-        confirmed.is_ok(),
+        confirmed.is_some(),
         "alice never confirmed bob via meta\n=== alice ===\n{alice_log}\n=== bob ===\n{bob_log}"
     );
     // bob's 0x80 bit does get set (he received alice's UDP), so

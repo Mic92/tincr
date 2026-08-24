@@ -1,7 +1,7 @@
 //! Perturbing the meta path: link flap, MTU clamp, handshake under
 //! loss, peer/relay restarts, idle PMTU.
 
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::common::linux::*;
@@ -12,23 +12,23 @@ fn count_fds(pid: nix::unistd::Pid) -> usize {
     std::fs::read_dir(format!("/proc/{pid}/fd")).map_or(0, Iterator::count)
 }
 
-fn flood_ping() -> Child {
-    Command::new("ping")
-        .args(["-i", "0.1", "-W", "1", "10.42.0.2"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn flood ping")
+fn flood_ping() -> KillOnDrop {
+    KillOnDrop(
+        Command::new("ping")
+            .args(["-i", "0.1", "-W", "1", "10.42.0.2"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn flood ping"),
+    )
 }
 
 fn alice_sees_bob(pair: &TunPair, reachable: bool, timeout: Duration) -> bool {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        poll_until(timeout, || {
-            let nodes = pair.alice.ctl().dump(3);
-            (node_status(&nodes, "bob").is_some_and(|s| s & 0x10 != 0) == reachable).then_some(())
-        });
-    }))
-    .is_ok()
+    try_poll(timeout, || {
+        let nodes = pair.alice.ctl().dump(3);
+        (node_status(&nodes, "bob").is_some_and(|s| s & 0x10 != 0) == reachable).then_some(())
+    })
+    .is_some()
 }
 
 fn assert_no_panic(alice_log: &str, bob_log: &str) {
@@ -98,17 +98,14 @@ fn stress_asymmetric_mtu() {
     pair.wait_udp_confirmed();
 
     // PMTU discovery is driven by data traffic only.
-    let mut flood = flood_ping();
-    let pmtu = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        poll_until(Duration::from_secs(20), || {
-            let alice = node_pmtu(&pair.alice.ctl().dump(3), "bob")?;
-            let bob = node_pmtu(&pair.bob.ctl().dump(3), "alice")?;
-            (alice.0 != 0 && bob.0 != 0).then_some([alice.0, bob.0])
-        })
-    }));
-    let _ = flood.kill();
-    let _ = flood.wait();
-    let Ok(mtus) = pmtu else {
+    let flood = flood_ping();
+    let pmtu = try_poll(Duration::from_secs(20), || {
+        let alice = node_pmtu(&pair.alice.ctl().dump(3), "bob")?;
+        let bob = node_pmtu(&pair.bob.ctl().dump(3), "alice")?;
+        (alice.0 != 0 && bob.0 != 0).then_some([alice.0, bob.0])
+    });
+    drop(flood);
+    let Some(mtus) = pmtu else {
         let (alice_log, bob_log) = pair.finish();
         panic!("PMTU never fixed\n=== alice ===\n{alice_log}\n=== bob ===\n{bob_log}");
     };
@@ -154,20 +151,17 @@ fn stress_handshake_under_loss() {
         panic!("meta handshake\n=== alice ===\n{alice_log}\n=== bob ===\n{bob_log}");
     }
 
-    let mut flood = flood_ping();
-    let converged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        poll_until(Duration::from_secs(30), || {
-            let alice = pair.alice.ctl().dump(3);
-            let bob = pair.bob.ctl().dump(3);
-            (node_status(&alice, "bob")? & 0x82 == 0x82
-                && node_status(&bob, "alice")? & 0x82 == 0x82
-                && node_pmtu(&alice, "bob")?.0 != 0)
-                .then_some(())
-        });
-    }));
-    let _ = flood.kill();
-    let _ = flood.wait();
-    if converged.is_err() {
+    let flood = flood_ping();
+    let converged = try_poll(Duration::from_secs(30), || {
+        let alice = pair.alice.ctl().dump(3);
+        let bob = pair.bob.ctl().dump(3);
+        (node_status(&alice, "bob")? & 0x82 == 0x82
+            && node_status(&bob, "alice")? & 0x82 == 0x82
+            && node_pmtu(&alice, "bob")?.0 != 0)
+            .then_some(())
+    });
+    drop(flood);
+    if converged.is_none() {
         let (alice_log, bob_log) = pair.finish();
         panic!("validkey/PMTU under loss\n=== alice ===\n{alice_log}\n=== bob ===\n{bob_log}");
     }

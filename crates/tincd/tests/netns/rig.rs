@@ -6,7 +6,7 @@ use super::common::linux::{
     bwrap_inner_init, bwrap_reexec, bwrap_usable, run_ip, run_ip_in, wait_for_carrier,
 };
 pub(crate) use super::common::node::Node;
-use super::common::{TmpGuard, node_status, poll_until};
+use super::common::{TmpGuard, node_status, poll_until, try_poll};
 
 /// Re-exec this test inside bwrap and set up the standard two-TUN
 /// topology. `Some` only in the inner (sandboxed) pass.
@@ -260,11 +260,8 @@ impl TunPair {
     }
 
     fn wait_status_bit(&self, bit: u32, timeout: Duration) {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            poll_until(timeout, || self.both_have_bit(bit).then_some(()));
-        }));
         assert!(
-            result.is_ok(),
+            try_poll(timeout, || self.both_have_bit(bit).then_some(())).is_some(),
             "status bit {bit:#x} not reached\n=== alice ===\n{}\n=== bob ===\n{}",
             self.alice.log(),
             self.bob.log()

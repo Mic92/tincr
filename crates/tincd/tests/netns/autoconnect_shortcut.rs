@@ -3,7 +3,7 @@
 //! give alice the degree at which the autoconnect shortcut arm runs;
 //! only alice has `AutoConnect = yes`.
 
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::common::*;
@@ -94,29 +94,26 @@ impl Mesh {
     }
 
     /// ~100 KiB/s alice→bob, above the 32 KiB/s relay threshold.
-    fn flood(extra: &[&str]) -> Child {
-        Command::new("ping")
-            .args(["-i", "0.01", "-s", "1000", "-q"])
-            .args(extra)
-            .arg("10.42.0.2")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn ping flood")
+    fn flood(extra: &[&str]) -> KillOnDrop {
+        KillOnDrop(
+            Command::new("ping")
+                .args(["-i", "0.01", "-s", "1000", "-q"])
+                .args(extra)
+                .arg("10.42.0.2")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn ping flood"),
+        )
     }
 
     /// Flood until alice dials bob directly (≤ 6 ticks × 5s).
     fn flood_until_shortcut(&self) -> bool {
-        let mut flood = Self::flood(&[]);
-        let promoted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            poll_until(Duration::from_secs(30), || {
-                self.alice_connected_to_bob().then_some(())
-            });
-        }))
-        .is_ok();
-        let _ = flood.kill();
-        let _ = flood.wait();
-        promoted
+        let _flood = Self::flood(&[]);
+        try_poll(Duration::from_secs(30), || {
+            self.alice_connected_to_bob().then_some(())
+        })
+        .is_some()
     }
 
     fn finish(mut self) -> String {
@@ -178,7 +175,7 @@ fn shortcut_survives_traffic_gap() {
         flapped = !mesh.alice_connected_to_bob();
         std::thread::sleep(Duration::from_millis(500));
     }
-    let _ = Mesh::flood(&["-w", "10"]).wait();
+    let _ = Mesh::flood(&["-w", "10"]).0.wait();
     let alice_log = mesh.finish();
     let activations = alice_log
         .lines()
