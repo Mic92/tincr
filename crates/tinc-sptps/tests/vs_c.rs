@@ -1,13 +1,7 @@
-//! Differential test: Rust SPTPS vs `sptps.c` via `tinc-ffi`.
-//!
-//! The strong claim is `byte_identical_wire_output`: same keys and same
-//! RNG stream give byte-for-byte the same wire output from both
-//! implementations, i.e. the same SIG transcript, PRF seed and record
-//! encoding. The interop tests are weaker (Ed25519 accepts any valid
-//! signature over the right message) but cover the responder path,
-//! datagram framing and rekeying against the real C state machine.
-//!
-//! All tests take `serial_guard()`: the C side has one global RNG.
+//! Rust SPTPS vs `sptps.c` via `tinc-ffi`. `byte_identical_wire_output`
+//! is the strong claim (same keys + RNG stream → same bytes); the
+//! interop tests cover responder, datagram and rekey paths against the
+//! real C state machine. `serial_guard()`: C has one global RNG.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -21,12 +15,9 @@ use tinc_sptps::{Framing, Output, Role, Sptps};
 
 const REPLAYWIN: usize = 16;
 
-/// Produces the same bytes as the C harness's `randomize()` for the
-/// same 32-byte seed: DJB ChaCha20 (8-byte zero nonce) keystream.
-/// `chacha.c` is block-granular and bumps the counter at the end of
-/// every call even if it used less than 64 bytes, so seek to the next
-/// block boundary after each fill. `byte_identical_wire_output` caught
-/// this: the nonce (first draw) matched, the ECDH key (second) did not.
+/// Same bytes as the C harness's `randomize()`: DJB ChaCha20 keystream,
+/// zero nonce. `chacha.c` advances to the next 64-byte block after
+/// every call, hence the seek.
 struct BridgeRng(ChaCha20Legacy);
 
 impl BridgeRng {
@@ -74,18 +65,14 @@ enum Impl {
     C,
 }
 
-/// One end of a session in either implementation, with just enough
-/// surface to script a handshake once for both. `Sptps` is boxed only
-/// to keep the variants similar in size.
 enum Peer {
     Rust(Box<Sptps>),
     C(CSptps<'static>),
 }
 
 impl Peer {
-    /// Returns the peer and its initial KEX record. C keys are leaked:
-    /// `CSptps` borrows them and threading the storage through every
-    /// test is not worth it for a few hundred bytes.
+    /// Returns the peer and its initial KEX. C keys are leaked because
+    /// `CSptps` borrows them.
     fn start(
         which: Impl,
         role: Role,
@@ -128,7 +115,6 @@ impl Peer {
         }
     }
 
-    /// Feed one whole record; asserts it was consumed entirely.
     fn feed(&mut self, data: &[u8]) -> Vec<Output> {
         let (taken, outs) = match self {
             Self::Rust(sptps) => sptps
@@ -150,7 +136,6 @@ impl Peer {
         }
     }
 
-    /// Fresh RNG bytes for the new ephemeral key.
     fn force_kex(&mut self, seed: [u8; 32]) -> Vec<u8> {
         match self {
             Self::Rust(sptps) => wire(sptps.force_kex(&mut BridgeRng::new(&seed)).unwrap()),
@@ -161,7 +146,7 @@ impl Peer {
         }
     }
 
-    /// C draws its responder KEX for a rekey lazily inside `receive`.
+    /// C draws its rekey KEX inside `receive`.
     fn reseed(&self, seed: [u8; 32]) {
         if matches!(self, Self::C(_)) {
             seed_rng(&seed);
@@ -173,7 +158,6 @@ impl Peer {
 struct Session {
     alice: Peer,
     bob: Peer,
-    /// Every record that crossed the wire, in script order.
     transcript: Vec<Vec<u8>>,
 }
 
@@ -214,11 +198,8 @@ impl Session {
         self.transcript.push(sealed);
     }
 
-    /// alice forces a new KEX. During a rekey the responder answers SIG
-    /// with SIG + ACK (under the old key) and both sides only report
-    /// `HandshakeDone` after the peer's ACK. This is what `receive_sig`'s
-    /// `was_rekey` return exists for: without it the Rust initiator
-    /// would finish early and never send the ACK C is waiting for.
+    /// Rekey: responder answers SIG with SIG + ACK, `HandshakeDone`
+    /// only after the peer's ACK (`receive_sig`'s `was_rekey`).
     fn rekey(&mut self) {
         let kex_a = self.alice.force_kex([0x33; 32]);
         self.bob.reseed([0x44; 32]);
@@ -242,8 +223,6 @@ fn rust_initiator_c_responder_stream() {
     session.bob_to_alice(7, b"c says hi back");
 }
 
-/// The responder signs in `receive_sig` rather than `receive_kex`, so
-/// both directions need covering.
 #[test]
 fn c_initiator_rust_responder_stream() {
     let _serial = serial_guard();
@@ -252,8 +231,6 @@ fn c_initiator_rust_responder_stream() {
     session.bob_to_alice(0, b"from rust");
 }
 
-/// Datagram framing puts the seqno on the wire and uses the replay
-/// window instead of the implicit stream counter.
 #[test]
 fn rust_initiator_c_responder_datagram() {
     let _serial = serial_guard();
@@ -301,11 +278,8 @@ fn stream_rekey_rust_initiator() {
     session.bob_to_alice(0, b"and back");
 }
 
-/// C tincd rekeys datagram sessions via `send_key_changed()`. The wire
-/// seqno must stay monotone across the rekey in both directions or the
-/// peer's replay window drops post-rekey traffic: as a replay when
-/// Rust sends (C's `inseqno` is past 0), as far-future when C sends
-/// (more than `replaywin * 8` ahead of a reset window).
+/// Wire seqno must stay monotone across a datagram rekey in both
+/// directions, or the peer's replay window drops what follows.
 #[test]
 fn datagram_rekey_keeps_seqno_monotone() {
     let _serial = serial_guard();

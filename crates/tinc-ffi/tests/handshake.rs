@@ -1,13 +1,6 @@
-//! C↔C SPTPS through the harness. This does not test `sptps.c`; it
-//! pins that the harness is a faithful conduit (bytes in, events out in
-//! `sptps.c`'s order, deterministic under `seed_rng`), which is what
-//! `tinc-sptps/tests/vs_c.rs` relies on when it swaps one side for Rust.
-//!
-//! Initial handshake per side: KEX out at start; initiator answers the
-//! peer's KEX with SIG; responder answers SIG with its own SIG and is
-//! done; initiator is done on receiving that. No ACK on the wire: the
-//! `SPTPS_ACK` state is only reached on a rekey, when `outstate` is
-//! already set.
+//! C↔C SPTPS through the harness: events come out in `sptps.c`'s order
+//! and deterministically under `seed_rng`, which `tinc-sptps/tests/vs_c.rs`
+//! depends on.
 
 use tinc_ffi::{CKey, CSptps, Event, Framing, Role, seed_rng, serial_guard};
 
@@ -23,8 +16,6 @@ fn header_len(framing: Framing) -> usize {
     }
 }
 
-/// Same derivation as `tinc-sptps`'s test keys; the KATs prove
-/// `from_seed` matches `ed25519_create_keypair`.
 fn keypair(tag: u8) -> ([u8; 96], [u8; 32]) {
     let mut seed = [0u8; 32];
     seed[0] = tag;
@@ -73,22 +64,18 @@ fn receive_whole(peer: &mut CSptps, data: &[u8]) -> Vec<Event> {
     events
 }
 
-/// One byte per call: every boundary in the stream reassembly buffer,
-/// and on our side, that events from calls producing nothing are not
-/// lost.
+/// One byte per call: reassembly boundaries, and no lost events.
 fn receive_bytewise(peer: &mut CSptps, data: &[u8]) -> Vec<Event> {
     data.iter()
         .flat_map(|byte| receive_whole(peer, std::slice::from_ref(byte)))
         .collect()
 }
 
-/// Full handshake plus one record each way; returns every wire record
-/// in order.
+/// Returns every wire record in order.
 fn handshake(framing: Framing, receive: Receive) -> Vec<Vec<u8>> {
     let header = header_len(framing);
     let alice_keys = Keys::new(1, 2);
     let bob_keys = Keys::new(2, 1);
-    // Distinct seeds, or both sides draw the same ephemeral key.
     let (mut alice, kex_a) = alice_keys.start(Role::Initiator, framing, b"label", 0xAA);
     let (mut bob, kex_b) = bob_keys.start(Role::Responder, framing, b"label", 0xBB);
     for kex in [&kex_a, &kex_b] {
@@ -112,8 +99,6 @@ fn handshake(framing: Framing, receive: Receive) -> Vec<Vec<u8>> {
     let to_bob = wire(alice.send_record(0, b"hello bob"));
     assert_eq!(to_bob.len(), header + 1 + 9 + TAG);
     match framing {
-        // Length header counts the body only; the type byte is inside
-        // the ciphertext.
         Framing::Stream => assert_eq!(&to_bob[..2], &[0, 9]),
         Framing::Datagram => assert_eq!(&to_bob[..4], &[0, 0, 0, 2], "third record"),
     }
@@ -153,7 +138,6 @@ fn datagram_handshake() {
     handshake(Framing::Datagram, receive_whole);
 }
 
-/// The property the differential tests are built on.
 #[test]
 fn same_seeds_same_bytes() {
     let _serial = serial_guard();
@@ -163,8 +147,7 @@ fn same_seeds_same_bytes() {
     );
 }
 
-/// `ecdsa_verify` failure makes `sptps_receive_data` return 0 with no
-/// events; the harness must surface that rather than swallow it.
+/// Verify failure: 0 bytes consumed, no events.
 #[test]
 fn wrong_peer_key_fails_at_sig() {
     let _serial = serial_guard();
@@ -179,10 +162,8 @@ fn wrong_peer_key_fails_at_sig() {
     assert_eq!(events, []);
 }
 
-/// Rekey reaches `SPTPS_ACK`, which the initial handshake skips. The
-/// responder answers SIG with SIG + ACK, both still under the *old*
-/// key (`receive_sig` switches `outcipher` only afterwards), and
-/// `HandshakeDone` waits for the peer's ACK.
+/// Rekey goes through `SPTPS_ACK`: responder sends SIG + ACK under the
+/// old key, `HandshakeDone` waits for the peer's ACK.
 #[test]
 fn stream_rekey_uses_ack_state() {
     let _serial = serial_guard();
@@ -198,7 +179,6 @@ fn stream_rekey_uses_ack_state() {
     seed_rng(&[3; 32]);
     let kex_a = wire(alice.force_kex());
     assert_eq!(kex_a.len(), 2 + 1 + KEX_BODY + TAG, "encrypted now");
-    // bob draws his new KEX inside receive.
     seed_rng(&[4; 32]);
     let kex_b = wire(receive_whole(&mut bob, &kex_a));
     assert_eq!(kex_b.len(), 2 + 1 + KEX_BODY + TAG);

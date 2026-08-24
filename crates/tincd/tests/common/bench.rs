@@ -1,6 +1,4 @@
-//! Shared by `benches/throughput{,_macos}.rs`: the alice↔bob tunnel
-//! fixture, iperf3/ping parsers, tool gates. Topology (netns vs. utun
-//! host routes) and profilers stay per-platform.
+//! Shared by `benches/throughput{,_macos}.rs`; topology stays per-platform.
 
 #![allow(dead_code)] // each bench uses a subset
 
@@ -11,7 +9,6 @@ use std::time::Duration;
 use super::node::Node;
 use super::{TmpGuard, node_status, tincd_at};
 
-/// `TINC_C_TINCD` — path to the C `tincd` (devshell sets it).
 pub fn c_tincd_bin() -> Option<PathBuf> {
     std::env::var_os("TINC_C_TINCD").map(PathBuf::from)
 }
@@ -36,8 +33,7 @@ pub enum Impl {
 }
 
 impl Impl {
-    /// Logging stays at info/`-d0`: per-packet debug output would be
-    /// the bottleneck being measured.
+    /// Per-packet debug logging would be the bottleneck.
     pub fn start(&self, node: &mut Node) {
         let mut cmd = match self {
             Self::Rust => {
@@ -63,10 +59,7 @@ impl Impl {
     }
 }
 
-/// `tinc.conf` lines common to all bench daemons. `PingTimeout` is
-/// tight to catch a hung daemon fast, looser while a sampling
-/// profiler may stall a ping cycle. `TINCD_BENCH_SPTPS_CIPHER` lets
-/// one binary measure both AEADs.
+/// A sampling profiler can stall a ping cycle, hence the looser timeout.
 pub fn bench_conf(ping_timeout: u32) -> String {
     let ping_timeout = if perf_enabled() { 5 } else { ping_timeout };
     let mut conf = format!("PingTimeout = {ping_timeout}\n");
@@ -77,9 +70,7 @@ pub fn bench_conf(ping_timeout: u32) -> String {
     conf
 }
 
-/// alice dials bob. The bench builds the nodes (device names and
-/// subnets are platform-specific), this starts them in the right
-/// order and waits until the UDP data path carries full-size packets.
+/// alice dials bob.
 pub struct Tunnel {
     pub tmp: TmpGuard,
     pub alice: Node,
@@ -103,8 +94,7 @@ impl Tunnel {
         )
     }
 
-    /// Poll `check(alice_nodes, bob_nodes)` on both `dump nodes`
-    /// outputs; panic with both logs on timeout.
+    /// `check(alice_nodes, bob_nodes)`; panics with both logs.
     pub fn wait_for(
         &self,
         what: &str,
@@ -122,10 +112,8 @@ impl Tunnel {
         }
     }
 
-    /// reachable → (kick) validkey + `udp_confirmed` → minmtu ≥ 1500.
-    /// Without the last step full-MSS segments would still take the
-    /// TCP fallback and the bench would measure the wrong path. PMTU
-    /// probing is demand-driven, hence `kick` (one ping) per poll.
+    /// Until minmtu ≥ 1500, full segments take the TCP fallback. PMTU
+    /// probing is demand-driven, hence `kick`.
     pub fn wait_data_path(&self, kick: impl Fn()) {
         const REACHABLE: u32 = 0x10;
         const VALIDKEY_UDP: u32 = 0x02 | 0x80;
@@ -172,8 +160,6 @@ pub fn ping_once(dest: &str) {
         .status();
 }
 
-/// iperf3 client against an already running server; panics with
-/// client output and daemon logs on failure.
 pub fn iperf3_client(tunnel: &Tunnel, args: &[&str]) -> IperfSum {
     let out = Command::new("iperf3")
         .args(args)
@@ -197,8 +183,7 @@ pub struct IperfResult {
 }
 #[derive(Debug, serde::Deserialize)]
 pub struct IperfEnd {
-    /// Server-side received: what actually crossed the tunnel
-    /// (`sum_sent` may include bytes still in flight).
+    /// `sum_sent` may include bytes still in flight.
     pub sum_received: IperfSum,
 }
 #[derive(Debug, serde::Deserialize)]
@@ -208,7 +193,6 @@ pub struct IperfSum {
     pub bytes: u64,
 }
 
-/// Panics with the raw JSON on failure (usually an `{"error": ...}`).
 pub fn parse_iperf(stdout: &[u8]) -> IperfResult {
     serde_json::from_slice(stdout).unwrap_or_else(|e| {
         panic!(
@@ -218,8 +202,7 @@ pub fn parse_iperf(stdout: &[u8]) -> IperfResult {
     })
 }
 
-/// Per-packet RTTs (ms), sorted, from `time=X` reply lines (iputils
-/// and BSD ping alike).
+/// Sorted RTTs from `time=X` lines (iputils and BSD alike).
 #[derive(Debug)]
 pub struct PingStats {
     pub rtts_ms: Vec<f64>,
@@ -242,8 +225,7 @@ impl PingStats {
         }
     }
 
-    /// `ping ARGS DEST -c COUNT`; ping exits non-zero on any loss, so
-    /// parse whatever came back. Zero replies means a dead tunnel.
+    /// ping exits non-zero on any loss, so the status is ignored.
     pub fn measure(args: &[&str], dest: &str, count: u32) -> Self {
         let out = Command::new("ping")
             .args(args)

@@ -1,7 +1,5 @@
-//! The `tinc` and `tinc-auth` binaries as subprocesses: argv parsing,
-//! dispatch, exit codes and stderr, plus the control-socket wire
-//! format against a scripted fake daemon. The command implementations
-//! themselves are unit-tested in `src/cmd/`.
+//! The `tinc`/`tinc-auth` binaries as subprocesses; commands themselves
+//! are unit-tested in `src/cmd/`.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -58,28 +56,24 @@ impl Run {
         }
     }
 
-    /// Asserts exit 0; returns stdout.
     #[track_caller]
     pub fn ok(self) -> String {
         assert!(self.success, "failed: {}", self.stderr);
         self.stdout
     }
 
-    /// Asserts exit 0; returns stderr (warnings).
     #[track_caller]
     pub fn ok_stderr(self) -> String {
         assert!(self.success, "failed: {}", self.stderr);
         self.stderr
     }
 
-    /// Asserts a non-zero exit; returns stderr.
     #[track_caller]
     pub fn fails(self) -> String {
         assert!(!self.success, "unexpectedly succeeded: {}", self.stdout);
         self.stderr
     }
 
-    /// Asserts a non-zero exit with `needle` in stderr.
     #[track_caller]
     pub fn fails_with(self, needle: &str) -> String {
         let stderr = self.fails();
@@ -88,8 +82,7 @@ impl Run {
     }
 }
 
-/// `tinc ARGS` with `NETNAME` removed from the environment so the
-/// caller's shell cannot change confbase resolution.
+/// `NETNAME` removed so the caller's shell cannot change confbase.
 pub(crate) fn tinc(args: &[&str]) -> Run {
     tinc_stdin(args, b"")
 }
@@ -111,21 +104,18 @@ pub(crate) fn tinc_with(args: &[&str], stdin: &[u8], tweak: impl FnOnce(&mut Com
     Run::new(child.wait_with_output().unwrap())
 }
 
-/// A temp directory holding `vpn/` as confbase and `tinc.pid` /
-/// `tinc.socket` for the (optional) fake daemon.
+/// Temp dir with `vpn/` as confbase and `tinc.pid`/`tinc.socket`.
 pub(crate) struct Conf {
     dir: tempfile::TempDir,
 }
 
 impl Conf {
-    /// Empty confbase; the pidfile does not exist.
     pub fn bare() -> Self {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("vpn")).unwrap();
         Self { dir }
     }
 
-    /// After `tinc init NAME`.
     pub fn init(name: &str) -> Self {
         let conf = Self::bare();
         conf.tinc(&["init", name]).ok();
@@ -140,7 +130,6 @@ impl Conf {
         self.dir.path().join("vpn")
     }
 
-    /// confbase as an argv string.
     pub fn arg(&self) -> String {
         self.base().to_str().unwrap().to_owned()
     }
@@ -175,8 +164,7 @@ impl Conf {
         tinc_stdin(&full, stdin)
     }
 
-    /// Write a pidfile naming this process (so `kill(pid, 0)`
-    /// succeeds) and bind the control socket next to it.
+    /// Pidfile names this process so `kill(pid, 0)` succeeds.
     fn listen(&self) -> (std::os::unix::net::UnixListener, String) {
         let cookie = format!("{:064x}", rand_cookie());
         std::fs::write(
@@ -192,8 +180,7 @@ impl Conf {
         )
     }
 
-    /// Fake daemon serving one control connection with `script` after
-    /// the greeting. `finish()` joins it and propagates its panics.
+    /// One scripted control connection; `finish()` propagates panics.
     pub fn serve(&self, script: impl FnOnce(&mut CtlConn) + Send + 'static) -> FakeDaemon {
         let (listener, cookie) = self.listen();
         let thread = std::thread::spawn(move || {
@@ -204,8 +191,7 @@ impl Conf {
         FakeDaemon(Some(thread))
     }
 
-    /// Fake daemon serving every connection with `script`, for the
-    /// long-running `tinc-auth` tests. Detached; dies with the test.
+    /// Every connection, for `tinc-auth`. Detached.
     pub fn serve_forever(&self, script: impl Fn(&mut CtlConn) + Send + Sync + 'static) {
         let (listener, cookie) = self.listen();
         let script = std::sync::Arc::new(script);
@@ -236,15 +222,12 @@ impl FakeDaemon {
     }
 }
 
-/// The daemon side of one control connection.
 pub(crate) struct CtlConn {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
 }
 
 impl CtlConn {
-    /// Check the client's `0 ^COOKIE 0` and answer like tincd:
-    /// `0 NAME 17.7` then `4 0 PID`.
     fn greet(stream: UnixStream, cookie: &str) -> Self {
         let mut conn = Self {
             writer: stream.try_clone().unwrap(),
@@ -257,7 +240,6 @@ impl CtlConn {
         conn
     }
 
-    /// Next request line without the newline; `None` at EOF.
     pub fn recv(&mut self) -> Option<String> {
         let mut line = String::new();
         match self.reader.read_line(&mut line).unwrap() {
@@ -287,7 +269,6 @@ impl CtlConn {
         self.writer.write_all(bytes).unwrap();
     }
 
-    /// Half-close so the client sees EOF while we can still read.
     pub fn close(&mut self) {
         self.writer.shutdown(std::net::Shutdown::Write).unwrap();
     }
@@ -304,8 +285,6 @@ impl Drop for AuthDaemon {
 }
 
 impl AuthDaemon {
-    /// `tinc-auth -c BASE -n mesh --pidfile PIDFILE ARGS` with socket
-    /// activation variables removed.
     pub fn spawn(conf: &Conf, args: &[&str]) -> Self {
         let child = Command::new(bin("tinc-auth"))
             .arg("-c")
@@ -321,8 +300,7 @@ impl AuthDaemon {
         Self(child)
     }
 
-    /// Read stderr up to the `listening` line; returns the `IdP` port if
-    /// one was announced. Panics with stderr if the process exits.
+    /// Blocks until `listening`; the `IdP` port if one was announced.
     pub fn wait_ready(&mut self) -> Option<u16> {
         let stderr = self.0.stderr.take().unwrap();
         let mut idp_port = None;
@@ -366,7 +344,6 @@ pub(crate) struct HttpResponse {
 }
 
 impl HttpResponse {
-    /// Parse a `Connection: close` response.
     pub fn read(stream: impl Read) -> Self {
         let mut reader = BufReader::new(stream);
         let mut line = String::new();

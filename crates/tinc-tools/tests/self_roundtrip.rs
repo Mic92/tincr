@@ -1,18 +1,8 @@
-//! `sptps_test` / `sptps_keypair` as subprocesses over a real socket,
-//! optionally against the C binaries (`TINC_C_SPTPS_TEST`,
-//! `TINC_C_SPTPS_KEYPAIR`; the devshell sets both, `nix build
-//! .#sptps-test-c` provides them).
-//!
-//! Compared to the in-process `tinc-sptps/tests/vs_c.rs` this covers
-//! `OsRng`, PEM key files end to end, kernel short reads/coalescing on
-//! the stream framing, and the binaries' argv/poll/EOF handling.
-//!
-//! In the 2×2 matrix, Rust server + C client exercises the Rust
-//! responder, C server + Rust client the Rust initiator; C↔C is the
-//! control. `init_keys_load_in_c` additionally feeds keys written by
-//! `tinc init` (a different PEM writer) to the C binary. Datagram
-//! servers never see EOF (UDP has no FIN) and are
-//! killed once the expected bytes arrived.
+//! `sptps_test`/`sptps_keypair` as subprocesses over a real socket,
+//! Rust and (with `TINC_C_SPTPS_TEST`/`TINC_C_SPTPS_KEYPAIR`, set by the
+//! devshell) C in every server/client combination. Covers what the
+//! in-process `vs_c.rs` cannot: `OsRng`, PEM files, kernel short
+//! reads, the binaries' argv/poll/EOF handling.
 
 #![forbid(unsafe_code)]
 
@@ -58,7 +48,6 @@ impl Impl {
     }
 }
 
-/// When CI provides the C binaries, a skipped cross test is a failure.
 fn skip_without_c(test: &str) -> bool {
     if Impl::C.available() {
         return false;
@@ -76,8 +65,6 @@ struct KeyPair {
     public: PathBuf,
 }
 
-/// Through the binary, so argv handling and the on-disk PEM format are
-/// part of the test.
 fn generate_keys(generator: Impl, dir: &Path, name: &str) -> KeyPair {
     let keys = KeyPair {
         private: dir.join(format!("{name}.priv")),
@@ -92,9 +79,8 @@ fn generate_keys(generator: Impl, dir: &Path, name: &str) -> KeyPair {
     keys
 }
 
-/// `Listening on N...` from the server's stderr. The caller must keep
-/// the stderr handle alive: if the read end closes, the server's next
-/// diagnostic line is a SIGPIPE.
+/// The caller must keep stderr open afterwards or the server's next
+/// diagnostic is a SIGPIPE.
 fn wait_for_port(stderr: &mut impl Read) -> u16 {
     let mut reader = BufReader::new(stderr);
     let mut line = String::new();
@@ -135,9 +121,8 @@ fn read_exactly(stdout: &mut impl Read, len: usize) -> Vec<u8> {
     out
 }
 
-/// Wait up to 2s for a clean exit; otherwise kill. `must_exit` turns
-/// the kill into a failure (stream servers see EOF, datagram ones do
-/// not).
+/// Datagram servers never see EOF and are killed; stream servers must
+/// exit by themselves.
 fn reap(mut child: Child, must_exit: bool) {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -155,9 +140,7 @@ fn reap(mut child: Child, must_exit: bool) {
     }
 }
 
-/// Server listens (`-r`: ignore stdin), client connects and sends
-/// `data` then quits on stdin EOF (`-q`); returns what the server
-/// printed. Both binaries share the CLI, so the impls are just paths.
+/// Returns what the server printed for `data` sent by the client.
 fn roundtrip(
     server: (Impl, &KeyPair),
     client: (Impl, &KeyPair),
@@ -202,7 +185,6 @@ fn roundtrip(
         client_out.status,
         String::from_utf8_lossy(&client_out.stderr)
     );
-    // Keep draining stderr until the server is gone (see wait_for_port).
     let drain = std::thread::spawn(move || {
         let mut sink = Vec::new();
         let _ = server_stderr.read_to_end(&mut sink);
@@ -212,9 +194,6 @@ fn roundtrip(
     received
 }
 
-/// Each side generates its own keys with its own implementation, so
-/// only public keys cross implementations here; `cross_pem_private_keys`
-/// covers the private key format.
 fn scenario(server: Impl, client: Impl, data: &[u8], datagram: bool) {
     let dir = tempfile::tempdir().unwrap();
     let server_keys = generate_keys(server, dir.path(), "server");
@@ -231,14 +210,11 @@ fn scenario(server: Impl, client: Impl, data: &[u8], datagram: bool) {
     assert_eq!(received.len(), data.len());
 }
 
-/// Not all zeroes, so a decryption failure cannot look like success.
 fn payload() -> Vec<u8> {
     (0..=255).collect()
 }
 
-/// Larger than `sptps_test`'s read buffer and any socket buffer, so the
-/// stream framing is reassembled from several short reads. A counter,
-/// so a dropped or swapped chunk shows as a localised diff.
+/// Forces stream reassembly across several short reads.
 fn large_payload() -> Vec<u8> {
     (0u32..65536).map(|i| (i % 251) as u8).collect()
 }
@@ -253,8 +229,6 @@ fn datagram() {
     scenario(Impl::Rust, Impl::Rust, &payload(), true);
 }
 
-/// Same two key pairs, each used once as initiator and once as
-/// responder.
 #[test]
 fn stream_swapped_roles() {
     let dir = tempfile::tempdir().unwrap();
@@ -292,8 +266,6 @@ fn cross_matrix() {
     }
 }
 
-/// Rust responder reassembling what the C initiator fragmented, and
-/// the reverse.
 #[test]
 fn cross_stream_large_payload() {
     if skip_without_c("cross_stream_large_payload") {
@@ -303,9 +275,7 @@ fn cross_stream_large_payload() {
     scenario(Impl::C, Impl::Rust, &large_payload(), false);
 }
 
-/// Private keys generated by one implementation, loaded by the other
-/// on both ends: the 96-byte `private ‖ public` blob and its LSB-first
-/// base64 PEM are where the format could plausibly diverge.
+/// Private key files written by one implementation, read by the other.
 #[test]
 fn cross_pem_private_keys() {
     if skip_without_c("cross_pem_private_keys") {
@@ -324,8 +294,7 @@ fn cross_pem_private_keys() {
     }
 }
 
-/// `tinc init`'s private key PEM and host-file public key (re-wrapped
-/// as the PEM `sptps_test` wants) must load in C.
+/// Keys as `tinc init` writes them (a different PEM writer) load in C.
 #[test]
 fn init_keys_load_in_c() {
     if skip_without_c("init_keys_load_in_c") {

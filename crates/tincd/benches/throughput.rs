@@ -1,17 +1,11 @@
-//! Throughput benchmark: iperf3 through two real daemons over real
-//! TUNs in a bwrap netns, C tincd as the baseline.
+//! iperf3 through two daemons on real TUNs in a bwrap netns, with C
+//! tincd as the baseline. Absolute numbers are machine-specific; the
+//! Rust/C ratio is what to compare across commits.
 //!
 //! ```sh
-//! cargo bench --bench throughput --profile profiling
-//! cargo bench --bench throughput -- rust_rust   # one pairing only
-//! cargo bench --bench throughput -- latency     # latency only (idle + load)
-//! cargo bench --bench throughput -- mesh        # 4-peer aggregate, Shards A/B
+//! cargo bench --bench throughput [-- rust_rust | latency | mesh]
+//! TINCD_PERF=1 …    # perf record;  TINCD_TRACE=1 … # perf trace (root)
 //! ```
-//!
-//! Runs C↔C, Rust↔Rust and Rust↔C sequentially and reports the
-//! Rust/C ratio — absolute numbers are machine-specific, the ratio
-//! is what you compare across commits. `TINCD_PERF=1` adds `perf
-//! record`, `TINCD_TRACE=1` adds `perf trace -s` (needs root).
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
@@ -45,8 +39,7 @@ mod bench {
 
     const BOB_IP: &str = "10.44.0.2";
 
-    /// Outer pass: check gates, re-exec inside bwrap (forwarding the
-    /// filter args), exit with its status. Inner pass: `Some`.
+    /// Outer pass re-execs inside bwrap and exits; inner pass returns.
     fn enter_netns() -> Option<ChildNetNs> {
         if std::env::var_os("BWRAP_INNER").is_some() {
             bwrap_inner_init();
@@ -73,9 +66,7 @@ mod bench {
         std::process::exit(status.code().unwrap_or(1));
     }
 
-    /// Persistent TUN; `multi_queue` only for Rust ends (C tincd
-    /// cannot attach to one). Deleted on drop, in whichever netns it
-    /// ended up.
+    /// C tincd cannot attach to a `multi_queue` TUN. Deleted on drop.
     struct TunDev {
         name: String,
         netns: Option<String>,
@@ -95,8 +86,7 @@ mod bench {
             }
         }
 
-        /// After the daemon attached: move into `netns` (the fd
-        /// binding survives, addresses would not) and configure.
+        /// After the daemon attached; addresses do not survive a move.
         fn place(&mut self, netns: Option<&str>, addr: &str, routes: &[&str]) {
             assert!(
                 wait_for_carrier(&self.name, Duration::from_secs(2)),
@@ -140,9 +130,7 @@ mod bench {
             .with_conf(&bench_conf(1))
     }
 
-    /// alice on tincT0 (outer netns, 10.44.0.1), bob on tincT1 in
-    /// `bobside` (10.44.0.2), UDP path hot. Field order matters:
-    /// daemons drop before their devices.
+    /// Field order: daemons drop before their devices.
     struct LinuxTunnel {
         tunnel: Tunnel,
         _devices: [TunDev; 2],
@@ -166,10 +154,8 @@ mod bench {
         }
     }
 
-    /// iperf3 server in `netns`. Its bind is asynchronous and cannot
-    /// be connect-probed from here (that would go through the
-    /// tunnel), hence the sleep. `--one-off` so it exits after one
-    /// client; killed on drop in case none ever connected.
+    /// The bind cannot be probed from here (that would go through the
+    /// tunnel), hence the sleep. Killed on drop.
     struct IperfServer(Child);
 
     impl IperfServer {
@@ -197,14 +183,11 @@ mod bench {
         iperf3_client(&tunnel.tunnel, &["-c", BOB_IP, "-t", "5"]).bits_per_second
     }
 
-    /// `-D -i 0.01`: 100 pings in ~1s. Loss is reported, not
-    /// asserted; drops under saturation are normal.
     fn ping_rtts() -> PingStats {
         PingStats::measure(&["-i", "0.01", "-D"], BOB_IP, 100)
     }
 
-    /// RTT under iperf3 load: the queueing delay batching adds, which
-    /// throughput alone hides. Returns the load's Mbps too.
+    /// The queueing delay batching adds is invisible in throughput.
     fn measure_latency_under_load(tunnel: &LinuxTunnel) -> (f64, PingStats) {
         let _server = IperfServer::start("bobside");
         let client = Command::new("iperf3")
@@ -213,7 +196,6 @@ mod bench {
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn iperf3 client");
-        // Past TCP slow start before sampling.
         std::thread::sleep(Duration::from_millis(500));
         let ping = ping_rtts();
         let out = client.wait_with_output().expect("wait iperf3 client");
@@ -228,17 +210,14 @@ mod bench {
         (bps, ping)
     }
 
-    /// `perf record -p` / `perf trace -s -p`, stopped with SIGINT on
-    /// drop (SIGTERM would truncate the output). Silently absent when
-    /// perf is missing or `perf_event_paranoid` forbids attaching.
+    /// Stopped with SIGINT on drop (SIGTERM truncates perf output).
     struct Perf {
         child: Option<Child>,
         summary: Option<PathBuf>,
     }
 
     impl Perf {
-        /// `-F 499`: off tick alignment; two samplers at 999 Hz
-        /// starved the meta connection under saturation.
+        /// 999 Hz on two daemons starved the meta connection.
         fn record(pid: nix::unistd::Pid, out: &Path) -> Self {
             if !perf_enabled() {
                 return Self {
@@ -265,8 +244,7 @@ mod bench {
             }
         }
 
-        /// Exact per-syscall counts. Needs root/`CAP_PERFMON`:
-        /// `sudo -E env PATH=$PATH TINCD_TRACE=1 cargo bench ...`.
+        /// Needs root or `CAP_PERFMON`.
         fn trace(pid: nix::unistd::Pid, out: &Path) -> Self {
             if std::env::var_os("TINCD_TRACE").is_none() {
                 return Self {
@@ -313,9 +291,7 @@ mod bench {
         }
     }
 
-    /// Top self-time symbols. Healthy: crypto dominates, <5% in
-    /// `tincd::`; an `alloc::raw_vec` entry means a per-packet clone
-    /// crept in.
+    /// Healthy: crypto dominates; `alloc::raw_vec` means a per-packet clone.
     fn report_hot_symbols(data: &Path) {
         if !data.exists() {
             return;
@@ -339,8 +315,6 @@ mod bench {
         eprintln!("  full report: perf report -i {}", data.display());
     }
 
-    /// `name` is what `cargo bench -- <substr>` filters on. Rust↔C is
-    /// the interop sanity check and not profiled.
     struct Pairing {
         name: &'static str,
         label: &'static str,
@@ -349,7 +323,6 @@ mod bench {
         bob: Impl,
     }
 
-    /// Profilers bracket only the iperf3 window, not the handshake.
     fn run_throughput(pairing: &Pairing, perf_out: &Path) -> f64 {
         eprintln!("--- {} ---", pairing.label);
         let tunnel = setup_tunnel(pairing.name, &pairing.alice, &pairing.bob);
@@ -374,8 +347,7 @@ mod bench {
         bps
     }
 
-    /// Idle then under-load RTT on one tunnel, so load is the only
-    /// variable. Returns the under-load p99.
+    /// Returns the under-load p99.
     fn run_latency(pairing: &Pairing, idle: bool, load: bool) -> Option<f64> {
         eprintln!("--- latency {} ---", pairing.label);
         let tunnel = setup_tunnel(
@@ -393,10 +365,8 @@ mod bench {
         })
     }
 
-    /// alice with N bobs as distinct nodes (distinct id6, so RX
-    /// spreads over alice's shards), each bob's TUN in its own netns
-    /// so return routes don't collide. Parallel iperf3 into every
-    /// bob; the aggregate is alice-bound.
+    /// N bobs (distinct id6, so RX spreads over alice's shards), each
+    /// TUN in its own netns so return routes don't collide.
     struct Mesh {
         alice: Node,
         bobs: Vec<Node>,
@@ -518,7 +488,6 @@ mod bench {
     }
 
     pub fn main() {
-        // Substring filters after `--`; cargo passes `--bench` too.
         let filters: Vec<String> = std::env::args()
             .skip(1)
             .filter(|a| !a.starts_with('-'))
@@ -538,13 +507,11 @@ mod bench {
             eprintln!("(set TINCD_PERF=1 for sampling profile, TINCD_TRACE=1 for syscall counts)");
         }
 
-        // Needs 4+ idle cores to mean anything, so only on request.
         if filters.iter().any(|f| f == "mesh") {
             run_mesh(4);
             return;
         }
 
-        // C↔C first: the healthy profile to diff against.
         let pairings = [
             Pairing {
                 name: "c_c",
@@ -576,8 +543,6 @@ mod bench {
             if selected(pairing.name) {
                 throughput[i] = Some(run_throughput(pairing, &perf_out));
             }
-            // `want_latency` stops a bare `rust_rust` from also
-            // substring-matching `latency_load_rust_rust`.
             let idle = want_latency && selected(&format!("latency_idle_{}", pairing.name));
             let load = want_latency && selected(&format!("latency_load_{}", pairing.name));
             if idle || load {
@@ -601,12 +566,9 @@ mod bench {
                 }
             }
         }
-        // No pass/fail gate: compare across commits by eye. ~50% of C
-        // usually means a per-packet allocation.
         if let (Some(c), Some(rust)) = (c, rust) {
             eprintln!("Rust/C ratio: {:.1}%", rust / c * 100.0);
             if let Some(mixed) = mixed {
-                // The slower endpoint is the mixed pairing's bottleneck.
                 eprintln!(
                     "Rust↔C / min(Rust↔Rust, C↔C): {:.1}%",
                     mixed / rust.min(c) * 100.0
