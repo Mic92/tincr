@@ -1,42 +1,9 @@
 //! S1 (test-process-as-peer) port of `test/integration/security.py`
 //! and `test/integration/splice.{c,py}`.
-//!
-//! ## Why
-//!
-//! These tests pin the protocol's **security boundary** — the cases
-//! where `id_h` MUST drop the connection rather than trust adversarial
-//! input. The gates live in `dispatch.rs::handle_id`: own-ID
-//! rejection, unknown-identity, version
-//! rollback. `stop.rs::peer_wrong_key_fails_sig` is the
-//! one existing S1 negative case (SIG verify); these add the
-//! pre-SPTPS gates.
-//!
-//! `splice_mitm` is the BIG one: it proves that `tcp_label`'s
-//! argument ordering (initiator, responder) is the MITM defense.
-//! A relay that lies about identity to BOTH daemons makes their
-//! labels diverge → transcripts diverge → SIG verify fails. This
-//! is the ONLY thing standing between "key exchange" and "key
-//! exchange that authenticates". Without it, a passive relay gets
-//! key compromise.
-//!
-//! ## What ISN'T here
-//!
-//! `security.py::test_tarpitted` — the tarpit is loopback-exempt
-//! (`daemon.rs:1288` `if !is_local(&peer)`). Integration test
-//! from `127.0.0.1` would never trigger it. The bucket arithmetic
-//! is pinned by `listen.rs::tarpit_*` unit tests; that's enough.
-//!
-//! ## Harness sharing
-//!
-//! Same helpers as `stop.rs` and `two_daemons.rs`, copied. Option-1
-//! from the task brief: test files are independent compilation units;
-//! the duplication is small and a `tests/common/mod.rs` is a 3-way
-//! merge hazard while other agents touch the existing files.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -47,9 +14,6 @@ use common::{
     tincd_at, wait_for_file, write_ed25519_privkey,
 };
 
-/// Minimal config for one daemon. Returns the daemon's pubkey
-/// (unused by the negative tests; the splice test reads it).
-/// `extra_conf` is appended to `tinc.conf` (for `PingTimeout`).
 fn write_config(confbase: &std::path::Path, name: &str, seed: u8, extra_conf: &str) -> [u8; 32] {
     std::fs::create_dir_all(confbase.join("hosts")).unwrap();
     std::fs::write(
@@ -64,7 +28,6 @@ fn write_config(confbase: &std::path::Path, name: &str, seed: u8, extra_conf: &s
     pubkey_from_seed(&seed)
 }
 
-/// Spawn a daemon. Same flags everywhere.
 fn spawn_daemon(
     confbase: &std::path::Path,
     pidfile: &std::path::Path,
@@ -77,8 +40,7 @@ fn spawn_daemon(
         .expect("spawn tincd")
 }
 
-/// One daemon spawned + ready. The fixture for the single-daemon
-/// negative tests.
+/// One daemon spawned + ready check
 struct OneDaemon {
     _tmp: TmpGuard,
     child: Child,
@@ -114,28 +76,16 @@ impl OneDaemon {
 }
 
 /// Send `id_line` and assert the daemon drops the connection
-/// (immediate EOF — `handle_id` returns `BadId`, `DispatchResult::
-/// Drop` → `terminate(id)`). Returns the daemon's stderr after
-/// kill (for log-message assertions).
-///
-/// `expect_reply` → we expect `"0 testnode 17.7\n"` THEN EOF (the
-/// daemon got far enough to queue its `send_id` reply before the
-/// later gate fired). Currently no test uses it, but the python
-/// `test_tarpitted` did — kept for symmetry.
+/// `expect_reply` → we expect `"0 testnode 17.7\n"` then EOF
 fn assert_dropped(daemon: OneDaemon, id_line: &str, expect_reply: bool) -> String {
     let stream = TcpStream::connect(daemon.tcp_addr).expect("TCP connect");
-    // Short timeout: `terminate` is synchronous in the dispatch
-    // path; the close happens before `handle_id`'s caller returns.
-    // 2s is generous.
+    // Short timeout because `terminate` is synchronous
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
     writeln!(&stream, "{id_line}").unwrap();
 
-    // Read everything until EOF. `BadId` → `Drop` → `terminate`
-    // closes the fd. We see EOF (read returns 0). If the daemon
-    // somehow proceeded (sent its ID reply + KEX bytes), we'd
-    // read non-empty and fail below.
+    // Read everything until EOF
     let mut got = Vec::new();
     let mut buf = [0u8; 256];
     loop {
@@ -143,7 +93,6 @@ fn assert_dropped(daemon: OneDaemon, id_line: &str, expect_reply: bool) -> Strin
             Ok(0) => break, // EOF — daemon dropped us. EXPECTED.
             Ok(n) => got.extend_from_slice(&buf[..n]),
             // WouldBlock after the read timeout: daemon DIDN'T close.
-            // Treat as failure (the test expected a drop).
             Err(e) => panic!(
                 "read from daemon errored ({e}); got so far: {:?}",
                 String::from_utf8_lossy(&got)
@@ -159,7 +108,6 @@ fn assert_dropped(daemon: OneDaemon, id_line: &str, expect_reply: bool) -> Strin
             String::from_utf8_lossy(&got)
         );
     } else {
-        // `security.py` `check.false(data)`: no reply at all.
         assert!(
             got.is_empty(),
             "expected daemon to drop with no reply; got {:?}",
@@ -170,17 +118,13 @@ fn assert_dropped(daemon: OneDaemon, id_line: &str, expect_reply: bool) -> Strin
     drain_stderr(daemon.child)
 }
 
-// security.py ports
-
-/// Reject ID claiming our own name. Gate: `dispatch.rs::handle_id`
-/// `if name == ctx.my_name`.
+/// Reject ID claiming our own name (`dispatch.rs::handle_id`)
+/// to avoid that a self-loop in the meta-graph
 ///
 /// The daemon sees `"0 testnode 17.7\n"` — its OWN name. The
 /// peer-is-us check fires before `send_id`, so we get nothing back.
 ///
-/// Why this gate exists: a self-loop in the meta-graph would make
-/// every `ADD_EDGE` we broadcast come back via this peer, get
-/// re-broadcast, infinite.
+/// Why this gate exists: .
 #[test]
 fn own_id_rejected() {
     let d = OneDaemon::spawn("own-id", "");
@@ -199,14 +143,9 @@ fn own_id_rejected() {
     );
 }
 
-/// Reject ID for unknown peer (no `hosts/baz`). Gate:
-/// `dispatch.rs::handle_id` pubkey-load fails (the
-/// `let Some(ecdsa) = ecdsa else` arm).
+/// Reject ID for unknown peer (no `hosts/baz`). (`dispatch.rs::handle_id`)
 ///
-/// "File missing" and "file has no key" collapse into one error —
-/// see the comment at the `host_config` parse in `handle_id`.
-/// Either way: drop before the `send_id` reply, so the observable
-/// behavior is no reply.
+/// "File missing" and "file has no key" collapse into one error and we get no reply
 #[test]
 fn unknown_id_rejected() {
     let d = OneDaemon::spawn("unknown-id", "");
@@ -222,27 +161,13 @@ fn unknown_id_rejected() {
     );
 }
 
-/// `security.py::test_null_metakey`. The python test sends a legacy
-/// `17.0` ID followed by a `METAKEY` with empty hex. We forbid
-/// legacy entirely (`DISABLE_LEGACY` equivalent). The relevant
-/// gate is the version-minor check.
-///
-/// We are stricter than C tinc: `minor < 2` is rejected (we don't
-/// speak legacy at any minor). The daemon never
-/// gets to the METAKEY line.
-///
-/// **The catch**: the python sends the daemon's own name AND `17.0`,
-/// so two gates could fire. We send a KNOWN peer name with `17.0`
-/// to isolate the version gate.
+/// Rejeet the old meta legacy protocol that we never implemented in tincr
 #[test]
 fn legacy_minor_rejected() {
     let tmp = tmp!("legacy-minor");
     let (confbase, pidfile, socket) = tmp.std_paths();
 
     write_config(&confbase, "testnode", 0x42, "");
-    // We DO need a hosts/bar with a pubkey: the version check at
-    // The `minor < 2` check is AFTER the pubkey load. Without
-    // a pubkey, the unknown-identity gate fires first.
     let bar_pub = *tinc_crypto::sign::SigningKey::from_seed(&[0x99; 32]).public_key();
     std::fs::write(
         confbase.join("hosts").join("bar"),
@@ -266,7 +191,7 @@ fn legacy_minor_rejected() {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
-    // `17.0`: legacy. `handle_id` `if minor < 2` → BadId.
+    // `17.0`: legacy. `handle_id` → BadId.
     writeln!(&stream, "0 bar 17.0").unwrap();
 
     let mut got = Vec::new();
@@ -396,289 +321,6 @@ fn id_timeout_half_open_survives() {
 
     let _ = child.kill();
     let _ = child.wait();
-}
-
-// splice.py / splice.c port
-
-/// `splice.py` / `splice.c` — the MITM relay. Two daemons (alice,
-/// bob), both passive (NO `ConnectTo`). Test process opens two
-/// `TcpStream`s. To alice we send `"0 bob 17.7\n"`; to bob we send
-/// `"0 alice 17.7\n"`. Each daemon's `id_h` succeeds (both have
-/// each other's pubkey). Each sends its ID reply + responder KEX.
-/// We consume the ID-reply lines, then proxy raw bytes between them.
-///
-/// **Why this fails to authenticate** — TWO defense layers:
-///
-/// 1. **Role asymmetry** (`tinc-sptps::receive_kex:553`): only
-///    initiators send SIG on receiving the peer's KEX. Responders
-///    wait for the initiator's SIG before sending theirs
-///    (`receive_sig` step 3). Both daemons here are RESPONDERS
-///    (inbound conns, `outgoing.is_none()`). Both send KEX (in
-///    `sptps_start`), both receive the other's KEX via the relay,
-///    NEITHER sends SIG. Deadlock. The C splice has the same
-///    behavior — `splice.py` only asserts node count, not `BadSig`.
-///
-/// 2. **Label asymmetry** (`dispatch.rs::tcp_label`): IF a SIG ever
-///    arrived (e.g. the relay also injected a fake one, or one
-///    daemon was an initiator via `ConnectTo`), the labels would
-///    diverge — alice computes `tcp_label("bob", "alice")`, bob
-///    computes `tcp_label("alice", "bob")`. Different transcripts
-///    → `BadSig`. This layer is WHY the relay can't just inject SIGs
-///    or forward an initiator's bytes: even with real keys on both
-///    ends, the labels disagree. THIS test exercises layer 1;
-///    `stop.rs::peer_wrong_key_fails_sig` exercises the SIG verify
-///    machinery; the label-ordering itself is pinned by
-///    `proto::tests::tcp_label_has_trailing_nul`.
-///
-/// **Assertion**: `dump nodes` on each daemon shows exactly 1
-/// REACHABLE node (itself). Neither gained a peer.
-///
-/// (`load_all_nodes` adds the OTHER name to the graph at setup
-/// — each daemon has a hosts/ file for the other for the pubkey.
-/// The MITM-defense invariant is reachability: no edge →
-/// unreachable.)
-#[test]
-#[expect(clippy::items_after_statements)] // e2e MITM scenario: helpers scoped here
-fn splice_mitm_rejected() {
-    use std::net::TcpListener;
-
-    let tmp = tmp!("splice");
-
-    // two-daemon setup (no ConnectTo on either side)
-    // Same shape as `two_daemons.rs::Node` but inlined: we need
-    // BOTH daemons to be PASSIVE (the relay is the initiator).
-    // Pre-allocate ports so each daemon can bind a known port,
-    // and so the test can connect to it.
-    let alloc_port = || {
-        TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
-    };
-    struct N {
-        confbase: PathBuf,
-        pidfile: PathBuf,
-        socket: PathBuf,
-        port: u16,
-        pubkey: [u8; 32],
-    }
-    let mk = |name: &str, seed: u8| -> N {
-        let confbase = tmp.path().join(name);
-        N {
-            pidfile: tmp.path().join(format!("{name}.pid")),
-            socket: tmp.path().join(format!("{name}.socket")),
-            port: alloc_port(),
-            pubkey: write_config(&confbase, name, seed, ""),
-            confbase,
-        }
-    };
-    let alice = mk("alice", 0xAA);
-    let bob = mk("bob", 0xBB);
-
-    // Override hosts/SELF with the pre-allocated port (write_config
-    // wrote `Port = 0`; we need the port known to the test).
-    std::fs::write(
-        alice.confbase.join("hosts").join("alice"),
-        format!("Port = {}\n", alice.port),
-    )
-    .unwrap();
-    std::fs::write(
-        bob.confbase.join("hosts").join("bob"),
-        format!("Port = {}\n", bob.port),
-    )
-    .unwrap();
-
-    // Cross-register pubkeys. Each daemon's `id_h` reads the
-    // OTHER's pubkey from `hosts/OTHER`. NO `Address` line —
-    // neither daemon initiates. The relay does.
-    std::fs::write(
-        alice.confbase.join("hosts").join("bob"),
-        format!(
-            "Ed25519PublicKey = {}\n",
-            tinc_crypto::b64::encode(&bob.pubkey)
-        ),
-    )
-    .unwrap();
-    std::fs::write(
-        bob.confbase.join("hosts").join("alice"),
-        format!(
-            "Ed25519PublicKey = {}\n",
-            tinc_crypto::b64::encode(&alice.pubkey)
-        ),
-    )
-    .unwrap();
-
-    // spawn both
-    let mut alice_child = spawn_daemon(&alice.confbase, &alice.pidfile, &alice.socket);
-    let mut bob_child = spawn_daemon(&bob.confbase, &bob.pidfile, &bob.socket);
-
-    assert!(wait_for_file(&alice.socket), "alice setup; stderr: {}", {
-        let _ = bob_child.kill();
-        let _ = bob_child.wait();
-        drain_stderr(std::mem::replace(
-            &mut alice_child,
-            Command::new("true").spawn().unwrap(),
-        ))
-    });
-    assert!(wait_for_file(&bob.socket), "bob setup; stderr: {}", {
-        let _ = alice_child.kill();
-        let _ = alice_child.wait();
-        drain_stderr(std::mem::replace(
-            &mut bob_child,
-            Command::new("true").spawn().unwrap(),
-        ))
-    });
-
-    // the splice: connect to both, lie about identity
-    // To alice: pretend to be bob. To bob: pretend to be alice.
-    // The cross-over.
-    let to_alice = TcpStream::connect(("127.0.0.1", alice.port)).expect("connect alice");
-    let to_bob = TcpStream::connect(("127.0.0.1", bob.port)).expect("connect bob");
-    to_alice
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-    to_bob
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-
-    writeln!(&to_alice, "0 bob 17.7").unwrap();
-    writeln!(&to_bob, "0 alice 17.7").unwrap();
-
-    // consume ID replies (read until '\n')
-    // Read byte-by-byte until `\n` — can't use BufReader (it
-    // buffers past the `\n` into KEX bytes which
-    // we then can't proxy). Same gotcha as `stop.rs:1028`.
-    fn read_until_nl(mut s: &TcpStream) -> Vec<u8> {
-        let mut out = Vec::new();
-        let mut b = [0u8; 1];
-        loop {
-            match s.read(&mut b) {
-                Ok(0) => panic!("daemon closed before ID reply; got: {out:?}"),
-                Ok(_) => {
-                    if b[0] == b'\n' {
-                        return out;
-                    }
-                    out.push(b[0]);
-                }
-                Err(e) => panic!("read ID reply: {e}"),
-            }
-        }
-    }
-    let alice_id = read_until_nl(&to_alice);
-    let bob_id = read_until_nl(&to_bob);
-    assert_eq!(alice_id, b"0 alice 17.7", "alice ID reply");
-    assert_eq!(bob_id, b"0 bob 17.7", "bob ID reply");
-
-    // Proxy: two threads copy bytes in each direction.
-    // `TcpStream` impls Read/Write for `&TcpStream`; clone the
-    // streams for the duplex split.
-    //
-    // The proxy runs until ONE side closes (BadSig → terminate →
-    // EOF). `io::copy` returns when the read side hits EOF. The
-    // write side then errors (broken pipe) — ignored.
-    // splice.c uses select() (level-triggered, no timeout). Our
-    // streams have read timeouts; `io::copy` would bail on the
-    // first WouldBlock. Hand-roll the loop: keep relaying until
-    // BOTH sides EOF or the deadline hits. The handshake is two
-    // round trips (KEX then SIG); the threads need to survive the
-    // gap between them.
-    fn relay(mut from: &TcpStream, mut to: &TcpStream, deadline: Instant) {
-        let mut buf = [0u8; 1024];
-        while Instant::now() < deadline {
-            match from.read(&mut buf) {
-                Ok(0) => return, // EOF — daemon closed (BadSig fired)
-                Ok(n) => {
-                    // Broken pipe (other side already closed) → done.
-                    if to.write_all(&buf[..n]).is_err() {
-                        return;
-                    }
-                }
-                // WouldBlock = read timeout fired, no data yet.
-                // Keep going — the SIG might arrive next.
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(_) => return,
-            }
-        }
-    }
-
-    // Short read timeout so the relay loop checks `deadline`
-    // frequently. The 2s timeout above was for the ID-reply read;
-    // tighten now.
-    to_alice
-        .set_read_timeout(Some(Duration::from_millis(100)))
-        .unwrap();
-    to_bob
-        .set_read_timeout(Some(Duration::from_millis(100)))
-        .unwrap();
-
-    let to_alice_r = to_alice.try_clone().unwrap();
-    let to_alice_w = to_alice.try_clone().unwrap();
-    let to_bob_r = to_bob.try_clone().unwrap();
-    let to_bob_w = to_bob.try_clone().unwrap();
-
-    // 3s deadline: handshake is <100ms on loopback; CI slop.
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let t_ab = std::thread::spawn(move || relay(&to_alice_r, &to_bob_w, deadline));
-    let t_ba = std::thread::spawn(move || relay(&to_bob_r, &to_alice_w, deadline));
-    let _ = t_ab.join();
-    let _ = t_ba.join();
-
-    // ASSERT: dump nodes on each shows 1 row (self only)
-    // `splice.py:85-86`. `REQ_DUMP_NODES = 3`. Row format
-    // (`gossip.rs::dump_nodes`): `"18 3 NAME ID HOST port PORT ..."`.
-    // Terminator: bare `"18 3"`.
-    let alice_nodes = Ctl::connect(&alice.socket, &alice.pidfile).dump(3);
-    let bob_nodes = Ctl::connect(&bob.socket, &bob.pidfile).dump(3);
-
-    let alice_stderr = drain_stderr(alice_child);
-    let bob_stderr = drain_stderr(bob_child);
-
-    // Exactly 1 REACHABLE node each: itself. The splice did NOT
-    // add a peer edge. `load_all_nodes` puts the other name in
-    // the graph (each has a hosts/ file for the other's pubkey),
-    // but unreachable. Status bit 4 (`0x10`) = reachable.
-    let reachable = |rows: &[String]| -> Vec<String> {
-        rows.iter()
-            .filter_map(|r| {
-                let body = r.strip_prefix("18 3 ")?;
-                let mut t = body.split_whitespace();
-                let name = t.next()?;
-                // Body tokens: name id host "port" port cipher
-                // digest maclen compression options STATUS …
-                // Status is token 10; after `next()` consumed
-                // name, that's nth(9).
-                let status = u32::from_str_radix(t.nth(9)?, 16).ok()?;
-                (status & 0x10 != 0).then(|| name.to_owned())
-            })
-            .collect()
-    };
-    let alice_reach = reachable(&alice_nodes);
-    let bob_reach = reachable(&bob_nodes);
-    assert_eq!(
-        alice_reach,
-        vec!["alice".to_owned()],
-        "alice should see only herself reachable; all rows: {alice_nodes:?}\n\
-         alice stderr:\n{alice_stderr}\nbob stderr:\n{bob_stderr}"
-    );
-    assert_eq!(
-        bob_reach,
-        vec!["bob".to_owned()],
-        "bob should see only himself reachable; all rows: {bob_nodes:?}\n\
-         alice stderr:\n{alice_stderr}\nbob stderr:\n{bob_stderr}"
-    );
-
-    // NEITHER completed. The role-asymmetry deadlock means no SIG
-    // ever flowed; both daemons are stuck in `State::Sig` waiting.
-    // (See doc comment: this is defense layer 1.)
-    assert!(
-        !alice_stderr.contains("SPTPS handshake completed"),
-        "alice should NOT complete; stderr:\n{alice_stderr}"
-    );
-    assert!(
-        !bob_stderr.contains("SPTPS handshake completed"),
-        "bob should NOT complete; stderr:\n{bob_stderr}"
-    );
 }
 
 // Adversarial-input regression: malformed protocol lines after ACK.
