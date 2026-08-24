@@ -299,10 +299,9 @@ fn pack_ifr_name(iface: Option<&str>) -> io::Result<[libc::c_char; libc::IFNAMSI
             ),
         ));
     }
-    // `as c_char`: x86_64 `i8`, aarch64 `u8`. Kernel ifnames are
-    // `[A-Za-z0-9._-]` (`dev_valid_name`); ASCII; cast preserves.
+    // `c_char` is `i8` on x86_64, `u8` on aarch64.
     for (dst, src) in buf.iter_mut().zip(bytes) {
-        *dst = *src as libc::c_char;
+        *dst = libc::c_char::from_ne_bytes([*src]);
     }
     Ok(buf)
 }
@@ -413,14 +412,10 @@ fn tunsetiff(
     // NUL-terminated; `from_bytes_until_nul` finds the NUL or fails.
     // If it fails (kernel bug, no NUL in 16 bytes), error out.
     //
-    // `c_char` signedness varies by arch; `.map(.. as u8)` is safe
-    // (kernel ifnames are ASCII per `dev_valid_name`).
-    //
     // `to_string_lossy`: never lossy in practice, but forward-
     // compatible (kernel might relax someday) and avoids the
     // `into_string().unwrap()` panic-on-non-UTF8.
-    #[allow(clippy::cast_sign_loss)] // c_char→u8: ASCII bytes (c_char sign is arch-dependent)
-    let bytes = ifr.ifr_name.map(|c| c as u8);
+    let bytes = ifr.ifr_name.map(|c| c.to_ne_bytes()[0]);
     let name = CStr::from_bytes_until_nul(&bytes).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -498,8 +493,9 @@ fn siocgifhwaddr(fd: BorrowedFd<'_>) -> io::Result<Mac> {
     // write). The 14 bytes are: `[0..6]` MAC, `[6..14]` undefined
     // (kernel only sets the first 6 for `ARPHRD_ETHER`). We only
     // read `[0..6]`.
-    #[allow(clippy::cast_sign_loss)] // c_char→u8: raw MAC bytes (c_char sign is arch-dependent)
-    let sa_data = unsafe { ifr.ifr_ifru.ifru_hwaddr }.sa_data.map(|c| c as u8);
+    let sa_data = unsafe { ifr.ifr_ifru.ifru_hwaddr }
+        .sa_data
+        .map(|c| c.to_ne_bytes()[0]);
     let mac: Mac = sa_data[..6].try_into().expect("sa_data is 14 bytes");
     Ok(mac)
 }
@@ -747,7 +743,6 @@ mod tests {
     /// accepts 15, rejects 16. `as u8` cast for x86_64-vs-aarch64
     /// `c_char` signedness; values are ASCII either way.
     #[test]
-    #[allow(clippy::cast_sign_loss)] // c_char→u8: ASCII test bytes (c_char sign is arch-dependent)
     fn pack_ifr_name_ok() {
         #[rustfmt::skip]
         let cases: &[(Option<&str>, &[u8])] = &[
@@ -762,7 +757,7 @@ mod tests {
             let buf = pack_ifr_name(*input).unwrap();
             // First `prefix.len()` bytes match the input.
             for (j, &b) in prefix.iter().enumerate() {
-                assert_eq!(buf[j] as u8, b, "case {i}: byte {j}");
+                assert_eq!(buf[j].to_ne_bytes()[0], b, "case {i}: byte {j}");
             }
             // Rest (NUL terminator + padding) is zero.
             assert!(
