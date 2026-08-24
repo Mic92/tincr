@@ -5,6 +5,7 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use super::common::KillOnDrop;
 use super::rig::*;
 
 #[test]
@@ -95,18 +96,20 @@ fn tso_ingest_stream_integrity() {
     };
 
     let received_path = tmp.path().join("received.bin");
-    let receiver = Command::new("ip")
-        .args([
-            "netns",
-            "exec",
-            "bobside",
-            "socat",
-            "-u",
-            "TCP-LISTEN:18099,reuseaddr",
-        ])
-        .arg(format!("CREATE:{}", received_path.display()))
-        .spawn()
-        .expect("spawn receiver");
+    let mut receiver = KillOnDrop(
+        Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                "bobside",
+                "socat",
+                "-u",
+                "TCP-LISTEN:18099,reuseaddr",
+            ])
+            .arg(format!("CREATE:{}", received_path.display()))
+            .spawn()
+            .expect("spawn receiver"),
+    );
     std::thread::sleep(Duration::from_millis(200));
     let sender = Command::new("socat")
         .arg("-u")
@@ -114,15 +117,14 @@ fn tso_ingest_stream_integrity() {
         .arg("TCP:10.42.0.2:18099,connect-timeout=5")
         .output()
         .expect("spawn sender");
-    let receiver_status = receiver.wait_with_output().unwrap().status;
+    // The FIN still has to cross the tunnel, so reap before `finish`.
+    let receiver_ok = sender.status.success() && receiver.0.wait().unwrap().success();
     let (alice_log, bob_log) = pair.finish();
-
     assert!(
-        sender.status.success(),
+        receiver_ok,
         "{}\n=== alice ===\n{alice_log}\n=== bob ===\n{bob_log}",
         String::from_utf8_lossy(&sender.stderr)
     );
-    assert!(receiver_status.success());
     assert!(alice_log.contains("TSO ingest enabled"), "{alice_log}");
     // A warning here means a super-segment was dropped and TCP
     // retransmitted around it.

@@ -170,17 +170,32 @@ pub fn wait_for_file_with(path: &Path, timeout: Duration) -> bool {
 
 /// Poll `f` every 20ms until it yields `Some`; panic on timeout so the
 /// failure shows up as a test failure rather than a nextest SIGKILL.
-pub fn poll_until<T>(timeout: Duration, mut f: impl FnMut() -> Option<T>) -> T {
+pub fn poll_until<T>(timeout: Duration, f: impl FnMut() -> Option<T>) -> T {
+    try_poll(timeout, f).unwrap_or_else(|| panic!("poll timed out after {timeout:?}"))
+}
+
+/// `poll_until` for callers that want to attach daemon logs on timeout.
+pub fn try_poll<T>(timeout: Duration, mut f: impl FnMut() -> Option<T>) -> Option<T> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(value) = f() {
-            return value;
+            return Some(value);
         }
-        assert!(
-            Instant::now() < deadline,
-            "poll timed out after {timeout:?}"
-        );
+        if Instant::now() >= deadline {
+            return None;
+        }
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// For traffic generators (ping, socat) that must not outlive a
+/// panicking test.
+pub struct KillOnDrop(pub Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 
