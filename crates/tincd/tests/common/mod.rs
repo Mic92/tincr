@@ -423,8 +423,8 @@ pub fn node_status(rows: &[String], name: &str) -> Option<u32> {
 // Tests that DON'T fit:
 //   - `peer_wrong_key_fails_sig`: registers a FAKE pubkey for
 //     testpeer (negative test — the pump must NOT complete).
-//   - `security.rs::splice_mitm_rejected`: two daemons, the test
-//     process is a relay not an SPTPS peer.
+//   - `security.rs::spliced_responders_never_authenticate`: two
+//     daemons, the test process is a relay not an SPTPS peer.
 //
 // `our_key` seed is `[0x77; 32]` everywhere; that's baked in.
 // Daemon name is `testnode`, peer name is `testpeer`. The label
