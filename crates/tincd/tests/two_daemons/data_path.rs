@@ -1,9 +1,9 @@
 use std::os::fd::AsRawFd;
 use std::time::Duration;
 
+use super::common::node::*;
 use super::common::*;
 use super::fd_tunnel::*;
-use super::node::*;
 
 /// **THE FIRST PACKET.** End-to-end: alice's TUN → bob's TUN.
 ///
@@ -46,8 +46,8 @@ use super::node::*;
 #[expect(clippy::similar_names)] // at_out_* vs bt_in_*: parallel names, test compares them
 fn first_packet_across_tunnel() {
     let tmp = tmp!("first-pkt");
-    let alice = Node::new(tmp.path(), "alice", 0xA7);
-    let bob = Node::new(tmp.path(), "bob", 0xB7);
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA7);
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB7);
 
     // socketpairs: one per daemon
     // [0] = test end (we read/write IP packets), [1] = daemon end
@@ -286,8 +286,8 @@ fn compression_roundtrip() {
     // Compression is HOST-tagged but our `setup` reads from the
     // merged config tree (host file is merged into tinc.conf at
     // setup). Put it in tinc.conf via `with_conf`.
-    let alice = Node::new(tmp.path(), "alice", 0xAC).with_conf("Compression = 6\n");
-    let bob = Node::new(tmp.path(), "bob", 0xBC).with_conf("Compression = 12\n");
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xAC).with_conf("Compression = 6\n");
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xBC).with_conf("Compression = 12\n");
 
     let (alice_tun, alice_far) = sockpair_datagram();
     let (bob_tun, bob_far) = sockpair_datagram();
@@ -430,8 +430,8 @@ fn compression_roundtrip() {
 #[test]
 fn ipv6_unreachable_builds_icmpv6() {
     let tmp = tmp!("v6-unreach");
-    let alice = Node::new(tmp.path(), "alice", 0xA5);
-    let bob = Node::new(tmp.path(), "bob", 0xB5);
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA5);
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB5);
 
     let (alice_tun, alice_far) = sockpair_datagram();
 
@@ -544,8 +544,8 @@ fn ipv6_unreachable_builds_icmpv6() {
 #[test]
 fn keyexpire_forces_rekey() {
     let tmp = tmp!("keyexpire");
-    let alice = Node::new(tmp.path(), "alice", 0xAE).with_conf("KeyExpire = 1\n");
-    let bob = Node::new(tmp.path(), "bob", 0xBE).with_conf("KeyExpire = 1\n");
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xAE).with_conf("KeyExpire = 1\n");
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xBE).with_conf("KeyExpire = 1\n");
 
     let (alice_tun, alice_far) = sockpair_datagram();
     let (bob_tun, bob_far) = sockpair_datagram();

@@ -5,133 +5,45 @@
 //! Not covered here: the per-IP tarpit is loopback-exempt, so it is
 //! unit-tested in `listen.rs` instead.
 
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 #[macro_use]
 mod common;
 use common::{
-    ChildWithLog, Ctl, PeerFixture, TmpGuard, node_status, pubkey_from_seed, read_cookie,
-    read_tcp_addr, tincd_at, wait_for_file, write_ed25519_privkey,
+    Node, PeerFixture, TmpGuard, is_timeout, node_reachable, read_cookie, read_line_unbuffered,
+    read_to_eof,
 };
 
 const ID_REPLY: &[u8] = b"0 testnode 17.7\n";
 
-/// A running `tincd` with a dummy device, listening on an ephemeral
-/// port. Killed on drop; stderr is drained in the background so a
-/// chatty daemon can never block on a full pipe.
-struct Daemon {
-    child: ChildWithLog,
-    tcp_addr: SocketAddr,
-    pidfile: PathBuf,
-    socket: PathBuf,
+fn connect(node: &Node, read_timeout: Duration) -> TcpStream {
+    let stream = TcpStream::connect(node.tcp_addr()).expect("TCP connect");
+    stream.set_read_timeout(Some(read_timeout)).unwrap();
+    stream
 }
 
-impl Daemon {
-    /// `peers` are `(name, seed)` pairs written to `hosts/` so the
-    /// daemon recognises them in `ID`.
-    fn start(dir: &Path, name: &str, seed: u8, extra_conf: &str, peers: &[(&str, u8)]) -> Self {
-        let confbase = dir.join(name);
-        let pidfile = dir.join(format!("{name}.pid"));
-        let socket = dir.join(format!("{name}.socket"));
-
-        std::fs::create_dir_all(confbase.join("hosts")).unwrap();
-        std::fs::write(
-            confbase.join("tinc.conf"),
-            format!("Name = {name}\nDeviceType = dummy\nAddressFamily = ipv4\n{extra_conf}"),
-        )
-        .unwrap();
-        std::fs::write(confbase.join("hosts").join(name), "Port = 0\n").unwrap();
-        write_ed25519_privkey(&confbase, &[seed; 32]);
-        for &(peer, peer_seed) in peers {
-            let b64 = tinc_crypto::b64::encode(&pubkey_from_seed(&[peer_seed; 32]));
-            std::fs::write(
-                confbase.join("hosts").join(peer),
-                format!("Ed25519PublicKey = {b64}\n"),
-            )
-            .unwrap();
-        }
-
-        let child = tincd_at(&confbase, &pidfile, &socket)
-            .env("RUST_LOG", "tincd=debug")
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn tincd");
-        let child = ChildWithLog::spawn(child);
-        assert!(
-            wait_for_file(&socket),
-            "{name}: setup failed; stderr:\n{}",
-            child.kill_and_log()
-        );
-        Self {
-            tcp_addr: read_tcp_addr(&pidfile),
-            child,
-            pidfile,
-            socket,
-        }
-    }
-
-    fn connect(&self, read_timeout: Duration) -> TcpStream {
-        let s = TcpStream::connect(self.tcp_addr).expect("TCP connect");
-        s.set_read_timeout(Some(read_timeout)).unwrap();
-        s
-    }
-
-    fn ctl(&self) -> Ctl {
-        Ctl::connect(&self.socket, &self.pidfile)
-    }
-
-    fn assert_alive(&mut self) {
-        if let Some(status) = self.child.child.try_wait().unwrap() {
-            panic!(
-                "daemon exited ({status}); stderr:\n{}",
-                self.child.log_snapshot()
-            );
-        }
-    }
-
-    fn into_log(self) -> String {
-        self.child.kill_and_log()
-    }
-}
-
-/// Single daemon named `testnode` that knows a peer `bar`.
-fn start_testnode(tag: &str, extra_conf: &str) -> (TmpGuard, Daemon) {
+/// Single daemon `testnode` that knows a peer `bar`.
+fn start_testnode(tag: &str, extra_conf: &str) -> (TmpGuard, Node) {
     let tmp = tmp!(tag);
-    let d = Daemon::start(tmp.path(), "testnode", 0x42, extra_conf, &[("bar", 0x99)]);
-    (tmp, d)
-}
-
-fn is_timeout(e: &std::io::Error) -> bool {
-    matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
-}
-
-/// Read until the peer closes. `Ok(bytes)` on EOF/RST, `Err(bytes)`
-/// if the socket's read timeout fired first.
-fn read_to_eof(mut s: &TcpStream) -> Result<Vec<u8>, Vec<u8>> {
-    let mut got = Vec::new();
-    let mut buf = [0u8; 512];
-    loop {
-        match s.read(&mut buf) {
-            Ok(0) => return Ok(got),
-            Ok(n) => got.extend_from_slice(&buf[..n]),
-            Err(e) if is_timeout(&e) => return Err(got),
-            Err(_) => return Ok(got),
-        }
-    }
+    let bar = Node::new(tmp.path(), "bar", 0x99);
+    let mut testnode = Node::new(tmp.path(), "testnode", 0x42)
+        .with_conf(extra_conf)
+        .log_level("tincd=debug");
+    testnode.write_config(&bar, false);
+    testnode.start();
+    (tmp, testnode)
 }
 
 /// Send one `ID` line and expect the daemon to hang up without a
 /// word. Returns the daemon log.
 fn expect_id_dropped(tag: &str, id_line: &str) -> String {
-    let (_tmp, d) = start_testnode(tag, "");
-    let s = d.connect(Duration::from_secs(5));
-    writeln!(&s, "{id_line}").unwrap();
-    match read_to_eof(&s) {
+    let (_tmp, mut testnode) = start_testnode(tag, "");
+    let stream = connect(&testnode, Duration::from_secs(5));
+    writeln!(&stream, "{id_line}").unwrap();
+    match read_to_eof(&stream) {
         Ok(got) if got.is_empty() => {}
         Ok(got) => panic!(
             "{id_line:?}: expected silent drop, got {:?}",
@@ -142,7 +54,7 @@ fn expect_id_dropped(tag: &str, id_line: &str) -> String {
             String::from_utf8_lossy(&got)
         ),
     }
-    let log = d.into_log();
+    let log = testnode.stop();
     assert!(log.contains("ID rejected"), "{id_line:?}: log:\n{log}");
     log
 }
@@ -175,33 +87,32 @@ fn id_requesting_legacy_protocol_is_dropped() {
 /// reaped after `PingTimeout`, and the daemon keeps serving.
 #[test]
 fn stalled_handshake_is_reaped_after_ping_timeout() {
-    let (_tmp, mut d) = start_testnode("stalled-handshake", "PingTimeout = 1\n");
+    let (_tmp, mut testnode) = start_testnode("stalled-handshake", "PingTimeout = 1");
 
-    let s = d.connect(Duration::from_secs(5));
-    writeln!(&s, "0 bar 17.7").unwrap();
-
-    // ID reply plus the daemon's KEX record, then silence from us.
-    let mut reply = vec![0u8; ID_REPLY.len()];
-    (&s).read_exact(&mut reply).expect("ID reply");
-    assert_eq!(reply, ID_REPLY);
+    let stream = connect(&testnode, Duration::from_secs(5));
+    writeln!(&stream, "0 bar 17.7").unwrap();
+    // ID reply (followed by the daemon's KEX, which we ignore).
+    assert_eq!(read_line_unbuffered(&stream), ID_REPLY);
 
     // Sweep runs once a second; allow generous slack.
-    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     assert!(
-        read_to_eof(&s).is_ok(),
+        read_to_eof(&stream).is_ok(),
         "half-open connection was not reaped; log:\n{}",
-        d.child.log_snapshot()
+        testnode.log()
     );
 
-    d.assert_alive();
-    let cookie = read_cookie(&d.pidfile);
-    let ctl = UnixStream::connect(&d.socket).expect("control socket");
+    testnode.assert_alive();
+    let cookie = read_cookie(&testnode.pidfile);
+    let ctl = UnixStream::connect(&testnode.socket).expect("control socket");
     writeln!(&ctl, "0 ^{cookie} 0").unwrap();
     let mut line = String::new();
     BufReader::new(&ctl).read_line(&mut line).unwrap();
     assert_eq!(line.as_bytes(), ID_REPLY);
 
-    let log = d.into_log();
+    let log = testnode.stop();
     assert!(log.contains("Timeout"), "log:\n{log}");
 }
 
@@ -217,42 +128,38 @@ fn stalled_handshake_is_reaped_after_ping_timeout() {
 #[test]
 fn spliced_responders_never_authenticate() {
     let tmp = tmp!("splice");
-    let alice = Daemon::start(tmp.path(), "alice", 0xAA, "", &[("bob", 0xBB)]);
-    let bob = Daemon::start(tmp.path(), "bob", 0xBB, "", &[("alice", 0xAA)]);
+    let mut alice = Node::new(tmp.path(), "alice", 0xAA).log_level("tincd=debug");
+    let mut bob = Node::new(tmp.path(), "bob", 0xBB).log_level("tincd=debug");
+    alice.write_config(&bob, false);
+    bob.write_config(&alice, false);
+    alice.start();
+    bob.start();
 
-    let to_alice = alice.connect(Duration::from_secs(5));
-    let to_bob = bob.connect(Duration::from_secs(5));
+    let to_alice = connect(&alice, Duration::from_secs(5));
+    let to_bob = connect(&bob, Duration::from_secs(5));
     writeln!(&to_alice, "0 bob 17.7").unwrap();
     writeln!(&to_bob, "0 alice 17.7").unwrap();
 
     // Consume exactly the ID line; everything after it is SPTPS and
     // must be relayed verbatim.
-    let read_line = |mut s: &TcpStream| {
-        let mut out = Vec::new();
-        let mut b = [0u8; 1];
-        while b[0] != b'\n' {
-            s.read_exact(&mut b).expect("ID reply");
-            out.push(b[0]);
-        }
-        out
-    };
-    assert_eq!(read_line(&to_alice), b"0 alice 17.7\n");
-    assert_eq!(read_line(&to_bob), b"0 bob 17.7\n");
+    assert_eq!(read_line_unbuffered(&to_alice), b"0 alice 17.7\n");
+    assert_eq!(read_line_unbuffered(&to_bob), b"0 bob 17.7\n");
 
     // Pipe both directions until a side closes or the deadline
     // passes. A loopback handshake takes milliseconds; two seconds is
     // ample for anything that was going to happen.
     let deadline = Instant::now() + Duration::from_secs(2);
-    let pipe = |from: TcpStream, mut to: TcpStream| {
-        from.set_read_timeout(Some(Duration::from_millis(100)))
+    let pipe = |source: TcpStream, mut sink: TcpStream| {
+        source
+            .set_read_timeout(Some(Duration::from_millis(100)))
             .unwrap();
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             while Instant::now() < deadline {
-                match (&from).read(&mut buf) {
+                match (&source).read(&mut buf) {
                     Ok(0) => return,
                     Ok(n) => {
-                        if to.write_all(&buf[..n]).is_err() {
+                        if sink.write_all(&buf[..n]).is_err() {
                             return;
                         }
                     }
@@ -262,17 +169,15 @@ fn spliced_responders_never_authenticate() {
             }
         })
     };
-    let a2b = pipe(to_alice.try_clone().unwrap(), to_bob.try_clone().unwrap());
-    let b2a = pipe(to_bob, to_alice);
-    a2b.join().unwrap();
-    b2a.join().unwrap();
+    let alice_to_bob = pipe(to_alice.try_clone().unwrap(), to_bob.try_clone().unwrap());
+    let bob_to_alice = pipe(to_bob, to_alice);
+    alice_to_bob.join().unwrap();
+    bob_to_alice.join().unwrap();
 
-    let reachable =
-        |d: &Daemon, peer: &str| node_status(&d.ctl().dump(3), peer).is_some_and(|s| s & 0x10 != 0);
-    let alice_sees_bob = reachable(&alice, "bob");
-    let bob_sees_alice = reachable(&bob, "alice");
-    let alice_log = alice.into_log();
-    let bob_log = bob.into_log();
+    let alice_sees_bob = node_reachable(&alice.ctl().dump(3), "bob");
+    let bob_sees_alice = node_reachable(&bob.ctl().dump(3), "alice");
+    let alice_log = alice.stop();
+    let bob_log = bob.stop();
     assert!(
         !alice_sees_bob && !bob_sees_alice,
         "spliced peers became reachable (alice→bob {alice_sees_bob}, bob→alice {bob_sees_alice})\n\
@@ -291,33 +196,28 @@ fn spliced_responders_never_authenticate() {
 /// socket. One daemon per case because the first bad line ends the
 /// connection.
 fn expect_bad_request_drops_peer(tag: &str, body: &[u8]) {
-    let mut fx = PeerFixture::spawn(tag);
+    let mut peer = PeerFixture::spawn(tag);
     // Finish activation (our ACK + the reverse edge) so the request
     // reaches its handler instead of bouncing off the pre-ACK gate.
-    fx.send_record(b"4 0 1 700000c\n");
-    fx.send_record(b"12 deadbeef testpeer testnode 127.0.0.1 655 700000c 1\n");
-    let _ = fx.drain_records(300);
+    peer.send_record(b"4 0 1 700000c\n");
+    peer.send_record(b"12 deadbeef testpeer testnode 127.0.0.1 655 700000c 1\n");
+    let _ = peer.drain_records(300);
 
-    fx.send_record(body);
+    peer.send_record(body);
 
-    fx.stream
+    peer.stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     assert!(
-        read_to_eof(&fx.stream).is_ok(),
+        read_to_eof(&peer.stream).is_ok(),
         "{tag}: connection survived malformed record {body:?}"
     );
+    peer.node.assert_alive();
+    let nodes = peer.node.ctl().dump(3);
     assert!(
-        fx.child.try_wait().unwrap().is_none(),
-        "{tag}: daemon died on {body:?}; stderr:\n{}",
-        fx.kill_and_stderr()
-    );
-    let nodes = Ctl::connect(&fx.socket, &fx.pidfile).dump(3);
-    assert!(
-        nodes.iter().any(|r| r.contains("testnode")),
+        nodes.iter().any(|row| row.contains("testnode")),
         "{tag}: control dump after drop: {nodes:?}"
     );
-    let _ = fx.kill_and_stderr();
 }
 
 #[test]
@@ -347,26 +247,27 @@ fn unauthenticated_conn_cap_rejects_then_frees() {
     use tincd::daemon::MAX_PENDING_META;
 
     // Long PingTimeout so the sweep doesn't free slots mid-test.
-    let (_tmp, d) = start_testnode("pending-cap", "PingInterval = 120\nPingTimeout = 120\n");
+    let (_tmp, mut testnode) =
+        start_testnode("pending-cap", "PingInterval = 120\nPingTimeout = 120");
 
     // An admitted idle connection just sits there (read times out);
     // a rejected one is closed immediately.
-    let is_admitted = |s: &TcpStream| match read_to_eof(s) {
+    let is_admitted = |stream: &TcpStream| match read_to_eof(stream) {
         Err(got) if got.is_empty() => true,
         Ok(got) if got.is_empty() => false,
-        r => panic!("unexpected data on idle pre-auth conn: {r:?}"),
+        other => panic!("unexpected data on idle pre-auth conn: {other:?}"),
     };
 
     // One at a time: kqueue is edge-triggered and the daemon accepts
     // once per wake, so give each SYN its own edge.
     let mut held = Vec::with_capacity(MAX_PENDING_META);
     loop {
-        let s = d.connect(Duration::from_millis(300));
+        let stream = connect(&testnode, Duration::from_millis(300));
         std::thread::sleep(Duration::from_millis(30));
-        if !is_admitted(&s) {
+        if !is_admitted(&stream) {
             break;
         }
-        held.push(s);
+        held.push(stream);
         assert!(
             held.len() <= MAX_PENDING_META,
             "cap never tripped after {} conns",
@@ -379,12 +280,12 @@ fn unauthenticated_conn_cap_rejects_then_frees() {
 
     drop(held.pop());
     std::thread::sleep(Duration::from_millis(300));
-    let again = d.connect(Duration::from_millis(500));
+    let again = connect(&testnode, Duration::from_millis(500));
     assert!(is_admitted(&again), "not admitted after freeing a slot");
 
     drop(held);
     drop(again);
-    let log = d.into_log();
+    let log = testnode.stop();
     assert!(
         log.contains("Too many unauthenticated connections"),
         "log:\n{log}"

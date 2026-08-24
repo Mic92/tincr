@@ -1,7 +1,7 @@
 use std::time::Duration;
 
+use super::common::node::*;
 use super::common::*;
-use super::node::*;
 
 /// `purge()` via explicit `REQ_PURGE`.
 ///
@@ -24,20 +24,18 @@ use super::node::*;
 /// doesn't touch `on_del_edge`.
 #[test]
 fn purge_removes_unreachable_node() {
-    use std::io::{BufRead, Write};
-
     let tmp = tmp!("purge");
     // AutoConnect = no: pass 2's gate is `!autoconnect`. Default is
     // true, under which purge NEVER deletes nodes (it wants to dial
     // them).
-    let alice = Node::new(tmp.path(), "alice", 0xA9).with_conf("AutoConnect = no\n");
-    let mid = Node::new(tmp.path(), "mid", 0xC9).with_conf("AutoConnect = no\n");
-    let bob = Node::new(tmp.path(), "bob", 0xB9).with_conf("AutoConnect = no\n");
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA9).with_conf("AutoConnect = no\n");
+    let mid = Node::with_alloc_port(tmp.path(), "mid", 0xC9).with_conf("AutoConnect = no\n");
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB9).with_conf("AutoConnect = no\n");
 
     // Chain: alice ConnectTo mid; bob ConnectTo mid. mid is the hub.
     mid.write_config_multi(&[&alice, &bob], &[]);
-    alice.write_config_multi(&[&mid, &bob], &["mid"]);
-    bob.write_config_multi(&[&mid, &alice], &["mid"]);
+    alice.write_config_multi(&[&mid, &bob], &[&mid]);
+    bob.write_config_multi(&[&mid, &alice], &[&mid]);
 
     let mut mid_child = mid.spawn();
     assert!(
@@ -91,10 +89,7 @@ fn purge_removes_unreachable_node() {
     // DEL_EDGE/DEL_SUBNET (nothing for bob — no outgoing edges),
     // pass 2 sees no edge to bob, !autoconnect, !strictsubnets
     // → node_del. dump_nodes goes from 3 rows to 2.
-    writeln!(alice_ctl.w, "18 8").unwrap();
-    let mut ack = String::new();
-    alice_ctl.r.read_line(&mut ack).expect("purge ack");
-    assert_eq!(ack.trim_end(), "18 8 0", "REQ_PURGE control_ok reply");
+    assert_eq!(alice_ctl.purge(), 0);
 
     let nodes = alice_ctl.dump(3);
     assert_eq!(
@@ -104,10 +99,7 @@ fn purge_removes_unreachable_node() {
     );
 
     // REQ_PURGE again: idempotent
-    writeln!(alice_ctl.w, "18 8").unwrap();
-    let mut ack2 = String::new();
-    alice_ctl.r.read_line(&mut ack2).expect("purge ack 2");
-    assert_eq!(ack2.trim_end(), "18 8 0", "idempotent REQ_PURGE");
+    assert_eq!(alice_ctl.purge(), 0, "idempotent");
 
     let nodes = alice_ctl.dump(3);
     assert_eq!(nodes.len(), 2, "idempotent: {nodes:?}");
@@ -141,17 +133,15 @@ fn purge_removes_unreachable_node() {
 /// autoconnect WANTS dead nodes around — it dials them.
 #[test]
 fn purge_respects_autoconnect_gate() {
-    use std::io::{BufRead, Write};
-
     let tmp = tmp!("purge-ac");
     // No `AutoConnect = no` line → default true.
-    let alice = Node::new(tmp.path(), "alice", 0xAA);
-    let mid = Node::new(tmp.path(), "mid", 0xCA).with_conf("AutoConnect = no\n");
-    let bob = Node::new(tmp.path(), "bob", 0xBA).with_conf("AutoConnect = no\n");
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xAA);
+    let mid = Node::with_alloc_port(tmp.path(), "mid", 0xCA).with_conf("AutoConnect = no\n");
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xBA).with_conf("AutoConnect = no\n");
 
     mid.write_config_multi(&[&alice, &bob], &[]);
-    alice.write_config_multi(&[&mid, &bob], &["mid"]);
-    bob.write_config_multi(&[&mid, &alice], &["mid"]);
+    alice.write_config_multi(&[&mid, &bob], &[&mid]);
+    bob.write_config_multi(&[&mid, &alice], &[&mid]);
 
     let mut mid_child = mid.spawn();
     assert!(
@@ -192,10 +182,7 @@ fn purge_respects_autoconnect_gate() {
     });
 
     // Explicit REQ_PURGE: still gated by autoconnect.
-    writeln!(alice_ctl.w, "18 8").unwrap();
-    let mut ack = String::new();
-    alice_ctl.r.read_line(&mut ack).expect("purge ack");
-    assert_eq!(ack.trim_end(), "18 8 0");
+    assert_eq!(alice_ctl.purge(), 0);
 
     let nodes = alice_ctl.dump(3);
     assert_eq!(

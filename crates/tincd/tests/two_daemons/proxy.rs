@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
+use super::common::node::*;
 use super::common::*;
-use super::node::*;
 
 // SOCKS5 proxy roundtrip
 
@@ -103,8 +103,8 @@ fn fake_socks5_server() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
 #[test]
 fn socks5_proxy_roundtrip() {
     let tmp = tmp!("socks5");
-    let alice = Node::new(tmp.path(), "alice", 0xA5);
-    let bob = Node::new(tmp.path(), "bob", 0xB5);
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA5);
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB5);
 
     // Spawn the fake SOCKS5 server first.
     let (proxy_addr, proxy_handle) = fake_socks5_server();
@@ -267,8 +267,8 @@ fn fake_http_proxy() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
 #[test]
 fn http_proxy_roundtrip() {
     let tmp = tmp!("httpproxy");
-    let alice = Node::new(tmp.path(), "alice", 0xA6);
-    let bob = Node::new(tmp.path(), "bob", 0xB6);
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA6);
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB6);
 
     // Spawn the fake HTTP CONNECT proxy first.
     let (proxy_addr, proxy_handle) = fake_http_proxy();

@@ -3,8 +3,8 @@ use std::time::Duration;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 
+use super::common::node::*;
 use super::common::*;
-use super::node::*;
 
 /// SIGHUP reload: alice changes her own Subnets, sends SIGHUP, bob
 /// sees the diff via `ADD_SUBNET` / `DEL_SUBNET`.
@@ -24,8 +24,8 @@ use super::node::*;
 #[test]
 fn sighup_reload_subnets() {
     let tmp = tmp!("reload");
-    let alice = Node::new(tmp.path(), "alice", 0xAA);
-    let bob = Node::new(tmp.path(), "bob", 0xBB);
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xAA);
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xBB);
 
     // alice has ONE subnet initially.
     let alice = alice.subnet("10.0.0.0/24");
@@ -182,7 +182,7 @@ fn tinc_join_against_real_daemon() {
     use tinc_crypto::sign::SigningKey;
 
     let tmp = tmp!("join");
-    let alice = Node::new(tmp.path(), "alice", 0xAA);
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xAA);
 
     // alice's basic config (no peer; she just listens)
     {
@@ -394,8 +394,8 @@ fn del_subnet_legitimate_still_works() {
     // a subnet; bob sees both via gossip. Proves `on_del_subnet`'s
     // happy path survived the lookup-gate reorder.
     let tmp = tmp!("del-subnet-gate");
-    let alice = Node::new(tmp.path(), "alice", 0xA6);
-    let bob = Node::new(tmp.path(), "bob", 0xB6);
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA6);
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB6);
 
     bob.write_config(&alice, false);
     alice.write_config(&bob, true);
@@ -477,8 +477,8 @@ fn del_subnet_legitimate_still_works() {
 #[test]
 fn control_reload_hosts_swap_drops_rekeyed_peer() {
     let tmp = tmp!("hswap");
-    let alice = Node::new(tmp.path(), "alice", 0xAA);
-    let bob = Node::new(tmp.path(), "bob", 0xBB);
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xAA);
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xBB);
 
     alice.write_config(&bob, false);
     bob.write_config(&alice, true);

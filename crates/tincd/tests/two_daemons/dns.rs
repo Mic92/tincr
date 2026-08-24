@@ -18,9 +18,9 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::AsRawFd;
 use std::time::Duration;
 
+use super::common::node::*;
 use super::common::*;
 use super::fd_tunnel::*;
-use super::node::*;
 
 // tiny DNS wire helpers (RFC 1035)
 // Duplicated from the `dns.rs` unit-test helpers on purpose: those
@@ -99,13 +99,13 @@ fn dns_stub_fd() {
     // Single daemon. bob is just a hosts/ entry so `load_all_nodes`
     // (under `StrictSubnets=yes`) preloads his /32 + /128 into the
     // subnet tree — no peer, no gossip. Mirrors the netns test.
-    let alice = Node::new(tmp.path(), "alice", 0xAD).with_conf(
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xAD).with_conf(
         "StrictSubnets = yes\n\
          DNSAddress = 10.42.0.53\n\
          DNSAddress = fd00::53\n\
          DNSSuffix = tinc.internal\n",
     );
-    let bob = Node::new(tmp.path(), "bob", 0xBD);
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xBD);
 
     let (tun, far) = sockpair_datagram();
 

@@ -49,10 +49,10 @@ fn tcp_fallback_udp_blackhole() {
     let extra = "AutoConnect = no\n";
     let alice = alice.with_conf(extra);
     let bob = bob.with_conf(extra);
-    let mid = Node::new(tmp.path(), "mid", 0xFC).with_conf(extra);
+    let mid = Node::with_alloc_port(tmp.path(), "mid", 0xFC).with_conf(extra);
     mid.write_config_multi(&[&alice, &bob], &[]);
-    alice.write_config_multi(&[&mid, &bob], &["mid"]);
-    bob.write_config_multi(&[&mid, &alice], &["mid"]);
+    alice.write_config_multi(&[&mid, &bob], &[&mid]);
+    bob.write_config_multi(&[&mid, &alice], &[&mid]);
 
     let log = "tincd=info,tincd::net=debug";
     let mut mid_child = mid.spawn_with_log(log);

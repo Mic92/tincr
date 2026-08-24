@@ -541,7 +541,7 @@ fn stress_relay_mid_restart() {
     let alice = tun_node(tmp.path(), "alice", 0xA6, "tinc0", "10.42.0.1/32");
     let bob = tun_node(tmp.path(), "bob", 0xB6, "tinc1", "10.42.0.2/32");
     // mid: dummy device, no subnet (no iface/subnet → builder emits dummy).
-    let mid = Node::new(tmp.path(), "mid", 0xC6);
+    let mid = Node::with_alloc_port(tmp.path(), "mid", 0xC6);
 
     // UDPDiscoveryInterval=1: first try_udp probe to mid fires 1s
     // after the tunnel is created (default 2s). Mid's relay gate
@@ -554,8 +554,8 @@ fn stress_relay_mid_restart() {
     let alice = alice.with_conf(extra);
     let bob = bob.with_conf(extra);
     mid.write_config_multi(&[&alice, &bob], &[]);
-    alice.write_config_multi(&[&mid, &bob], &["mid"]);
-    bob.write_config_multi(&[&mid, &alice], &["mid"]);
+    alice.write_config_multi(&[&mid, &bob], &[&mid]);
+    bob.write_config_multi(&[&mid, &alice], &[&mid]);
 
     let log = "tincd=info,tincd::net=debug";
     let mut mid_child = mid.spawn_with_log(log);

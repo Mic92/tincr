@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 
+use super::common::node::*;
 use super::common::*;
-use super::node::*;
 
 /// Two real daemons. Alice has `ConnectTo = bob`. Full handshake →
 /// ACK → both reachable. Then stop alice; bob sees the disconnect,
@@ -37,8 +37,8 @@ use super::node::*;
 #[test]
 fn two_daemons_connect_and_reach() {
     let tmp = tmp!("connect");
-    let alice = Node::new(tmp.path(), "alice", 0xAA);
-    let bob = Node::new(tmp.path(), "bob", 0xBB);
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xAA);
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xBB);
 
     // configs: alice initiates, bob accepts
     bob.write_config(&alice, false);
@@ -228,8 +228,8 @@ fn outgoing_retry_after_refused() {
     // 1s). With PingTimeout=1 the conn is born already-stale and
     // the next sweep reaps it before `id_h` even runs. PingTimeout=1
     // is just an unrealistic config. 3s gives the handshake room.
-    let alice = Node::new(tmp.path(), "alice", 0xA1).with_conf("PingTimeout = 3\n");
-    let bob = Node::new(tmp.path(), "bob", 0xB1).with_conf("PingTimeout = 3\n");
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA1).with_conf("PingTimeout = 3\n");
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB1).with_conf("PingTimeout = 3\n");
 
     bob.write_config(&alice, false);
     alice.write_config(&bob, true);
@@ -329,9 +329,10 @@ fn ping_pong_keepalive() {
     // PingTimeout=3 gives the SIGSTOP phase room: the stopped
     // daemon is paused for ~5s, the OTHER daemon's sweep needs
     // pingtimeout (3s) to elapse after the unanswered PING.
-    let alice =
-        Node::new(tmp.path(), "alice", 0xA8).with_conf("PingInterval = 1\nPingTimeout = 3\n");
-    let bob = Node::new(tmp.path(), "bob", 0xB8).with_conf("PingInterval = 1\nPingTimeout = 3\n");
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA8)
+        .with_conf("PingInterval = 1\nPingTimeout = 3\n");
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB8)
+        .with_conf("PingInterval = 1\nPingTimeout = 3\n");
 
     bob.write_config(&alice, false);
     alice.write_config(&bob, true);
@@ -422,8 +423,8 @@ fn tinc_up_runs() {
     use std::os::unix::fs::PermissionsExt;
 
     let tmp = tmp!("tincup");
-    let alice = Node::new(tmp.path(), "alice", 0xA9);
-    let bob = Node::new(tmp.path(), "bob", 0xB9);
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA9);
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB9);
 
     bob.write_config(&alice, false);
     alice.write_config(&bob, false);
@@ -480,8 +481,8 @@ fn tinc_up_runs() {
 #[test]
 fn load_all_nodes_populates_graph() {
     let tmp = tmp!("loadall");
-    let alice = Node::new(tmp.path(), "alice", 0xA9).with_conf("AutoConnect = no\n");
-    let bob = Node::new(tmp.path(), "bob", 0xB9);
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA9).with_conf("AutoConnect = no\n");
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB9);
 
     bob.write_config(&alice, false);
     alice.write_config(&bob, false); // no ConnectTo
@@ -584,11 +585,11 @@ fn autoconnect_converges_to_three() {
     // here because the connect lands much later. PingTimeout=10
     // > 5s periodic + handshake. (PingTimeout is clamped to
     // `≤ PingInterval`; default PingInterval=60 leaves room.)
-    let alice = Node::new(tmp.path(), "alice", 0xA0).with_conf("PingTimeout = 10\n");
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA0).with_conf("PingTimeout = 10\n");
     let peer_conf = "PingTimeout = 10\nAutoConnect = no\n";
-    let bob = Node::new(tmp.path(), "bob", 0xB0).with_conf(peer_conf);
-    let carol = Node::new(tmp.path(), "carol", 0xC0).with_conf(peer_conf);
-    let dave = Node::new(tmp.path(), "dave", 0xD0).with_conf(peer_conf);
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB0).with_conf(peer_conf);
+    let carol = Node::with_alloc_port(tmp.path(), "carol", 0xC0).with_conf(peer_conf);
+    let dave = Node::with_alloc_port(tmp.path(), "dave", 0xD0).with_conf(peer_conf);
 
     // The peers: just listen, no ConnectTo. AutoConnect=no on
     // them so THEY don't start dialing each other (we only want
@@ -620,7 +621,7 @@ fn autoconnect_converges_to_three() {
         for peer in [&bob, &carol, &dave] {
             let pk = tinc_crypto::b64::encode(&peer.pubkey());
             std::fs::write(
-                alice.confbase.join("hosts").join(peer.name),
+                alice.confbase.join("hosts").join(&peer.name),
                 format!(
                     "Ed25519PublicKey = {pk}\nAddress = 127.0.0.1 {}\n",
                     peer.port

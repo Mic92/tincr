@@ -15,9 +15,9 @@
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
+use super::common::node::*;
 use super::common::*;
 use super::fd_tunnel::*;
-use super::node::*;
 
 const VALIDKEY: u32 = 0x02;
 const REACHABLE: u32 = 0x10;
@@ -32,8 +32,8 @@ fn count_restarts(log: &str) -> usize {
 #[test]
 fn reqkey_race_fd() {
     let tmp = tmp!("fd-race");
-    let alice = Node::new(tmp.path(), "alice", 0xA1).with_conf("PingInterval = 2\n");
-    let bob = Node::new(tmp.path(), "bob", 0xB1).with_conf("PingInterval = 2\n");
+    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA1).with_conf("PingInterval = 2\n");
+    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB1).with_conf("PingInterval = 2\n");
 
     let (alice_tun, alice_far) = sockpair_datagram();
     let (bob_tun, bob_far) = sockpair_datagram();
@@ -41,8 +41,8 @@ fn reqkey_race_fd() {
     // Symmetric: both ConnectTo each other (triggers dedup path).
     let alice = alice.fd(alice_far.as_raw_fd()).subnet("10.44.0.1/32");
     let bob = bob.fd(bob_far.as_raw_fd()).subnet("10.44.0.2/32");
-    alice.write_config_multi(&[&bob], &["bob"]);
-    bob.write_config_multi(&[&alice], &["alice"]);
+    alice.write_config_multi(&[&bob], &[&bob]);
+    bob.write_config_multi(&[&alice], &[&alice]);
 
     let mut bob_child = bob.spawn_with_fd(&bob_far);
     assert!(
