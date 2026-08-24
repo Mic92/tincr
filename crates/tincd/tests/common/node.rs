@@ -14,6 +14,7 @@ use std::net::SocketAddr;
 use std::os::fd::{OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
+use std::time::Duration;
 
 use super::{
     ChildWithLog, Ctl, alloc_port, pubkey_from_seed, read_tcp_addr, tincd_at, wait_for_file,
@@ -190,9 +191,42 @@ impl Node {
             self.name,
             daemon.kill_and_log()
         );
-        self.port = read_tcp_addr(&self.pidfile).port();
+        let port = read_tcp_addr(&self.pidfile).port();
+        if self.port == 0 {
+            // Pin it so a restart keeps peers' `Address =` lines valid.
+            let own_host = self.confbase.join("hosts").join(&self.name);
+            if let Ok(contents) = std::fs::read_to_string(&own_host) {
+                std::fs::write(
+                    own_host,
+                    contents.replace("Port = 0\n", &format!("Port = {port}\n")),
+                )
+                .unwrap();
+            }
+        }
+        self.port = port;
         self.daemon = Some(daemon);
         self
+    }
+
+    /// Learn a port without staying up: for tests where the listener
+    /// must be down while a dialer already knows its address, or where
+    /// two nodes `ConnectTo` each other. Same small reuse window as
+    /// any released port, but restart pins it. Overwrites the config
+    /// with a throwaway one; call `write_config*` afterwards.
+    pub fn reserve_port(&mut self) -> u16 {
+        std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
+        std::fs::write(
+            self.confbase.join("tinc.conf"),
+            format!(
+                "Name = {}\nDeviceType = dummy\nAddressFamily = ipv4\n",
+                self.name
+            ),
+        )
+        .unwrap();
+        std::fs::write(self.confbase.join("hosts").join(&self.name), "Port = 0\n").unwrap();
+        write_ed25519_privkey(&self.confbase, &self.seed);
+        self.start().stop();
+        self.port
     }
 
     /// Kill the daemon and return everything it wrote to stderr.
@@ -265,6 +299,39 @@ impl Node {
 
     pub fn ctl(&self) -> Ctl {
         Ctl::connect(&self.socket, &self.pidfile)
+    }
+
+    /// Meta connection to `peer` is past ACK.
+    pub fn has_active_peer(&self, peer: &str) -> bool {
+        has_active_peer(&self.ctl().dump(6), peer)
+    }
+
+    /// Poll until the meta connection to `peer` is (in)active.
+    pub fn wait_for_peer(&self, peer: &str, active: bool, timeout: Duration) {
+        let deadline = std::time::Instant::now() + timeout;
+        while self.has_active_peer(peer) != active {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{}: connection to {peer} did not become {}; stderr:\n{}",
+                self.name,
+                if active { "active" } else { "inactive" },
+                self.log()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Start `listener`, point `self` at it with `ConnectTo`, start
+    /// `self`, and wait until both ends see the connection.
+    pub fn start_dialing(&mut self, listener: &mut Node) {
+        if !listener.is_running() {
+            listener.write_config(self, false);
+            listener.start();
+        }
+        self.write_config(listener, true);
+        self.start();
+        self.wait_for_peer(&listener.name, true, Duration::from_secs(10));
+        listener.wait_for_peer(&self.name, true, Duration::from_secs(10));
     }
 
     /// Transitional: raw child for tests not yet moved to `start()`.
