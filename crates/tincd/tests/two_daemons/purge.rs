@@ -3,201 +3,58 @@ use std::time::Duration;
 use super::common::node::*;
 use super::common::*;
 
-/// `purge()` via explicit `REQ_PURGE`.
-///
-/// Three daemons in a chain: alice — mid — bob. Kill bob; mid's
-/// `terminate()` deletes the mid↔bob edges and gossips `DEL_EDGE` to
-/// alice. Alice's `on_del_edge` runs `graph()` → bob unreachable.
-/// Bob stays in the node list (no auto-purge — removed to fix
-/// issue #4 oscillation storm).
-///
-/// Then send `REQ_PURGE` to alice. Pass 1 deletes bob's outgoing
-/// edges (none — alice never had a bob→* edge, only mid→bob),
-/// pass 2 sees no edge with `to == bob` (mid's `DEL_EDGE`
-/// removed it), `!autoconnect` (we set `AutoConnect = no`), no
-/// strictsubnets → `node_del`. `dump_nodes` goes from 3 rows to 2.
-///
-/// Why three daemons, not two: with two, killing alice's only peer
-/// also kills the only meta-connection that `DEL_EDGE` could arrive
-/// on. The `terminate()` path on the SURVIVING daemon's side does
-/// the local `del_edge` directly (`connect.rs::terminate`), which
-/// doesn't touch `on_del_edge`.
+/// alice → mid ← bob. Three nodes because with two, killing the only
+/// peer also kills the connection a `DEL_EDGE` would arrive on, and
+/// we want alice to learn of bob's death via gossip.
+fn chain_then_kill_bob(dir: &std::path::Path, alice_conf: &str) -> (Node, Node) {
+    let mut alice = Node::new(dir, "alice", 0xA9).with_conf(alice_conf);
+    let mut mid = Node::new(dir, "mid", 0xC9).with_conf("AutoConnect = no\n");
+    let mut bob = Node::new(dir, "bob", 0xB9).with_conf("AutoConnect = no\n");
+
+    mid.write_config_multi(&[&alice, &bob], &[]);
+    mid.start();
+    alice.write_config_multi(&[&mid, &bob], &[&mid]);
+    alice.start();
+    bob.write_config_multi(&[&mid, &alice], &[&mid]);
+    bob.start();
+
+    let mut alice_ctl = alice.ctl();
+    poll_until(Duration::from_secs(10), || {
+        let nodes = alice_ctl.dump(3);
+        (nodes.len() == 3 && node_reachable(&nodes, "bob")).then_some(())
+    });
+    bob.stop();
+    poll_until(Duration::from_secs(10), || {
+        (!node_reachable(&alice_ctl.dump(3), "bob")).then_some(())
+    });
+    (alice, mid)
+}
+
+/// Unreachable nodes stay listed (no auto-purge, see issue #4) until
+/// `REQ_PURGE`, which drops them when autoconnect is off.
 #[test]
 fn purge_removes_unreachable_node() {
     let tmp = tmp!("purge");
-    // AutoConnect = no: pass 2's gate is `!autoconnect`. Default is
-    // true, under which purge NEVER deletes nodes (it wants to dial
-    // them).
-    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xA9).with_conf("AutoConnect = no\n");
-    let mid = Node::with_alloc_port(tmp.path(), "mid", 0xC9).with_conf("AutoConnect = no\n");
-    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xB9).with_conf("AutoConnect = no\n");
-
-    // Chain: alice ConnectTo mid; bob ConnectTo mid. mid is the hub.
-    mid.write_config_multi(&[&alice, &bob], &[]);
-    alice.write_config_multi(&[&mid, &bob], &[&mid]);
-    bob.write_config_multi(&[&mid, &alice], &[&mid]);
-
-    let mut mid_child = mid.spawn();
-    assert!(
-        wait_for_file(&mid.socket),
-        "mid setup failed; stderr:\n{}",
-        drain_stderr(mid_child)
-    );
-    let mut alice_child = alice.spawn();
-    if !wait_for_file(&alice.socket) {
-        let _ = mid_child.kill();
-        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
-    }
-    let mut bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket) {
-        let _ = mid_child.kill();
-        let _ = alice_child.kill();
-        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
-    }
-
+    let (alice, _mid) = chain_then_kill_bob(tmp.path(), "AutoConnect = no\n");
     let mut alice_ctl = alice.ctl();
-
-    // wait: alice sees all three nodes, bob reachable
-    // bob is two hops away: alice—mid edge from alice's ACK,
-    // mid—bob edge gossiped via ADD_EDGE from mid.
-    poll_until(Duration::from_secs(10), || {
+    assert_eq!(alice_ctl.dump(3).len(), 3);
+    for _ in 0..2 {
+        assert_eq!(alice_ctl.purge(), 0);
         let nodes = alice_ctl.dump(3);
-        let bob_reachable = node_status(&nodes, "bob").is_some_and(|s| s & 0x10 != 0);
-        (nodes.len() == 3 && bob_reachable).then_some(())
-    });
-
-    // kill bob → mid gossips DEL_EDGE
-    // mid's `terminate()` sends DEL_EDGE for mid→bob and
-    // bob→mid to alice. Alice's `on_del_edge` runs graph() →
-    // bob unreachable. No auto-purge (removed to fix issue #4
-    // oscillation storm). Bob stays in the node list as
-    // unreachable until explicit REQ_PURGE.
-    let _ = bob_child.kill();
-    let _ = bob_child.wait();
-
-    // Wait for bob to become unreachable on alice.
-    poll_until(Duration::from_secs(10), || {
-        let nodes = alice_ctl.dump(3);
-        node_status(&nodes, "bob")
-            .is_some_and(|s| s & 0x10 == 0)
-            .then_some(())
-    });
-
-    // REQ_PURGE: bob deleted
-    // Without auto-purge, bob is unreachable but still in the
-    // node list. Explicit REQ_PURGE deletes him: pass 1 gossips
-    // DEL_EDGE/DEL_SUBNET (nothing for bob — no outgoing edges),
-    // pass 2 sees no edge to bob, !autoconnect, !strictsubnets
-    // → node_del. dump_nodes goes from 3 rows to 2.
-    assert_eq!(alice_ctl.purge(), 0);
-
-    let nodes = alice_ctl.dump(3);
-    assert_eq!(
-        nodes.len(),
-        2,
-        "bob should be gone after REQ_PURGE: {nodes:?}"
-    );
-
-    // REQ_PURGE again: idempotent
-    assert_eq!(alice_ctl.purge(), 0, "idempotent");
-
-    let nodes = alice_ctl.dump(3);
-    assert_eq!(nodes.len(), 2, "idempotent: {nodes:?}");
-    assert!(
-        node_status(&nodes, "alice").is_some_and(|s| s & 0x10 != 0),
-        "alice (myself) reachable: {nodes:?}"
-    );
-    assert!(
-        node_status(&nodes, "mid").is_some_and(|s| s & 0x10 != 0),
-        "mid reachable: {nodes:?}"
-    );
-
-    drop(alice_ctl);
-    let _ = alice_child.kill();
-    let _ = mid_child.kill();
-    let _ = alice_child.wait();
-    let _ = mid_child.wait();
+        assert_eq!(nodes.len(), 2, "{nodes:?}");
+        assert!(node_reachable(&nodes, "alice") && node_reachable(&nodes, "mid"));
+    }
 }
 
-/// `purge()` pass-2 early return: a single edge to ANY unreachable
-/// node aborts ALL node deletions. The autoconnect
-/// gate also prevents deletion (default config).
-///
-/// Same chain as `purge_removes_unreachable_node`, but alice runs
-/// with `AutoConnect = yes` (the default). Kill bob → bob becomes
-/// unreachable on alice. Auto-purge fires (the `on_del_edge` hook),
-/// but pass 2's `!autoconnect` gate is false, so bob STAYS in the
-/// node list. `dump_nodes`: still 3 rows, bob status `0x0`.
-///
-/// This proves we don't over-purge: the gate exists because
-/// autoconnect WANTS dead nodes around — it dials them.
+/// Autoconnect wants dead nodes kept around to dial later, so purge
+/// must not delete them under the default config.
 #[test]
-fn purge_respects_autoconnect_gate() {
+fn purge_keeps_nodes_when_autoconnect_on() {
     let tmp = tmp!("purge-ac");
-    // No `AutoConnect = no` line → default true.
-    let alice = Node::with_alloc_port(tmp.path(), "alice", 0xAA);
-    let mid = Node::with_alloc_port(tmp.path(), "mid", 0xCA).with_conf("AutoConnect = no\n");
-    let bob = Node::with_alloc_port(tmp.path(), "bob", 0xBA).with_conf("AutoConnect = no\n");
-
-    mid.write_config_multi(&[&alice, &bob], &[]);
-    alice.write_config_multi(&[&mid, &bob], &[&mid]);
-    bob.write_config_multi(&[&mid, &alice], &[&mid]);
-
-    let mut mid_child = mid.spawn();
-    assert!(
-        wait_for_file(&mid.socket),
-        "mid setup failed; stderr:\n{}",
-        drain_stderr(mid_child)
-    );
-    let mut alice_child = alice.spawn();
-    if !wait_for_file(&alice.socket) {
-        let _ = mid_child.kill();
-        panic!("alice setup failed; stderr:\n{}", drain_stderr(alice_child));
-    }
-    let mut bob_child = bob.spawn();
-    if !wait_for_file(&bob.socket) {
-        let _ = mid_child.kill();
-        let _ = alice_child.kill();
-        panic!("bob setup failed; stderr:\n{}", drain_stderr(bob_child));
-    }
-
+    let (alice, _mid) = chain_then_kill_bob(tmp.path(), "");
     let mut alice_ctl = alice.ctl();
-
-    poll_until(Duration::from_secs(10), || {
-        let nodes = alice_ctl.dump(3);
-        let bob_reachable = node_status(&nodes, "bob").is_some_and(|s| s & 0x10 != 0);
-        (nodes.len() == 3 && bob_reachable).then_some(())
-    });
-
-    let _ = bob_child.kill();
-    let _ = bob_child.wait();
-
-    // bob unreachable but STILL PRESENT. 3 rows. Wait for the
-    // unreachability transition (DEL_EDGE → graph() → status 0).
-    poll_until(Duration::from_secs(10), || {
-        let nodes = alice_ctl.dump(3);
-        node_status(&nodes, "bob")
-            .is_some_and(|s| s & 0x10 == 0)
-            .then_some(())
-    });
-
-    // Explicit REQ_PURGE: still gated by autoconnect.
     assert_eq!(alice_ctl.purge(), 0);
-
     let nodes = alice_ctl.dump(3);
-    assert_eq!(
-        nodes.len(),
-        3,
-        "autoconnect gate: bob should NOT be purged; {nodes:?}"
-    );
-    assert!(
-        node_status(&nodes, "bob").is_some_and(|s| s & 0x10 == 0),
-        "bob unreachable but present: {nodes:?}"
-    );
-
-    drop(alice_ctl);
-    let _ = alice_child.kill();
-    let _ = mid_child.kill();
-    let _ = alice_child.wait();
-    let _ = mid_child.wait();
+    assert_eq!(nodes.len(), 3, "{nodes:?}");
+    assert!(!node_reachable(&nodes, "bob"));
 }
