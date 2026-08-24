@@ -34,7 +34,8 @@ pub struct Node {
     /// override it.
     pub extra_conf: String,
     /// `DeviceType = tun` (or `tap`) + `Interface =`; netns tests
-    /// precreate it.
+    /// precreate it. On macOS: `DeviceType = utun` + `Device =`,
+    /// the spelling C tincd needs there too.
     pub iface: Option<String>,
     pub tap: bool,
     /// Run this C tincd binary instead of ours.
@@ -125,6 +126,9 @@ impl Node {
 
         let mut tinc_conf = format!("Name = {}\nAddressFamily = ipv4\n", self.name);
         match (&self.iface, self.device_fd) {
+            #[cfg(target_os = "macos")]
+            (Some(iface), _) => writeln!(tinc_conf, "DeviceType = utun\nDevice = {iface}"),
+            #[cfg(not(target_os = "macos"))]
             (Some(iface), _) => writeln!(
                 tinc_conf,
                 "DeviceType = {}\nInterface = {iface}",

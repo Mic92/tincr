@@ -1,14 +1,15 @@
-//! Platform-neutral helpers shared by `benches/throughput{,_macos}.rs`.
-//! Only pure parsers / serde structs / tiny probes; `setup_tunnel`/
-//! `measure` stay per-platform (netns re-exec vs host-route swap vs
-//! `perf`/`sample` don't share control flow).
+//! Shared by `benches/throughput{,_macos}.rs`: the alice↔bob tunnel
+//! fixture, iperf3/ping parsers, tool gates. Topology (netns vs. utun
+//! host routes) and profilers stay per-platform.
 
 #![allow(dead_code)] // each bench uses a subset
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
-// env / tool gates
+use super::node::Node;
+use super::{TmpGuard, node_status, tincd_at};
 
 /// `TINC_C_TINCD` — path to the C `tincd` (devshell sets it).
 pub fn c_tincd_bin() -> Option<PathBuf> {
@@ -24,24 +25,133 @@ pub fn iperf3_available() -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// `Rust` = `CARGO_BIN_EXE_tincd`; `C(path)` = `TINC_C_TINCD`.
+pub fn perf_enabled() -> bool {
+    std::env::var_os("TINCD_PERF").is_some()
+}
+
 #[derive(Clone)]
 pub enum Impl {
     Rust,
     C(PathBuf),
 }
 
-// ctl-dump parsers
+impl Impl {
+    /// Logging stays at info/`-d0`: per-packet debug output would be
+    /// the bottleneck being measured.
+    pub fn start(&self, node: &mut Node) {
+        let mut cmd = match self {
+            Self::Rust => {
+                let mut cmd = tincd_at(&node.confbase, &node.pidfile, &node.socket);
+                cmd.env("RUST_LOG", "tincd=info");
+                // Non-dumpable processes refuse `perf record -p`.
+                if perf_enabled() {
+                    cmd.env("TINCR_ALLOW_COREDUMP", "1");
+                }
+                cmd
+            }
+            Self::C(bin) => {
+                let mut cmd = Command::new(bin);
+                cmd.args(["-D", "-d0", "-c"])
+                    .arg(&node.confbase)
+                    .arg("--pidfile")
+                    .arg(&node.pidfile);
+                cmd
+            }
+        };
+        cmd.stderr(Stdio::piped());
+        node.start_command(cmd);
+    }
+}
 
-/// `dump nodes` row → `minmtu` (body token 15). Row: `name id host
-/// "port" PORT cipher digest maclen comp opts status nexthop via
-/// distance mtu MINMTU maxmtu ...`. Until PMTU discovery lifts this
-/// past full-MSS, big packets fall back to TCP-tunnelled
-/// `SPTPS_PACKET` and the bench measures the wrong path.
+/// `tinc.conf` lines common to all bench daemons. `PingTimeout` is
+/// tight to catch a hung daemon fast, looser while a sampling
+/// profiler may stall a ping cycle. `TINCD_BENCH_SPTPS_CIPHER` lets
+/// one binary measure both AEADs.
+pub fn bench_conf(ping_timeout: u32) -> String {
+    let ping_timeout = if perf_enabled() { 5 } else { ping_timeout };
+    let mut conf = format!("PingTimeout = {ping_timeout}\n");
+    if let Ok(cipher) = std::env::var("TINCD_BENCH_SPTPS_CIPHER") {
+        use std::fmt::Write as _;
+        writeln!(conf, "SPTPSCipher = {cipher}").unwrap();
+    }
+    conf
+}
+
+/// alice dials bob. The bench builds the nodes (device names and
+/// subnets are platform-specific), this starts them in the right
+/// order and waits until the UDP data path carries full-size packets.
+pub struct Tunnel {
+    pub tmp: TmpGuard,
+    pub alice: Node,
+    pub bob: Node,
+}
+
+impl Tunnel {
+    pub fn start(tmp: TmpGuard, mut alice: Node, mut bob: Node, impls: (&Impl, &Impl)) -> Self {
+        bob.write_config(&alice, false);
+        impls.1.start(&mut bob);
+        alice.write_config(&bob, true);
+        impls.0.start(&mut alice);
+        Self { tmp, alice, bob }
+    }
+
+    pub fn logs(&self) -> String {
+        format!(
+            "=== alice ===\n{}\n=== bob ===\n{}",
+            self.alice.log(),
+            self.bob.log()
+        )
+    }
+
+    /// Poll `check(alice_nodes, bob_nodes)` on both `dump nodes`
+    /// outputs; panic with both logs on timeout.
+    pub fn wait_for(
+        &self,
+        what: &str,
+        timeout: Duration,
+        mut check: impl FnMut(&[String], &[String]) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + timeout;
+        while !check(&self.alice.ctl().dump(3), &self.bob.ctl().dump(3)) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what} timed out\n{}",
+                self.logs()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// reachable → (kick) validkey + `udp_confirmed` → minmtu ≥ 1500.
+    /// Without the last step full-MSS segments would still take the
+    /// TCP fallback and the bench would measure the wrong path. PMTU
+    /// probing is demand-driven, hence `kick` (one ping) per poll.
+    pub fn wait_data_path(&self, kick: impl Fn()) {
+        const REACHABLE: u32 = 0x10;
+        const VALIDKEY_UDP: u32 = 0x02 | 0x80;
+        let both = |alice: &[String], bob: &[String], want: u32| {
+            node_status(alice, "bob").is_some_and(|s| s & want == want)
+                && node_status(bob, "alice").is_some_and(|s| s & want == want)
+        };
+        self.wait_for("meta handshake", Duration::from_secs(10), |a, b| {
+            both(a, b, REACHABLE)
+        });
+        kick();
+        self.wait_for("validkey/udp_confirmed", Duration::from_secs(10), |a, b| {
+            both(a, b, VALIDKEY_UDP)
+        });
+        self.wait_for("PMTU convergence", Duration::from_secs(20), |a, b| {
+            kick();
+            node_minmtu(a, "bob").is_some_and(|m| m >= 1500)
+                && node_minmtu(b, "alice").is_some_and(|m| m >= 1500)
+        });
+    }
+}
+
+/// `dump nodes` row → `minmtu` (token 15).
 pub fn node_minmtu(rows: &[String], name: &str) -> Option<u16> {
     rows.iter().find_map(|r| {
-        let body = r.strip_prefix("18 3 ")?;
-        let toks: Vec<&str> = body.split_whitespace().collect();
+        let toks: Vec<&str> = r.strip_prefix("18 3 ")?.split_whitespace().collect();
         if toks.first() != Some(&name) {
             return None;
         }
@@ -49,7 +159,37 @@ pub fn node_minmtu(rows: &[String], name: &str) -> Option<u16> {
     })
 }
 
-// iperf3 JSON
+pub fn ping_once(dest: &str) {
+    #[cfg(target_os = "macos")]
+    let args = ["-c", "1", "-t", "1"];
+    #[cfg(not(target_os = "macos"))]
+    let args = ["-c", "1", "-W", "1"];
+    let _ = Command::new("ping")
+        .args(args)
+        .arg(dest)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// iperf3 client against an already running server; panics with
+/// client output and daemon logs on failure.
+pub fn iperf3_client(tunnel: &Tunnel, args: &[&str]) -> IperfSum {
+    let out = Command::new("iperf3")
+        .args(args)
+        .arg("--json")
+        .output()
+        .expect("spawn iperf3 client");
+    assert!(
+        out.status.success(),
+        "iperf3 {args:?}: {:?}\nstdout: {}\nstderr: {}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+        tunnel.logs()
+    );
+    parse_iperf(&out.stdout).end.sum_received
+}
 
 #[derive(Debug, serde::Deserialize)]
 pub struct IperfResult {
@@ -57,20 +197,18 @@ pub struct IperfResult {
 }
 #[derive(Debug, serde::Deserialize)]
 pub struct IperfEnd {
-    /// Server-side received: what actually crossed the tunnel and got
-    /// acked (`sum_sent` may include bytes still in flight).
+    /// Server-side received: what actually crossed the tunnel
+    /// (`sum_sent` may include bytes still in flight).
     pub sum_received: IperfSum,
 }
 #[derive(Debug, serde::Deserialize)]
 pub struct IperfSum {
     pub bits_per_second: f64,
-    /// Feeds the macOS short-circuit assert; Linux ignores it.
     #[serde(default)]
     pub bytes: u64,
 }
 
-/// Panics with the raw JSON on failure (usual cause: iperf3 emitted
-/// an `{"error": ...}` object).
+/// Panics with the raw JSON on failure (usually an `{"error": ...}`).
 pub fn parse_iperf(stdout: &[u8]) -> IperfResult {
     serde_json::from_slice(stdout).unwrap_or_else(|e| {
         panic!(
@@ -80,11 +218,8 @@ pub fn parse_iperf(stdout: &[u8]) -> IperfResult {
     })
 }
 
-// ping percentiles
-
-/// Per-packet RTTs (ms), sorted. Parsed from `time=X` reply lines;
-/// works for both iputils and BSD ping (neither summary line has
-/// `time=` with `=`).
+/// Per-packet RTTs (ms), sorted, from `time=X` reply lines (iputils
+/// and BSD ping alike).
 #[derive(Debug)]
 pub struct PingStats {
     pub rtts_ms: Vec<f64>,
@@ -107,6 +242,26 @@ impl PingStats {
         }
     }
 
+    /// `ping ARGS DEST -c COUNT`; ping exits non-zero on any loss, so
+    /// parse whatever came back. Zero replies means a dead tunnel.
+    pub fn measure(args: &[&str], dest: &str, count: u32) -> Self {
+        let out = Command::new("ping")
+            .args(args)
+            .arg("-c")
+            .arg(count.to_string())
+            .arg(dest)
+            .output()
+            .expect("spawn ping");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stats = Self::parse(&stdout, count);
+        assert!(
+            !stats.rtts_ms.is_empty(),
+            "ping got zero replies:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        stats
+    }
+
     pub fn percentile(&self, p: f64) -> f64 {
         if self.rtts_ms.is_empty() {
             return f64::NAN;
@@ -119,16 +274,15 @@ impl PingStats {
         let idx = ((p / 100.0) * (self.rtts_ms.len() - 1) as f64).round() as usize;
         self.rtts_ms[idx.min(self.rtts_ms.len() - 1)]
     }
-    pub fn p50(&self) -> f64 {
-        self.percentile(50.0)
-    }
-    pub fn p99(&self) -> f64 {
-        self.percentile(99.0)
-    }
-    pub fn max(&self) -> f64 {
-        self.rtts_ms.last().copied().unwrap_or(f64::NAN)
-    }
-    pub const fn recv(&self) -> usize {
-        self.rtts_ms.len()
+
+    pub fn summary(&self) -> String {
+        format!(
+            "p50={:>7.3}ms  p99={:>7.3}ms  max={:>7.3}ms  ({}/{} recv)",
+            self.percentile(50.0),
+            self.percentile(99.0),
+            self.rtts_ms.last().copied().unwrap_or(f64::NAN),
+            self.rtts_ms.len(),
+            self.sent
+        )
     }
 }

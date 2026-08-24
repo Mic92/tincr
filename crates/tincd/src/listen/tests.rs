@@ -485,9 +485,7 @@ fn assign_static_port_cases() {
 /// → fresh ephemeral). Prove the listener still materializes.
 #[test]
 fn bind_reusing_port_fallback() {
-    // Occupy a port. 127.0.0.1:0 → kernel hands out a fresh
-    // ephemeral; pool is large enough that racing alloc_port()
-    // in parallel tests is a non-issue (no bind-drop-rebind here).
+    // Occupy a fresh ephemeral port for the pair's lifetime.
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let first = open_listener_pair(addr, &opts(), None, false).unwrap();
     let taken = first.local.port();
@@ -507,14 +505,12 @@ fn bind_reusing_port_fallback() {
 /// `open_listener_pair` with a static port: `assign_static_port`
 /// returns None (port is non-zero), `bind_reusing_port` skips
 /// straight to the original addr. Reuse hint never reaches the
-/// kernel. Proven via `assign_static_port` directly (the socket
-/// path is covered by the integration tests; doing
-/// bind-drop-rebind here would TOCTOU-race the parallel
-/// `alloc_port` calls in `tests/two_daemons.rs`).
+/// kernel. Proven via `assign_static_port` directly; the socket path
+/// is covered by the integration tests, and bind-drop-rebind here
+/// would race parallel tests for the port.
 #[test]
 fn open_pair_bindto_flag_plumbed() {
-    // 127.0.0.1:0 → ephemeral port held for the pair's lifetime;
-    // no bind-drop-rebind, so no race with alloc_port() elsewhere.
+    // 127.0.0.1:0 → ephemeral port held for the pair's lifetime.
     let l = open_listener_pair("127.0.0.1:0".parse().unwrap(), &opts(), None, true).expect("bind");
     assert!(l.bindto, "bindto=true plumbed through");
     assert_eq!(l.udp_port(), l.local.port(), "port reuse within pair");

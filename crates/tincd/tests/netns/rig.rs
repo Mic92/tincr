@@ -1,7 +1,10 @@
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
-use super::common::linux::{run_ip, wait_for_carrier};
+pub(crate) use super::common::linux::ChildNetNs;
+use super::common::linux::{
+    bwrap_inner_init, bwrap_reexec, bwrap_usable, run_ip, run_ip_in, wait_for_carrier,
+};
 pub(crate) use super::common::node::Node;
 use super::common::{TmpGuard, node_status, poll_until};
 
@@ -17,65 +20,16 @@ pub(crate) fn enter_netns(test_name: &str) -> Option<NetNs> {
 /// Inner pass (`BWRAP_INNER` set): bring `lo` up, return `true`.
 pub(crate) fn enter_bwrap(test_name: &str) -> bool {
     if std::env::var_os("BWRAP_INNER").is_some() {
-        run_ip(&["link", "set", "lo", "up"]);
-        std::fs::create_dir_all("/run/netns").expect("mkdir /run/netns");
+        bwrap_inner_init();
         return true;
     }
-
-    let probe = Command::new("bwrap")
-        .args(["--unshare-user", "--bind", "/", "/", "true"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output();
-    match probe {
-        Err(e) => {
-            eprintln!("SKIP {test_name}: bwrap not found ({e})");
-            return false;
-        }
-        Ok(out) if !out.status.success() => {
-            eprintln!(
-                "SKIP {test_name}: bwrap probe failed (unprivileged userns disabled?): {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-            return false;
-        }
-        Ok(_) => {}
-    }
-    if !std::path::Path::new("/dev/net/tun").exists() {
-        eprintln!("SKIP {test_name}: /dev/net/tun missing");
+    if !bwrap_usable(test_name) {
         return false;
     }
-
-    // `--tmpfs /dev` is load-bearing: TUNSETIFF checks that the
-    // device node's mount is owned by our userns, which a plain
-    // dev-bind of the host's /dev is not. `/proc/self/exe` is
-    // resolved out here because inside it would point at bwrap.
-    let self_exe = std::fs::read_link("/proc/self/exe").expect("readlink /proc/self/exe");
-    let status = Command::new("bwrap")
-        .args(["--unshare-net", "--unshare-user"])
-        .args(["--cap-add", "CAP_NET_ADMIN"])
-        .args(["--cap-add", "CAP_NET_RAW"])
-        .args(["--cap-add", "CAP_SYS_ADMIN"])
-        .args(["--uid", "0", "--gid", "0"])
-        .args(["--bind", "/", "/"])
-        .args(["--tmpfs", "/dev"])
-        .args(["--dev-bind", "/dev/net/tun", "/dev/net/tun"])
-        .args(["--dev-bind", "/dev/null", "/dev/null"])
-        .args(["--dev-bind", "/dev/urandom", "/dev/urandom"])
-        .args(["--proc", "/proc"])
-        .args(["--tmpfs", "/run"])
-        // NixOS keeps dig/socat/iptables under /run/current-system.
-        .args(if std::path::Path::new("/run/current-system").exists() {
-            &["--ro-bind", "/run/current-system", "/run/current-system"][..]
-        } else {
-            &[]
-        })
-        .arg("--")
-        .arg(&self_exe)
-        // `--exact` with the full `module::name`: a substring match
-        // once ran two tests in one sandbox, and a non-matching name
-        // runs zero tests and "passes".
+    // `--exact` with the full `module::name`: a substring match once
+    // ran two tests in one sandbox, and a non-matching name runs zero
+    // tests and "passes".
+    let status = bwrap_reexec()
         .args([
             "--exact",
             test_name,
@@ -83,33 +37,10 @@ pub(crate) fn enter_bwrap(test_name: &str) -> bool {
             "--test-threads=1",
             "--include-ignored",
         ])
-        .env("BWRAP_INNER", "1")
         .status()
         .expect("spawn bwrap");
     assert!(status.success(), "inner test failed: {status:?}");
     false
-}
-
-/// A child netns reachable via `ip netns exec NAME`. `ip netns add`
-/// needs shared mount propagation, which a userns root cannot set
-/// up, so bind-mount an `unshare -n` sleeper's nsfd by hand.
-pub(crate) fn make_child_netns(name: &str) -> Child {
-    let sleeper = Command::new("unshare")
-        .args(["-n", "sleep", "3600"])
-        .spawn()
-        .expect("spawn unshare sleeper");
-    std::thread::sleep(Duration::from_millis(100));
-    let target = format!("/run/netns/{name}");
-    std::fs::write(&target, b"").expect("touch nsfd target");
-    let status = Command::new("mount")
-        .args(["--bind"])
-        .arg(format!("/proc/{}/ns/net", sleeper.id()))
-        .arg(&target)
-        .status()
-        .expect("spawn mount");
-    assert!(status.success(), "mount --bind nsfd for {name}: {status:?}");
-    run_ip(&["netns", "exec", name, "ip", "link", "set", "lo", "up"]);
-    sleeper
 }
 
 /// veth pair with each end `(netns, ifname, addr/prefix)` moved,
@@ -209,7 +140,7 @@ impl Drop for Netem {
 /// otherwise 10.42.0.1 and 10.42.0.2 would both be local addresses
 /// and ping would short-circuit over `lo`.
 pub(crate) struct NetNs {
-    sleeper: Child,
+    _bobside: ChildNetNs,
 }
 
 impl NetNs {
@@ -233,7 +164,7 @@ impl NetNs {
             }
         }
         Self {
-            sleeper: make_child_netns("bobside"),
+            _bobside: ChildNetNs::new("bobside"),
         }
     }
 
@@ -253,20 +184,8 @@ impl NetNs {
         run_ip(&["link", "set", "tinc1", "up"]);
         assert!(wait_for_carrier("tinc1", Duration::from_secs(2)));
         run_ip(&["link", "set", "tinc1", "netns", "bobside"]);
-        let bobside = |args: &[&str]| {
-            let mut full = vec!["netns", "exec", "bobside", "ip"];
-            full.extend(args);
-            run_ip(&full);
-        };
-        bobside(&["addr", "add", "10.42.0.2/24", "dev", "tinc1"]);
-        bobside(&["link", "set", "tinc1", "up"]);
-    }
-}
-
-impl Drop for NetNs {
-    fn drop(&mut self) {
-        let _ = self.sleeper.kill();
-        let _ = self.sleeper.wait();
+        run_ip_in("bobside", &["addr", "add", "10.42.0.2/24", "dev", "tinc1"]);
+        run_ip_in("bobside", &["link", "set", "tinc1", "up"]);
     }
 }
 
