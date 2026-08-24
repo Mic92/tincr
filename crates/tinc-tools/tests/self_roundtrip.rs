@@ -1,97 +1,38 @@
-//! Rust↔Rust SPTPS over a real socket. Spawns `sptps_keypair` and
-//! `sptps_test` as subprocesses — same shape as
-//! `test/integration/sptps_basic.py`, but in `cargo test` so it lives
-//! next to the unit tests, runs with the rest of CI, and can use real
-//! timeouts instead of `wait $pid` and hoping.
+//! `sptps_test` / `sptps_keypair` as subprocesses over a real socket,
+//! optionally against the C binaries (`TINC_C_SPTPS_TEST`,
+//! `TINC_C_SPTPS_KEYPAIR`; the devshell sets both, `nix build
+//! .#sptps-test-c` provides them).
 //!
-//! ## What this proves
+//! Compared to the in-process `tinc-sptps/tests/vs_c.rs` this covers
+//! `OsRng`, PEM key files end to end, kernel short reads/coalescing on
+//! the stream framing, and the binaries' argv/poll/EOF handling.
 //!
-//! `tinc-sptps/tests/vs_c.rs` is the gold standard for *correctness*:
-//! same RNG seed both sides, byte-identical wire output, in-process.
-//! But "in-process with seeded RNG" misses everything the daemon will
-//! actually face:
-//!
-//!   - **`OsRng`** — first time real entropy flows through the key
-//!     derivation. Seeded ChaCha is great for differential testing
-//!     and useless for catching "we accidentally hardcoded the seed".
-//!   - **PEM key files end-to-end** — generate → write → read → use.
-//!     `tinc-conf::pem` round-trips bytes; this round-trips a *key
-//!     that signs*.
-//!   - **Kernel socket** — TCP can split a `send()` across multiple
-//!     `recv()`s, coalesce two `send()`s into one `recv()`, deliver
-//!     short reads. The SPTPS stream framing has to survive that. The
-//!     in-process test pumps whole records.
-//!   - **The `poll()` loop** — the actual binary entry point, fd
-//!     plumbing, EOF detection. No way to unit-test that without
-//!     spawning the binary.
-//!
-//! ## Cross-impl with C
-//!
-//! Set `TINC_C_SPTPS_TEST` and `TINC_C_SPTPS_KEYPAIR` to enable the
-//! `cross_*` tests below. They run a 2×2 matrix — each role (server,
-//! client) can be Rust or C, four combinations × two modes. If the env
-//! var is unset, those tests skip (return early; libtest has no proper
-//! skip status, so they show as "passed" — the test name says `cross_`
-//! so you know to set the var if you care).
-//!
-//! `nix build .#sptps-test-c` builds the C side in nolegacy mode (no
-//! openssl). To run locally:
-//!
-//! ```sh
-//! C=$(nix build .#sptps-test-c --no-link --print-out-paths)
-//! TINC_C_SPTPS_TEST=$C/bin/sptps_test \
-//! TINC_C_SPTPS_KEYPAIR=$C/bin/sptps_keypair \
-//!   cargo test -p tinc-tools cross
-//! ```
-//!
-//! Why we couldn't just reuse `test/integration/sptps_basic.py`: it
-//! only knows one `SPTPS_TEST_PATH`. Same impl both sides. The whole
-//! point of cross-impl is *different* impls per role.
-//!
-//! ## The UDP-has-no-FIN problem
-//!
-//! Stream mode: client closes socket, server's `recv()` returns 0,
-//! server prints "Connection terminated by peer." and exits cleanly.
-//!
-//! Datagram mode: client closes socket, server's `recv()`… blocks
-//! forever. UDP has no connection teardown. `sptps_basic.py` deals with
-//! this by reading the expected number of bytes from the server's
-//! stdout and then `server.kill()`. We do the same — kill the server
-//! after we've read what we sent. That's not a hack; it's the only
-//! correct behavior for a UDP listener with no application-layer
-//! goodbye message.
+//! In the 2×2 matrix, Rust server + C client exercises the Rust
+//! responder, C server + Rust client the Rust initiator; C↔C is the
+//! control. `init_keys_load_in_c` additionally feeds keys written by
+//! `tinc init` (a different PEM writer) to the C binary. Datagram
+//! servers never see EOF (UDP has no FIN) and are
+//! killed once the expected bytes arrived.
 
 #![forbid(unsafe_code)]
-
-// Backticking proper nouns reads like a ransom note. Same allow as
-// tinc-crypto/tinc-sptps.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Find the binary cargo built. `CARGO_BIN_EXE_<name>` is set by cargo
-/// for integration tests when the crate has a `[[bin]]` of that name —
-/// the documented way to find your own binaries from `tests/`. Falls
-/// back to relative-path probing for `cargo build && cargo test` where
-/// the env var might not be set (it should be, but belt-and-braces).
-fn bin(name: &str) -> PathBuf {
-    if let Ok(p) = std::env::var(format!("CARGO_BIN_EXE_{name}")) {
-        return PathBuf::from(p);
-    }
-    // Integration tests run from `target/{profile}/deps/`; the bins
-    // are one level up. `current_exe()` → strip `deps/` → append name.
-    let exe = std::env::current_exe().expect("current_exe");
-    let deps = exe.parent().expect("parent");
-    let profile = deps.parent().expect("profile dir");
-    profile.join(name)
+fn cargo_bin(name: &str) -> PathBuf {
+    std::env::var_os(format!("CARGO_BIN_EXE_{name}")).map_or_else(
+        // target/{profile}/deps/<test> → target/{profile}/<name>
+        || {
+            let exe = std::env::current_exe().unwrap();
+            exe.parent().unwrap().parent().unwrap().join(name)
+        },
+        PathBuf::from,
+    )
 }
 
-/// Which binaries to spawn. Everything else in this file works on the
-/// CLI surface (argv, stdin/stdout, the `Listening on N...` line), so
-/// swapping the binary path is the entire interface for cross-impl.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Impl {
     Rust,
     C,
@@ -100,188 +41,149 @@ enum Impl {
 impl Impl {
     fn sptps_test(self) -> Option<PathBuf> {
         match self {
-            Self::Rust => Some(bin("sptps_test")),
-            // `ok()`: unset env var → None → caller skips. `var_os`
-            // not `var` — store paths can have any bytes (they don't
-            // in practice, but `var` would panic on non-UTF-8 and
-            // that's a needlessly brittle dep).
+            Self::Rust => Some(cargo_bin("sptps_test")),
             Self::C => std::env::var_os("TINC_C_SPTPS_TEST").map(PathBuf::from),
         }
     }
+
     fn sptps_keypair(self) -> Option<PathBuf> {
         match self {
-            Self::Rust => Some(bin("sptps_keypair")),
+            Self::Rust => Some(cargo_bin("sptps_keypair")),
             Self::C => std::env::var_os("TINC_C_SPTPS_KEYPAIR").map(PathBuf::from),
         }
     }
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Rust => "rust",
-            Self::C => "c",
-        }
+
+    fn available(self) -> bool {
+        self.sptps_test().is_some() && self.sptps_keypair().is_some()
     }
 }
 
-/// Generate a keypair via the `sptps_keypair` binary. Going through the
-/// binary (not `keypair::generate()` directly) is the point: it tests
-/// the binary's argv handling and the on-disk PEM format.
-///
-/// `who` picks which impl writes the key. The cross-impl matrix uses
-/// this too: a key generated by one impl's `sptps_keypair` should be
-/// readable by the other's `sptps_test`. That's a separate axis from
-/// "can they handshake" — it's "do they agree on the PEM format".
-fn gen_keys(who: Impl, dir: &Path, name: &str) -> (PathBuf, PathBuf) {
-    let priv_path = dir.join(format!("{name}.priv"));
-    let pub_path = dir.join(format!("{name}.pub"));
-    let status = Command::new(who.sptps_keypair().unwrap())
-        .arg(&priv_path)
-        .arg(&pub_path)
-        .status()
-        .expect("spawn sptps_keypair");
-    assert!(status.success(), "sptps_keypair failed");
-    (priv_path, pub_path)
+/// When CI provides the C binaries, a skipped cross test is a failure.
+fn skip_without_c(test: &str) -> bool {
+    if Impl::C.available() {
+        return false;
+    }
+    assert!(
+        std::env::var_os("TINC_C_SPTPS_TEST").is_none(),
+        "TINC_C_SPTPS_TEST set but TINC_C_SPTPS_KEYPAIR missing"
+    );
+    eprintln!("SKIP {test}: TINC_C_SPTPS_TEST / TINC_C_SPTPS_KEYPAIR not set");
+    true
 }
 
-/// Parse `Listening on N...` from a child's stderr. This is the same
-/// regex `sptps_basic.py` uses; the line format is API.
-///
-/// **Takes `&mut`, not by value.** The caller MUST keep the stderr
-/// handle alive for the child's lifetime. If the read end of the pipe
-/// drops, the child's next `eprintln!` gets `EPIPE` → `SIGPIPE` →
-/// dead server. We learned this the empirical way: `wait_for_port`
-/// returned the port, the client connected, the server `accept()`ed,
-/// then the server `eprintln!("Connected")` and died. 0.01s test
-/// duration was the tell — too fast for any real I/O.
+struct KeyPair {
+    private: PathBuf,
+    public: PathBuf,
+}
+
+/// Through the binary, so argv handling and the on-disk PEM format are
+/// part of the test.
+fn generate_keys(generator: Impl, dir: &Path, name: &str) -> KeyPair {
+    let keys = KeyPair {
+        private: dir.join(format!("{name}.priv")),
+        public: dir.join(format!("{name}.pub")),
+    };
+    let status = Command::new(generator.sptps_keypair().unwrap())
+        .arg(&keys.private)
+        .arg(&keys.public)
+        .status()
+        .expect("spawn sptps_keypair");
+    assert!(status.success(), "{generator:?} sptps_keypair failed");
+    keys
+}
+
+/// `Listening on N...` from the server's stderr. The caller must keep
+/// the stderr handle alive: if the read end closes, the server's next
+/// diagnostic line is a SIGPIPE.
 fn wait_for_port(stderr: &mut impl Read) -> u16 {
     let mut reader = BufReader::new(stderr);
-    let deadline = Instant::now() + Duration::from_secs(5);
     let mut line = String::new();
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).expect("read stderr");
-        assert!(n != 0, "server stderr closed without Listening line");
-        if let Some(rest) = line.trim().strip_prefix("Listening on ")
-            && let Some(num) = rest.strip_suffix("...")
-        {
-            return num.parse().expect("port number");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for Listening line"
+        assert_ne!(
+            reader.read_line(&mut line).unwrap(),
+            0,
+            "server stderr closed without a Listening line"
         );
+        if let Some(port) = line
+            .trim()
+            .strip_prefix("Listening on ")
+            .and_then(|rest| rest.strip_suffix("..."))
+        {
+            return port.parse().unwrap();
+        }
     }
 }
 
-/// Read exactly `n` bytes from a child's stdout, with a deadline.
-/// `read_exact` would block past the deadline; we loop on `read` and
-/// check the clock. `sptps_basic.py` does the same with its `while
-/// len(received) < len(DATA)` loop.
-fn read_n(stdout: &mut impl Read, n: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(n);
+fn read_exactly(stdout: &mut impl Read, len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
     let mut buf = [0u8; 4096];
     let deadline = Instant::now() + Duration::from_secs(10);
-    while out.len() < n {
+    while out.len() < len {
         assert!(
             Instant::now() < deadline,
-            "timed out: have {} of {n} bytes",
+            "have {} of {len} bytes",
             out.len()
         );
-        let want = (n - out.len()).min(buf.len());
+        let want = (len - out.len()).min(buf.len());
         match stdout.read(&mut buf[..want]) {
-            Ok(0) => panic!(
-                "server stdout closed early: have {} of {n} bytes",
-                out.len()
-            ),
-            Ok(k) => out.extend_from_slice(&buf[..k]),
-            // EAGAIN can't happen on a blocking pipe; treat any error
-            // as fatal. The deadline above handles hangs.
+            Ok(0) => panic!("server stdout closed at {} of {len} bytes", out.len()),
+            Ok(got) => out.extend_from_slice(&buf[..got]),
             Err(e) => panic!("read server stdout: {e}"),
         }
     }
     out
 }
 
-/// `try_wait` poll with deadline → `kill`. The graceful path for
-/// stream mode. If the child doesn't exit on its own (UDP, or a
-/// genuine hang), kill it so the test doesn't leave processes behind.
-fn reap(mut child: Child, expect_clean: bool) {
+/// Wait up to 2s for a clean exit; otherwise kill. `must_exit` turns
+/// the kill into a failure (stream servers see EOF, datagram ones do
+/// not).
+fn reap(mut child: Child, must_exit: bool) {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        match child.try_wait().expect("try_wait") {
-            Some(status) => {
-                if expect_clean {
-                    assert!(status.success(), "child exited non-zero: {status:?}");
-                }
-                return;
-            }
-            None if Instant::now() >= deadline => {
-                // UDP: expected. Stream: bug. Either way, kill so the
-                // test ends. The `expect_clean` assert above won't fire
-                // because `kill` → `wait` returns the SIGKILL status,
-                // which we don't check.
-                let _ = child.kill();
-                let _ = child.wait();
-                assert!(
-                    !expect_clean,
-                    "child didn't exit cleanly within 2s (TCP server hung?)"
-                );
-                return;
-            }
-            None => std::thread::sleep(Duration::from_millis(50)),
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(!must_exit || status.success(), "server exited {status:?}");
+            return;
         }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            assert!(!must_exit, "stream server did not exit on EOF");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
-/// One round-trip: server listens, client connects + sends, we diff.
-/// Returns the bytes the server wrote to stdout.
-///
-/// `server_impl`/`client_impl` pick which binary plays which role.
-/// Everything else — argv, port discovery, the SIGPIPE drain thread —
-/// is identical regardless of impl, because both impls speak the same
-/// CLI. That symmetry is the test design: if the harness doesn't care
-/// which is which, then any failure is a wire-level disagreement, not
-/// a harness artifact.
-#[expect(clippy::too_many_arguments)] // 8 is fine; a struct here would just move the names
+/// Server listens (`-r`: ignore stdin), client connects and sends
+/// `data` then quits on stdin EOF (`-q`); returns what the server
+/// printed. Both binaries share the CLI, so the impls are just paths.
 fn roundtrip(
-    server_impl: Impl,
-    client_impl: Impl,
-    server_priv: &Path,
-    client_pub: &Path,
-    client_priv: &Path,
-    server_pub: &Path,
+    server: (Impl, &KeyPair),
+    client: (Impl, &KeyPair),
     data: &[u8],
-    flags: &[&str],
+    datagram: bool,
 ) -> Vec<u8> {
-    // Server: `sptps_test -4 -r [flags] server.priv client.pub 0`
-    //   -4: IPv4 (avoids dual-stack flakiness in CI)
-    //   -r: readonly — don't poll stdin (we're not feeding it any)
-    //   port 0: kernel picks
-    let mut server = Command::new(server_impl.sptps_test().unwrap())
-        .arg("-4")
-        .arg("-r")
-        .args(flags)
-        .arg(server_priv)
-        .arg(client_pub)
+    let mode: &[&str] = if datagram { &["-d"] } else { &[] };
+    let mut server_child = Command::new(server.0.sptps_test().unwrap())
+        .args(["-4", "-r"])
+        .args(mode)
+        .arg(&server.1.private)
+        .arg(&client.1.public)
         .arg("0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn server");
-
-    // Hold stderr for the server's lifetime. See `wait_for_port` doc
-    // for why dropping it kills the server.
-    let mut server_stderr = server.stderr.take().expect("stderr piped");
+    let mut server_stderr = server_child.stderr.take().unwrap();
     let port = wait_for_port(&mut server_stderr);
 
-    // Client: `sptps_test -4 -q [flags] client.priv server.pub localhost PORT`
-    //   -q: quit on stdin EOF (after we close the pipe)
-    let mut client = Command::new(client_impl.sptps_test().unwrap())
-        .arg("-4")
-        .arg("-q")
-        .args(flags)
-        .arg(client_priv)
-        .arg(server_pub)
+    let mut client_child = Command::new(client.0.sptps_test().unwrap())
+        .args(["-4", "-q"])
+        .args(mode)
+        .arg(&client.1.private)
+        .arg(&server.1.public)
         .arg("localhost")
         .arg(port.to_string())
         .stdin(Stdio::piped())
@@ -289,315 +191,180 @@ fn roundtrip(
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn client");
+    client_child.stdin.take().unwrap().write_all(data).unwrap();
 
-    // Push data, close pipe → client sees EOF → exits (-q).
-    {
-        let mut stdin = client.stdin.take().expect("stdin piped");
-        stdin.write_all(data).expect("write client stdin");
-        // Drop closes the pipe — that's the EOF.
-    }
+    let received = read_exactly(&mut server_child.stdout.take().unwrap(), data.len());
 
-    // Read exactly len(data) from server stdout. Stream mode: this is
-    // one or two SPTPS records' worth depending on TCP coalescing.
-    // Datagram: one record per stdin read (≤1460 bytes), so one record
-    // for our 256.
-    let mut server_stdout = server.stdout.take().expect("stdout piped");
-    let received = read_n(&mut server_stdout, data.len());
-
-    // Client should exit cleanly: -q → break on EOF → ExitCode::SUCCESS.
-    // If the client hung, that's a real bug — its `-q` path failed.
-    let client_status = client.wait().expect("client wait");
+    let client_out = client_child.wait_with_output().unwrap();
     assert!(
-        client_status.success(),
-        "client exited non-zero: {client_status:?}\nstderr: {}",
-        {
-            let mut s = String::new();
-            client
-                .stderr
-                .take()
-                .unwrap()
-                .read_to_string(&mut s)
-                .unwrap();
-            s
-        }
+        client_out.status.success(),
+        "client exited {:?}\n{}",
+        client_out.status,
+        String::from_utf8_lossy(&client_out.stderr)
     );
-
-    // Server: stream mode exits cleanly when client closes the TCP
-    // socket. Datagram mode never exits on its own — kill it.
-    let datagram = flags.contains(&"-d");
-    // For stream mode the server also `eprintln!("Connection terminated
-    // by peer.")` on shutdown — if we drop server_stderr before reap,
-    // SIGPIPE again. Spawn a drain thread: it reads to EOF, which only
-    // arrives when the server exits (or is killed). Join after reap.
+    // Keep draining stderr until the server is gone (see wait_for_port).
     let drain = std::thread::spawn(move || {
         let mut sink = Vec::new();
         let _ = server_stderr.read_to_end(&mut sink);
-        sink // for diagnostics if reap asserts
     });
-    reap(server, !datagram);
-    let _ = drain.join();
-
+    reap(server_child, !datagram);
+    drain.join().unwrap();
     received
 }
 
-//
+/// Each side generates its own keys with its own implementation, so
+/// only public keys cross implementations here; `cross_pem_private_keys`
+/// covers the private key format.
+fn scenario(server: Impl, client: Impl, data: &[u8], datagram: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let server_keys = generate_keys(server, dir.path(), "server");
+    let client_keys = generate_keys(client, dir.path(), "client");
+    let received = roundtrip(
+        (server, &server_keys),
+        (client, &client_keys),
+        data,
+        datagram,
+    );
+    if let Some(offset) = received.iter().zip(data).position(|(a, b)| a != b) {
+        panic!("{server:?} server, {client:?} client: first mismatch at byte {offset}");
+    }
+    assert_eq!(received.len(), data.len());
+}
 
-/// 256 bytes, same as `sptps_basic.py`. The size matters less than
-/// "nonzero and not all zeroes" — we want decryption failures to be
-/// loud (all-zero plaintext could mask a bad-key-but-same-tag bug,
-/// vanishingly unlikely but cheap to avoid).
+/// Not all zeroes, so a decryption failure cannot look like success.
 fn payload() -> Vec<u8> {
     (0..=255).collect()
 }
 
-/// Common scenario: gen two keypairs, push `data`, diff against what
-/// the server received. The (`server_impl`, `client_impl`) pair is the
-/// independent variable. Returns true if it ran, false if it skipped
-/// (C binary not available).
-///
-/// **Key generator follows the loader.** Server keypair is generated by
-/// `server_impl`, client keypair by `client_impl`. Why: the *private*
-/// key is loaded by the same impl that generated it, so PEM-format
-/// disagreement on the private side won't break the handshake — only
-/// the public key crosses impls (server reads client's public, client
-/// reads server's public). That's the relevant cross-impl PEM test.
-/// `cross_pem_read` below tests private-key cross-reads explicitly.
-fn scenario(server: Impl, client: Impl, data: &[u8], flags: &[&str]) -> bool {
-    let (Some(_), Some(_)) = (server.sptps_test(), client.sptps_test()) else {
-        eprintln!(
-            "SKIP: TINC_C_SPTPS_TEST not set ({} server, {} client)",
-            server.label(),
-            client.label()
-        );
-        return false;
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let (s_priv, s_pub) = gen_keys(server, dir.path(), "server");
-    let (c_priv, c_pub) = gen_keys(client, dir.path(), "client");
-
-    let received = roundtrip(
-        server, client, &s_priv, &c_pub, &c_priv, &s_pub, data, flags,
-    );
-
-    assert_eq!(
-        received.len(),
-        data.len(),
-        "length mismatch ({} server, {} client, flags {flags:?})",
-        server.label(),
-        client.label()
-    );
-    if let Some(i) = received.iter().zip(data).position(|(a, b)| a != b) {
-        panic!(
-            "first byte mismatch at {i}: got {:02x}, want {:02x} \
-             ({} server, {} client, flags {flags:?})",
-            received[i],
-            data[i],
-            server.label(),
-            client.label()
-        );
-    }
-    true
-}
-
-// Rust↔Rust
-// Always run. The unit-test floor: if these fail, the binary is
-// broken regardless of cross-impl.
-
-#[test]
-fn stream_mode() {
-    assert!(scenario(Impl::Rust, Impl::Rust, &payload(), &[]));
+/// Larger than `sptps_test`'s read buffer and any socket buffer, so the
+/// stream framing is reassembled from several short reads. A counter,
+/// so a dropped or swapped chunk shows as a localised diff.
+fn large_payload() -> Vec<u8> {
+    (0u32..65536).map(|i| (i % 251) as u8).collect()
 }
 
 #[test]
-fn datagram_mode() {
-    assert!(scenario(Impl::Rust, Impl::Rust, &payload(), &["-d"]));
+fn stream() {
+    scenario(Impl::Rust, Impl::Rust, &payload(), false);
 }
 
-/// Swap roles: server uses what was the "client" keypair, and vice
-/// versa. `sptps_basic.py` does this too. Catches a hypothetical bug
-/// where keygen produces a working initiator key but a broken responder
-/// key — implausible but the test is free.
+#[test]
+fn datagram() {
+    scenario(Impl::Rust, Impl::Rust, &payload(), true);
+}
+
+/// Same two key pairs, each used once as initiator and once as
+/// responder.
 #[test]
 fn stream_swapped_roles() {
     let dir = tempfile::tempdir().unwrap();
-    let (a_priv, a_pub) = gen_keys(Impl::Rust, dir.path(), "a");
-    let (b_priv, b_pub) = gen_keys(Impl::Rust, dir.path(), "b");
-
+    let a = generate_keys(Impl::Rust, dir.path(), "a");
+    let b = generate_keys(Impl::Rust, dir.path(), "b");
     let data = payload();
-    // First: a serves, b connects.
-    let r1 = roundtrip(
-        Impl::Rust,
-        Impl::Rust,
-        &a_priv,
-        &b_pub,
-        &b_priv,
-        &a_pub,
-        &data,
-        &[],
+    assert_eq!(
+        roundtrip((Impl::Rust, &a), (Impl::Rust, &b), &data, false),
+        data
     );
-    assert_eq!(r1, data);
-    // Then: b serves, a connects. Same keys, swapped roles.
-    let r2 = roundtrip(
-        Impl::Rust,
-        Impl::Rust,
-        &b_priv,
-        &a_pub,
-        &a_priv,
-        &b_pub,
-        &data,
-        &[],
+    assert_eq!(
+        roundtrip((Impl::Rust, &b), (Impl::Rust, &a), &data, false),
+        data
     );
-    assert_eq!(r2, data);
 }
 
-/// Stream mode with a payload bigger than one TCP segment. This forces
-/// the kernel to split the `send()` across multiple `recv()`s on the
-/// server side, exercising the SPTPS stream-framing reassembly. 64KB
-/// is well past any MTU and past the typical 16KB socket buffer.
-///
-/// `sptps_basic.py` only sends 256 bytes — one TCP segment, one
-/// `recv()`, one SPTPS record. Doesn't test reassembly. This does.
 #[test]
 fn stream_large_payload() {
-    // 64 KiB — bigger than `sptps_test`'s 65535 read buffer minus one,
-    // so even a single stdin `read()` can't hold it all. Guaranteed to
-    // exercise the loop. The bytes are a counter so a swapped/dropped
-    // chunk shows up as a localized diff, not just "lengths match,
-    // contents don't".
-    let data: Vec<u8> = (0u32..65536).map(|i| (i % 251) as u8).collect();
-    assert!(scenario(Impl::Rust, Impl::Rust, &data, &[]));
+    scenario(Impl::Rust, Impl::Rust, &large_payload(), false);
 }
 
-// Cross-impl: Rust↔C
-// These tests skip (return early) if TINC_C_SPTPS_TEST is unset.
-// They aren't #[ignore]'d because:
-//   1. `cargo test --include-ignored` would run them and fail noisily
-//      when the var isn't set, which is annoying for local dev.
-//   2. With the env var set, you want them in the default `cargo test`
-//      run — no extra flag, no special invocation.
-// The `cross_guard` check below is the CI gate: when CI sets the var,
-// a false return is a real failure (env var set but binary missing).
-//
-// The 2×2 matrix is asymmetric in what each cell tests:
-//
-//   ┌──────────┬──────────────┬──────────────────────────────────┐
-//   │ server   │ client       │ what's actually being tested     │
-//   ├──────────┼──────────────┼──────────────────────────────────┤
-//   │ Rust     │ Rust         │ (above) — the binary works at all│
-//   │ Rust     │ C            │ Rust *responder* SPTPS state mach│
-//   │ C        │ Rust         │ Rust *initiator* SPTPS state mach│
-//   │ C        │ C            │ the C binary still works (control)│
-//   └──────────┴──────────────┴──────────────────────────────────┘
-//
-// The two off-diagonal cells are the prize. Initiator and responder
-// take different code paths in SPTPS (initiator sends KEX first, signs
-// first; responder waits, verifies first). `tinc-sptps/tests/vs_c.rs`
-// covers both with seeded RNG; this covers both with real entropy and
-// real sockets.
-//
-// The C↔C cell is the control. If it fails, the C binary or the test
-// harness is broken — stop and fix that before believing anything else.
-
-fn cross_guard(ran: bool) {
-    // CI sets TINC_C_SPTPS_TEST. In that environment, skipping is a
-    // bug — the env var is set, the test must run. Locally, the var
-    // is unset, `scenario` returns false, and we just don't assert.
-    if std::env::var_os("TINC_C_SPTPS_TEST").is_some() {
-        assert!(ran, "TINC_C_SPTPS_TEST is set but scenario skipped");
+#[test]
+fn cross_matrix() {
+    if skip_without_c("cross_matrix") {
+        return;
+    }
+    for datagram in [false, true] {
+        for (server, client) in [
+            (Impl::Rust, Impl::C),
+            (Impl::C, Impl::Rust),
+            (Impl::C, Impl::C),
+        ] {
+            scenario(server, client, &payload(), datagram);
+        }
     }
 }
 
-#[test]
-fn cross_stream_rust_server_c_client() {
-    cross_guard(scenario(Impl::Rust, Impl::C, &payload(), &[]));
-}
-
-#[test]
-fn cross_stream_c_server_rust_client() {
-    cross_guard(scenario(Impl::C, Impl::Rust, &payload(), &[]));
-}
-
-#[test]
-fn cross_stream_c_server_c_client() {
-    cross_guard(scenario(Impl::C, Impl::C, &payload(), &[]));
-}
-
-#[test]
-fn cross_datagram_rust_server_c_client() {
-    cross_guard(scenario(Impl::Rust, Impl::C, &payload(), &["-d"]));
-}
-
-#[test]
-fn cross_datagram_c_server_rust_client() {
-    cross_guard(scenario(Impl::C, Impl::Rust, &payload(), &["-d"]));
-}
-
-#[test]
-fn cross_datagram_c_server_c_client() {
-    cross_guard(scenario(Impl::C, Impl::C, &payload(), &["-d"]));
-}
-
-/// 64KB through the cross-impl path. The Rust *responder* reassembling
-/// records that the *C initiator* fragmented across TCP segments — and
-/// the reverse. The C↔C cell is skipped here; it'd just be testing the
-/// C binary against itself, which is `sptps_basic.py`'s job.
+/// Rust responder reassembling what the C initiator fragmented, and
+/// the reverse.
 #[test]
 fn cross_stream_large_payload() {
-    let data: Vec<u8> = (0u32..65536).map(|i| (i % 251) as u8).collect();
-    let r1 = scenario(Impl::Rust, Impl::C, &data, &[]);
-    let r2 = scenario(Impl::C, Impl::Rust, &data, &[]);
-    cross_guard(r1 && r2);
+    if skip_without_c("cross_stream_large_payload") {
+        return;
+    }
+    scenario(Impl::Rust, Impl::C, &large_payload(), false);
+    scenario(Impl::C, Impl::Rust, &large_payload(), false);
 }
 
-/// PEM cross-read: a key generated by one impl's `sptps_keypair`
-/// should load in the other. The `scenario()` cross-impl tests already
-/// exercise *public*-key cross-reads (server reads client's public);
-/// this exercises *private*-key cross-reads by generating with one
-/// impl and using with the other on both ends.
-///
-/// What this catches that the matrix above doesn't: the 96-byte
-/// private-key blob layout (`ecdsa.c`'s struct-overlap trick —
-/// `private[64] || public[32]` packed). The public-key file is just 32
-/// bytes; harder to get wrong. The private side is where the LSB-first
-/// b64 encoding and the exact byte order matter.
+/// Private keys generated by one implementation, loaded by the other
+/// on both ends: the 96-byte `private ‖ public` blob and its LSB-first
+/// base64 PEM are where the format could plausibly diverge.
 #[test]
-fn cross_pem_read() {
-    let Some(_) = Impl::C.sptps_keypair() else {
-        eprintln!("SKIP: TINC_C_SPTPS_KEYPAIR not set");
-        cross_guard(false);
+fn cross_pem_private_keys() {
+    if skip_without_c("cross_pem_private_keys") {
         return;
-    };
+    }
     let dir = tempfile::tempdir().unwrap();
-
-    // C generates, Rust uses (both ends — so private cross-read on
-    // both server and client).
-    let (s_priv, s_pub) = gen_keys(Impl::C, dir.path(), "c_server");
-    let (c_priv, c_pub) = gen_keys(Impl::C, dir.path(), "c_client");
     let data = payload();
-    let r = roundtrip(
-        Impl::Rust,
-        Impl::Rust,
-        &s_priv,
-        &c_pub,
-        &c_priv,
-        &s_pub,
-        &data,
-        &[],
-    );
-    assert_eq!(r, data, "C-generated keys, Rust-used");
+    for (generator, user) in [(Impl::C, Impl::Rust), (Impl::Rust, Impl::C)] {
+        let server = generate_keys(generator, dir.path(), "server");
+        let client = generate_keys(generator, dir.path(), "client");
+        assert_eq!(
+            roundtrip((user, &server), (user, &client), &data, false),
+            data,
+            "{generator:?} keys used by {user:?}"
+        );
+    }
+}
 
-    // Rust generates, C uses.
-    let (s_priv, s_pub) = gen_keys(Impl::Rust, dir.path(), "r_server");
-    let (c_priv, c_pub) = gen_keys(Impl::Rust, dir.path(), "r_client");
-    let r = roundtrip(
-        Impl::C,
-        Impl::C,
-        &s_priv,
-        &c_pub,
-        &c_priv,
-        &s_pub,
-        &data,
-        &[],
+/// `tinc init`'s private key PEM and host-file public key (re-wrapped
+/// as the PEM `sptps_test` wants) must load in C.
+#[test]
+fn init_keys_load_in_c() {
+    if skip_without_c("init_keys_load_in_c") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let init = |name: &str| {
+        let confbase = dir.path().join(name);
+        let status = Command::new(cargo_bin("tinc"))
+            .arg("-c")
+            .arg(&confbase)
+            .args(["init", name])
+            .env_remove("NETNAME")
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let host = std::fs::read_to_string(confbase.join("hosts").join(name)).unwrap();
+        let b64 = host
+            .lines()
+            .find_map(|line| line.strip_prefix("Ed25519PublicKey = "))
+            .unwrap();
+        let public = dir.path().join(format!("{name}.pub"));
+        tinc_conf::pem::write_pem(
+            &mut std::fs::File::create(&public).unwrap(),
+            "ED25519 PUBLIC KEY",
+            &tinc_crypto::b64::decode(b64).unwrap(),
+        )
+        .unwrap();
+        KeyPair {
+            private: confbase.join("ed25519_key.priv"),
+            public,
+        }
+    };
+    let alice = init("alice");
+    let bob = init("bob");
+    let data = payload();
+    assert_eq!(
+        roundtrip((Impl::C, &alice), (Impl::C, &bob), &data, false),
+        data
     );
-    assert_eq!(r, data, "Rust-generated keys, C-used");
 }

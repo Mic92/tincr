@@ -1,77 +1,39 @@
-#![cfg(unix)]
+//! The OIDC provider half of `tinc-auth`, over real HTTP. The subnet
+//! dump assigns 127.0.0.1 to alice so both the bind check and the
+//! `/authorize` whois succeed on loopback.
 
-use super::bin;
-use super::fake_daemon::{fake_daemon_setup, serve_greeting};
-use std::io::{BufRead, BufReader, Read, Write};
+use super::{AuthDaemon, Conf, HttpResponse};
+use std::io::Write;
 use std::net::TcpStream;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
 
-struct Idp {
-    child: Child,
-    port: u16,
-}
-
-impl Drop for Idp {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-/// Serves subnet dumps forever. The dump claims 127.0.0.1 for
-/// `alice` so the bind check and /authorize whois both succeed
-/// against a loopback listener.
-fn serve_dumps(listener: std::os::unix::net::UnixListener, cookie: String) {
-    std::thread::spawn(move || {
-        while let Ok((stream, _)) = listener.accept() {
-            let cookie = cookie.clone();
-            std::thread::spawn(move || {
-                let (mut br, mut w) = serve_greeting(&stream, &cookie);
-                let mut req = String::new();
-                br.read_line(&mut req).unwrap();
-                assert_eq!(req.trim_end(), "18 5");
-                writeln!(w, "18 5 127.0.0.1/32 alice").unwrap();
-                writeln!(w, "18 5 10.0.0.0/24 bob").unwrap();
-                writeln!(w, "18 5").unwrap();
-            });
-        }
+fn serve_subnets(conf: &Conf) {
+    conf.serve_forever(|ctl| {
+        ctl.expect("18 5");
+        ctl.send("18 5 127.0.0.1/32 alice");
+        ctl.send("18 5 10.0.0.0/24 bob");
+        ctl.send("18 5");
     });
 }
 
-fn spawn_idp(dir: &std::path::Path, cb: &str, pf: &str, port: u16) -> Idp {
-    std::fs::write(format!("{cb}/tinc.conf"), "Name = alice\n").unwrap();
-    let clients = dir.join("clients.json");
+fn start_idp(conf: &Conf) -> (AuthDaemon, u16) {
+    conf.write("tinc.conf", "Name = alice\n");
+    let clients = conf.dir().join("clients.json");
     std::fs::write(
         &clients,
         r#"[{"id":"app","secret":"hunter2","redirect_uris":["http://app.mesh/cb"]}]"#,
     )
     .unwrap();
-    let groups = dir.join("groups.json");
+    let groups = conf.dir().join("groups.json");
     std::fs::write(&groups, r#"{"ajones":["admin"]}"#).unwrap();
-    let map = dir.join("map.json");
+    let map = conf.dir().join("map.json");
     std::fs::write(&map, r#"{"alice":"ajones"}"#).unwrap();
-
-    let child = Command::new(bin("tinc-auth"))
-        .args([
-            "-c",
-            cb,
-            "-n",
-            "mesh",
-            "--pidfile",
-            pf,
+    let mut idp = AuthDaemon::spawn(
+        conf,
+        &[
             "--idp-listen",
-            &format!("127.0.0.1:{port}"),
+            "127.0.0.1:0",
             "--issuer",
-            &format!("http://127.0.0.1:{port}"),
+            "http://idp.mesh",
             "--clients",
             clients.to_str().unwrap(),
             "--groups",
@@ -80,85 +42,26 @@ fn spawn_idp(dir: &std::path::Path, cb: &str, pf: &str, port: u16) -> Idp {
             map.to_str().unwrap(),
             "--email-domain",
             "example.com",
-        ])
-        .env_remove("LISTEN_PID")
-        .env_remove("LISTEN_FDS")
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-
-    let deadline = Instant::now() + Duration::from_mins(1);
-    loop {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            break;
-        }
-        assert!(Instant::now() < deadline, "idp never came up");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Idp { child, port }
+        ],
+    );
+    let port = idp.wait_ready().expect("IdP port");
+    (idp, port)
 }
 
-struct Response {
-    status: u16,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
+fn http(port: u16, request: &str) -> HttpResponse {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    HttpResponse::read(stream)
 }
 
-impl Response {
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
-    }
-
-    fn json(&self) -> serde_json::Value {
-        serde_json::from_slice(&self.body).unwrap()
-    }
-}
-
-fn http(port: u16, request: &str) -> Response {
-    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    s.write_all(request.as_bytes()).unwrap();
-
-    let mut br = BufReader::new(s);
-    let mut line = String::new();
-    br.read_line(&mut line).unwrap();
-    let status: u16 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
-
-    let mut headers = Vec::new();
-    loop {
-        line.clear();
-        br.read_line(&mut line).unwrap();
-        if line == "\r\n" || line == "\n" || line.is_empty() {
-            break;
-        }
-        if let Some((k, v)) = line.split_once(':') {
-            headers.push((k.trim().to_owned(), v.trim().to_owned()));
-        }
-    }
-    let len: usize = headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-        .map_or(0, |(_, v)| v.parse().unwrap());
-    let mut body = vec![0; len];
-    br.read_exact(&mut body).unwrap();
-    Response {
-        status,
-        headers,
-        body,
-    }
-}
-
-fn get(port: u16, path: &str) -> Response {
+fn get(port: u16, path: &str) -> HttpResponse {
     http(
         port,
         &format!("GET {path} HTTP/1.1\r\nHost: idp\r\nConnection: close\r\n\r\n"),
     )
 }
 
-fn post_form(port: u16, path: &str, body: &str) -> Response {
+fn post_form(port: u16, path: &str, body: &str) -> HttpResponse {
     http(
         port,
         &format!(
@@ -172,21 +75,20 @@ fn post_form(port: u16, path: &str, body: &str) -> Response {
 
 #[test]
 fn idp_full_flow_over_http() {
-    let (dir, cb, pf, listener, cookie) = fake_daemon_setup();
-    serve_dumps(listener, cookie);
-    let port = free_port();
-    let idp = spawn_idp(dir.path(), &cb, &pf, port);
+    let conf = Conf::bare();
+    serve_subnets(&conf);
+    let (_idp, port) = start_idp(&conf);
 
-    let disco = get(idp.port, "/.well-known/openid-configuration");
+    let disco = get(port, "/.well-known/openid-configuration");
     assert_eq!(disco.status, 200);
     let d = disco.json();
-    assert_eq!(d["issuer"], format!("http://127.0.0.1:{port}"));
+    assert_eq!(d["issuer"], "http://idp.mesh");
 
-    let jwks = get(idp.port, "/.well-known/jwks.json").json();
+    let jwks = get(port, "/.well-known/jwks.json").json();
     assert_eq!(jwks["keys"][0]["alg"], "RS256");
 
     let auth = get(
-        idp.port,
+        port,
         "/authorize?response_type=code&client_id=app\
          &redirect_uri=http%3A%2F%2Fapp.mesh%2Fcb&state=st&nonce=nn",
     );
@@ -203,7 +105,7 @@ fn idp_full_flow_over_http() {
         .to_owned();
 
     let tok = post_form(
-        idp.port,
+        port,
         "/token",
         &format!(
             "grant_type=authorization_code&code={code}\
@@ -235,7 +137,7 @@ fn idp_full_flow_over_http() {
 
     let access = t["access_token"].as_str().unwrap();
     let ui = http(
-        idp.port,
+        port,
         &format!(
             "GET /userinfo HTTP/1.1\r\nHost: idp\r\nConnection: close\r\n\
              Authorization: Bearer {access}\r\n\r\n"
@@ -246,7 +148,7 @@ fn idp_full_flow_over_http() {
 
     // replay is refused
     let replay = post_form(
-        idp.port,
+        port,
         "/token",
         &format!(
             "grant_type=authorization_code&code={code}\
@@ -258,32 +160,25 @@ fn idp_full_flow_over_http() {
     assert_eq!(replay.json()["error"], "invalid_grant");
 }
 
+/// 10.0.0.1 is bob's per the dump; alice may not serve the `IdP` there.
 #[test]
 fn idp_refuses_foreign_bind() {
-    let (dir, cb, pf, listener, cookie) = fake_daemon_setup();
-    serve_dumps(listener, cookie);
-    std::fs::write(format!("{cb}/tinc.conf"), "Name = bob\n").unwrap();
-    let clients = dir.path().join("clients.json");
+    let conf = Conf::bare();
+    serve_subnets(&conf);
+    conf.write("tinc.conf", "Name = alice\n");
+    let clients = conf.dir().join("clients.json");
     std::fs::write(&clients, "[]").unwrap();
-
-    let out = Command::new(bin("tinc-auth"))
-        .args([
-            "-c",
-            &cb,
-            "--pidfile",
-            &pf,
+    AuthDaemon::spawn(
+        &conf,
+        &[
             "--idp-listen",
-            &format!("127.0.0.1:{}", free_port()),
+            "10.0.0.1:0",
             "--issuer",
             "http://x",
             "--clients",
             clients.to_str().unwrap(),
-        ])
-        .env_remove("LISTEN_PID")
-        .env_remove("LISTEN_FDS")
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("refusing"), "{stderr}");
+        ],
+    )
+    .wait_output()
+    .fails_with("refusing");
 }

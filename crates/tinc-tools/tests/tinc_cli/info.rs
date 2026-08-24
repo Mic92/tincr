@@ -1,154 +1,58 @@
-#![cfg(unix)]
+//! `tinc info`: three sequential dumps for a node (each request
+//! carrying the name as a dead third argument, as C sends it), one for
+//! an address.
 
-use super::fake_daemon::{fake_daemon_setup, serve_greeting};
-use super::tinc;
+use super::{Conf, tinc_with};
 
-/// Helper: init a confbase, return its dir + a --pidfile pointing
-/// at nothing (so the post-edit reload silently fails).
-fn config_init(name: &str) -> (tempfile::TempDir, String, String) {
-    let dir = tempfile::tempdir().unwrap();
-    let cb = dir.path().join("vpn");
-    let cb_s = cb.to_str().unwrap().to_owned();
-    let pidfile = dir.path().join("nope.pid");
-    let pidfile_s = pidfile.to_str().unwrap().to_owned();
-
-    let out = tinc(&["-c", &cb_s, "init", name]);
-    assert!(out.status.success(), "{:?}", out.stderr);
-    (dir, cb_s, pidfile_s)
-}
-
-/// Helper: spawn `tinc` with `TZ=UTC` so `fmt_localtime` is
-/// deterministic. The unit tests can't safely `setenv("TZ")` (cargo
-/// test threads share process state); subprocess env is per-process.
-fn tinc_utc(args: &[&str]) -> std::process::Output {
-    use std::process::Command;
-    Command::new(env!("CARGO_BIN_EXE_tinc"))
-        .args(args)
-        .env("TZ", "UTC")
-        .output()
-        .unwrap()
-}
-
-/// `tinc info bob` against a fake daemon serving 3 nodes (bob is the
-/// 2nd — exercises both pre-match-skip and post-match-drain), 4
-/// edges (2 from bob — exercises filter), 3 subnets (1 owned by bob).
-///
-/// THE three-dump-sequence test. The daemon must see THREE `"18 N
-/// item"` requests in order (the dead-third-arg compat check is the
-/// `assert_eq!` on the request lines).
-///
-/// `clippy::too_many_lines`: it's a fake-daemon script + a golden
-/// output check. One scenario, end-to-end. Splitting would mean
-/// helpers that wrap helpers.
+/// bob is second of three nodes (skip one, match, drain one), has two
+/// of four edges and one subnet. status 0x52 = validkey | reachable |
+/// sptps; options 0x07000004 = `PMTU_DISCOVERY` | protocol minor 7;
+/// 1700000000 is 2023-11-14 22:13:20 UTC, hence `TZ=UTC`.
 #[test]
-fn info_node_against_fake() {
-    use std::io::{BufRead, Write};
-
-    let (_dir, cb, pf, listener, cookie) = fake_daemon_setup();
-
-    let daemon = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        let (mut br, mut w) = serve_greeting(&stream, &cookie);
-
-        // Round 1: DUMP_NODES
-        // Request includes `bob` as a dead third arg. The daemon
-        // doesn't read it (just dispatches on REQ_DUMP_NODES). Assert it
-        // arrives anyway — wire-compat with what C tinc's `tinc info` sends.
-        let mut req = String::new();
-        br.read_line(&mut req).unwrap();
-        assert_eq!(req.trim_end(), "18 3 bob", "dead third arg should be sent");
-
-        // Three node rows. bob is #2 (so the match-loop skips alice,
-        // matches bob, then DRAINS carol). All 22 wire fields.
-        //
-        // bob's row: reachable+validkey+sptps (status=0x52),
-        // direct UDP (minmtu>0), version 7 (options=0x07000004 =
-        // PMTU_DISCOVERY|ver7). last_state_change = 1700000000
-        // (2023-11-14 22:13:20 UTC).
-        writeln!(
-            w,
-            "18 3 alice 0 1.1.1.1 port 655 0 0 0 0 0 12 - alice 1 0 0 0 0 -1 0 0 0 0"
-        )
-        .unwrap();
-        writeln!(
-            w,
-            "18 3 bob 0a1b2c3d4e5f 10.0.0.2 port 655 \
-             0 0 0 0 7000004 52 alice bob 1 1518 1400 1518 \
-             1700000000 1500 100 50000 200 100000"
-        )
-        .unwrap();
-        writeln!(
-            w,
-            "18 3 carol 0 unknown port unknown 0 0 0 0 0 0 - - 99 0 0 0 0 -1 0 0 0 0"
-        )
-        .unwrap();
-        writeln!(w, "18 3").unwrap(); // terminator
-
-        // Round 2: DUMP_EDGES
-        // Only fires AFTER the nodes terminator (sequential, not
-        // pipelined). Dead third arg again.
-        req.clear();
-        br.read_line(&mut req).unwrap();
-        assert_eq!(req.trim_end(), "18 4 bob");
-
-        // 4 edges. Two have from=bob → collected. The other two
-        // are filtered out (only edges FROM the queried node).
-        //
-        // Full 8-field rows BUT the parse only reads the first two
-        // strings. The trailing junk after `to` proves that:
-        // "18 4 bob alice GARBAGE GARBAGE" would still parse
-        // (first 2 strings = bob, alice). We send well-formed rows
-        // because that's what the daemon does, but the partial-
-        // parse is what's exercised.
-        writeln!(
-            w,
-            "18 4 alice bob 1.1.1.2 port 655 unspec port unspec 0 100"
-        )
-        .unwrap();
-        writeln!(
-            w,
-            "18 4 bob alice 1.1.1.1 port 655 unspec port unspec 0 100"
-        )
-        .unwrap();
-        writeln!(
-            w,
-            "18 4 bob carol 1.1.1.3 port 655 unspec port unspec 0 200"
-        )
-        .unwrap();
-        writeln!(
-            w,
-            "18 4 carol bob 1.1.1.2 port 655 unspec port unspec 0 200"
-        )
-        .unwrap();
-        writeln!(w, "18 4").unwrap();
-
-        // Round 3: DUMP_SUBNETS
-        req.clear();
-        br.read_line(&mut req).unwrap();
-        assert_eq!(req.trim_end(), "18 5 bob");
-
-        // 3 subnets. One owned by bob.
-        writeln!(w, "18 5 10.0.0.0/24 alice").unwrap();
-        writeln!(w, "18 5 10.0.1.0/24 bob").unwrap();
-        writeln!(w, "18 5 ff:ff:ff:ff:ff:ff (broadcast)").unwrap();
-        writeln!(w, "18 5").unwrap();
+fn info_node() {
+    let conf = Conf::bare();
+    let daemon = conf.serve(|ctl| {
+        ctl.expect("18 3 bob");
+        ctl.send("18 3 alice 0 1.1.1.1 port 655 0 0 0 0 0 12 - alice 1 0 0 0 0 -1 0 0 0 0");
+        ctl.send(
+            "18 3 bob 0a1b2c3d4e5f 10.0.0.2 port 655 0 0 0 0 7000004 52 alice bob 1 \
+             1518 1400 1518 1700000000 1500 100 50000 200 100000",
+        );
+        ctl.send("18 3 carol 0 unknown port unknown 0 0 0 0 0 0 - - 99 0 0 0 0 -1 0 0 0 0");
+        ctl.send("18 3");
+        ctl.expect("18 4 bob");
+        ctl.send("18 4 alice bob 1.1.1.2 port 655 unspec port unspec 0 100");
+        ctl.send("18 4 bob alice 1.1.1.1 port 655 unspec port unspec 0 100");
+        ctl.send("18 4 bob carol 1.1.1.3 port 655 unspec port unspec 0 200");
+        ctl.send("18 4 carol bob 1.1.1.2 port 655 unspec port unspec 0 200");
+        ctl.send("18 4");
+        ctl.expect("18 5 bob");
+        ctl.send("18 5 10.0.0.0/24 alice");
+        ctl.send("18 5 10.0.1.0/24 bob");
+        ctl.send("18 5 ff:ff:ff:ff:ff:ff (broadcast)");
+        ctl.send("18 5");
     });
-
-    let out = tinc_utc(&["-c", &cb, "--pidfile", &pf, "info", "bob"]);
-    daemon.join().unwrap();
-
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(out.status.success(), "stderr: {stderr}");
-
-    let stdout = String::from_utf8(out.stdout).unwrap();
-
-    // Assert: byte-for-byte golden
-    // status=0x52 = bit 1 (validkey) | bit 4 (reachable) | bit 6
-    // (sptps). NOT visited/indirect/udp_confirmed.
-    // options=0x07000004 = PMTU_DISCOVERY (bit 2) | version 7.
-    // 1700000000 in UTC = 2023-11-14 22:13:20.
-    // 1500us → "RTT: 1.500".
-    let expected = "\
+    let base = conf.arg();
+    let pidfile = conf.pidfile();
+    let stdout = tinc_with(
+        &[
+            "-c",
+            &base,
+            "--pidfile",
+            pidfile.to_str().unwrap(),
+            "info",
+            "bob",
+        ],
+        b"",
+        |cmd| {
+            cmd.env("TZ", "UTC");
+        },
+    )
+    .ok();
+    daemon.finish();
+    assert_eq!(
+        stdout,
+        "\
 Node:         bob
 Node ID:      0a1b2c3d4e5f
 Address:      10.0.0.2 port 655
@@ -163,150 +67,64 @@ RX:           100 packets  50000 bytes
 TX:           200 packets  100000 bytes
 Edges:        alice carol
 Subnets:      10.0.1.0/24
-";
-    assert_eq!(stdout, expected);
+"
+    );
 }
 
-/// `tinc info dave` (nonexistent): NODES dump runs, no match,
-/// terminator, error. EDGES/SUBNETS NEVER sent — short-circuit
-/// on unknown node.
-/// — BEFORE the second sendline.
-///
-/// The fake daemon asserts NO second request arrives (`read_line`
-/// would block; we drop the socket after the nodes terminator and
-/// the test thread's daemon-side join confirms it returned).
+/// No match in the nodes dump: error out without requesting edges.
 #[test]
-fn info_node_not_found_short_circuits() {
-    use std::io::{BufRead, Write};
-
-    let (_dir, cb, pf, listener, cookie) = fake_daemon_setup();
-
-    let daemon = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        let (mut br, mut w) = serve_greeting(&stream, &cookie);
-
-        let mut req = String::new();
-        br.read_line(&mut req).unwrap();
-        assert_eq!(req.trim_end(), "18 3 dave");
-
-        // One node, NOT dave. Then terminator.
-        writeln!(
-            w,
-            "18 3 alice 0 1.1.1.1 port 655 0 0 0 0 0 12 - alice 0 0 0 0 0 -1 0 0 0 0"
-        )
-        .unwrap();
-        writeln!(w, "18 3").unwrap();
-
-        // Assert: NO second request
-        // The CLI errors after the nodes terminator without sending
-        // the EDGES request. If it DID send, this read would get
-        // "18 4 dave\n". Instead the CLI's socket drops → EOF →
-        // read_line returns 0 bytes.
-        //
-        // The error returns BEFORE the edges request goes out.
-        // If our impl pipelined or didn't short-circuit,
-        // this assert catches it.
-        req.clear();
-        let n = br.read_line(&mut req).unwrap();
-        assert_eq!(n, 0, "expected EOF, got second request: {req:?}");
+fn info_unknown_node_stops_after_nodes() {
+    let conf = Conf::bare();
+    let daemon = conf.serve(|ctl| {
+        ctl.expect("18 3 dave");
+        ctl.send("18 3 alice 0 1.1.1.1 port 655 0 0 0 0 0 12 - alice 1 0 0 0 0 -1 0 0 0 0");
+        ctl.send("18 3");
+        ctl.expect_eof();
     });
-
-    let out = tinc(&["-c", &cb, "--pidfile", &pf, "info", "dave"]);
-    daemon.join().unwrap();
-
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("Unknown node dave."));
-    assert!(out.stdout.is_empty());
+    conf.tinc(&["info", "dave"])
+        .fails_with("Unknown node dave.");
+    daemon.finish();
 }
 
-/// `tinc info 10.0.0.5` (address mode): which subnets contain it?
-/// The /24 does, the /16 does, the unrelated /24 doesn't. ALL
-/// matches printed (no longest-prefix selection — `info_subnet`
-/// shows everything that matches, the daemon's routing table picks
-/// longest at PACKET time).
+/// Every containing subnet is printed (longest-prefix selection is
+/// the daemon's job at packet time); MAC subnets never match an
+/// address.
 #[test]
-fn info_subnet_address_mode() {
-    use std::io::{BufRead, Write};
-
-    let (_dir, cb, pf, listener, cookie) = fake_daemon_setup();
-
-    let daemon = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        let (mut br, mut w) = serve_greeting(&stream, &cookie);
-
-        let mut req = String::new();
-        br.read_line(&mut req).unwrap();
-        // Dead third arg: the address itself.
-        assert_eq!(req.trim_end(), "18 5 10.0.0.5");
-
-        // 4 subnets. Two contain 10.0.0.5.
-        writeln!(w, "18 5 10.0.0.0/24 alice").unwrap();
-        writeln!(w, "18 5 10.0.0.0/16 bob").unwrap();
-        writeln!(w, "18 5 192.168.0.0/24 carol").unwrap();
-        // (broadcast) MAC → type mismatch → filtered.
-        writeln!(w, "18 5 ff:ff:ff:ff:ff:ff (broadcast)").unwrap();
-        writeln!(w, "18 5").unwrap();
+fn info_address() {
+    let conf = Conf::bare();
+    let daemon = conf.serve(|ctl| {
+        ctl.expect("18 5 10.0.0.5");
+        ctl.send("18 5 10.0.0.0/24 alice");
+        ctl.send("18 5 10.0.0.0/16 bob");
+        ctl.send("18 5 192.168.0.0/24 carol");
+        ctl.send("18 5 ff:ff:ff:ff:ff:ff (broadcast)");
+        ctl.send("18 5");
     });
-
-    let out = tinc(&["-c", &cb, "--pidfile", &pf, "info", "10.0.0.5"]);
-    daemon.join().unwrap();
-
-    assert!(out.status.success());
-    let stdout = String::from_utf8(out.stdout).unwrap();
-
-    // `"Subnet: %s\nOwner:  %s\n"`. Two spaces after `Owner:`
-    // (column alignment with `Subnet:`). Per match.
-    let expected = "\
-Subnet: 10.0.0.0/24
-Owner:  alice
-Subnet: 10.0.0.0/16
-Owner:  bob
-";
-    assert_eq!(stdout, expected);
-    // 192.168 NOT in output (didn't match).
-    assert!(!stdout.contains("carol"));
-    // (broadcast) NOT in output (type mismatch).
-    assert!(!stdout.contains("broadcast"));
+    let stdout = conf.tinc(&["info", "10.0.0.5"]).ok();
+    daemon.finish();
+    assert_eq!(
+        stdout,
+        "Subnet: 10.0.0.0/24\nOwner:  alice\nSubnet: 10.0.0.0/16\nOwner:  bob\n"
+    );
 }
 
-/// `tinc info 99.99.99.99` (no match): "Unknown address". The
-/// wording differs from "Unknown subnet" (which is the
-/// `/`-present case at :336).
 #[test]
-fn info_subnet_no_match() {
-    use std::io::{BufRead, Write};
-
-    let (_dir, cb, pf, listener, cookie) = fake_daemon_setup();
-
-    let daemon = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        let (mut br, mut w) = serve_greeting(&stream, &cookie);
-
-        let mut req = String::new();
-        br.read_line(&mut req).unwrap();
-        // One subnet that doesn't contain 99.99.99.99.
-        writeln!(w, "18 5 10.0.0.0/24 alice").unwrap();
-        writeln!(w, "18 5").unwrap();
+fn info_unknown_address() {
+    let conf = Conf::bare();
+    let daemon = conf.serve(|ctl| {
+        ctl.expect("18 5 99.99.99.99");
+        ctl.send("18 5 10.0.0.0/24 alice");
+        ctl.send("18 5");
     });
-
-    let out = tinc(&["-c", &cb, "--pidfile", &pf, "info", "99.99.99.99"]);
-    daemon.join().unwrap();
-
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    // No `/` in arg → "address" wording (vs. "subnet").
-    assert!(stderr.contains("Unknown address 99.99.99.99."));
-    assert!(out.stdout.is_empty());
+    conf.tinc(&["info", "99.99.99.99"])
+        .fails_with("Unknown address 99.99.99.99.");
+    daemon.finish();
 }
 
-/// `tinc info @!$` (neither node name nor subnet): the dispatch
-/// rejects before connect. Daemon never accepts.
+/// Rejected before connecting.
 #[test]
-fn info_invalid_arg() {
-    let (_d, cb, pf) = config_init("alice");
-    let out = tinc(&["-c", &cb, "--pidfile", &pf, "info", "@!$"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("Argument is not a node name, subnet or address."));
+fn info_invalid_argument() {
+    Conf::bare()
+        .tinc(&["info", "not/valid"])
+        .fails_with("Argument is not a node name, subnet or address.");
 }
