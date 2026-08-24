@@ -180,17 +180,33 @@ impl Node {
         self.start()
     }
 
-    pub fn start_command(&mut self, mut cmd: std::process::Command) -> &mut Self {
-        assert!(self.daemon.is_none(), "{} already running", self.name);
+    pub fn start_command(&mut self, cmd: std::process::Command) -> &mut Self {
+        match self.try_start_command(cmd) {
+            Ok(node) => node,
+            Err(log) => panic!("tincd did not come up; stderr:\n{log}"),
+        }
+    }
+
+    /// `Err(stderr)` if the daemon exits or never creates its socket.
+    pub fn try_start(&mut self) -> Result<&mut Self, String> {
+        self.try_start_command(self.command())
+    }
+
+    fn try_start_command(&mut self, mut cmd: std::process::Command) -> Result<&mut Self, String> {
+        if let Some(previous) = &mut self.daemon {
+            assert!(
+                previous.wait_exit(Duration::ZERO).is_some(),
+                "{} already running",
+                self.name
+            );
+            self.stop();
+        }
         let _ = std::fs::remove_file(&self.socket);
         let _ = std::fs::remove_file(&self.pidfile);
         let daemon = ChildWithLog::spawn(cmd.spawn().expect("spawn tincd"));
-        assert!(
-            wait_for_file(&self.socket),
-            "{}: tincd did not come up; stderr:\n{}",
-            self.name,
-            daemon.kill_and_log()
-        );
+        if !wait_for_file(&self.socket) {
+            return Err(daemon.kill_and_log());
+        }
         let port = read_tcp_addr(&self.pidfile).port();
         if self.port == 0 {
             // Pin it so a restart keeps peers' `Address =` lines valid.
@@ -205,7 +221,7 @@ impl Node {
         }
         self.port = port;
         self.daemon = Some(daemon);
-        self
+        Ok(self)
     }
 
     /// Learn a port without staying up: for tests where the listener
@@ -238,11 +254,12 @@ impl Node {
     }
 
     /// Wait for the daemon to exit by itself; panics on timeout.
+    /// `log()` stays available afterwards.
     pub fn wait_exit(&mut self) -> std::process::ExitStatus {
         let name = self.name.clone();
-        let mut daemon = self
+        let daemon = self
             .daemon
-            .take()
+            .as_mut()
             .unwrap_or_else(|| panic!("{name} not started"));
         daemon
             .wait_exit(std::time::Duration::from_secs(5))

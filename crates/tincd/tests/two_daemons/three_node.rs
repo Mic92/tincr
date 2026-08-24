@@ -239,8 +239,11 @@ fn mid_does_not_relay_for_spoofed_udp_sender() {
         (node_reachable(&nodes, "alice") && node_reachable(&nodes, "bob")).then_some(())
     });
 
-    let bob_in_packets =
-        || node_traffic(&bob.ctl().dump(3), "alice").map_or(0, |(in_packets, _)| in_packets);
+    let bob_in_packets = || {
+        node_traffic(&bob.ctl().dump(13), "alice")
+            .expect("alice row")
+            .0
+    };
     let before = bob_in_packets();
     let mut spoof = Vec::new();
     spoof.extend_from_slice(tincd::node_id::NodeId6::from_name("bob").as_bytes());
