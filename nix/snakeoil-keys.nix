@@ -31,28 +31,4 @@
     '';
     ed25519Public = "4Rki6fj1BxpyDLQKOkv+BO9gFA2rptNJyKEIUZa6qTM";
   };
-  # Tier-2b cold-start node (nix/nixos-test-dht.nix). carol's hosts/relay
-  # has the pubkey but NO Address= — she can only reach relay if the
-  # DHT tells her where it is.
-  delta = {
-    ed25519Private = ''
-      -----BEGIN ED25519 PRIVATE KEY-----
-      wVO2JOA/dKa8iqZ/3ySLQUlGnilMeDT+fHU2gfITzc2ATRXOf2Tak2ov7CeOML4G
-      bI7DWHnvEXRy49JpMgRftp7Bfmoz6U/a+M37azWDiEc5HXL1huyQj90qbafyaOOb
-      -----END ED25519 PRIVATE KEY-----
-    '';
-    ed25519Public = "6ewnJ6sO1vmPz9u2s1gIBX+x1SdorM0YPt6m2nsmjzG";
-  };
-  # DHT-only bootstrap node (nix/nixos-test-dht.nix). dave has NO
-  # ConnectTo and his hosts/* carry pubkeys only — AutoConnect must
-  # pick a candidate on `has_dht_key` alone, then DHT-resolve it.
-  epsilon = {
-    ed25519Private = ''
-      -----BEGIN ED25519 PRIVATE KEY-----
-      4o7YUNSl6riz+9f4B7/pEK5LiSk0Udj7jDxTyJQlycnM7XG4DUsGP3XFZrwd1TsB
-      XtGXHqVfWHZWUUpXKbwegsNROaJhaUEi7uyTxs/iWAcjmHHbJDNheI+vcgrXR8qZ
-      -----END ED25519 PRIVATE KEY-----
-    '';
-    ed25519Public = "bTkjWSoGFh4ur8UM7voFA3o5xxWyQToHi/LH46VEvaG";
-  };
 }

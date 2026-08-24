@@ -14,7 +14,7 @@ use std::time::Duration;
 /// peer is noticed within `PingTimeout + 1 s`.
 pub(crate) const PING_SWEEP: Duration = Duration::from_secs(1);
 
-/// `on_periodic_tick`: autoconnect / portmap / discovery plumbing.
+/// `on_periodic_tick`: autoconnect / portmap plumbing.
 /// 5 s is the floor; edge-storm backoff (`sleeptime`) raises it.
 pub(crate) const PERIODIC_TICK: Duration = Duration::from_secs(5);
 
@@ -45,10 +45,3 @@ pub(crate) const REQ_KEY_RETRY: Duration = Duration::from_secs(10);
 pub(crate) const PMTU_PROBE_TICK: Duration = Duration::from_micros(333_333);
 /// Revalidate/Lost phases: one probe per second.
 pub(crate) const PMTU_REVALIDATE_TICK: Duration = Duration::from_secs(1);
-
-// DHT discovery.
-
-/// `Discovery` publish backoff seed; doubles on failure. Equals
-/// [`PERIODIC_TICK`] because that's the poll cadence — anything
-/// smaller is unobservable.
-pub(crate) const DISCOVERY_BACKOFF_SEED: Duration = PERIODIC_TICK;

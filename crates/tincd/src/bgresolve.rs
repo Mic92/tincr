@@ -3,23 +3,16 @@
 //! `do_outgoing_connection` runs on the epoll thread via the
 //! `RetryOutgoing` timer. libc `getaddrinfo` blocks for its full
 //! resolver timeout (glibc default 5 s per server, 30 s with a broken
-//! `resolv.conf`). One slow lookup parks the whole reactor — same
-//! stall class as the DHT-publish bug fixed in `682eed0a`.
+//! `resolv.conf`). One slow lookup would park the whole reactor.
 //!
-//! [`DnsWorker`] is the same shape as `discovery::DhtWorker`: a named
-//! `std::thread` with an mpsc request channel in and a result channel
-//! out. The epoll thread only does non-blocking `send` / `try_iter`.
-//! A *separate* thread (not folded into `tinc-dht`): a BEP 44
-//! `put_mutable` is seconds-long; a DNS lookup queued behind one would
-//! inherit that latency. One extra parked thread is free.
+//! [`DnsWorker`] is a named `std::thread` with an mpsc request channel
+//! in and a result channel out. The epoll thread only does
+//! non-blocking `send` / `try_iter`.
 //!
-//! ## No reactor wakeup
-//!
-//! Results are drained from `on_periodic_tick` (5 s cadence) — same as
-//! `DhtWorker`. Outgoing retries are seconds-granular (`bump_timeout`
-//! starts at +5 s), so a dedicated `eventfd` wake would only shave the
-//! first connect on a hostname-only `Address=` by a few seconds. Not
-//! worth the extra fd in the loop; documented trade-off.
+//! Results are drained from `on_periodic_tick` (5 s cadence). Outgoing
+//! retries are seconds-granular (`bump_timeout` starts at +5 s), so a
+//! dedicated `eventfd` wake would only shave the first connect on a
+//! hostname-only `Address=` by a few seconds; not worth the extra fd.
 
 #![forbid(unsafe_code)]
 
@@ -109,8 +102,7 @@ impl DnsWorker {
     /// already has one queued/running is a no-op — the next
     /// [`Self::drain`] will deliver that result and clear the gate.
     /// If the worker thread died the send is silently dropped; the
-    /// caller's retry backoff keeps the daemon limping (same
-    /// degradation as a dead DHT worker).
+    /// caller's retry backoff keeps the daemon limping.
     pub(crate) fn request(&mut self, tag: DnsTag, hosts: Vec<(String, u16)>) {
         if !self.inflight.insert(tag.clone()) {
             return;

@@ -24,7 +24,6 @@ mod conn;
 mod control;
 pub mod daemon;
 mod darwin_x;
-pub mod discovery;
 mod dispatch;
 mod dns;
 mod egress;

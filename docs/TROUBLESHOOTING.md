@@ -12,7 +12,6 @@ diagnostic commands referenced here.
 | `Decrease in PMTU to X detected` loops | [PMTU oscillation](#pmtu-oscillation) |
 | `Ignoring unauthorized ADD_SUBNET` flood | [StrictSubnets mismatch](#ignoring-unauthorized-add_subnet-floods) |
 | Traffic stuck on TCP relay, never goes UDP | [No direct UDP](#no-direct-udp-stuck-on-tcp) |
-| DHT never publishes / publishes v6-only | [DHT publish gated](#dht-never-publishes--publishes-v6-only) |
 | C tinc peer can't connect | [Legacy protocol](#interop-with-c-tinc-fails) |
 | Wrong relay chosen / detour routing | [Edge weight](#traffic-detours-through-a-slower-relay) |
 | High latency / idle CPU use / suspected daemon bug | [Event-loop strace](#reading-strace-for-event-loop-health) |
@@ -138,49 +137,6 @@ asymmetric case there is nothing to fix on the tincd side.
 
 ---
 
-## DHT never publishes / publishes v6-only
-
-**Symptom** - at `-d2` you never see
-`tincd::discovery: published seq=...`, or you only ever see
-`published seq=...: tinc1 v6=[...]:655` with no `v4=` / `tcp=`. Peers
-that bootstrap purely from DHT can't dial you.
-
-**Causes**:
-
-- **No dialable v4 address known yet.** The first publish is held
-  until one of `reflexive_v4` / `portmapped_tcp` / `portmapped_tcp6`
-  is set, with a 30 s grace. If you have neither a public v4 nor a
-  helpful NAT gateway, the first publish lands after 30 s with
-  `v6=` only - correct, but not useful to v4-only peers.
-  Check for `tincd::discovery: DHT voted public v4: ...` (INFO) and
-  `tincd::portmap: Portmapped Tcp ...` (INFO). If neither appears,
-  that's why.
-
-- **Publish failing.** At debug:
-  `tincd::discovery: DHT publish failed (will retry in ...)`. Usually
-  the host firewall drops inbound UDP on the DHT port so the
-  iterative `find_node` never completes. Backoff grows from 5 s to
-  the republish interval. This no longer stalls the daemon.
-
-- **Bootstrap unreachable.** Custom `DhtBootstrap =` pointing at a
-  dead host, and no `$STATE_DIRECTORY/dht_nodes` from a previous
-  run. Fix the bootstrap or delete `DhtBootstrap` to use the public
-  mainline seeds.
-
-**Confirm from another host** -
-
-```sh
-tinc-dht-seed --resolve --secret-file /etc/tinc/NET/dht_secret PUBKEY_OF_NODE
-# hit  → prints  tinc1 v4=... tcp=...
-# miss → tinc-dht-seed: no record for pubkey (publish not landed / wrong secret?)
-```
-
-A miss with the *correct* secret means the node hasn't published.
-A miss only when you omit `--secret-file` is the expected sealed
-behaviour.
-
----
-
 ## Interop with C tinc fails
 
 **Symptom** - a C tinc node cannot establish a meta connection.
@@ -277,7 +233,7 @@ and file an issue):
 - `futex(…) <1.0…>` or longer on the **main** TID → something is
   blocking the loop. While parked, TUN/UDP fds are not serviced.
   You'll see it as periodic ping stalls that decay (2000 → 1000 →
-  100 ms) as the kernel backlog drains. Worker threads (DHT,
+  100 ms) as the kernel backlog drains. Worker threads (DNS,
   portmap) are allowed to block. Check the TID against
   `ls /proc/$(pidof tincd)/task`.
 - `sendto` returning `EMSGSIZE` repeatedly for the same peer →

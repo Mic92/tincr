@@ -184,10 +184,7 @@ impl RxDstMemo {
 /// `None` ⇒ caller falls through to slow path.
 ///
 /// Gates (any ⇒ `None`):
-///   - `slowpath_all` (setup-time fold; covers `!Router` and DHT
-///     discovery — the `dht_probe_sent` demux at rx.rs:237 only
-///     matters when discovery is on, and `slowpath_all` folds
-///     `dht_discovery` via setup.rs)
+///   - `slowpath_all` (setup-time fold; covers `!Router`)
 ///   - `pkt.len() < 12 + 21` (id6 prefix + minimum SPTPS datagram)
 ///   - `dst_id6 != NULL` (relay branch — we don't decrypt for relay)
 ///   - `src_id6` not in `id6` table (unknown peer)
@@ -209,16 +206,6 @@ impl RxDstMemo {
 #[must_use]
 pub(crate) fn rx_probe<'a>(snap: &'a TxSnapshot, pkt: &'a [u8]) -> Option<RxTarget<'a>> {
     // Setup-time fold. Same gate as tx_probe; same one-bool early-out.
-    // Covers DHT discovery: setup.rs:846 only spawns when
-    // `settings.dht_discovery` is true, and that's NOT folded here
-    // YET — but the rx.rs gate is `dht_probe_sent.contains(&peer)`,
-    // which is non-empty only when discovery is on. We could fold
-    // `dht_discovery` into slowpath_all (it IS spawn-const), but
-    // probes are sent to addrs LEARNED FROM the DHT, which by
-    // construction aren't peer UDP addrs. The src_id6 lookup at the
-    // bottom of this fn fails for non-peers anyway (DHT bootstrap
-    // nodes have no entry). Belt: leave slowpath_all as-is; the
-    // src_id6 gate covers it.
     if snap.slowpath_all {
         return None;
     }

@@ -17,7 +17,7 @@ a drop-in replacement for an existing tinc 1.1 mesh, including
 # cargo
 cargo install --git https://github.com/Mic92/tincr --locked tincd
 
-# nix (provides tincd, tinc, tinc-auth, tinc-dht-seed, sptps_keypair)
+# nix (provides tincd, tinc, tinc-auth, sptps_keypair)
 nix build github:Mic92/tincr#packages.x86_64-linux.tincd
 ```
 
@@ -32,9 +32,8 @@ nix build github:Mic92/tincr#packages.x86_64-linux.tincd
 
 ## Getting started
 
-[docs/QUICKSTART.md](docs/QUICKSTART.md) sets up a two-node mesh,
-then adds a third node behind NAT that finds the others via DHT
-discovery alone. It also has a NixOS example.
+[docs/QUICKSTART.md](docs/QUICKSTART.md) sets up a two-node mesh.
+It also has a NixOS example.
 
 Adding a machine to an existing mesh takes two commands:
 
@@ -50,17 +49,11 @@ tinc -n myvpn join <URL>
 
 Everything tinc 1.1 does, plus:
 
-- **Nodes find each other on their own.** Each node publishes its
-  current address as an encrypted record on the public BitTorrent
-  DHT. Peers look it up using only the public key they already
-  have, so host files need no `Address=` lines at all. Config keys:
-  `DhtDiscovery`, `DhtBootstrap`, `DhtSecretFile`.
 - **Invitations.** `tinc invite` prints a one-time URL, `tinc join`
   uses it to enroll a new node. No copying key files around.
 - **Asks your router to open a port** (`UPnP=yes`). Uses its own
   client (PCP, falling back to UPnP-IGD) instead of libminiupnpc,
-  and also opens IPv6 pinholes. The mapped address is published via
-  the DHT.
+  and also opens IPv6 pinholes.
 - **Fast.** Multi-gigabit per flow on Linux by batching packets
   (GSO/GRO: bursts of TUN reads become one `sendmsg` with
   `UDP_SEGMENT`, and vice versa on receive) and using the AVX-512
@@ -111,8 +104,7 @@ Everything tinc 1.1 does, plus:
 | Mixing tincr and tinc-c nodes | [docs/COMPAT.md](docs/COMPAT.md) |
 | Internals | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/PROTOCOL.md](docs/PROTOCOL.md) |
 
-Man pages: `tincd(8)`, `tinc(8)`, `tinc.conf(5)`, `tinc-auth(8)`,
-`tinc-dht-seed(8)`.
+Man pages: `tincd(8)`, `tinc(8)`, `tinc.conf(5)`, `tinc-auth(8)`.
 
 ## Compatibility with tinc-c
 
@@ -130,7 +122,6 @@ long as the C nodes set `ExperimentalProtocol=yes`. Differences:
   functionality.
 - `tinc init` is non-interactive and does not probe for a free port.
 - `USR1`/`USR2` signals are ignored. Use `tinc dump …` instead.
-- New config keys (`DhtDiscovery`, `DNSAddress`, …) are silently
-  ignored by the C daemon.
+- New config keys are silently ignored by the C daemon.
 
 Details and the full key-by-key matrix: [docs/COMPAT.md](docs/COMPAT.md).

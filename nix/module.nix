@@ -343,7 +343,7 @@ let
         NoNewPrivileges = true;
 
         # Default-deny bind, then allow the listeners plus the
-        # ephemeral range (outgoing meta, DHT, punch sockets).
+        # ephemeral range (outgoing meta, punch sockets).
         SocketBindDeny = [ "any" ];
         SocketBindAllow = [
           "tcp:${toString net.listenPort}"

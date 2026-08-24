@@ -75,7 +75,6 @@ StrictSubnets = yes
 # TunnelServer = yes
 Broadcast = no
 AutoConnect = no        # only dial peers you ConnectTo explicitly
-DhtDiscovery = no       # don't learn endpoints for nodes you didn't vet
 ```
 
 ```conf

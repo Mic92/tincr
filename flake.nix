@@ -120,7 +120,6 @@
           nixos-tinc-authelia = pkgs.callPackage ./nix/nixos-test-authelia.nix { inherit tincd; };
           nixos-tinc-nat = pkgs.callPackage ./nix/nixos-test-nat.nix { inherit tincd; };
           nixos-tinc-systemd = pkgs.callPackage ./nix/nixos-test-systemd.nix { inherit tincd; };
-          nixos-tinc-dht = pkgs.callPackage ./nix/nixos-test-dht.nix { inherit tincd; };
           nixos-tincr = pkgs.callPackage ./nix/nixos-test-tincr.nix {
             inherit tincd;
             tincrModule = self.nixosModules.tincr;
