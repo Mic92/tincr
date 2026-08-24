@@ -10,14 +10,14 @@
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use super::common::ChildWithLog;
 use super::common::linux::run_ip;
 use super::common::{tincd_bin, wait_for_file_with, write_ed25519_privkey};
-use super::rig::{enter_bwrap, make_child_netns, veth_pair};
+use super::rig::{ChildNetNs, enter_bwrap, veth_pair};
 
 /// The daemon's own port. Not 655: no `CAP_NET_BIND_SERVICE` in the
 /// userns.
@@ -89,16 +89,12 @@ fn enter_bwrap_with_miniupnpd(test_name: &str) -> Option<String> {
 /// gw-ns.
 struct Gateway {
     upnpd: ChildWithLog,
-    sleepers: [Child; 2],
+    _netns: [ChildNetNs; 2],
 }
 
 impl Drop for Gateway {
     fn drop(&mut self) {
         let _ = self.upnpd.child.kill();
-        for sleeper in &mut self.sleepers {
-            let _ = sleeper.kill();
-            let _ = sleeper.wait();
-        }
     }
 }
 
@@ -109,7 +105,7 @@ impl Gateway {
         miniupnpd_bin: &str,
         natpmp: bool,
     ) -> Option<Self> {
-        let sleepers = [make_child_netns("alice"), make_child_netns("gw")];
+        let netns = [ChildNetNs::new("alice"), ChildNetNs::new("gw")];
         veth_pair(
             ("alice", "veth-a", "192.168.77.2/24"),
             ("gw", "veth-lan", "192.168.77.1/24"),
@@ -132,13 +128,6 @@ impl Gateway {
             &["ip", "route", "add", "default", "via", "192.168.77.1"],
         );
         nsexec("gw", &["sysctl", "-w", "net.ipv4.ip_forward=1"]);
-        let cleanup = |mut sleepers: [Child; 2]| {
-            for sleeper in &mut sleepers {
-                let _ = sleeper.kill();
-                let _ = sleeper.wait();
-            }
-        };
-
         // The chains miniupnpd expects (its nft_init.sh would also add
         // a drop-policy forward chain), plus masquerade. Doubles as the
         // probe for nft working in this userns at all.
@@ -173,7 +162,6 @@ impl Gateway {
         if !load_nft("gw", test_name, &tmp.join("gw.nft"), gw_rules)
             || !load_nft("alice", test_name, &tmp.join("alice.nft"), &alice_rules)
         {
-            cleanup(sleepers);
             return None;
         }
 
@@ -215,7 +203,6 @@ impl Gateway {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !nsexec("gw", &["ss", "-uln"]).contains(ready_port) {
             if let Ok(Some(status)) = upnpd.child.try_wait() {
-                cleanup(sleepers);
                 panic!(
                     "miniupnpd exited early ({status:?}):\n{}",
                     upnpd.kill_and_log()
@@ -227,7 +214,10 @@ impl Gateway {
             );
             std::thread::sleep(Duration::from_millis(100));
         }
-        Some(Self { upnpd, sleepers })
+        Some(Self {
+            upnpd,
+            _netns: netns,
+        })
     }
 
     fn dnat_rules() -> String {
@@ -445,7 +435,7 @@ fn upnp_rogue_gateway_ext_addr_rejected() {
         return;
     }
     let tmp = tmp!("portmap-rogue");
-    let mut sleeper = make_child_netns("alice");
+    let _alice_netns = ChildNetNs::new("alice");
     run_ip(&[
         "link", "add", "veth-gw", "type", "veth", "peer", "name", "veth-a",
     ]);
@@ -547,6 +537,4 @@ fn upnp_rogue_gateway_ext_addr_rejected() {
     // Unblock `incoming()`; the thread then exits on its own.
     let _ = TcpStream::connect(SocketAddr::from(([192, 168, 77, 1], http_port)));
     drop(http_thread);
-    let _ = sleeper.kill();
-    let _ = sleeper.wait();
 }

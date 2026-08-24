@@ -94,36 +94,6 @@ pub fn tincd_at(
     cmd
 }
 
-/// Transitional: a port free on both TCP and UDP right now. Racy by
-/// construction (freed before the daemon binds it); new tests should
-/// let the daemon bind `Port = 0` and use [`Node::port`] /
-/// [`read_tcp_addr`] instead. The pid-seeded counter over
-/// `[12000, 28000)` just makes collisions between parallel test
-/// processes unlikely.
-pub fn alloc_port() -> u16 {
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    const BASE: u32 = 12000;
-    const SPAN: u32 = 16000;
-    static NEXT: AtomicU32 = AtomicU32::new(u32::MAX);
-
-    if NEXT.load(Ordering::Relaxed) == u32::MAX {
-        let seed = std::process::id().wrapping_mul(2_654_435_761) % SPAN;
-        let _ = NEXT.compare_exchange(u32::MAX, seed, Ordering::Relaxed, Ordering::Relaxed);
-    }
-    for _ in 0..512 {
-        #[expect(clippy::cast_possible_truncation)] // BASE + SPAN < u16::MAX
-        let port = (BASE + NEXT.fetch_add(1, Ordering::Relaxed) % SPAN) as u16;
-        if let (Ok(_tcp), Ok(_udp)) = (
-            std::net::TcpListener::bind(("127.0.0.1", port)),
-            std::net::UdpSocket::bind(("0.0.0.0", port)),
-        ) {
-            return port;
-        }
-    }
-    panic!("alloc_port: no port free on both TCP and UDP after 512 tries");
-}
-
 /// A loopback TCP port that answers ECONNREFUSED for as long as the
 /// returned socket lives: bound but never `listen()`ed, so no other
 /// test can grab it either.
@@ -650,8 +620,131 @@ impl Drop for ChildWithLog {
 
 #[cfg(target_os = "linux")]
 pub mod linux {
-    use std::process::Command;
+    use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
+
+    /// bwrap with unprivileged userns works and `/dev/net/tun` exists;
+    /// otherwise prints `SKIP label: why`.
+    pub fn bwrap_usable(label: &str) -> bool {
+        let probe = Command::new("bwrap")
+            .args(["--unshare-user", "--bind", "/", "/", "true"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output();
+        match probe {
+            Err(e) => {
+                eprintln!("SKIP {label}: bwrap not found ({e})");
+                return false;
+            }
+            Ok(out) if !out.status.success() => {
+                eprintln!(
+                    "SKIP {label}: bwrap probe failed (unprivileged userns disabled?): {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+                return false;
+            }
+            Ok(_) => {}
+        }
+        if !std::path::Path::new("/dev/net/tun").exists() {
+            eprintln!("SKIP {label}: /dev/net/tun missing");
+            return false;
+        }
+        true
+    }
+
+    /// bwrap command that re-executes the current binary as uid 0 in
+    /// fresh user+net namespaces with `BWRAP_INNER` set; append the
+    /// binary's own arguments. `--tmpfs /dev` is load-bearing:
+    /// TUNSETIFF checks that the device node's mount is owned by our
+    /// userns, which a plain dev-bind of the host's /dev is not.
+    /// `/proc/self/exe` is resolved out here because inside it would
+    /// point at bwrap.
+    pub fn bwrap_reexec() -> Command {
+        let self_exe = std::fs::read_link("/proc/self/exe").expect("readlink /proc/self/exe");
+        let mut cmd = Command::new("bwrap");
+        cmd.args(["--unshare-net", "--unshare-user"])
+            .args(["--cap-add", "CAP_NET_ADMIN"])
+            .args(["--cap-add", "CAP_NET_RAW"])
+            .args(["--cap-add", "CAP_SYS_ADMIN"])
+            .args(["--uid", "0", "--gid", "0"])
+            .args(["--bind", "/", "/"])
+            .args(["--tmpfs", "/dev"])
+            .args(["--dev-bind", "/dev/net/tun", "/dev/net/tun"])
+            .args(["--dev-bind", "/dev/null", "/dev/null"])
+            .args(["--dev-bind", "/dev/urandom", "/dev/urandom"])
+            .args(["--proc", "/proc"])
+            .args(["--tmpfs", "/run"])
+            // NixOS keeps dig/socat/iptables under /run/current-system.
+            .args(if std::path::Path::new("/run/current-system").exists() {
+                &["--ro-bind", "/run/current-system", "/run/current-system"][..]
+            } else {
+                &[]
+            })
+            .arg("--")
+            .arg(self_exe)
+            .env("BWRAP_INNER", "1");
+        cmd
+    }
+
+    /// Inner-pass base setup: `lo` up and a writable `/run/netns`.
+    pub fn bwrap_inner_init() {
+        run_ip(&["link", "set", "lo", "up"]);
+        std::fs::create_dir_all("/run/netns").expect("mkdir /run/netns");
+    }
+
+    /// A child netns reachable via `ip netns exec NAME`, gone on
+    /// drop. `ip netns add` needs shared mount propagation, which a
+    /// userns root cannot set up, so bind-mount an `unshare -n`
+    /// sleeper's nsfd by hand.
+    pub struct ChildNetNs {
+        name: String,
+        sleeper: Child,
+    }
+
+    impl ChildNetNs {
+        pub fn new(name: &str) -> Self {
+            let sleeper = Command::new("unshare")
+                .args(["-n", "sleep", "3600"])
+                .spawn()
+                .expect("spawn unshare sleeper");
+            std::thread::sleep(Duration::from_millis(100));
+            let target = format!("/run/netns/{name}");
+            std::fs::write(&target, b"").expect("touch nsfd target");
+            let status = Command::new("mount")
+                .args(["--bind"])
+                .arg(format!("/proc/{}/ns/net", sleeper.id()))
+                .arg(&target)
+                .status()
+                .expect("spawn mount");
+            assert!(status.success(), "mount --bind nsfd for {name}: {status:?}");
+            run_ip(&["netns", "exec", name, "ip", "link", "set", "lo", "up"]);
+            Self {
+                name: name.to_owned(),
+                sleeper,
+            }
+        }
+    }
+
+    impl Drop for ChildNetNs {
+        fn drop(&mut self) {
+            let target = format!("/run/netns/{}", self.name);
+            let _ = Command::new("umount")
+                .arg(&target)
+                .stderr(Stdio::null())
+                .status();
+            let _ = std::fs::remove_file(target);
+            let _ = self.sleeper.kill();
+            let _ = self.sleeper.wait();
+        }
+    }
+
+    /// `ip netns exec NS ip ARGS...`
+    pub fn run_ip_in(netns: &str, args: &[&str]) {
+        let mut full = vec!["netns", "exec", netns, "ip"];
+        full.extend(args);
+        run_ip(&full);
+    }
 
     pub fn run_ip(args: &[&str]) {
         let out = Command::new("ip").args(args).output().expect("spawn ip");
