@@ -446,7 +446,7 @@ fn recv_row_basic() {
         br.read_line(&mut line).unwrap();
         assert_eq!(line.trim_end(), "18 3");
         // Body with embedded `port` literal — `recv_row` must
-        // NOT touch it. The cmd::dump parse re-tokenizes.
+        // not touch it. The cmd::dump parse re-tokenizes.
         writeln!(w, "18 3 alice 10.0.0.1 port 655 fields").unwrap();
         writeln!(w, "18 3 bob unknown port unknown fields").unwrap();
         writeln!(w, "18 3").unwrap();
@@ -533,7 +533,7 @@ fn recv_row_bad_code() {
     daemon.join().unwrap();
 }
 
-/// Graph mode: TWO sends, TWO terminators. The first End
+/// Graph mode: two sends, two terminators. The first End
 /// (`DumpNodes`) doesn't end the loop — caller checks which kind.
 /// `recv_row` itself doesn't track state; it just hands back
 /// (kind, body) per row. The CALLER's loop knows graph mode
@@ -561,7 +561,7 @@ fn recv_row_graph_two_terminators() {
     });
 
     let mut ctl = CtlSocket::handshake(ours, &cookie).unwrap();
-    // Graph mode sends BOTH. The daemon doesn't pipeline
+    // Graph mode sends both. The daemon doesn't pipeline
     // (strictly request-response), but TCP buffers the second
     // send while the daemon is still writing the first response.
     ctl.send(CtlRequest::DumpNodes).unwrap();
@@ -607,8 +607,8 @@ fn recv_row_trailing_space_is_terminator() {
 
 /// `recv_data` after `recv_line`: the shared-buffer concern.
 ///
-/// Daemon writes header + data in ONE syscall (it doesn't, but
-/// TCP can coalesce). `BufReader` reads it ALL into its 8KiB
+/// Daemon writes header + data in one syscall (it doesn't, but
+/// TCP can coalesce). `BufReader` reads it all into its 8KiB
 /// buffer on the first `read_line`. The data is now in the
 /// `BufReader`'s buffer, not the socket. `recv_data` must see it.
 ///
@@ -618,7 +618,7 @@ fn recv_row_trailing_space_is_terminator() {
 /// "optimizes" `recv_data` to `self.reader.get_mut().0.borrow_
 /// mut().read_exact()` (bypassing `BufReader`), this fails.
 ///
-/// `Cursor<Vec<u8>>` is the in-memory stream. ONE buffer, two
+/// `Cursor<Vec<u8>>` is the in-memory stream. One buffer, two
 /// records (header + data each), back-to-back, no separator.
 /// Exactly what TCP coalescing gives.
 #[test]
@@ -651,14 +651,14 @@ fn recv_data_after_recv_line_shared_buffer() {
     let line = ctl.recv_line().unwrap().unwrap();
     assert_eq!(line, "18 15 7");
 
-    // 7 bytes. They're in BufReader's buffer, NOT the Cursor.
+    // 7 bytes. They're in BufReader's buffer, not the Cursor.
     // `read_exact` on BufReader drains buffer first.
     let mut data = [0u8; 7];
     ctl.recv_data(&mut data).unwrap();
     assert_eq!(&data, b"LOGDATA");
 
     // Record 2
-    // STILL in BufReader's buffer (Cursor returned everything
+    // still in BufReader's buffer (Cursor returned everything
     // on the first read).
     let line = ctl.recv_line().unwrap().unwrap();
     assert_eq!(line, "18 15 5");

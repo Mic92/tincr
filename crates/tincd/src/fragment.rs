@@ -2,7 +2,7 @@
 //!
 //! Only used for the rare case: relaying a too-big IPv4 packet with
 //! DF clear. Modern OSes set DF on TCP (PMTUD); this fires for legacy
-//! UDP / weird configs. RFC 791 §2.3 says routers MUST fragment;
+//! UDP / weird configs. RFC 791 §2.3 says routers must fragment;
 //! we comply even though it's rare.
 //!
 //! The 8-byte alignment (`& !7`) is RFC 791 §3.2: the fragment-offset
@@ -19,7 +19,7 @@
 //! The input might ALREADY be a fragment (someone upstream fragmented
 //! a 4000-byte UDP packet at MTU 1500; one of those 1500-byte
 //! fragments now hits our 590-byte hop). Its MF bit is set and its
-//! offset is nonzero. We must preserve MF on ALL our output pieces
+//! offset is nonzero. We must preserve MF on all our output pieces
 //! (the original "more fragments" follow ours) and continue counting
 //! from the original offset. The C handles this; we port it.
 
@@ -270,7 +270,7 @@ mod tests {
         let exp_offs = [start_off, start_off + 552 / 8, start_off + 1104 / 8]; // 100, 169, 238
         for (i, frag) in frags.iter().enumerate() {
             let ip = parse_ip(frag);
-            // ALL fragments have MF set: the original had MF (more
+            // all fragments have MF set: the original had MF (more
             // fragments follow ours in the larger reassembly).
             assert_eq!(ip.off() & IP_MF, IP_MF, "frag {i} must have MF");
             assert_eq!(ip.off() & IP_OFFMASK, exp_offs[i], "frag {i} offset");

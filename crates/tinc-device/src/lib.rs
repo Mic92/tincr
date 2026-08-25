@@ -21,11 +21,11 @@ use std::io;
 
 // Types
 
-/// `MTU` — `net.h:36`. 1500 payload + 14 ethernet header + 4 VLAN
+/// 1500 payload + 14 ethernet header + 4 VLAN
 /// tag. `pub` because the daemon's `MAXSIZE` arithmetic includes it.
 pub const MTU: usize = 1518;
 
-// RFC 894 / IANA wire constants — NOT cfg-gated, same everywhere.
+// RFC 894 / IANA wire constants — not cfg-gated, same everywhere.
 // pub(crate): backends synthesize headers; the daemon doesn't.
 mod ether;
 
@@ -39,7 +39,7 @@ pub use arena::{DeviceArena, DrainResult};
 // Userspace TSO split. Portable: same `virtio_net_hdr` on Linux
 // `IFF_VNET_HDR`, FreeBSD `TAPSVNETHDR`, Windows NDIS LSO. The
 // device backends produce `DrainResult::Super`; the daemon calls
-// `tso_split` on it. NOT cfg-gated: the function is pure header
+// `tso_split` on it. Not cfg-gated: the function is pure header
 // arithmetic on `&[u8]`, runs anywhere.
 mod tso;
 pub use tso::{
@@ -74,7 +74,7 @@ pub struct DeviceConfig {
     /// `tun1`, ...). The netname-default is the daemon's job.
     pub iface: Option<String>,
 
-    /// Resolved mode. NOT `Option`: an unset `ifr_flags` is
+    /// Resolved mode. Not `Option`: an unset `ifr_flags` is
     /// `EINVAL` on `TUNSETIFF`.
     pub mode: Mode,
 }
@@ -164,7 +164,7 @@ pub trait Device: Send {
     ///
     /// Default: loop `self.read()` into arena slots until EAGAIN or
     /// `cap`. Never returns `Super` — that's the Linux `vnet_hdr`
-    /// override. The default IS the BSD/macOS/mock path: their
+    /// override. The default is the BSD/macOS/mock path: their
     /// existing byte-pipe `read()` is the building block.
     ///
     /// `cap` clamps to `arena.cap()`. Typically `DEVICE_DRAIN_CAP=64`
@@ -185,7 +185,7 @@ pub trait Device: Send {
     /// which is just [`write`] — i.e. "staging" is a no-op and
     /// `write_flush` has nothing to do.
     ///
-    /// Callers MUST pair every burst of `write_stage` with one
+    /// Callers must pair every burst of `write_stage` with one
     /// `write_flush` before yielding (the daemon does so at the end
     /// of each UDP recv batch). Ordering between `write_stage` and a
     /// direct `write` on the same device is **not** preserved across a

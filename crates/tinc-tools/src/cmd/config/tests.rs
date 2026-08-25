@@ -18,7 +18,7 @@ fn parse_var_expr_ok() {
         ("Port=655",                (None, "Port", "655")),  // no-space-around-=
         ("Port\t655",               (None, "Port", "655")),  // tab separator
         ("Port 655",                (None, "Port", "655")),  // argv-join: `tinc set Port 655` → "Port 655"
-        // multi-word value: only FIRST `\t /=` is key boundary
+        // multi-word value: only first `\t /=` is key boundary
         // `tinc set Name $HOST` → `"Name = my host name"`. The strncat
         // loop preserves spaces; `args.join(" ")` does too.
         ("Name = host with spaces", (None, "Name", "host with spaces")),
@@ -26,7 +26,7 @@ fn parse_var_expr_ok() {
         ("alice.Port",              (Some("alice"), "Port", "")),
         ("alice.Port = 655",        (Some("alice"), "Port", "655")),
         ("alice.Port=655",          (Some("alice"), "Port", "655")),  // no-space + node prefix
-        // value with embedded `=`: split on FIRST `=`/ws
+        // value with embedded `=`: split on first `=`/ws
         ("Device = /dev/tun=x",     (None, "Device", "/dev/tun=x")),
         // dots in value, not key: `.` scan is key-slice-only
         ("Address = 10.0.0.1",      (None, "Address", "10.0.0.1")),
@@ -62,7 +62,7 @@ fn parse_var_expr_err() {
 // split_line — file-line tokenizer (instance #7)
 
 /// `split_line` table. rstrip set is `\t\r\n `. `cmd_config`
-/// does NOT have `#` comment awareness — `#` is just a
+/// does not have `#` comment awareness — `#` is just a
 /// character (`parse_config_line` does, but `cmd_config`
 /// doesn't share that code; intentional — `tinc set` operates
 /// on files-as-text, not files-as-config).
@@ -575,7 +575,7 @@ fn edit_adds_newline_before_append() {
 }
 
 /// PEM block at the end of a host file. `tinc set Port 655`
-/// must NOT mangle the base64 lines. The `split_line` tokenizer
+/// must not mangle the base64 lines. The `split_line` tokenizer
 /// returns `Some((garbage, garbage))` for them but they don't
 /// match `Port`, so they copy verbatim.
 #[test]
@@ -692,7 +692,7 @@ fn run_full_explicit_node() {
 }
 
 /// `tinc get Port` with daemon running (pidfile exists): returns
-/// the *runtime* port from the pidfile, NOT the configured one.
+/// the *runtime* port from the pidfile, not the configured one.
 /// `Port = 0` is the use case — daemon picks a free port.
 #[test]
 fn run_get_port_from_pidfile() {
@@ -715,7 +715,7 @@ fn run_get_port_from_pidfile() {
     let ConfigOutput::Got(vals) = out else {
         panic!()
     };
-    // 47123 from the pidfile, NOT 0 from the config.
+    // 47123 from the pidfile, not 0 from the config.
     assert_eq!(vals, vec!["47123"]);
 }
 
@@ -738,7 +738,7 @@ fn run_get_port_fallback_to_config() {
     assert_eq!(vals, vec!["655"]);
 }
 
-/// `tinc get alice.Port` does NOT take the pidfile path —
+/// `tinc get alice.Port` does not take the pidfile path —
 /// explicit node means "the configured port for that host
 /// file", not "the running daemon's port". The check runs
 /// before any node resolution; the explicit node short-circuits.
@@ -764,7 +764,7 @@ fn run_get_port_explicit_node_skips_pidfile() {
     let ConfigOutput::Got(vals) = out else {
         panic!()
     };
-    // 1234 from hosts/alice, NOT 47123 from the pidfile.
+    // 1234 from hosts/alice, not 47123 from the pidfile.
     // Proves the `explicit_node.is_none()` guard in run().
     assert_eq!(vals, vec!["1234"]);
 }
@@ -798,8 +798,8 @@ fn warnonremove_case_insensitive() {
     assert!(result.is_empty());
 }
 
-/// get→set coercion happens BEFORE the pidfile-port read. So
-/// `tinc get Port 655` does NOT read the pidfile — by the time
+/// get→set coercion happens before the pidfile-port read. So
+/// `tinc get Port 655` does not read the pidfile — by the time
 /// we'd check, action is already SET. (Our impl checks
 /// `value.is_empty()` separately, which gives the same result.
 /// This test pins that they're equivalent.)
@@ -829,10 +829,10 @@ fn get_port_with_value_skips_pidfile() {
 }
 
 /// The `!node && !(type & VAR_SERVER)` condition uses
-/// NOT-SERVER, not HAS-HOST. A var with NEITHER flag (which
+/// not-SERVER, not HAS-HOST. A var with NEITHER flag (which
 /// doesn't exist in the real table, but the logic admits it)
 /// would resolve to hosts/$me. Only SERVER → tinc.conf. The
-/// dual-tagged test above covers HAS-BOTH; this covers the
+/// dual-tagged test above covers HAS-both; this covers the
 /// symmetry.
 ///
 /// We can't test with a real var (every var has SERVER or

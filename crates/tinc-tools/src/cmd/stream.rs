@@ -9,7 +9,7 @@
 //!                     ... repeats until client disconnects
 //! ```
 //!
-//! Unlike `dump`, these are PUSHES with no terminator. The daemon
+//! Unlike `dump`, these are pushes with no terminator. The daemon
 //! sets `c->status.log = true`; every `logger()` call thereafter
 //! `send_request`s to subscribers. The CLI loops until daemon EOF
 //! or Ctrl-C.
@@ -17,8 +17,8 @@
 //! ## The wire shape (recvdata vs recvline)
 //!
 //! Daemon-side, log/pcap each emit a `send_request` (line-framed,
-//! printf + `\n`) followed by `send_meta` (raw bytes, NO `\n`).
-//! The data IS arbitrary bytes — pcap data is Ethernet frames, log
+//! printf + `\n`) followed by `send_meta` (raw bytes, no `\n`).
+//! The data is arbitrary bytes — pcap data is Ethernet frames, log
 //! data may have embedded `\n`s. So:
 //!
 //!   - Parse the header with `recv_line` (line-framed)
@@ -61,7 +61,7 @@ const LOG_DATA_MAX: usize = 1024;
 
 /// Max packet capture. 9000-byte jumbo MTU + Ethernet header (14) +
 /// a few for slop. Daemon-side `vpn_packet_t` is `MAXSIZE` (9018).
-/// The check is the SAME defense — a daemon bug saying len=2^32
+/// The check is the same defense — a daemon bug saying len=2^32
 /// would alloc 4GiB without this.
 const PCAP_DATA_MAX: usize = 9018;
 
@@ -80,7 +80,7 @@ const PCAP_DATA_MAX: usize = 9018;
 /// `max`: per-stream size limit. `len > max → None`.
 ///
 /// We parse `len` as `usize` for both streams — `parse::<usize>()`
-/// rejects negative AND overflow. The wire is ASCII digits either
+/// rejects negative and overflow. The wire is ASCII digits either
 /// way.
 fn parse_header(line: &str, kind: CtlRequest, max: usize) -> Option<usize> {
     // `"18 15 7"`. Three space-separated ints.
@@ -118,15 +118,15 @@ fn parse_header(line: &str, kind: CtlRequest, max: usize) -> Option<usize> {
 // daemon's own debug level". Higher numbers = more verbose.
 //
 // `use_color`: pass-through to the daemon's `format_pretty`. Per-
-// subscriber: the daemon formats the SAME log line both colored
+// subscriber: the daemon formats the same log line both colored
 // and uncolored if it has subscribers of both kinds.
 
 /// `DEBUG_UNSET`. The "use daemon's level" sentinel.
 const DEBUG_UNSET: i32 = -1;
 
-/// Three checks: stdout IS a tty, TERM is set, TERM isn't `"dumb"`.
+/// Three checks: stdout is a tty, TERM is set, TERM isn't `"dumb"`.
 ///
-/// Hard-coded stdout. The daemon writes log lines to OUR stdout
+/// Hard-coded stdout. The daemon writes log lines to our stdout
 /// via the socket; if we're piped (`tinc log | less`), color
 /// escapes look like garbage in less without `-R`.
 /// `isatty(stdout)` is false then → no color.
@@ -190,7 +190,7 @@ where
     // Receive loop
     // Reused buffer; `clear` + `resize` per-iteration. `resize`
     // doesn't shrink capacity, so after the first message we never
-    // re-alloc. `with_capacity` for the FIRST message: pre-size to
+    // re-alloc. `with_capacity` for the first message: pre-size to
     // max so even the first iteration doesn't grow.
     let mut buf: Vec<u8> = Vec::with_capacity(LOG_DATA_MAX);
 
@@ -202,7 +202,7 @@ where
         };
 
         // Exactly `len` raw bytes after the header line. `resize`
-        // (NOT `reserve`) because `recv_data` writes into `&mut
+        // (not `reserve`) because `recv_data` writes into `&mut
         // [u8]` — we need initialized length, not just capacity.
         // The zero-fill is wasted work but the syscall dominates
         // by 10000×.
@@ -234,7 +234,7 @@ where
 /// `LEVEL` is parsed strictly: `tinc log abc` errors instead of silently
 /// meaning level 0.
 ///
-/// The SIGINT handler is NOT here (see module doc). Ctrl-C kills
+/// The SIGINT handler is not here (see module doc). Ctrl-C kills
 /// the process; exit 130. Daemon doesn't care.
 ///
 /// # Errors
@@ -243,7 +243,7 @@ where
 pub fn run_log(paths: &Paths, level: Option<i32>) -> Result<(), CmdError> {
     let mut ctl = CtlSocket::connect(paths)?;
 
-    // Checked HERE not inside `log_loop` so the test can pass a
+    // Checked here not inside `log_loop` so the test can pass a
     // fixed bool.
     let use_color = use_ansi_escapes_stdout();
 
@@ -336,7 +336,7 @@ fn pcap_global_header(snaplen: u32) -> [u8; 24] {
 ///   uint32_t origlen   — original packet length on the wire
 /// ```
 ///
-/// `len` and `origlen`: the daemon clips to `snaplen` BEFORE
+/// `len` and `origlen`: the daemon clips to `snaplen` before
 /// sending, so we receive `len` bytes and don't know the original.
 /// Both set to what we got. Wireshark shows "X bytes captured"
 /// with no truncation marker. Slightly wrong but the daemon would
@@ -347,7 +347,7 @@ fn pcap_global_header(snaplen: u32) -> [u8; 24] {
 /// not ours. There's a microsecond-magic (`0xa1b2_3c4d`) for 64-bit
 /// timestamps but we don't use it.
 ///
-/// Why we timestamp HERE (CLI-side) not daemon-side: the daemon's
+/// Why we timestamp here (CLI-side) not daemon-side: the daemon's
 /// `send_pcap` doesn't include time. The CLI calls `gettimeofday`
 /// per-packet. The timestamp is "when the CLI received it," not
 /// "when the daemon routed it." Socket latency is ~10µs (localhost),
@@ -376,7 +376,7 @@ fn pcap_packet_header(now: SystemTime, len: u32) -> [u8; 16] {
 
 /// The main loop. Same `Write`-generic as `log_loop`.
 ///
-/// `snaplen`: 0 = full packet. Passed to daemon AND embedded in
+/// `snaplen`: 0 = full packet. Passed to daemon and embedded in
 /// the global header. Daemon enforces; we record.
 ///
 /// `now`: clock function. Production passes `SystemTime::now`;
@@ -419,7 +419,7 @@ where
             break;
         };
 
-        // INSIDE the loop, per-packet, BEFORE the data read.
+        // INSIDE the loop, per-packet, before the data read.
         // (Neither order is observably different; the data hasn't
         // arrived yet either way.)
         let ts = now();
@@ -559,7 +559,7 @@ mod tests {
         assert_eq!(&h[0..4], &[0xe8, 0x03, 0, 0]);
         // tv_usec = 500 = 0x1f4. LE.
         assert_eq!(&h[4..8], &[0xf4, 0x01, 0, 0]);
-        // len = origlen = 1500 = 0x5dc. LE. BOTH set to the same value.
+        // len = origlen = 1500 = 0x5dc. LE. Both set to the same value.
         assert_eq!(&h[8..12], &[0xdc, 0x05, 0, 0]);
         assert_eq!(&h[12..16], &[0xdc, 0x05, 0, 0]);
     }
@@ -582,7 +582,7 @@ mod tests {
     /// the file is valid pcap.
     #[test]
     fn pcap_packet_header_before_epoch_is_zero() {
-        // Construct a SystemTime BEFORE epoch by subtracting from
+        // Construct a SystemTime before epoch by subtracting from
         // epoch — works on Unix.
         let before = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
         let h = pcap_packet_header(before, 100);
@@ -596,7 +596,7 @@ mod tests {
 
     /// Read+Write adapter: reads come from `read_side`, writes
     /// land in `write_side`. The loops under test both subscribe
-    /// (write) AND consume (read); a single Cursor would interleave
+    /// (write) and consume (read); a single Cursor would interleave
     /// the two. Wrapped via `CtlSocket::wrap` (the test-seam ctor).
     struct Duplex {
         read_side: Cursor<Vec<u8>>,
@@ -672,7 +672,7 @@ mod tests {
     fn log_loop_malformed_breaks_clean() {
         let mut wire = Vec::new();
         wire.extend_from_slice(b"18 15 5\nHello");
-        // Garbage header. Loop should break HERE.
+        // Garbage header. Loop should break here.
         wire.extend_from_slice(b"garbage\n");
         // This second record is never read.
         wire.extend_from_slice(b"18 15 5\nWorld");
@@ -680,7 +680,7 @@ mod tests {
         let (mut ctl, _) = ctl_from_wire(wire);
         let mut out = Vec::new();
 
-        // `Ok(())` — silent exit, NOT an error.
+        // `Ok(())` — silent exit, not an error.
         log_loop(&mut ctl, &mut out, None, false).unwrap();
 
         // First record made it. Second didn't.
@@ -806,7 +806,7 @@ mod tests {
     // use_ansi_escapes_stdout — tested by inspection
     //
     // Can't unit-test `is_terminal()` without a PTY (cargo test's
-    // stdout is a pipe). The TERM check IS testable but only if
+    // stdout is a pipe). The TERM check is testable but only if
     // we factor it out, and the function is 6 lines. Integration
     // tests (when `tinc log` runs against a real daemon) cover it
     // implicitly: stdout is a pipe → no color → daemon receives

@@ -212,7 +212,7 @@ mod tests {
             ("alice",            Dir::Hosts, "alice"),
             // `hosts/` prefix strip
             ("hosts/alice",      Dir::Hosts, "alice"),
-            // hosts/tinc.conf → hosts_dir/tinc.conf, NOT confbase: strip
+            // hosts/tinc.conf → hosts_dir/tinc.conf, not confbase: strip
             // happens first, so the CONFFILES check is skipped. Pins branch order.
             ("hosts/tinc.conf",  Dir::Hosts, "tinc.conf"),
             // dash-split is validation only; path keeps the dash

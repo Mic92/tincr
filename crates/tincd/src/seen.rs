@@ -76,7 +76,7 @@ impl SeenRequests {
     pub(crate) fn age(&mut self, now: Instant, max_age: Duration) -> (usize, usize) {
         let before = self.cache.len();
         self.cache.retain(|_, firstseen| {
-            // Keep if NOT expired. C: `firstseen + pinginterval <=
+            // Keep if not expired. C: `firstseen + pinginterval <=
             // now` deletes; so keep when `now - firstseen < max_age`.
             now.saturating_duration_since(*firstseen) < max_age
         });

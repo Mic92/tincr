@@ -65,7 +65,7 @@ impl Daemon {
             (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
         };
 
-        // Checked AFTER accept: refusing to accept would busy-loop
+        // Checked after accept: refusing to accept would busy-loop
         // LT epoll. accept+close is cheap; the SPTPS state isn't.
         if self.pending_meta >= MAX_PENDING_META {
             let now = self.timers.now();
@@ -87,7 +87,7 @@ impl Daemon {
         if !is_local(&peer) {
             let now = self.timers.now();
             if self.tarpit.check(peer, now) {
-                // fd NOT configured — peer's reads block forever.
+                // fd not configured — peer's reads block forever.
                 self.tarpit.pit(sock.into());
                 log::info!(target: "tincd::conn",
                            "Tarpitting connection from {peer}");
@@ -95,7 +95,7 @@ impl Daemon {
             }
         }
 
-        // Configure BEFORE allocating the Connection so a configure
+        // Configure before allocating the Connection so a configure
         // failure doesn't leave a half-registered slot.
         let fd = match configure_tcp(sock) {
             Ok(fd) => fd,
@@ -140,7 +140,7 @@ impl Daemon {
     /// queued, the next `turn()` re-fires after TUN-read/meta-conn/
     /// timers get a slice. Same fairness as the old `recv_from` loop's
     /// `UDP_DRAIN_CAP=64` (bug audit `deef1268`).
-    /// iperf3 is TCP-over-tunnel — alice MUST get back to TUN reads
+    /// iperf3 is TCP-over-tunnel — alice must get back to TUN reads
     /// or the send window fills and the whole thing stalls.
     pub(in crate::daemon) fn on_udp_recv(&mut self, i: u8) {
         // Take the batch out so we can borrow bufs immutably while
@@ -270,7 +270,7 @@ impl Daemon {
         // sneaks past during the flip just doesn't get captured.
         // Same one-packet window as TX.
         //
-        // rx_fast_scratch: dp.rx_fast_scratch, NOT dp.rx_scratch.
+        // rx_fast_scratch: dp.rx_fast_scratch, not dp.rx_scratch.
         // The slow path mem::takes dp.rx_scratch internally (sptps.
         // rs:354,389,428); a separate Vec lets fast/slow interleave
         // in one batch without scratch contention. Taken out here
@@ -301,7 +301,7 @@ impl Daemon {
             // Ordering invariant: the GRO bucket is a SINGLE bucket
             // shared by fast and slow paths. Packet 4 (fast) coalesces
             // into `gro`; packet 5 (slow, e.g. PKT_PROBE) parks the
-            // SAME bucket into dp.gro_bucket via the take/restore
+            // same bucket into dp.gro_bucket via the take/restore
             // below; send_packet_myself sees packet 4's data in there
             // and either coalesces into it or flushes-first. Same
             // bucket, same handoff, no reordering.
@@ -311,14 +311,14 @@ impl Daemon {
                     crate::shard::rx_open(&target, snap, &mut rx_fast_scratch, &mut dst_memo)
             {
                 target.handles.stats.add_in(1, len as u64);
-                // Consumed. Replay window IS advanced — the slow
+                // Consumed. Replay window is advanced — the slow
                 // path won't see this packet. GRO offer/TUN write
                 // inline (no &mut self via send_packet_myself; we
                 // own the bucket and the device borrow directly).
                 //
                 // No GRO (Darwin utun, no vnet_hdr): use the staged
                 // write so the whole batch ships in one `sendmsg_x`.
-                // Elsewhere `write_stage` IS `write` (trait default).
+                // Elsewhere `write_stage` is `write` (trait default).
                 if gro.is_some() {
                     Self::rx_fast_sink(&mut self.device, &mut gro, &mut rx_fast_scratch[..len]);
                 } else if let Err(e) = self.device.write_stage(&mut rx_fast_scratch[..len]) {
@@ -448,7 +448,7 @@ impl Daemon {
         };
 
         // The bit tells `receive_sptps_record` this came via UDP (vs
-        // TCP-tunneled). Dispatch is AFTER (Vec<Output> return), so
+        // TCP-tunneled). Dispatch is after (Vec<Output> return), so
         // defer the clear below.
         tunnel.status.udppacket = true;
 
@@ -458,7 +458,7 @@ impl Daemon {
         // Vec<Output> path on:
         //   - InvalidState: no incipher yet (pre-handshake UDP)
         //   - BadRecord: REC_HANDSHAKE/KEX-renegotiate (rare; replay
-        //     window NOT advanced, receive() sees the seqno fresh)
+        //     window not advanced, receive() sees the seqno fresh)
         //
         // Across a REQ_KEY restart, `tunnel.sptps` is the *new*
         // mid-handshake session but the peer's in-flight datagrams
@@ -469,7 +469,7 @@ impl Daemon {
         // session HAS its incipher but old-key stragglers are still
         // arriving — ordering between `HandshakeDone` and the last
         // old-key datagram is RTT-dependent). `BadRecord`/`BadSeqno`
-        // do NOT retry: those mean the new session DID authenticate
+        // do not retry: those mean the new session DID authenticate
         // the packet, so it can't also be an old-key straggler.
         let mut open_result = sptps.open_data_into(ct, &mut self.dp.rx_scratch, 14);
         if matches!(
@@ -500,7 +500,7 @@ impl Daemon {
                     nw |= self.send_mtu_info(from_nid, &from_name, i32::from(MTU), true);
                 }
                 nw |= self.receive_sptps_record(from_nid, &from_name, record_type);
-                // Clear udppacket AFTER the call: the PROBE gate and
+                // Clear udppacket after the call: the PROBE gate and
                 // maxrecentlen update inside need to see the true value.
                 if let Some(t) = self.dp.tunnels.get_mut(&from_nid) {
                     t.status.udppacket = false;
@@ -658,7 +658,7 @@ impl Daemon {
             return true;
         }
         // dst == myself but not nullid: fall through to direct
-        // receive. Packet arrived via a dynamic relay; if WE're
+        // receive. Packet arrived via a dynamic relay; if we're
         // the static relay tell `from` where they're reachable
         // so next packet skips the dynamic relay. Gated to
         // static-relay-only so every hop in a chain doesn't emit

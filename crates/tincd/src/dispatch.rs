@@ -70,8 +70,8 @@ fn myself_options_default() -> ConnOptions {
 }
 
 /// Build our own connection options from global config. Called once
-/// at `setup()`. Returns the GLOBAL defaults that per-host
-/// `IndirectData`/`TCPOnly`/`ClampMSS` OR against in [`send_ack`].
+/// at `setup()`. Returns the global defaults that per-host
+/// `IndirectData`/`TCPOnly`/`ClampMSS` are OR'd against in [`send_ack`].
 ///
 /// Implication chain:
 ///   - `TCPOnly` → also INDIRECT
@@ -300,11 +300,10 @@ pub(crate) fn check_gate(conn: &Connection, line: &[u8]) -> Result<Request, Disp
 
 /// SPTPS label for the TCP meta connection.
 ///
-/// **TRAILING NUL IS WIRE-COMPAT.** C tinc includes the terminating
-/// NUL in this label; it feeds the SIG transcript + PRF seed, and
-/// omitting it makes the handshake fail with `BadSig`. The invitation
-/// label ([`INVITE_LABEL`]) does NOT include a NUL — historical
-/// accident in the C code, but it is the wire format.
+/// The trailing NUL is wire format: it feeds the SIG transcript + PRF
+/// seed, and omitting it fails the handshake with `BadSig`. The
+/// invitation label ([`INVITE_LABEL`]) has no NUL — historical accident
+/// in C tinc, but equally wire format.
 ///
 /// Argument order: always (initiator, responder).
 #[must_use]
@@ -333,8 +332,8 @@ pub(crate) enum IdOk {
     Control { needs_write: bool },
     /// Peer ID accepted, SPTPS installed. Daemon must: queue `init` to
     /// outbuf, `inbuf.take_rest()` + re-feed (same TCP segment may carry
-    /// initiator's KEX), then `IO_WRITE`. `needs_write` reflects ONLY the
-    /// `send_id` line; OR with `send_raw`'s result.
+    /// initiator's KEX), then `IO_WRITE`. `needs_write` reflects only the
+    /// `send_id` line; OR it with `send_raw`'s result.
     Peer {
         needs_write: bool,
         init: Vec<Output>,
@@ -370,7 +369,7 @@ pub(crate) struct IdCtx<'a> {
     pub sptps_kex: SptpsKex,
 }
 
-/// SPTPS label for invitation handshakes. **NO trailing NUL** — unlike
+/// SPTPS label for invitation handshakes. No trailing NUL — unlike
 /// [`tcp_label`]; wire format.
 const INVITE_LABEL: &[u8] = b"tinc invitation";
 
@@ -493,8 +492,8 @@ fn id_peer(
 
     conn.allow_request = Some(Request::Ack);
 
-    // ORDER: our ID line must go BEFORE SPTPS KEX bytes — the peer
-    // reads our ID, learns minor>=2, THEN reads KEX. KEX-first would
+    // Our ID line must go before SPTPS KEX bytes — the peer reads our
+    // ID, learns minor>=2, then reads KEX. KEX-first would
     // make its line reader parse ciphertext.
     let needs_write = if is_outgoing {
         false // initiator already sent in `finish_connecting`
@@ -622,7 +621,7 @@ fn id_invitation(
         )));
     };
 
-    // Decode the joiner's THROWAWAY pubkey (NOT their node identity —
+    // Decode the joiner's throwaway pubkey (not their node identity —
     // that's the later type-1 record).
     let throwaway: [u8; PUBLIC_LEN] = std::str::from_utf8(throwaway_b64)
         .ok()
@@ -762,10 +761,10 @@ pub(crate) fn send_ack(
 
     #[expect(clippy::cast_possible_truncation)] // RTT ms fits i32
     let weight = now.saturating_duration_since(conn.start).as_millis() as i32;
-    // Per-host config OR global options, composed bit-by-bit; the
+    // Per-host config OR'd with global options, bit by bit; the
     // per-host fields were extracted during the ID handshake.
     let mut opts = ConnOptions::empty();
-    // IndirectData per-host (yes only) OR global.
+    // IndirectData: per-host (yes only) or global.
     if conn.host_indirect == Some(true) || myself_options.contains(ConnOptions::INDIRECT) {
         opts |= ConnOptions::INDIRECT;
     }
@@ -773,7 +772,7 @@ pub(crate) fn send_ack(
     if conn.host_tcponly == Some(true) || myself_options.contains(ConnOptions::TCPONLY) {
         opts |= ConnOptions::TCPONLY | ConnOptions::INDIRECT;
     }
-    // PMTU only if global says so AND we're not TCP-only
+    // PMTU only if global says so and we're not TCP-only
     // — this is the load-bearing bit. Without it, per-host TCPOnly
     // still left PMTU set, peer wastes udp_discovery_timeout probing
     // a path the user already told us is broken.
@@ -781,7 +780,7 @@ pub(crate) fn send_ack(
     {
         opts |= ConnOptions::PMTU_DISCOVERY;
     }
-    // Per-host ClampMSS OVERRIDES global (not OR'd); absent = global
+    // Per-host ClampMSS overrides global (not OR'd); absent = global
     // default sticks.
     if conn
         .host_clamp_mss

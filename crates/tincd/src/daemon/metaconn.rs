@@ -61,8 +61,8 @@ impl Daemon {
     }
 
     /// Fairness cap, not ET requirement. LT epoll re-fires next
-    /// `turn()` if the fd is still readable. C does one `recv()` per
-    /// wake (`meta.c:185`); we do up to 64 (≈136KB/turn) — cheap
+    /// `turn()` if the fd is still readable. Up to 64 reads
+    /// (≈136KB/turn) — cheap
     /// insurance against a peer flooding the line and starving the
     /// device fd.
     pub(super) fn on_conn_readable(&mut self, id: ConnId) {
@@ -402,16 +402,16 @@ impl Daemon {
                 (r, nw_purge | nw2)
             }
             DispatchResult::SetDebug(level) => {
-                // Reply with PREVIOUS level. `level >= 0` → update;
+                // Reply with previous level. `level >= 0` → update;
                 // `< 0` → query-only. None → terminate ctl conn (the
-                // ONLY ctl arm that does this; the rest reply
+                // only ctl arm that does this; the rest reply
                 // REQ_INVALID and stay up).
                 let Some(level) = level else {
                     return (DispatchResult::Drop, false);
                 };
                 let prev = crate::log_tap::set_debug_level(level);
                 if level >= 0 {
-                    // Remember the FIRST prev so close restores the original.
+                    // Remember the first prev so close restores the original.
                     self.conn_mut(id).prev_debug_level.get_or_insert(prev);
                 }
                 self.ctl_ack(id, crate::dispatch::REQ_SET_DEBUG, prev)
@@ -449,7 +449,7 @@ impl Daemon {
                 // No reply. The conn now passively receives log records
                 // via `flush_log_tap`.
                 //
-                // Debug levels: -1=UNSET, 0=ALWAYS, 1=CONNECTIONS, ...,
+                // Debug levels: -1=UNSET, 0=always, 1=CONNECTIONS, ...,
                 // 5=TRAFFIC, ..., 10=SCARY. Map roughly: 0→Info,
                 // 1-2→Debug, 3+→Trace. Same shape as `main.rs::
                 // debug_level_to_filter`. -1 (UNSET) = "use daemon's
@@ -496,7 +496,7 @@ impl Daemon {
         if conn.tcplen != 0 && conn.outgoing.is_some() && conn.allow_request == Some(Request::Id) {
             let n = usize::from(conn.tcplen);
             let Some(range) = conn.inbuf.read_n(n) else {
-                // Partial. Do NOT fall through to read_line
+                // Partial. Don't fall through to read_line
                 // (SOCKS bytes would parse as garbage).
                 return Some(FeedDrain::Done);
             };
@@ -570,7 +570,7 @@ impl Daemon {
         }
         // One BFS for all ADD_EDGEs in this batch (`graph_dirty`).
         self.flush_graph_dirty();
-        // Dispatch may have queued to ANY conn (broadcast,
+        // Dispatch may have queued to any conn (broadcast,
         // forward, relay); sweep all.
         if needs_write {
             self.maybe_set_write_any();
@@ -687,7 +687,7 @@ impl Daemon {
                         }
                         Request::Pong => {
                             // Real clock, not `self.timers.now()`: that
-                            // is cached at `tick()` BEFORE `epoll_wait`
+                            // is cached at `tick()` before `epoll_wait`
                             // blocked, so it can be stale by up to one
                             // wakeup interval and under-reads RTT by
                             // exactly the latency of whichever OTHER
@@ -752,8 +752,8 @@ impl Daemon {
                             Ok(false)
                         }
                         Request::Error | Request::Termreq => {
-                            // Terminate. Explicit so catch-all below
-                            // is ONLY truly-unhandled.
+                            // Terminate. Explicit so the catch-all below
+                            // is only truly-unhandled requests.
                             log::warn!(target: "tincd::proto",
                                        "{req:?} from peer: {:?}",
                                        std::str::from_utf8(body).unwrap_or("<non-utf8>"));
@@ -885,7 +885,7 @@ impl Daemon {
         nw
     }
 
-    /// Records dispatch by `(type, InvitePhase)`, NOT `check_gate` —
+    /// Records dispatch by `(type, InvitePhase)`, not `check_gate` —
     /// the bytes are file chunks and b64 pubkeys, not request lines.
     pub(super) fn dispatch_invitation_outputs(
         &mut self,
@@ -960,7 +960,7 @@ impl Daemon {
                             }
                             needs_write |= conn.send_sptps_record(1, &[]);
 
-                            // Unlink BEFORE type-1 reply arrives; the
+                            // Unlink before the type-1 reply arrives; the
                             // rename already enforced single-use.
                             if let Err(e) = std::fs::remove_file(&used_path) {
                                 log::warn!(target: "tincd::auth",

@@ -193,7 +193,7 @@ pub(super) fn map_v4(
     let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| format!("bind: {e}"))?;
     sock.connect((gw, PCP_PORT))
         .map_err(|e| format!("connect {gw}: {e}"))?;
-    // §8.1: client IP MUST equal the packet's source addr (server
+    // §8.1: client IP must equal the packet's source addr (server
     // checks, returns ADDRESS_MISMATCH otherwise). connect() made
     // the kernel pick it.
     let client = match sock.local_addr().map(|a| a.ip()) {

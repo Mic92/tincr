@@ -253,7 +253,7 @@ pub fn export_all(paths: &Paths, mut out: impl Write) -> Result<(), CmdError> {
 /// *comment* would suddenly trigger a section boundary).
 ///
 /// # Errors
-/// - I/O writing a host file (NOT skip-because-exists; that's a warning)
+/// - I/O writing a host file (not skip-because-exists; that's a warning)
 /// - `Name =` value fails `check_id`
 ///
 /// # Panics
@@ -531,7 +531,7 @@ mod tests {
         let blob = "Name = ../escape\nSubnet = 10.0.0.0/8\n";
         let err = import(&paths, blob.as_bytes(), false).unwrap_err();
         assert!(matches!(err, CmdError::BadInput(_)));
-        // The dangerous file was NOT created.
+        // The dangerous file was not created.
         assert!(!paths.hosts_dir().join("..").join("escape").exists());
     }
 
@@ -580,7 +580,7 @@ mod tests {
         let count = import(&paths, b" Name = alice\nfoo\n".as_slice(), false).unwrap();
         assert_eq!(count, 0);
 
-        // `Name = alice ignored` (trailing junk) → IS a header, name=alice.
+        // `Name = alice ignored` (trailing junk) → is a header, name=alice.
         // %s stops at whitespace.
         let count = import(&paths, b"Name = alice ignored\nfoo\n".as_slice(), false).unwrap();
         assert_eq!(count, 1);

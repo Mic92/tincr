@@ -155,7 +155,7 @@ mod tests {
             assert_eq!(r as i32, i);
             assert_eq!(r.to_string(), i.to_string());
         }
-        assert!(Request::from_id(-1).is_none()); // ALL guard
+        assert!(Request::from_id(-1).is_none()); // all guard
         assert!(Request::from_id(24).is_none()); // LAST guard
     }
 

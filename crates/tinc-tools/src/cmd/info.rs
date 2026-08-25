@@ -3,7 +3,7 @@
 //! ```text
 //!   tinc info alice           → human-readable summary of node alice
 //!   tinc info 10.0.0.5        → which subnet(s) route this address?
-//!   tinc info 10.0.0.0/24     → who advertises EXACTLY this subnet?
+//!   tinc info 10.0.0.0/24     → who advertises exactly this subnet?
 //! ```
 //!
 //! ## Dispatch by argument shape
@@ -151,7 +151,7 @@ pub enum Reachability {
     /// socket) to this node, but no working UDP. Packets tunnel
     /// over TCP.
     DirectTcp,
-    /// Else: reachable, direct, key valid, no UDP, AND nexthop
+    /// Else: reachable, direct, key valid, no UDP, and nexthop
     /// is someone else. We'd forward via nexthop's TCP. The
     /// "shouldn't normally happen" case (if we're routing through
     /// nexthop, why isn't `via` set?).
@@ -469,7 +469,7 @@ pub struct SubnetMatch {
 ///   - Has `/` → exact mode: prefix and addr must equal.
 ///   - Has `#` → ALSO match weight. Else weight-agnostic.
 ///
-/// Returns ALL matches. Empty result → caller errors with
+/// Returns all matches. Empty result → caller errors with
 /// "Unknown address/subnet".
 ///
 /// # Errors

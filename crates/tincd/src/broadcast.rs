@@ -1,6 +1,6 @@
 //! `broadcast_packet` target selection.
 //!
-//! Broadcast = packet goes to ALL nodes. Two strategies:
+//! Broadcast = packet goes to all nodes. Two strategies:
 //!
 //! - **MST** (`BMODE_MST`, default): walk the minimum spanning tree.
 //!   Each node forwards over MST edges except the one it arrived on.
@@ -17,7 +17,7 @@
 //! C also checks `tunnelserver` — MST might be invalid in
 //! tunnelserver mode (filtered `ADD_EDGE`). Daemon-side gate.
 //!
-//! ## What's NOT here
+//! ## What's not here
 //!
 //! - `c->status.mst` — daemon stores `Vec<EdgeId>` from `run_graph`
 //!   in `last_mst` (gossip.rs `run_graph_and_log`).
@@ -74,19 +74,14 @@ where
         .collect()
 }
 
-/// Direct broadcast. The condition: `(n->via == myself && n->nexthop
-/// == n) || n->via == n`. In English: nodes we can reach in one hop (either directly UDP-dialable, or
-/// `via` themselves = self-relay = direct).
-///
-/// `if(from != myself) break` — direct mode ONLY
-/// broadcasts when WE originated. We take a `from_is_self: bool` and
-/// return empty if false.
+/// Direct broadcast: nodes we can reach in one hop (`via == myself &&
+/// nexthop == n`, or `via == n` = self-relay = direct). Only when we
+/// originated (`from_is_self`); empty otherwise.
 ///
 /// Generic over a node-view tuple `(NodeId, via, nexthop)`. Daemon
 /// builds from `last_routes`.
 ///
-/// `n != myself` — we never include ourselves in the targets;
-/// the send to ourselves already happened.
+/// Never includes ourselves; the send to ourselves already happened.
 pub(crate) fn direct_targets<N>(
     nodes: impl Iterator<Item = (N, Option<N>, Option<N>)>,
     myself: N,
@@ -95,7 +90,6 @@ pub(crate) fn direct_targets<N>(
 where
     N: Copy + Eq,
 {
-    // :1644-1646 — direct mode only broadcasts locally-originated.
     if !from_is_self {
         return Vec::new();
     }
@@ -176,7 +170,7 @@ mod tests {
 
     #[test]
     fn direct_via_someone_else() {
-        // via=Z(2) (relay) → NOT in targets
+        // via=Z(2) (relay) → not in targets
         let nodes = [(1u32, Some(2u32), Some(2u32))];
         let got = direct_targets(nodes.into_iter(), 0, true);
         assert!(got.is_empty());
@@ -184,8 +178,7 @@ mod tests {
 
     #[test]
     fn direct_from_not_self() {
-        // :1644-1646 — direct only broadcasts when WE originated.
-        // node would otherwise qualify (via=self, nexthop=self).
+        // Node would otherwise qualify (via=self, nexthop=self).
         let nodes = [(1u32, Some(0u32), Some(1u32))];
         let got = direct_targets(nodes.into_iter(), 0, false);
         assert!(got.is_empty());
@@ -193,9 +186,7 @@ mod tests {
 
     #[test]
     fn direct_excludes_self() {
-        // :1650 `n != myself` — myself shouldn't appear even if it
-        // satisfies the filter (via==myself && nexthop==myself, or
-        // via==myself which IS the n->via==n arm when n==myself).
+        // myself shouldn't appear even though it satisfies the filter.
         let nodes = [
             (0u32, Some(0u32), Some(0u32)), // myself, satisfies via==n
             (1, Some(0), Some(1)),          // direct neighbor

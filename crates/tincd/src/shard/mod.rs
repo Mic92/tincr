@@ -76,7 +76,7 @@ pub(crate) struct TunnelHandles {
     pub out_key_base: u64,
 
     /// `Sptps::replay_handle()`. RX-path: `lock()` + `check_public(seqno)`
-    /// per incoming packet AFTER decrypt succeeds. Uncontended in steady
+    /// per incoming packet after decrypt succeeds. Uncontended in steady
     /// state (each peer's flow lands on one socket). Stored here so the
     /// daemon's mirror lookup works for both TX and RX without a
     /// separate type.
@@ -151,7 +151,7 @@ pub(crate) struct TunnelHandles {
 pub(crate) struct TxSnapshot {
     /// Spawn-time fold of every config-immutable slow-path gate:
     /// `dns.is_some() | routing_mode != Router | priorityinheritance`.
-    /// `any_pcap` is NOT folded — it flips at runtime; checked live
+    /// `any_pcap` is not folded — it flips at runtime; checked live
     /// at the device.rs call site. Set once at setup; never re-read.
     pub slowpath_all: bool,
 
@@ -164,7 +164,7 @@ pub(crate) struct TxSnapshot {
 
     /// `[NodeId6::NULL ‖ id6_table.id_of(myself)]`. The 12-byte
     /// prefix every direct-send packet writes at offset 0. Direct
-    /// ⇒ dst=NULL (`net_packet.c:1015`); src is always us. Computed
+    /// ⇒ dst=NULL; src is always us. Computed
     /// once at setup; the seal loop `copy_from_slice`s it.
     pub id6_prefix: [u8; 12],
 
@@ -184,7 +184,7 @@ pub(crate) struct TxSnapshot {
     /// Same `Arc::new(clone())` pattern as `subnets`: O(nodes) clone
     /// at gossip-rate. Refreshed in `tx_snap_refresh_graph` — the
     /// table only changes on `lookup_or_add_node` (which only does
-    /// real work on the FIRST `ADD_EDGE`/`ADD_SUBNET` mentioning a
+    /// real work on the first `ADD_EDGE`/`ADD_SUBNET` mentioning a
     /// new name) and `purge`, both of which already run that hook.
     /// A node learned via `ADD_SUBNET` alone (no edge) cannot send
     /// us UDP — unreachable — so the lag between subnet-learn and

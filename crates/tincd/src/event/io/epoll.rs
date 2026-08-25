@@ -25,7 +25,7 @@ pub(super) fn create() -> io::Result<Poller> {
     Ok(Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC)?)
 }
 
-/// Level-triggered (no `EPOLLET`), matching `src/linux/event.c:97`.
+/// Level-triggered (no `EPOLLET`), same as C tinc.
 fn interest_to_flags(i: super::Io) -> EpollFlags {
     match i {
         super::Io::Read => EpollFlags::EPOLLIN,

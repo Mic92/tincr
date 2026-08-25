@@ -2,7 +2,7 @@
 //!
 //! Mirror of [`tx_probe`](super::tx_probe) / [`seal_super`](super::seal_super)
 //! for the receive side. `rx_probe` walks the same gate chain
-//! `handle_incoming_vpn_packet` would, returning `Some` only if THIS
+//! `handle_incoming_vpn_packet` would, returning `Some` only if this
 //! packet can take the direct-decrypt-write-TUN path with no per-
 //! packet `&mut Daemon` reborrow. `rx_open` then decrypts +
 //! ethertype-synth + dst-subnet check, all with `&TxSnapshot`.
@@ -10,7 +10,7 @@
 //! Unlike TX (one probe per super), RX probes per packet: a recvmmsg
 //! batch is N independent UDP datagrams from possibly-different
 //! peers. The amortization comes from [`RxDstMemo`]: a TCP flow
-//! produces 64 packets with the SAME inner dst-ip; one trie probe,
+//! produces 64 packets with the same inner dst-ip; one trie probe,
 //! 63 `[u8; 4]` compares.
 //!
 //! ## Side effects the slow path does that we PUNT
@@ -22,7 +22,7 @@
 //! - `myself.out_packets`/`out_bytes` on TUN-write — own-node stats
 //!   aren't in `TunnelHandles`; the per-peer RX bump is.
 //! - `udp_addr` cache populate (rx.rs:325) — gate at probe-time:
-//!   `handles.udp_addr.is_some()`. The FIRST valid packet from a
+//!   `handles.udp_addr.is_some()`. The first valid packet from a
 //!   peer goes slow-path, slow-path caches, every subsequent packet
 //!   goes fast.
 //! - `overwrite_mac` stamp (device.rs:410) — Router+TAP only;
@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 /// `PKT_NORMAL`. Re-stated (not re-exported from `daemon.rs`) so
 /// `shard` doesn't reach into `daemon` private constants. The byte
-/// is fixed by the wire protocol — `connection.h`, won't change.
+/// is fixed by the wire protocol.
 const PKT_NORMAL: u8 = 0;
 
 /// `REC_HANDSHAKE`. Mirror of `tinc_sptps::REC_HANDSHAKE`. Gate:
@@ -100,12 +100,12 @@ pub(crate) struct RxTarget<'a> {
 
 /// Per-batch dst-subnet memo. `rx_open` decrypts then asks "does
 /// `route(dst_ip)` resolve to myself?" — a trie probe. For a TCP
-/// flow, 64 packets in one recvmmsg batch share the SAME inner dst.
+/// flow, 64 packets in one recvmmsg batch share the same inner dst.
 /// Cache the answer keyed on the raw dst bytes; reset at batch
 /// boundary (the GRO scope).
 ///
-/// `bool` = "owner is myself". `false` covers BOTH "not myself"
-/// (peer is forwarding through us — slow path does the relay) AND
+/// `bool` = "owner is myself". `false` covers both "not myself"
+/// (peer is forwarding through us — slow path does the relay) and
 /// "no covering subnet" (slow path sends ICMP unreachable). The
 /// fast path doesn't distinguish; either way it's a punt.
 ///
@@ -177,7 +177,7 @@ impl RxDstMemo {
 
 // rx_probe — gate chain (no decrypt)
 
-/// Probe whether THIS packet can take the RX fast path. Runs the
+/// Probe whether this packet can take the RX fast path. Runs the
 /// same gate chain `handle_incoming_vpn_packet` would, returning
 /// `Some(RxTarget)` only if the packet is direct-to-us from a peer
 /// with a live tunnel and a cached UDP address. No side effects.
@@ -189,7 +189,7 @@ impl RxDstMemo {
 ///   - `dst_id6 != NULL` (relay branch — we don't decrypt for relay)
 ///   - `src_id6` not in `id6` table (unknown peer)
 ///   - no `TunnelHandles` (pre-handshake; slow path runs `send_req_key`)
-///   - `udp_addr` not cached (FIRST valid packet from this peer;
+///   - `udp_addr` not cached (first valid packet from this peer;
 ///     slow path's rx.rs:325 caches it; next packet goes fast)
 ///
 /// Gates DEFERRED to [`rx_open`] (post-decrypt):
@@ -285,15 +285,15 @@ pub(crate) fn rx_probe<'a>(snap: &'a TxSnapshot, pkt: &'a [u8]) -> Option<RxTarg
 ///    extends only after the tag check passes), so a forged packet
 ///    doesn't dirty `scratch`.
 /// 2. **Type gate** (`ty == PKT_NORMAL`). `PKT_PROBE`/`COMPRESSED`/
-///    `MAC` ⇒ `Err(())`. Replay NOT advanced — slow path's
+///    `MAC` ⇒ `Err(())`. Replay not advanced — slow path's
 ///    `open_data_into` re-decrypts, gets the same `ty`, dispatches
 ///    `udp_probe_h`/decompress correctly.
 /// 3. **MTU gate** (`body_len > MTU`). Same rationale.
 /// 4. **dst-subnet gate** (memo probe on plaintext dst-ip). Same.
-/// 5. **THEN `replay.check_public`** — only commit after EVERY gate
+/// 5. **Then `replay.check_public`** — only commit after every gate
 ///    passed. A replayed packet that would have failed a gate is
 ///    fine (it'll fail in the slow path too, double-drop, no harm),
-///    but a fresh packet that fails a gate MUST stay un-committed
+///    but a fresh packet that fails a gate must stay un-committed
 ///    so the slow path can handle it.
 /// 6. ethertype synth + type-byte strip (the memmove).
 ///
@@ -324,7 +324,7 @@ pub(crate) fn rx_open(
     //
     // `scratch` setup: clear, resize to ETH_HLEN headroom.
     // `open_into` debug-asserts `out.len() == decrypt_at` then
-    // extends. On tag fail it returns BEFORE the extend
+    // extends. On tag fail it returns before the extend
     // (chapoly.rs:254), so `scratch` stays at `[0; 14]` — the
     // slow path's `open_data_into` will re-clear it anyway.
     scratch.clear();
@@ -506,7 +506,7 @@ mod tests {
         // Also a subnet bob owns, for the negative dst test.
         st.add("10.1.0.0/24".parse().unwrap(), "bob".into());
 
-        // bob's handles. inkey IS the test key; outcipher doesn't
+        // bob's handles. inkey is the test key; outcipher doesn't
         // matter (RX doesn't seal). replay starts empty (seqno 0
         // is the first valid). udp_addr cached so probe passes.
         let aead = tinc_sptps::SptpsAead::default();
@@ -551,7 +551,7 @@ mod tests {
     /// a body via `ChaPoly::seal_into` (the seal-side primitive
     /// `seal_super` uses), build the wire packet, probe + open,
     /// assert the bytes match. Proves the gate chain doesn't
-    /// reject a valid packet AND the byte layout (ethertype synth,
+    /// reject a valid packet and the byte layout (ethertype synth,
     /// type-byte strip) is correct.
     #[test]
     fn roundtrip_probe_open_ok() {
@@ -577,14 +577,14 @@ mod tests {
         // Memo cached the dst.
         assert_eq!(memo.v4, Some(([10, 0, 0, 5], true)));
         // (Replay-advance-on-success is structurally guaranteed by
-        // step 5 being unconditional after step 4. NOT asserted here:
+        // step 5 being unconditional after step 4. Not asserted here:
         // ReplayWindow has no public constructor with a real window
         // size; default() is zero-width. The *_no_replay_advance
         // tests below prove the converse via seqno reuse, which works
         // with any window.)
     }
 
-    /// Tag mismatch ⇒ `rx_open` Err, replay window NOT advanced.
+    /// Tag mismatch ⇒ `rx_open` Err, replay window not advanced.
     /// (The hard rule: forged seqno + bad tag must not commit.)
     #[test]
     fn bad_tag_no_replay_advance() {
@@ -605,7 +605,7 @@ mod tests {
         assert!(rx_open(&target2, &snap, &mut scratch, &mut memo).is_ok());
     }
 
-    /// `PKT_PROBE` ⇒ Err, replay NOT advanced. Slow path must be
+    /// `PKT_PROBE` ⇒ Err, replay not advanced. Slow path must be
     /// able to re-decrypt and dispatch `udp_probe_h`.
     #[test]
     fn pkt_probe_punts_no_replay_advance() {
@@ -620,14 +620,14 @@ mod tests {
         let mut memo = RxDstMemo::default();
         assert!(rx_open(&target, &snap, &mut scratch, &mut memo).is_err());
 
-        // seqno 5 NOT committed: a PKT_NORMAL at seqno 5 still works.
+        // seqno 5 not committed: a PKT_NORMAL at seqno 5 still works.
         let pkt2 = wire_packet("bob", 5, PKT_NORMAL, &body, &inkey);
         let target2 = rx_probe(&snap, &pkt2).unwrap();
         assert!(rx_open(&target2, &snap, &mut scratch, &mut memo).is_ok());
     }
 
     /// dst routes to bob (10.1.0.0/24), not alice ⇒ punt. Replay
-    /// NOT advanced — slow path forwards.
+    /// not advanced — slow path forwards.
     #[test]
     fn dst_not_myself_punts_no_replay_advance() {
         let (snap, _bob, inkey) = fixture();
@@ -643,7 +643,7 @@ mod tests {
         // Memo cached the negative.
         assert_eq!(memo.v4, Some(([10, 1, 0, 5], false)));
 
-        // seqno 0 NOT committed.
+        // seqno 0 not committed.
         let body2 = v4_body([10, 0, 0, 5], 100);
         let pkt2 = wire_packet("bob", 0, PKT_NORMAL, &body2, &inkey);
         let target2 = rx_probe(&snap, &pkt2).unwrap();

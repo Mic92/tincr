@@ -167,7 +167,7 @@ fn finalize_minimal_blob() {
 
 /// `VAR_SAFE` filter. `Mode` is SERVER|SAFE → tinc.conf.
 /// `Subnet` is HOST|MULTIPLE|SAFE → hosts/bob.
-/// `Device` is SERVER but NOT SAFE → dropped (without --force).
+/// `Device` is SERVER but not SAFE → dropped (without --force).
 #[test]
 fn finalize_var_safe_filter() {
     let cd = ConfDir::bare();
@@ -186,7 +186,7 @@ ConnectTo = alice
     // Mode (SERVER|SAFE) → tinc.conf. ConnectTo too.
     assert!(conf.contains("Mode = switch\n"));
     assert!(conf.contains("ConnectTo = alice\n"));
-    // Device NOT in tinc.conf — it's not SAFE, dropped.
+    // Device not in tinc.conf — it's not SAFE, dropped.
     assert!(!conf.contains("Device"));
 
     let host = fs::read_to_string(p.host_file("bob")).unwrap();
@@ -283,7 +283,7 @@ fn finalize_secondary_chunks() {
     let carol = fs::read_to_string(p.host_file("carol")).unwrap();
     assert_eq!(carol, "Address = carol.example\n");
 
-    // bob's host file (chunk-1 HOST vars + pubkey): NO Address
+    // bob's host file (chunk-1 HOST vars + pubkey): no Address
     // (alice's Address went to alice's file, not bob's).
     let bob_host = fs::read_to_string(p.host_file("bob")).unwrap();
     assert!(!bob_host.contains("vpn.example"));
@@ -340,7 +340,7 @@ fn finalize_self_clobber_is_case_insensitive() {
 /// Secondary chunk with our own name → bail. Malicious inviter
 /// trying to clobber our host file.
 ///
-/// The blob shape matters: `Name = bob\nName = bob\n...` does NOT
+/// The blob shape matters: `Name = bob\nName = bob\n...` does not
 /// trigger this — the second `Name = bob` matches `val == name`
 /// and is `continue`'d *inside chunk 1*. You can only get to the
 /// chunk-2 self-clobber check by first
@@ -579,7 +579,7 @@ fn invite_join_roundtrip_in_process() {
     // The pump
     // Two unidirectional byte queues. `Output::Wire` from one
     // side → enqueue → `receive()` on the other. Loop until both
-    // queues are empty AND no new wire bytes were produced
+    // queues are empty and no new wire bytes were produced
     // (steady state).
     //
     // State tracked across the loop, mirroring the C globals:
@@ -617,7 +617,7 @@ fn invite_join_roundtrip_in_process() {
         }
     }
 
-    // Pending sends — records to push AFTER draining a receive's
+    // Pending sends — records to push after draining a receive's
     // outputs. We can't `send_record` *inside* the drain loop
     // because the drain loop is iterating Outputs from the same
     // Sptps. Same constraint as `pubkey_to_send` in `join()`.

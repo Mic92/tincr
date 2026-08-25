@@ -396,7 +396,7 @@ impl Daemon {
         (if up { "subnet-up" } else { "subnet-down" }, env)
     }
 
-    /// Enqueue host-up/down AND hosts/NAME-up/down. `addr` None →
+    /// Enqueue host-up/down and hosts/NAME-up/down. `addr` None →
     /// REMOTEADDRESS omitted.
     pub(super) fn run_host_script(&self, up: bool, node: &str, addr: Option<SocketAddr>) {
         let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
@@ -515,7 +515,7 @@ impl Daemon {
             }
             SignalWhat::Reload => {
                 // env_logger's file target is set-once; --logfile
-                // is NOT reopened here. logrotate must use
+                // is not reopened here. logrotate must use
                 // `copytruncate` (see docs/OPERATING.md).
                 log::info!(target: "tincd", "Got SIGHUP, reloading");
                 if !self.reload_configuration() {
@@ -565,7 +565,7 @@ impl Daemon {
             }
         }
 
-        // Kick the ping sweep. The retry timers above fire BEFORE
+        // Kick the ping sweep. The retry timers above fire before
         // this in the next `expired()` walk (BTreeMap order is
         // (when, seq); same `when`, lower seq wins) so by the time
         // the sweep runs, any new in-progress conns from the retry
@@ -575,7 +575,7 @@ impl Daemon {
 
     /// False if config re-read failed; daemon continues either way.
     ///
-    /// NOT reloadable: Port, `AddressFamily`, `DeviceType` (need re-bind/
+    /// not reloadable: Port, `AddressFamily`, `DeviceType` (need re-bind/
     /// re-open). Not-yet: Compression, Forwarding.
     pub(super) fn reload_configuration(&mut self) -> bool {
         let config = match super::setup::read_daemon_config(&self.confbase, &self.cmdline_conf) {

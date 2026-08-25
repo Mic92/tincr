@@ -30,8 +30,8 @@ const ETHER_SIZE: usize = 14;
 const ETH_ALEN: usize = 6;
 const ARP_SIZE: usize = 28;
 const IP6_SIZE: usize = 40;
-const NS_SIZE: usize = 24; // icmp6_hdr(8) + in6_addr(16). ipv6.h:106
-const OPT_SIZE: usize = 2; // {type, len}. ipv6.h:115
+const NS_SIZE: usize = 24; // icmp6_hdr(8) + in6_addr(16).
+const OPT_SIZE: usize = 2; // {type, len}.
 const IPPROTO_ICMPV6: u8 = 58;
 
 // NDP constants (RFC 4861).
@@ -76,7 +76,7 @@ pub(crate) fn build_arp_reply(original: &[u8]) -> Vec<u8> {
 
     let mut out = original[..ETHER_SIZE + ARP_SIZE].to_vec();
 
-    // C does NOT touch the eth header (only :1022 copies arp back).
+    // C does not touch the eth header (only :1022 copies arp back).
     // Eth-dst is ignored on a tap read.
 
     let arp_bytes: &[u8; ARP_SIZE] = original[ETHER_SIZE..ETHER_SIZE + ARP_SIZE]
@@ -310,7 +310,7 @@ mod tests {
         let kernel_mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
         req[6..12].copy_from_slice(&kernel_mac);
 
-        // Daemon snatches AFTER parse_arp_req validates.
+        // Daemon snatches after parse_arp_req validates.
         assert!(parse_arp_req(&req).is_some());
         let mut mymac = [0u8; 6];
         mymac.copy_from_slice(&req[6..12]);

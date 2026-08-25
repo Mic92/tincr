@@ -62,7 +62,7 @@ use std::time::{Duration, Instant};
 use rand_core::Rng;
 use tinc_crypto::os_rng;
 
-/// `UPnP = yes | udponly | no` — C parity (`net_setup.c:1202`).
+/// `UPnP = yes | udponly | no` — same values as C tinc.
 /// `udponly` maps the UDP listener only (the SPTPS datagram path);
 /// `yes` also maps TCP (the meta-connection listener).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -253,7 +253,7 @@ impl Drop for Portmapper {
             // — the lease simply expires — so a longer hang would
             // argue for detaching instead; with the bounded
             // round-trip, joining is safe and keeps test teardown
-            // deterministic. C tinc doesn't even try (`upnp.c:170`).
+            // deterministic. C tinc doesn't even try.
             let _ = j.join();
         }
     }

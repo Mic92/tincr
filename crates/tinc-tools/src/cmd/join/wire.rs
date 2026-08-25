@@ -18,9 +18,6 @@ pub(super) const ACK: u32 = tinc_proto::Request::Ack as u32;
 ///
 /// `buf` carries bytes between calls — `recv()` may deliver multiple
 /// lines (or a line plus the start of SPTPS data) in one syscall.
-/// Upstream uses static `buffer[4096]`/`blen` for the same reason; we
-/// make the state explicit.
-///
 /// The line is returned WITHOUT the trailing `\n`.
 pub(super) fn recv_line(sock: &mut TcpStream, buf: &mut Vec<u8>) -> Result<String, CmdError> {
     loop {

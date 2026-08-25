@@ -22,7 +22,7 @@
 //!   key from a year-old invite is useless). The daemon loads this on
 //!   startup and uses it as its SPTPS identity for invitation handshakes.
 //! - **Cookie** (18 random bytes): one per invitation. Bearer token.
-//!   Goes in the URL (b64-encoded) but NOT on disk.
+//!   Goes in the URL (b64-encoded) but not on disk.
 //! - **Invitation file** (`invitations/HASH`): the per-invitation config
 //!   blob. Named by `sha512(cookie || fingerprint)[..18]` so `ls` doesn't
 //!   leak the cookie. The daemon recomputes the hash from the cookie
@@ -285,7 +285,7 @@ fn sweep_expired(inv_dir: &Path, now: SystemTime) -> Result<u32, CmdError> {
 /// `OpenOptions::mode(0600)` sets the mode atomically at create time,
 /// so there is no window where the key is world-readable.
 ///
-/// NOT `O_EXCL` — we just unlinked it (or it didn't exist).
+/// Not `O_EXCL` — we just unlinked it (or it didn't exist).
 fn write_invitation_key(path: &Path, sk: &SigningKey) -> Result<(), CmdError> {
     super::write_private_key(path, sk, super::OpenKind::CreateTrunc)
 }
@@ -320,7 +320,7 @@ fn build_invitation_file(
     let mut out = String::new();
 
     // Chunk 1: invitee's bootstrap config
-    // `Name = X` is the FIRST line; `finalize_join` reads it to know
+    // `Name = X` is the first line; `finalize_join` reads it to know
     // what node it's becoming. Must be first — `get_value` finds the
     // first match.
     out.push_str("Name = ");
@@ -397,7 +397,7 @@ fn copy_mesh_vars(paths: &Paths, out: &mut String) -> Result<(), CmdError> {
 /// In our case (no daemon connection) we use whatever port was in the
 /// `Address` line, or `655` default. The `Port = 0` substitution still
 /// happens, just with whatever port `get_my_address` resolved to. If
-/// the user has `Port = 0` AND no port on their `Address` line AND no
+/// the user has `Port = 0` and no port on their `Address` line and no
 /// daemon running, they get `Port = 655` here, which is wrong but at
 /// least it's a sensible default — and they'll find out when join fails
 /// to connect.
@@ -413,11 +413,11 @@ fn copy_host_replacing_port(
     out: &mut String,
 ) -> Result<(), CmdError> {
     // Extract the first whitespace-delimited token (after leading
-    // whitespace). Match: token is exactly 4 chars AND those 4 chars
+    // whitespace). Match: token is exactly 4 chars and those 4 chars
     // are "Port" case-insensitively. "Port" matches, "PORT" matches,
-    // "Porting" does NOT (token is 7 chars).
+    // "Porting" does not (token is 7 chars).
     //
-    // Subtlety: token stops at TAB or SPACE but NOT at `=`. So
+    // Subtlety: token stops at TAB or SPACE but not at `=`. So
     // `Port=655` has token "Port=655" (8 chars), doesn't match.
     // `Port=655` passes through unchanged; init writes the `Port = X`
     // form anyway.
@@ -583,7 +583,7 @@ mod tests {
             "12345",
             "Address = 1.2.3.4\nPort = 12345\nEd25519PublicKey = abc\n",
         );
-        // `Port=655` (no space before `=`) does NOT match. The
+        // `Port=655` (no space before `=`) does not match. The
         // tokenizer stops at whitespace, not `=`, so the token is
         // `Port=655` (8 chars), not `Port` (4 chars).
         case("Port=0\n", "12345", "Port=0\n");
@@ -972,7 +972,7 @@ mod tests {
         let chunk1 = body.split(SEPARATOR).next().unwrap();
         assert!(chunk1.contains("Mode = switch\n"));
         assert!(chunk1.contains("Broadcast = no\n"));
-        // Device is NOT copied. Not in the filter.
+        // Device is not copied. Not in the filter.
         assert!(!chunk1.contains("Device"));
     }
 }

@@ -17,7 +17,7 @@ impl Daemon {
     ) -> Result<bool, DispatchError> {
         let (owner_name, subnet) = parse_add_subnet(body)?;
 
-        // tunnelserver indirect filter. Check BEFORE
+        // tunnelserver indirect filter. Check before
         // lookup_or_add_node - don't pollute graph with indirect
         // names. ORDER: seen_request first - mark seen even on drop.
         let Some(conn_name) = self.flooded_prologue(
@@ -58,10 +58,10 @@ impl Daemon {
             return Ok(nw);
         }
 
-        // tunnelserver second gate. Reached when owner IS the direct
+        // tunnelserver second gate. Reached when owner is the direct
         // peer but subnet wasn't preloaded from hosts/ ("unauthorized"
         // - tunnelserver implies strictsubnets; load_all_nodes
-        // preloaded those; reaching here means NOT on disk). NO
+        // preloaded those; reaching here means not on disk). NO
         // forward. (50800c0d fixed a spurious forward here that made
         // three_daemon_tunnelserver intermittent.)
         if self.settings.tunnelserver {
@@ -125,7 +125,7 @@ impl Daemon {
         Ok(nw)
     }
 
-    /// DEL for unknown owner/subnet is warn-and-drop (NOT
+    /// DEL for unknown owner/subnet is warn-and-drop (not
     /// `lookup_or_add`).
     pub(in crate::daemon) fn on_del_subnet(
         &mut self,
@@ -144,7 +144,7 @@ impl Daemon {
             return Ok(false);
         };
 
-        // NOT lookup_or_add. Warn, return.
+        // not lookup_or_add. Warn, return.
         let Some(&owner) = self.node_ids.get(&owner_name) else {
             log::warn!(target: "tincd::proto",
                        "Got DEL_SUBNET from {conn_name} for {owner_name} \
@@ -153,7 +153,7 @@ impl Daemon {
         };
 
         // Peer says we don't own a subnet we DO own. ORDERING: lookup
-        // FIRST, bail if not found. Security audit `2f72c2ba`: without
+        // first, bail if not found. Security audit `2f72c2ba`: without
         // that gate, a malicious peer sends DEL_SUBNET for a subnet
         // we never claimed; we retaliate ADD; victim adds bogus route
         // pointing at us.
@@ -172,14 +172,14 @@ impl Daemon {
             return Ok(nw);
         }
 
-        // AFTER retaliate, BEFORE forward+del.
+        // after retaliate, before forward+del.
         if self.settings.tunnelserver {
             return Ok(false);
         }
 
         let nw = self.forward_request(from_conn, body);
 
-        // AFTER forward, BEFORE del. (not-found-strictsubnets case
+        // after forward, before del. (not-found-strictsubnets case
         // folds into del()==false below: same observable behavior -
         // forward, no del.)
         if self.settings.strictsubnets {
@@ -189,7 +189,7 @@ impl Daemon {
         // ORDERING: lookup gates script + del. Security audit
         // `2f72c2ba`: subnet-down for a subnet we never up'd is a
         // peer-triggers-fork-exec DoS (flood DEL with fresh nonces).
-        // Do del() FIRST. We invert script-before-del (del() returns
+        // Do del() first. We invert script-before-del (del() returns
         // bool) - script env doesn't read the table; same behavior.
         let did_del = self.subnets.del(&subnet, &owner_name);
         if did_del {

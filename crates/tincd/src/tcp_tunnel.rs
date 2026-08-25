@@ -11,9 +11,9 @@
 //!
 //! - binary: `"21 LEN\n"` then `LEN` raw bytes via
 //!   `c->sptpslen`. proto-minor ≥ 7 only (so the receiver knows to
-//!   read raw blobs). WHAT THIS MODULE BUILDS/PARSES.
+//!   read raw blobs). WHAT this MODULE BUILDS/PARSES.
 //!
-//! Frame layout (BOTH paths' inner blob, identical to the UDP wire
+//! Frame layout (both paths' inner blob, identical to the UDP wire
 //! frame at `daemon/net.rs:1246`):
 //!
 //! ```text
@@ -25,7 +25,7 @@
 //! `dst` first because the relay only needs the first 6 bytes to
 //! route (`receive_tcppacket_sptps:624`).
 //!
-//! ## What's NOT here
+//! ## What's not here
 //!
 //! - `c->sptpslen` field: `conn.rs`, daemon serial.
 //! - `Request::SptpsPacket` dispatch arm: `metaconn.rs`, daemon

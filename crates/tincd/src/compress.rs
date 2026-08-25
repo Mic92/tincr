@@ -158,13 +158,10 @@ impl Compressor {
             }
 
             Level::LzoHi => {
-                // NOT-PORTING(lzo-999): minilzo doesn't include
-                // lzo1x_999_compress. The full lzo2 library has it;
-                // nobody cares. Decompress works
+                // minilzo has no lzo1x_999_compress. Decompress works
                 // (same _safe fn, same wire format) so we can receive
-                // level-11 from a C peer; we just can't send it.
-                // Returning None mirrors C built without HAVE_LZO:
-                // caller logs "compression failed" and sends raw.
+                // level 11 from a C peer; we just can't send it. None
+                // makes the caller log "compression failed" and send raw.
                 None
             }
 
@@ -391,7 +388,7 @@ mod lzo {
     }
 
     /// `lzo1x_decompress_safe`. The `_safe` variant bounds-checks; the non-safe one trusts input lengths.
-    /// Ours come from the wire — MUST use `_safe`.
+    /// Ours come from the wire — must use `_safe`.
     pub(super) fn decompress_safe(src: &[u8], max_len: usize) -> Option<Vec<u8>> {
         let mut out = vec![0u8; max_len];
         let mut out_len: usize = max_len;
@@ -530,7 +527,7 @@ mod tests {
     #[test]
     fn lzo_lo_random_roundtrip() {
         // Incompressible input: output may grow (lzo1x adds a few
-        // bytes of overhead for literals) but MUST roundtrip.
+        // bytes of overhead for literals) but must roundtrip.
         let mut c = Compressor::new();
         let src = pseudo_random(1024, 0xfee1_dead);
         let comp = c.compress(&src, Level::LzoLo).unwrap();
@@ -541,11 +538,11 @@ mod tests {
     #[test]
     fn lzo_hi_compress_stub_decompress_works() {
         // Asymmetric: minilzo lacks lzo1x_999_compress so LzoHi
-        // compress is stubbed (None), but decompress uses the SAME
+        // compress is stubbed (None), but decompress uses the same
         // lzo1x_decompress_safe as LzoLo (shared wire format). We
         // can RECEIVE level-11 from a C peer; we just can't SEND it.
         // This is fine — compression level is per-direction: we
-        // advertise OUR level in ANS_KEY, peer compresses outbound
+        // advertise our level in ANS_KEY, peer compresses outbound
         // to us with whatever THEY choose. We must decompress
         // anything; we may compress with anything we have.
         let mut c = Compressor::new();
@@ -654,9 +651,9 @@ mod tests {
         assert_eq!(dec, b"the quick brown fox jumps over the lazy dog");
     }
 
-    /// And the other direction: OUR LZ4 output must decode with the
+    /// And the other direction: our LZ4 output must decode with the
     /// reference. We can't run liblz4 here, but `lz4_flex`'s own
-    /// decompress IS the reference algorithm — block format has no
+    /// decompress is the reference algorithm — block format has no
     /// encoder freedom for short literals. Spot-check that our output
     /// for a tiny input matches the C KAT byte-for-byte (LZ4 block
     /// format is deterministic for inputs this short — no match

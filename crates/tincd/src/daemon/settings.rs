@@ -136,12 +136,12 @@ pub struct DaemonSettings {
     ///
     /// Implies `strictsubnets` (applied in `apply_reloadable_settings`
     /// after both are parsed): a hub doesn't gossip indirect topology
-    /// AND doesn't trust direct peers to claim arbitrary subnets.
+    /// and doesn't trust direct peers to claim arbitrary subnets.
     pub tunnelserver: bool,
     /// The operator's `hosts/NAME` files become the AUTHORITY for
     /// which subnets each node owns. `ADD_SUBNET` gossip for subnets
     /// not in the file is ignored (forwarded, not added locally).
-    /// `DEL_SUBNET` for subnets that ARE in the file is ignored.
+    /// `DEL_SUBNET` for subnets that are in the file is ignored.
     ///
     /// Implied by `tunnelserver`. `load_all_nodes` preloads the
     /// authorized subnets at startup; lookup-first means authorized
@@ -162,12 +162,12 @@ pub struct DaemonSettings {
     /// `forward_packet`. Default `Internal`.
     pub forwarding_mode: ForwardingMode,
     /// Dispatch shape: `Router` → ethertype switch; `Switch` →
-    /// `route_mac`; `Hub` → always broadcast. NOT reloadable -
+    /// `route_mac`; `Hub` → always broadcast. not reloadable -
     /// changing tun↔tap mid-run means re-opening the device.
     pub routing_mode: RoutingMode,
     /// The `RouteResult::Broadcast` arm dispatches on this. `None`
     /// drops all broadcasts; `Direct` only sends to one-hop
-    /// neighbors (and only when WE originated). Default `Mst`.
+    /// neighbors (and only when we originated). Default `Mst`.
     pub broadcast_mode: broadcast::BroadcastMode,
     /// Seconds. Lease TTL for learned MACs. The `age_subnets` 10s
     /// timer is the SWEEP frequency; this is the LEASE duration.
@@ -211,7 +211,7 @@ pub struct DaemonSettings {
     /// Tests that don't want surprise connections (most of them) set
     /// `AutoConnect = no`.
     pub autoconnect: bool,
-    /// Seconds. Debounce for `send_udp_info` (only when WE
+    /// Seconds. Debounce for `send_udp_info` (only when we
     /// originate). Default 5.
     pub udp_info_interval: u32,
     /// Seconds. Separate debounce from `UDP_INFO`. Default 5.
@@ -248,7 +248,7 @@ pub struct DaemonSettings {
     /// skips the not-confirmed reset; the daemon falls back to
     /// TCP-only forwarding.
     pub udp_discovery: bool,
-    /// Global `PMTU` from tinc.conf. Clamps ALL peers. Per-host
+    /// Global `PMTU` from tinc.conf. Clamps all peers. Per-host
     /// `PMTU` also clamps (both apply, min wins).
     pub global_pmtu: Option<u16>,
     /// Global `SPTPSCipher` default. Per-peer override comes from
@@ -265,8 +265,8 @@ pub struct DaemonSettings {
     /// see [`read_sptps_kex`]. Non-reloadable: changing it mid-run
     /// would desync the next rekey.
     pub sptps_kex: tinc_sptps::SptpsKex,
-    /// `DeviceStandby`. When set, `tinc-up` is NOT fired at setup:
-    /// the script defers until the FIRST peer becomes reachable.
+    /// `DeviceStandby`. When set, `tinc-up` is not fired at setup:
+    /// the script defers until the first peer becomes reachable.
     /// Mirror for tinc-down: fired when the LAST peer becomes
     /// unreachable. For laptops that don't want a configured-but-
     /// unconnected tun0 hanging around. Non-reloadable.
@@ -295,12 +295,12 @@ pub enum ForwardingMode {
     #[default]
     Internal,
     /// Write everything from a peer to TUN; let the OS routing
-    /// table decide. Packets from OUR device still go through
+    /// table decide. Packets from our device still go through
     /// `route()` (we're the originator).
     Kernel,
 }
 
-/// Read once at setup, NOT reloadable (changing it mid-run would
+/// Read once at setup, not reloadable (changing it mid-run would
 /// mean re-opening the device tun→tap).
 ///
 /// | Variant | Device | Dispatch |
@@ -372,8 +372,8 @@ impl Default for DaemonSettings {
 }
 
 /// Parse the reloadable subset of settings from `config`. Called
-/// from `setup()` AND `reload_configuration()`. Non-reloadable
-/// settings (Port, `AddressFamily`, `DeviceType`) are NOT here - they
+/// from `setup()` and `reload_configuration()`. Non-reloadable
+/// settings (Port, `AddressFamily`, `DeviceType`) are not here - they
 /// need re-bind / re-open which `setup()` does inline.
 pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSettings) {
     cfg_int!(config, "PingInterval", u32, |v| if v >= 1 {
@@ -413,7 +413,7 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
     cfg_bool!(config, "DecrementTTL" => settings.decrement_ttl);
     cfg_bool!(config, "TunnelServer" => settings.tunnelserver);
     cfg_bool!(config, "StrictSubnets" => settings.strictsubnets);
-    // tunnelserver implies strictsubnets. Applied after BOTH parsed.
+    // tunnelserver implies strictsubnets. Applied after both parsed.
     settings.strictsubnets |= settings.tunnelserver;
     cfg_bool!(config, "LocalDiscovery" => settings.local_discovery);
     if let Some(e) = config.lookup("Shards").next() {
@@ -428,7 +428,7 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
     cfg_bool!(config, "DirectOnly" => settings.directonly);
     cfg_bool!(config, "PriorityInheritance" => settings.priorityinheritance);
     cfg_bool!(config, "AutoConnect" => settings.autoconnect);
-    // ScriptsExtension is NOT parsed (Windows-only).
+    // ScriptsExtension is not parsed (Windows-only).
     let new_interp = config
         .lookup("ScriptsInterpreter")
         .next()
@@ -625,11 +625,11 @@ pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings
 
     // Reloadable settings. Factored into a helper so
     // reload_configuration can call it too.
-    // NOT Port/AddressFamily (those need re-bind, setup-only).
+    // not Port/AddressFamily (those need re-bind, setup-only).
     apply_reloadable_settings(config, &mut settings);
 
     // BindToAddress for outgoing source-addr selection. Non-
-    // reloadable. We only stash the FIRST entry here for the
+    // reloadable. We only stash the first entry here for the
     // outgoing-connect bind; the FULL set is re-read below in the
     // listener-creation block.
     if let Some(e) = config.lookup("BindToAddress").next() {
@@ -644,7 +644,7 @@ pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings
         }
     }
 
-    // UDPRcvBuf / UDPSndBuf. Warnings enabled ONLY when the
+    // UDPRcvBuf / UDPSndBuf. Warnings enabled only when the
     // operator explicitly configures - the 1MB default tripping
     // the kernel cap on every boot would be log noise.
     if let Some(e) = config.lookup("UDPRcvBuf").next()
@@ -713,7 +713,7 @@ pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings
         }
     }
 
-    // Mode. NOT in apply_reloadable_settings (device re-open).
+    // Mode. not in apply_reloadable_settings (device re-open).
     if let Some(e) = config.lookup("Mode").next() {
         settings.routing_mode = match e.get_str().to_ascii_lowercase().as_str() {
             "router" => RoutingMode::Router,

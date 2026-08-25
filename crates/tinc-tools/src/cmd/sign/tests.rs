@@ -155,7 +155,7 @@ fn verify_tampered_signer_name() {
     // Bob's confbase. `Signer::Any` so it uses the header's name
     // → looks up hosts/bob → bob's pubkey. Sig was made by alice's
     // key over `... alice 1700000000`. Reconstructed trailer is
-    // `... bob 1700000000`. Wrong key AND wrong message. Fails.
+    // `... bob 1700000000`. Wrong key and wrong message. Fails.
     let err = verify_blob(bob, &Signer::Any, tampered.as_bytes()).unwrap_err();
     let CmdError::BadInput(msg) = err else {
         panic!()
@@ -176,7 +176,7 @@ fn trailer_leading_space() {
     let body = b"hello";
     // Build a *wrong* signed message (no leading space).
     let mut wrong_msg = Vec::from(&body[..]);
-    wrong_msg.extend_from_slice(b"alice 1700000000"); // NO leading space
+    wrong_msg.extend_from_slice(b"alice 1700000000"); // no leading space
     let sig = sk.sign(&wrong_msg);
     let sig_b64 = b64::encode(&sig);
 
@@ -286,7 +286,7 @@ fn signer_parse() {
     }
     // `*` → Any.
     assert!(matches!(Signer::parse("*", &paths).unwrap(), Signer::Any));
-    // Valid name → Named (NOT looked up — that happens at verify
+    // Valid name → Named (not looked up — that happens at verify
     // time, not parse time).
     match Signer::parse("bob", &paths).unwrap() {
         Signer::Named(n) => assert_eq!(n, "bob"),
@@ -300,7 +300,7 @@ fn signer_parse() {
 /// `Ed25519PublicKey =` line but does have a PEM block.
 #[test]
 fn load_host_pubkey_pem_fallback() {
-    // Non-standard host file: PEM block, NO config line.
+    // Non-standard host file: PEM block, no config line.
     let sk = keypair::generate();
     let mut priv_pem = Vec::new();
     tinc_conf::pem::write_pem(&mut priv_pem, "ED25519 PRIVATE KEY", &sk.to_blob()).unwrap();

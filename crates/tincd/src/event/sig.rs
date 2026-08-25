@@ -1,4 +1,4 @@
-//! Self-pipe signal handling. Ports `signal.c` (90 LOC).
+//! Self-pipe signal handling.
 //!
 //! Async-signal-safe handler does `write(pipefd[1], &num, 1)`. The
 //! poll loop reads `pipefd[0]` and dispatches. Standard self-pipe
@@ -17,7 +17,6 @@
 //! Linux/BSD by accident of the libc.
 //!
 //! We use `sigaction()` directly with `SA_RESTART` and an empty mask.
-//! Same effective behavior on Linux/BSD as the C, but portable.
 //! `SA_RESTART` because the daemon's syscalls (read, write, accept)
 //! shouldn't fail with `EINTR` for SIGHUP/SIGTERM — the self-pipe
 //! wakes the poll loop, the syscall restarts and finishes, then poll
@@ -30,9 +29,7 @@
 //!
 //! The handler may only call async-signal-safe functions; it does
 //! one raw `write(2)` of `signum as u8` and nothing else. The
-//! write-end fd is stashed in a `static AtomicI32` — the C uses a
-//! plain `static int`, which is a (benign) data race; `AtomicI32`
-//! costs nothing and avoids the UB.
+//! write-end fd is stashed in a `static AtomicI32`.
 
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
@@ -41,7 +38,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
 
 /// Write-end fd for the handler. `-1` = not initialized; `new()`
-/// sets this BEFORE installing the handler so the `<0` bail is
+/// sets this before installing the handler so the `<0` bail is
 /// purely defensive.
 static PIPE_WR: AtomicI32 = AtomicI32::new(-1);
 
@@ -89,7 +86,7 @@ extern "C" fn handler(signum: libc::c_int) {
     // installed; never closed while handler is installed). The
     // pointer is to a stack local. Length is 1.
     //
-    // Intentionally raw `libc::write`, NOT `nix::unistd::write`: this
+    // Intentionally raw `libc::write`, not `nix::unistd::write`: this
     // is signal-handler context. nix's wrapper is thin, but staying
     // on the bare syscall keeps the async-signal-safety audit trivial.
     #[allow(unsafe_code)]
@@ -100,7 +97,7 @@ extern "C" fn handler(signum: libc::c_int) {
 
 impl<W: Copy> SelfPipe<W> {
     /// Creates the pipe, stashes the write fd in `PIPE_WR` for the
-    /// handler. Does NOT
+    /// handler. Does not
     /// register with the event loop — caller does that with `read_
     /// fd()` + `EventLoop::add`.
     ///

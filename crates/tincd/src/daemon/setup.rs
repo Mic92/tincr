@@ -55,7 +55,7 @@ use super::{Daemon, IoWhat, ListenerSlot, SetupError, SignalWhat, TimerWhat, net
 ///
 /// Port reuse: the first listener picks an ephemeral with `Port=0`;
 /// every subsequent bind tries to reuse it so the daemon advertises
-/// ONE port to peers regardless of how many addresses it listens on.
+/// one port to peers regardless of how many addresses it listens on.
 ///
 /// `bindto`: `BindToAddress` listeners are also used as outgoing-
 /// connect source addresses; `ListenAddress` listeners are listen-only.
@@ -69,7 +69,7 @@ fn build_listeners(
     // None until the first successful bind.
     let mut reuse_port: Option<u16> = if port == 0 { None } else { Some(port) };
     let mut cfgs = 0usize;
-    // Dedup tracks the REQUESTED (pre-bind) addrs, not `l.local`
+    // Dedup tracks the requested (pre-bind) addrs, not `l.local`
     // (that's post-bind with ephemeral filled in).
     let mut requested: Vec<SocketAddr> = Vec::new();
 
@@ -124,7 +124,7 @@ fn build_listeners(
                     }
                 }
                 Err(e) => {
-                    // Lenient: skip this entry, try the rest. If ALL
+                    // Lenient: skip this entry, try the rest. If all
                     // fail, the empty-listeners check below catches it.
                     log::error!(target: "tincd::net",
                                 "{key} = {s}: {e}");
@@ -230,7 +230,7 @@ fn open_device(
             // `Interface = NAME` → attach to a precreated
             // persistent device; unset → kernel picks `tun0`/etc.
             // The netns test precreates so it can move the device
-            // into a child netns AFTER the daemon attaches (the
+            // into a child netns after the daemon attaches (the
             // fd→device binding survives `ip link set netns`).
             let cfg = tinc_device::DeviceConfig {
                 iface: config
@@ -377,7 +377,7 @@ fn register_listeners(
 }
 
 /// Parse `DNSAddress`/`DNSSuffix` into `DnsConfig`. Rust-only
-/// extension. Off (returns `Ok(None)`) unless BOTH are set.
+/// extension. Off (returns `Ok(None)`) unless both are set.
 /// `Alias =` lines from hosts/ files, lowercased. Node names win over
 /// aliases. A duplicate alias goes to the first host in sorted order.
 /// tinc.conf + `-o` overrides + hosts/NAME, and the expanded name.
@@ -494,7 +494,7 @@ fn register_timers(
 ) -> (TimerId, TimerId, TimerId, TimerId) {
     // ping timer
     // Initial fire is `pingtimeout` seconds from now; the handler
-    // re-arms at +1s. tinc-event re-arm is EXPLICIT - the match
+    // re-arms at +1s. tinc-event re-arm is explicit - the match
     // arm calls `timers.set(pingtimer, ...)`.
     let pingtimer = timers.add(TimerWhat::Ping);
     timers.set(
@@ -625,7 +625,7 @@ impl Daemon {
         log::info!(target: "tincd", "tincd starting, name={name}");
 
         // private key
-        // Missing key is FATAL: we forbid legacy, so there is no RSA
+        // Missing key is fatal: we forbid legacy, so there is no RSA
         // fallback. The error message includes the gen-keys hint so
         // the user knows what to do.
         let mykey = read_ecdsa_private_key(&config, confbase).map_err(|e| {
@@ -638,7 +638,7 @@ impl Daemon {
         })?;
 
         // surface unknown keys
-        // The daemon never consults VARS for lookup (it asks for
+        // The daemon never consults the VARS table for lookup (it asks for
         // specific names), so a typo'd key is otherwise just inert —
         // "typo ≡ unset" with no hint why. Warn once at startup.
         for e in config.entries() {
@@ -664,7 +664,7 @@ impl Daemon {
         } else {
             shard_tuns.len() + 1
         };
-        // Captured BEFORE the Box goes into the Daemon struct: the
+        // Captured before the Box goes into the Daemon struct: the
         // `&dyn` trait borrow makes `&mut self` script call sites
         // awkward.
         let iface = device.iface().to_owned();
@@ -704,8 +704,8 @@ impl Daemon {
         let (pingtimer, age_timer, periodictimer, keyexpire_timer) =
             register_timers(&mut timers, &settings);
 
-        // sd_notify WATCHDOG timer
-        // Driven from the event loop, NOT a free thread: a hung
+        // sd_notify watchdog timer
+        // Driven from the event loop, not a free thread: a hung
         // loop must stop pinging so systemd's WatchdogSec actually
         // catches a wedge. No-op when WATCHDOG_USEC unset.
         let watchdog = crate::sd_notify::watchdog_interval().map(|iv| {
@@ -715,8 +715,8 @@ impl Daemon {
         });
 
         // listeners
-        // Socket activation BYPASSES BindToAddress/ListenAddress
-        // entirely (the .socket unit IS the bind config). Otherwise
+        // Socket activation bypasses BindToAddress/ListenAddress
+        // entirely (the .socket unit is the bind config). Otherwise
         // walk BindToAddress, then ListenAddress, else wildcard.
         // Empty result is a hard error: the daemon can't function
         // without at least one listener.
@@ -770,7 +770,7 @@ impl Daemon {
         };
 
         // init_control
-        // Bind (the AlreadyRunning check) BEFORE writing the pidfile,
+        // Bind (the AlreadyRunning check) before writing the pidfile,
         // so a second tincd fails before clobbering the live cookie.
         let control = ControlSocket::bind(socket).map_err(|e| match e {
             crate::control::BindError::AlreadyRunning => SetupError::Config(format!(
@@ -797,7 +797,7 @@ impl Daemon {
         id6_table.add(&name, myself);
 
         // Subnet
-        // OUR subnets from `hosts/NAME` (HOST-tagged). `route()`
+        // Our subnets from `hosts/NAME` (HOST-tagged). `route()`
         // needs these to recognize packets destined for us. Parse
         // failures are logged + skipped (the bad subnet just isn't
         // routable).
@@ -807,7 +807,7 @@ impl Daemon {
         }
 
         // DNS stub (Rust-only)
-        // Tailscale-style TUN intercept. Off unless BOTH
+        // Tailscale-style TUN intercept. Off unless both
         // `DNSAddress=` and `DNSSuffix=` are set. The magic IP must
         // also be added to the TUN in `tinc-up`. `DNSAddress` can be
         // repeated for v4+v6.
@@ -958,11 +958,11 @@ impl Daemon {
         daemon.request_proxy_resolve();
 
         // try_outgoing_connections - the actual setup
-        // Done HERE (not above) because it needs `&mut self` for the
+        // Done here (not above) because it needs `&mut self` for the
         // slotmap + graph + EventLoop.
         for peer in connect_to {
-            // The node goes into the graph BEFORE we connect; an
-            // ADD_EDGE arriving via some OTHER path can find it.
+            // The node goes into the graph before we connect; an
+            // ADD_EDGE arriving via some other path can find it.
             daemon.lookup_or_add_node(&peer);
             let config_addrs = resolve_config_addrs(&daemon.confbase, &peer);
             let addr_cache =
@@ -1010,13 +1010,13 @@ impl Daemon {
         // tinc-up
         // The script typically does `ip addr add` / `ip link set up`
         // on the TUN. Base env only (no NODE/SUBNET). When standby,
-        // the FIRST BecameReachable in `run_graph_and_log` fires it
+        // the first BecameReachable in `run_graph_and_log` fires it
         // instead.
         if !daemon.settings.device_standby {
             daemon.device_enable();
         }
 
-        // Fire subnet-up for our OWN configured subnets. AFTER
+        // Fire subnet-up for our own configured subnets, after
         // tinc-up: subnet-up scripts (which add routes) assume the
         // iface is configured. Same loop shape as the BecameReachable
         // arm in gossip.rs.
@@ -1044,7 +1044,7 @@ impl Daemon {
             id6_prefix[6..].copy_from_slice(src_id6.as_bytes());
 
             crate::shard::TxSnapshot {
-                // any_pcap NOT folded — it flips at runtime via
+                // any_pcap not folded — it flips at runtime via
                 // `tinc pcap` (metaconn.rs sets, route.rs recomputes
                 // on conn drop). Checked live at the call site
                 // (device.rs) so the fast path bypasses pcap when

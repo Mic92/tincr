@@ -36,7 +36,7 @@ pub(super) const MAX_NODES: usize = 65_536;
 pub(super) const MAX_EDGES: usize = 4 * MAX_NODES;
 
 impl Daemon {
-    /// Lookup-or-add fused. Does NOT add a `NodeState` - transitives
+    /// Lookup-or-add fused. Does not add a `NodeState` - transitives
     /// are in the graph only.
     pub(super) fn lookup_or_add_node(&mut self, name: &str) -> NodeId {
         if let Some(&id) = self.node_ids.get(name) {
@@ -114,7 +114,7 @@ impl Daemon {
     /// `tunnelserver_reject_indirect`. Returns `Some(conn_name)` to
     /// proceed, `None` to drop. Encodes the ordering invariant so a
     /// fifth handler can't get it wrong; callers do
-    /// `lookup_or_add_node` AFTER this.
+    /// `lookup_or_add_node` after this.
     pub(super) fn flooded_prologue(
         &mut self,
         from_conn: ConnId,
@@ -134,7 +134,7 @@ impl Daemon {
     }
 
     /// Shared prologue for routed messages (`REQ_KEY`/`ANS_KEY`):
-    /// `conn_name` clone + `resolve_from_to`. Relay is NOT folded in:
+    /// `conn_name` clone + `resolve_from_to`. Relay is not folded in:
     /// the two callers gate the reflexive-addr append differently.
     pub(super) fn routed_prologue(
         &self,
@@ -218,7 +218,7 @@ impl Daemon {
     ///
     /// `#[must_use]`: dropping the return is the `97ef5af0` bug class
     /// — line sits in outbuf until the next natural WRITE arm (up to
-    /// pinginterval=60s away). Either OR into the caller's `nw`, or
+    /// pinginterval=60s away). Either or into the caller's `nw`, or
     /// `let _nw =` with a comment pointing at the `maybe_set_write_any`
     /// that covers it.
     #[must_use]
@@ -237,9 +237,9 @@ impl Daemon {
     /// third parties is dropped. Returns `true` if the message should be
     /// IGNORED (and logs the warning). `about` is the set of node names
     /// the message concerns (1 for subnets, 2 for edges); the message is
-    /// allowed iff ANY of them is us or the direct peer `from_conn`.
-    /// Call BEFORE `lookup_or_add_node` so indirect names don't pollute
-    /// the graph, but AFTER `seen_request` (mark seen even on drop).
+    /// allowed iff any of them is us or the direct peer `from_conn`.
+    /// Call before `lookup_or_add_node` so indirect names don't pollute
+    /// the graph, but after `seen_request` (mark seen even on drop).
     fn tunnelserver_reject_indirect(
         &self,
         from_conn: ConnId,

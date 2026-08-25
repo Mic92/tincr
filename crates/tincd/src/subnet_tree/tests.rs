@@ -13,11 +13,11 @@ fn all_up(_: &str) -> bool {
 
 // Ord: pin every tiebreak level.
 //
-// The comparator IS the algorithm. If these break, routing breaks.
-// Each test isolates ONE level by holding the others equal.
+// The comparator is the algorithm. If these break, routing breaks.
+// Each test isolates one level by holding the others equal.
 
 /// Level 1: `prefixlength` DESCENDING (`b - a`). /24 sorts
-/// BEFORE /16 in tree order — the longer prefix is "smaller" so
+/// before /16 in tree order — the longer prefix is "smaller" so
 /// iteration sees it first.
 #[test]
 fn ipv4_ord_prefixlen_desc() {
@@ -36,7 +36,7 @@ fn ipv4_ord_prefixlen_desc() {
 /// Level 2: `address` ascending. C: `memcmp`. Same prefix, lower
 /// addr first. `Ipv4Addr::Ord` is big-endian byte compare, same
 /// as `memcmp` on `ipv4_t` (which is `uint8_t[4]` in network
-/// order — `subnet.h:33`).
+/// order).
 #[test]
 fn ipv4_ord_addr_tiebreak() {
     let lo = Ipv4Key {
@@ -50,7 +50,7 @@ fn ipv4_ord_addr_tiebreak() {
     assert!(lo < hi);
 }
 
-/// Level 3: `weight` ascending. C: `a - b` (NOT reversed). Lower
+/// Level 3: `weight` ascending. C: `a - b` (not reversed). Lower
 /// weight = preferred route, sorts first.
 #[test]
 fn ipv4_ord_weight_tiebreak() {
@@ -96,7 +96,7 @@ fn ipv4_ord_weight_negative() {
 ///
 /// **Why we don't match C:** the C behaviour is *undefined*, not
 /// merely different. Without `-fwrapv` (which upstream's meson
-/// build does NOT set) the optimizer can assume the subtraction
+/// build does not set) the optimizer can assume the subtraction
 /// never overflows and rearrange the comparison arbitrarily.
 /// Replicating UB with `wrapping_sub().signum()` would pin us to
 /// the gcc-x86_64-at-O2 behaviour, which is exactly the kind of
@@ -220,7 +220,7 @@ fn lookup_longest_wins() {
     assert_eq!(owner, Some("narrow"));
     assert_eq!(*s, sn("10.1.0.0/16"));
 
-    // 10.2.x.x is NOT in the /16, falls through to /8.
+    // 10.2.x.x is not in the /16, falls through to /8.
     let (s, owner) = t.lookup_ipv4(Ipv4Addr::new(10, 2, 0, 0), all_up).unwrap();
     assert_eq!(owner, Some("broad"));
     assert_eq!(*s, sn("10.0.0.0/8"));
@@ -266,7 +266,7 @@ fn lookup_skips_unreachable() {
     assert_eq!(*s, sn("10.0.0.0/16"));
 }
 
-/// `r = p` happens BEFORE the reachable check. If NOBODY is
+/// `r = p` happens before the reachable check. If NOBODY is
 /// reachable, return the last (= shortest matching) subnet
 /// anyway. `route_ipv4` uses this to log "would route to X but X
 /// is unreachable" instead of "no route".
@@ -285,7 +285,7 @@ fn lookup_returns_unreachable_fallback() {
     assert_eq!(*s, sn("10.0.0.0/16"));
 }
 
-/// `!p->owner ||` — ownerless ALWAYS breaks the scan, regardless
+/// `!p->owner ||` — ownerless always breaks the scan, regardless
 /// of `is_reachable`. The predicate isn't even called (no name to
 /// pass). `route_ipv4` then sees `None` and returns `Broadcast`.
 #[test]
@@ -293,7 +293,7 @@ fn lookup_broadcast_short_circuits_reachable() {
     let mut t = SubnetTree::new();
     t.add_broadcast(sn("224.0.0.0/4"));
     // alice owns an overlapping /8 (impossible in practice, but
-    // proves the short-circuit: /4 sorts AFTER /8 by descending
+    // proves the short-circuit: /4 sorts after /8 by descending
     // prefix — wait, /8 is longer than /4. /8 wins on prefix.
     // Use a non-overlapping owned subnet to make sure the
     // broadcast match is the only hit).

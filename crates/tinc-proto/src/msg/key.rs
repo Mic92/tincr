@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(m.maclen, u64::MAX);
         assert_eq!(m.compression, 0);
         // Round-trips: u64::MAX formats as a big positive decimal,
-        // NOT as "-1". That's fine — `%lu` printf would do the same.
+        // not as "-1". That's fine — `%lu` printf would do the same.
         // We only need to PARSE "-1", not emit it via format()
         // (the daemon emits it as a literal in the format_args!).
         assert!(m.format().contains("18446744073709551615"));

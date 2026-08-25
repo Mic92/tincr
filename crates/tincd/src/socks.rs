@@ -6,7 +6,7 @@
 //! SOCKS5 (RFC 1928): three round-trips sent as one blob.
 //! Greet+auth+connect; resp is `choice+auth_status+conn_resp` concat.
 //!
-//! NOT here: SOCKS4A (not implemented), HTTP CONNECT
+//! not here: SOCKS4A (not implemented), HTTP CONNECT
 //! (daemon's `send_proxyrequest`), `PROXY_EXEC` (I/O).
 
 #![forbid(unsafe_code)]
@@ -18,7 +18,7 @@ const SOCKS4_VERSION: u8 = 4;
 const SOCKS4_CMD_CONN: u8 = 1;
 const SOCKS4_REPLY_VERSION: u8 = 0;
 const SOCKS4_STATUS_OK: u8 = 0x5A;
-/// `sizeof(socks4_response_t)` (`proxy.h:18-23`): ver+status+port+ip.
+/// SOCKS4 response: ver+status+port+ip.
 const SOCKS4_RESPONSE_LEN: usize = 8;
 
 // SOCKS5 wire constants.
@@ -41,7 +41,7 @@ const SOCKS5_CONN_RESP_LEN: usize = 4; // socks5_conn_resp_t (header only)
 const SOCKS5_IPV4_LEN: usize = 6; // socks5_ipv4_t (4 + 2)
 const SOCKS5_IPV6_LEN: usize = 18; // socks5_ipv6_t (16 + 2)
 
-/// Proxy type. `net.h:171-178`.
+/// Proxy type.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ProxyType {
     /// `PROXY_SOCKS4` — IPv4 only.
@@ -98,7 +98,7 @@ fn build_socks4(target: SocketAddr, creds: Option<&Creds>) -> Result<(Vec<u8>, u
 }
 
 fn build_socks5(target: SocketAddr, creds: Option<&Creds>) -> Result<(Vec<u8>, usize), BuildError> {
-    // password auth needs BOTH user AND pass
+    // password auth needs both user and pass
     let password_auth = creds.and_then(|c| c.pass.as_ref().map(|p| (c.user.as_str(), p.as_str())));
 
     // STRICTER: upstream narrows size_t→u8; we check (RFC 1929).

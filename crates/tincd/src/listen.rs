@@ -139,7 +139,7 @@ pub(crate) const MAXSOCKETS: usize = 8;
 /// Which address families to bind (`AddressFamily` config).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AddrFamily {
-    /// Try v4 AND v6.
+    /// Try v4 and v6.
     #[default]
     Any,
     /// v4 only.
@@ -330,7 +330,7 @@ pub(crate) fn adopt_listeners_from(
         )));
     }
 
-    // Wrap ALL inherited fds before doing any fallible work. If a
+    // Wrap all inherited fds before doing any fallible work. If a
     // mid-loop `?` fired after wrapping fd i but before wrapping
     // fd i+1..n, the tail fds would leak (we already own them —
     // main.rs unset LISTEN_FDS so nobody else will close them).
@@ -384,7 +384,7 @@ pub(crate) fn adopt_listeners_from(
         // UDP is ours to open, against the same address. systemd only
         // gives TCP (`ListenStream=` in the .socket unit; a separate
         // `ListenDatagram=` would put a UDP fd in the mix, but tinc's
-        // protocol pairs TCP+UDP on the SAME addr — easier to open UDP
+        // protocol pairs TCP+UDP on the same addr — easier to open UDP
         // ourselves than to de-interleave systemd's fd list).
         // Mirror the adopted fd's dual-stackness: v6only here would
         // make every send to a v4 peer fail with ENETUNREACH.
@@ -426,7 +426,7 @@ pub(crate) fn adopt_listeners(n: usize, opts: &SockOpts) -> io::Result<Vec<Liste
 ///
 /// `O_NONBLOCK` is set here, unlike TCP listeners (the listener fd
 /// doesn't need non-blocking — `accept` blocking is fine because we
-/// only call it when epoll says ready). UDP `recvfrom` IS the data
+/// only call it when epoll says ready). UDP `recvfrom` is the data
 /// path; non-blocking is mandatory.
 ///
 /// # Errors
@@ -541,7 +541,7 @@ where
     F: Fn(&SockAddr) -> io::Result<Socket>,
 {
     // Only attempt the reuse if assign_static_port succeeded (i.e.
-    // addr had port 0 AND we have a port to steal).
+    // addr had port 0 and we have a port to steal).
     // Reuse failed (port taken on this interface) → fall through.
     if let Some(reused) = assign_static_port(addr, reuse_port)
         && let Ok(s) = setup(&SockAddr::from(reused))
@@ -555,7 +555,7 @@ where
 /// One TCP+UDP pair on `addr`. Either both succeed or neither is kept
 /// (TCP succeeds, UDP fails → close TCP, skip).
 ///
-/// `reuse_port`: with `Port=0`, the FIRST listener gets a kernel
+/// `reuse_port`: with `Port=0`, the first listener gets a kernel
 /// port. Subsequent calls pass that port here so the whole daemon
 /// converges on one port across all listeners (and TCP/UDP within
 /// a pair). After the first TCP bind, `from_fd = tcp_fd` so UDP

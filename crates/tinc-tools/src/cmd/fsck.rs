@@ -1,51 +1,17 @@
-//! `cmd_fsck` — configuration sanity checker.
+//! `tinc fsck` — configuration sanity checker.
 //!
-//! Four independent checks, one of which mutates with `--force`:
+//! | Check | `--force` |
+//! |---|---|
+//! | Keypair coherence: priv-derived pubkey matches `hosts/NAME`'s | rewrites pubkey (PEM block) |
+//! | Per-variable validity: known/obsolete/wrong-file/duplicate | warnings only |
+//! | Script executability: `*-up`/`*-down` have `+x` | `chmod 0755` |
+//! | Private key file mode `0600` | `chmod & ~077` |
 //!
-//! | # | Check | `--force` |
-//! |---|---|---|
-//! | 1 | Keypair coherence: priv-derived pubkey matches `hosts/NAME`'s | rewrites pubkey |
-//! | 2 | Per-variable validity: known/obsolete/wrong-file/duplicate | nothing — warnings only |
-//! | 3 | Script executability: `*-up`/`*-down` have `+x` | `chmod 0755` |
-//! | 4 | Private key file mode: `0600` | `chmod & ~077` |
-//!
-//! Legacy RSA is not supported and there is no interactive y/n prompt:
-//! fixes are gated solely on `force`. The suggested-command messages use
-//! an opaque `cmd_prefix: &str` that the binary constructs once.
-//!
-//! ## The testable seam: `Finding` + `Report`
-//!
-//! Findings are collected into a `Vec` so tests can assert without
-//! parsing stderr. Fixes still apply during the scan (later checks
-//! may read the changed state) and are also recorded as `Finding`s.
-//! `Finding` is NOT `PartialEq` (`PathBuf` equality is fragile);
-//! tests `matches!` on variant + `path.ends_with(...)`.
-//!
-//! ## `success = success & check_scripts_and_configs()`
-//!
-//! Bitwise `&` not `&&`: all checks run regardless of earlier
-//! failures. `Report::ok` is the AND of all results.
-//!
-//! ## fsck's pubkey fix writes PEM, not config-line
-//!
-//! The fix appends a PEM block, while `init`/`genkey` write
-//! `Ed25519PublicKey = <b64>`. Both are valid (the loader falls back
-//! to PEM). Preserved — the visual distinction ("repaired by fsck"
-//! vs "init wrote this") is useful.
-//!
-//! ## `Ed25519PrivateKeyFile` config respect
-//!
-//! fsck reads the merged config tree, so it respects this var.
-//! genkey/sign use `paths.ed25519_private()` directly and don't —
-//! correct for genkey (creates default location), a sign bug noted
-//! elsewhere.
-//!
-//! ## The hosts/ script suffix-strip-then-ignore
-//!
-//! Upstream's host-dir script check strips the suffix into a buffer
-//! then never reads it. Dead code (copy-paste from the conf-dir
-//! check which does validate the prefix). Dropped; same observable
-//! behavior.
+//! All checks run regardless of earlier failures; `Report::ok` is true
+//! only if every one passed. No interactive prompt: fixes are gated
+//! solely on `force`. Findings are collected into `Report` so tests
+//! assert on variants instead of parsing stderr; fixes still apply
+//! during the scan because later checks may read the changed state.
 
 mod conf;
 mod display;
@@ -130,10 +96,6 @@ pub enum Finding {
     // Scripts
     /// `*-up`/`*-down` in confbase that isn't `tinc-`/`host-`/
     /// `subnet-`. Not fixable — fsck doesn't know what you intended.
-    /// Upstream prints an explanation once (the `static bool
-    /// explained` trick); we print it every time (simpler; the
-    /// explanation is two lines, and you rarely have >1 unknown
-    /// script).
     UnknownScript { path: PathBuf },
     /// Script exists but `access(R_OK | X_OK)` failed with `EACCES`.
     /// Fixable (`chmod 0755`).
@@ -164,7 +126,7 @@ pub enum Finding {
     /// is invisibly ignored — fsck is the canary.
     ///
     /// `where_` is `"tinc.conf"` for the server check or the node
-    /// name for a host check. NOT a path. The duplicate spans the
+    /// name for a host check. Not a path. The duplicate spans the
     /// whole file so there's no single line number to print.
     DuplicateVar { name: String, where_: String },
 
@@ -179,7 +141,7 @@ pub enum Finding {
     FixFailed { path: PathBuf, err: String },
 }
 
-/// Severity for output formatting. NOT for `Report::ok` — that's
+/// Severity for output formatting. Not for `Report::ok` — that's
 /// computed structurally during the scan (which checks failed), not
 /// derived from severities post-hoc. The reason: `KeyMismatch` is
 /// `Error` *unless* `--force` fixed it, in which case it's a warning
@@ -252,20 +214,17 @@ pub struct Report {
     /// In scan order: tinc.conf existence → keypair → key mode →
     /// scripts → variables.
     pub findings: Vec<Finding>,
-    /// `true` ↔ `EXIT_SUCCESS`. Computed as bitwise AND, no short
+    /// `true` ↔ `EXIT_SUCCESS`. Computed as bitwise and, no short
     /// circuit: each phase contributes a `bool`, final result is the
-    /// AND. Warnings don't affect it; only the fatal checks (no
+    /// and. Warnings don't affect it; only the fatal checks (no
     /// tinc.conf, no priv key, unfixed mismatch).
     pub ok: bool,
 }
 
 // The scan
 
-/// `fsck()`.
-///
 /// `force` is `--force`: apply fixes (chmod, rewrite pubkey) instead
-/// of just warning. Upstream also has interactive `y/n` prompts when
-/// `tty`; we don't (see module doc).
+/// of just warning.
 ///
 /// The scan is **side-effecting** when `force` is true. Tests that
 /// pass `force: true` should expect their tempdir to be mutated.
@@ -372,8 +331,6 @@ fn is_root() -> bool {
 
 #[cfg(not(unix))]
 fn is_root() -> bool {
-    // Windows: no `getuid`. Upstream's stub returns 0, which makes
-    // `is_root()` always true. That changes which EACCES message
-    // prints — minor. We pick false (the more cautious message).
+    // No `getuid`; false picks the more cautious EACCES message.
     false
 }

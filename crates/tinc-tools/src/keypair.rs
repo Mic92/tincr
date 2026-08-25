@@ -24,7 +24,7 @@ use tinc_conf::pem::{PemError, read_pem, write_pem};
 use tinc_crypto::b64;
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 
-/// PEM type strings. (Yes, "ED25519", not "Ed25519". Upstream's casing.)
+/// PEM type strings. "ED25519", not "Ed25519": on-disk format.
 pub const TY_PRIVATE: &str = "ED25519 PRIVATE KEY";
 pub const TY_PUBLIC: &str = "ED25519 PUBLIC KEY";
 

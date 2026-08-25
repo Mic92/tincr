@@ -6,18 +6,18 @@
 //! daemon's `age_subnets` timer (fires every 10s) calls
 //! [`MacLeases::age`] to find expired entries.
 //!
-//! C smushes `expires` into `subnet_t` (`subnet.h:53`). We don't —
+//! C tinc stores `expires` in the subnet itself. We don't —
 //! `tinc_proto::Subnet` is wire-format, and configured subnets vs
 //! learned MACs have different lifecycles. Side table; daemon mirrors
 //! learn/age into `SubnetTree::add/del`.
 //!
-//! ## What's NOT here
+//! ## What's not here
 //!
 //! - The actual `Subnet::Mac` add/del + `ADD/DEL_SUBNET` gossip — daemon,
 //!   on `learn`/`age` return.
 //! - The `route_mac::LearnAction → mac_lease` plumbing — daemon's
 //!   `route_packet_mac` (`daemon/net.rs`).
-//! - The skip-configured-subnets guard: we ONLY hold learned MACs.
+//! - The skip-configured-subnets guard: we only hold learned MACs.
 //!   The daemon's `SubnetTree` holds both; only learned ones are
 //!   mirrored here. The guard is implicit.
 //! - The 10s timer arming — daemon's `TimerWhat`.
@@ -40,7 +40,7 @@ pub(crate) struct MacLeases {
 }
 
 impl MacLeases {
-    /// New MAC. Returns `true` if this was the FIRST lease (table
+    /// New MAC. Returns `true` if this was the first lease (table
     /// was empty). Daemon arms the age timer on first add (on
     /// `true`).
     /// return.
@@ -92,7 +92,7 @@ impl MacLeases {
     /// Expiry boundary: STRICT less. A lease expiring exactly at
     /// `now` is still alive for one more tick.
     pub(crate) fn age(&mut self, now: Instant) -> (Vec<Mac>, bool) {
-        // Strict less. `expires == now` → NOT expired yet.
+        // Strict less. `expires == now` → not expired yet.
         let expired: Vec<Mac> = self
             .leases
             .extract_if(|_, &mut expires| expires < now)
@@ -153,7 +153,7 @@ mod tests {
         let mut m = MacLeases::default();
         let t = t0();
         assert!(m.learn(A, t, 600));
-        // learn again at t+100 — should NOT claim first, len unchanged,
+        // learn again at t+100 — should not claim first, len unchanged,
         // expiry bumped
         assert!(!m.learn(A, t + secs(100), 600));
         assert_eq!(m.len(), 1);
@@ -168,7 +168,7 @@ mod tests {
         m.learn(A, t, 600);
         assert!(m.refresh(A, t + secs(50), 600));
         let exp = *m.iter().next().unwrap().1;
-        // expiry is t+50+600, NOT t+600
+        // expiry is t+50+600, not t+600
         assert_eq!(exp, t + secs(650));
     }
 
@@ -209,7 +209,7 @@ mod tests {
         m.learn(A, t, 600);
         let (exp, left) = m.age(t + secs(601));
         assert_eq!(exp, vec![A]);
-        assert!(!left); // timer should NOT re-arm
+        assert!(!left); // timer should not re-arm
         assert!(m.is_empty());
     }
 

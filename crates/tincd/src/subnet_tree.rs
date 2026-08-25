@@ -12,15 +12,15 @@
 //! and v6 lookups happen on the same packet (TAP mode with dual-stack
 //! ARP).
 //!
-//! ## The comparator IS the algorithm
+//! ## The comparator is the algorithm
 //!
 //! The keys sort by prefix length DESCENDING first, so in-order tree
 //! iteration visits `/32` before `/24` before `/8`. Lookup is then a
-//! linear scan: the first mask match IS the longest match. No trie
+//! linear scan: the first mask match is the longest match. No trie
 //! needed — the sort order does the work. The ordering matches C
 //! tinc's comparators so route selection agrees across the mesh.
 //!
-//! ## What's NOT here
+//! ## What's not here
 //!
 //! - A lookup cache (hot-path optimization; add if profiling asks).
 //! - A per-node subnet index. The global table is enough for routing;
@@ -286,7 +286,7 @@ impl SubnetTree {
         }
     }
 
-    /// `lookup_subnet`. Exact-match lookup (NOT prefix-match —
+    /// `lookup_subnet`. Exact-match lookup (not prefix-match —
     /// that's `lookup_ipv4`/`lookup_ipv6`).
     ///
     /// Used by `add_subnet_h` for the strictsubnets lookup-first
@@ -320,7 +320,7 @@ impl SubnetTree {
     /// IPv4 longest-prefix lookup.
     ///
     /// Linear scan in tree order. Tree order has `/32` before `/24`
-    /// before `/8` (descending prefix), so the FIRST entry whose
+    /// before `/8` (descending prefix), so the first entry whose
     /// top-`prefix` bits match `addr` is the longest-prefix match.
     ///
     /// ## Reachability
@@ -355,7 +355,7 @@ impl SubnetTree {
             if k.subnet.matches(&q, true) {
                 last_hit = Some((&k.subnet, k.owner.as_deref()));
                 // Ownerless (broadcast) is always "reachable" — it goes
-                // to ALL reachable peers via route_broadcast.
+                // to all reachable peers via route_broadcast.
                 if k.owner.as_deref().is_none_or(&mut is_reachable) {
                     break;
                 }

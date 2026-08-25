@@ -364,7 +364,7 @@ fn gso_none_completes_partial_csum() {
     // Replace the valid TCP csum with the pseudo-header sum
     // (what the kernel writes for CHECKSUM_PARTIAL).
     let pseudo = pseudo_header_checksum_nofold(IPPROTO_TCP, &pkt[12..20], 120);
-    // Fold pseudo to 16 bits, NO complement (the kernel writes
+    // Fold pseudo to 16 bits, no complement (the kernel writes
     // the un-complemented partial — RFC 1071 chaining).
     let mut p = pseudo;
     p = (p >> 16) + (p & 0xffff);
@@ -477,7 +477,7 @@ fn gro_coalesce_three_v4() {
 /// THE roundtrip: `tso_split`'s output, fed to GRO, reassembles
 /// the original payload. This is what alice→bob exercises:
 /// alice's `tso_split` emits, bob's GRO coalesces, bob's kernel
-/// re-splits. If THIS works, the sha256 stream test works.
+/// re-splits. If this works, the sha256 stream test works.
 #[test]
 fn gro_reassembles_tso_split_output() {
     // 1400-byte segments, 5 of them. Real iperf3 shape.

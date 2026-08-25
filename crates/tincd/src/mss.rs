@@ -170,7 +170,7 @@ pub(crate) fn clamp(packet: &mut [u8], mtu: u16) -> bool {
         // MSS).
         //
         // Mirror the C bug-for-bug: it reads `packet[start+21]`
-        // (NOT `+i`) — the *first* option's length byte, not this
+        // (not `+i`) — the *first* option's length byte, not this
         // one's. In practice MSS is almost always the first
         // option in a SYN, so the bug rarely fires. We replicate
         // it because the alternative (fixing it) changes

@@ -265,7 +265,7 @@ impl Device for FdTun {
         None
     }
 
-    /// The fd, for the daemon's poll loop. `Some` — there IS
+    /// The fd, for the daemon's poll loop. `Some` — there is
     /// an fd (unlike Dummy).
     fn fd(&self) -> Option<BorrowedFd<'_>> {
         Some(self.fd.as_fd())
@@ -372,7 +372,7 @@ mod tests {
         buf[33] = 0x99; // last byte, arbitrary
 
         let n = tun.write(&mut buf).unwrap();
-        // Wrote 20 (the IP part). NOT 34.
+        // Wrote 20 (the IP part). Not 34.
         assert_eq!(n, 20);
 
         // Read from the pipe. Should be exactly the IP part.
@@ -381,7 +381,7 @@ mod tests {
         assert_eq!(rn, 20);
         assert_eq!(recv[0], 0x45); // IPv4 marker survived
         assert_eq!(recv[19], 0x99); // last byte survived
-        // The ether garbage is NOT here.
+        // The ether garbage is not here.
         assert_ne!(recv[0], 0xEE);
     }
 

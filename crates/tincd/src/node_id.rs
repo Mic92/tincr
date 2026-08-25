@@ -1,7 +1,6 @@
 //! 6-byte SHA-512-prefix node identity.
 //!
-//! Every UDP packet on the wire is `[dst_id:6][src_id:6][sptps...]`
-//! (`net.h:92-93` `SRCID`/`DSTID` macros, `DEFAULT_PACKET_OFFSET=12`).
+//! Every UDP packet on the wire is `[dst_id:6][src_id:6][sptps...]`.
 //! The receiver does a `HashMap` lookup on the 6-byte source ID
 //! (`lookup_node_id`) to find which peer's SPTPS state to feed the ciphertext to. On miss it falls back to
 //! `try_mac` — trial-decrypt against every node — which is the slow
@@ -30,7 +29,7 @@ use crate::inthash::IntHashMap;
 use crate::graph::NodeId;
 use sha2::{Digest, Sha512};
 
-/// `node_id_t` (`net.h:61-63`): `struct { uint8_t x[6]; }`.
+/// 6-byte node id (UDP packet prefix).
 ///
 /// `Copy` because the C passes it by value all over `net_packet.c`.
 /// `Hash`/`Eq` because it's a `HashMap` key.
@@ -103,7 +102,7 @@ impl fmt::Debug for NodeId6 {
 /// ## Collisions
 ///
 /// 48 bits, SHA-512 is uniform. Birthday bound is ~16M nodes before
-/// 50% collision probability. Upstream does NOT handle this:
+/// 50% collision probability. Upstream does not handle this:
 /// `splay_insert` returns NULL on duplicate key and the return is
 /// ignored. A second node with the same ID just doesn't get indexed, so UDP packets from it fall through to `try_mac`.
 ///
@@ -299,11 +298,11 @@ mod tests {
         assert_eq!(t.len(), 1);
     }
 
-    /// Two distinct graph slots, manually mapped to the SAME 6-byte
+    /// Two distinct graph slots, manually mapped to the same 6-byte
     /// ID via `insert_raw` (we're not finding a real SHA-512
     /// collision in a unit test). Second insert overwrites; both
     /// `by_node` entries persist; removing the displaced node does
-    /// NOT yank the survivor's `by_id` entry.
+    /// not yank the survivor's `by_id` entry.
     ///
     /// We don't capture the WARN log here — `log` crate test capture
     /// needs `testing_logger` or similar, not in our dev-deps. The
@@ -323,14 +322,14 @@ mod tests {
         t.insert_raw(id6, n2, "second");
         assert_eq!(t.lookup(id6), Some(n2), "by_id overwritten");
 
-        // by_node still has BOTH entries — id_of works for both.
+        // by_node still has both entries — id_of works for both.
         // (The displaced node can still send; it just can't be
         // looked up on receive. That's the C's behavior too: n->id
         // is set, but node_id_tree only indexes one of them.)
         assert_eq!(t.id_of(n1), Some(id6));
         assert_eq!(t.id_of(n2), Some(id6));
 
-        // Removing the displaced node: must NOT yank n2's by_id slot.
+        // Removing the displaced node: must not yank n2's by_id slot.
         t.remove(n1);
         assert_eq!(t.lookup(id6), Some(n2), "survivor's by_id intact");
         assert_eq!(t.id_of(n1), None);

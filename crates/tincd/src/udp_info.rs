@@ -472,7 +472,7 @@ mod tests {
         }
     }
 
-    /// `should_send_udp_info` gates. Each row perturbs ONE field
+    /// `should_send_udp_info` gates. Each row perturbs one field
     /// from `Send::PASS`.
     #[test]
     #[rustfmt::skip]
@@ -641,7 +641,7 @@ mod tests {
             let to = to_ok.then_some(());
             assert_eq!(on_receive_mtu_info(&mkmtu(mtu), from, to), *want, "{label}");
         }
-        // boundary: exactly 512 is NOT Malformed (assert_ne! preserved)
+        // boundary: exactly 512 is not Malformed (assert_ne! preserved)
         assert_ne!(
             on_receive_mtu_info(&mkmtu(512), Some(((), unconv)), Some(())),
             Malformed,

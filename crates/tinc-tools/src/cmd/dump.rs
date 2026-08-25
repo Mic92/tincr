@@ -8,7 +8,7 @@
 //!   tinc dump connections        → meta-connections (the live sockets)
 //!   tinc dump graph              → DOT format, undirected
 //!   tinc dump digraph            → DOT format, directed
-//!   tinc dump invitations        → outstanding invites (NO daemon)
+//!   tinc dump invitations        → outstanding invites (no daemon)
 //!   tinc list ...                → alias
 //! ```
 //!

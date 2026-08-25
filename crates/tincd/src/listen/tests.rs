@@ -26,10 +26,10 @@ fn unmap_cases() {
     let cases: &[(&str, &str)] = &[
         // v4-mapped → v4. THE conversion.
         ("[::ffff:10.0.0.5]:655", "10.0.0.5:655"),
-        // `::ffff:0.0.0.0` IS a valid mapped addr (the v4 wildcard).
+        // `::ffff:0.0.0.0` is a valid mapped addr (the v4 wildcard).
         // to_ipv4_mapped returns Some(0.0.0.0).
         ("[::ffff:0.0.0.0]:655",  "0.0.0.0:655"),
-        // `::1` is NOT v4-mapped. Passes through unchanged.
+        // `::1` is not v4-mapped. Passes through unchanged.
         ("[::1]:655",             "[::1]:655"),
         // 2001:db8::1 — non-loopback, also unchanged.
         ("[2001:db8::1]:655",     "[2001:db8::1]:655"),
@@ -41,7 +41,7 @@ fn unmap_cases() {
         let want: SocketAddr = expected.parse().unwrap();
         assert_eq!(unmap(sa), want, "case {i}: {input}");
     }
-    // The first row's IS-v4 property (the conversion happened):
+    // The first row's is-v4 property (the conversion happened):
     assert!(unmap("[::ffff:10.0.0.5]:655".parse().unwrap()).is_ipv4());
 }
 
@@ -49,7 +49,7 @@ fn unmap_cases() {
 
 /// v4: 127.0.0.0/8 (`ntohl(...) >> 24 == 127`). Any addr in
 /// the /8, not just .0.0.1.
-/// v6: `::1` ONLY (`IN6_IS_ADDR_LOOPBACK`), not the whole `::/8`.
+/// v6: `::1` only (`IN6_IS_ADDR_LOOPBACK`), not the whole `::/8`.
 #[test]
 fn is_local_cases() {
     #[rustfmt::skip]
@@ -61,7 +61,7 @@ fn is_local_cases() {
         // v6: exactly.
         ("::1",               true),
         ("::2",               false),
-        // ::ffff:127.0.0.1 — v4-mapped loopback. NOT a v6 loopback.
+        // ::ffff:127.0.0.1 — v4-mapped loopback. not a v6 loopback.
         // `IN6_IS_ADDR_LOOPBACK` is exactly `::1`. The caller
         // should `unmap()` first; if they don't, this is `false`.
         ("::ffff:127.0.0.1",  false),
@@ -408,7 +408,7 @@ fn open_fwmark_set() {
     };
     let listeners = open_listeners(0, AddrFamily::Ipv4, &o);
     assert_eq!(listeners.len(), 1);
-    // Read back from BOTH sockets — TCP and UDP.
+    // Read back from both sockets — TCP and UDP.
     let tcp_mark = getsockopt(&listeners[0].tcp.as_fd(), sockopt::Mark).unwrap();
     let udp_mark = getsockopt(&listeners[0].udp.as_fd(), sockopt::Mark).unwrap();
     assert_eq!(tcp_mark, 0x1234);
@@ -417,7 +417,7 @@ fn open_fwmark_set() {
 
 /// `fwmark = 0` (default) means "don't set". Verify the syscall
 /// is skipped: `SO_MARK` readback is 0 even though we never called
-/// setsockopt. (Weak assertion — kernel default IS 0 — but
+/// setsockopt. (Weak assertion — kernel default is 0 — but
 /// proves we don't crash on the unprivileged path.)
 #[test]
 #[cfg(target_os = "linux")]

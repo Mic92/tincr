@@ -130,7 +130,7 @@ fn pubkey_from_b64(p: &str) -> Option<[u8; PUBLIC_LEN]> {
     }
     let bytes = b64::decode(p)?;
     bytes.as_slice().try_into().ok().or_else(|| {
-        // b64::decode of 43 chars should ALWAYS give 32 bytes.
+        // b64::decode of 43 chars should always give 32 bytes.
         // Reaching here means tinc-crypto's b64 disagrees with
         // upstream `b64decode_tinc`. The KAT tests pin that, so
         // this is unreachable-in-practice. We check anyway.
@@ -235,7 +235,7 @@ pub(crate) fn read_ecdsa_private_key(
 /// `None` on failure: the caller rejects the peer (legacy protocol
 /// is not supported).
 ///
-/// Source-order subtlety: if `hosts/NAME` has BOTH the var and a
+/// Source-order subtlety: if `hosts/NAME` has both the var and a
 /// PEM block, the var wins silently (early return). No consistency
 /// check; ported faithfully.
 #[must_use]
@@ -343,7 +343,7 @@ mod tests {
         assert_eq!(back, pk);
     }
 
-    /// `if(strlen(p) != 43)` — the FIRST check. Anything not 43
+    /// `if(strlen(p) != 43)` — the first check. Anything not 43
     /// chars is rejected before decode is even tried.
     #[test]
     fn b64_wrong_len() {
@@ -441,7 +441,7 @@ mod tests {
     /// the log line in stderr.
     ///
     /// Per the module doc: the C mask is over-broad. Pin the cases
-    /// that matter (group/other read) AND a false-positive case
+    /// that matter (group/other read) and a false-positive case
     /// (setgid bit — weird but not actually insecure) to document
     /// that we MATCH the C bug.
     #[test]
@@ -457,7 +457,7 @@ mod tests {
         assert!(!private_key_permissions_insecure(path, 0o100_400, None));
 
         // False positives (C-bug, ported).
-        // 0o102600 — setgid + 600. NOT actually insecure (setgid on
+        // 0o102600 — setgid + 600. not actually insecure (setgid on
         // a non-executable does nothing exploitable for a key file).
         // C warns anyway. We match.
         assert!(private_key_permissions_insecure(path, 0o102_600, None));
@@ -532,7 +532,7 @@ mod tests {
         let pk = *det_key(5).public_key();
         let b64 = encode(&pk);
 
-        // Write to hosts/peer THEN parse it (this is what id_h does:
+        // Write to hosts/peer then parse it (this is what id_h does:
         // read_host_config(name) → host_config). The function takes
         // an already-loaded config; it's not loading the file itself
         // for source 1.
@@ -667,7 +667,7 @@ mod tests {
         assert!(loaded.is_none());
     }
 
-    /// Source-order documentation test: when BOTH inline var AND
+    /// Source-order documentation test: when both inline var and
     /// PEM block are present (and DIFFERENT), inline wins (early
     /// return). See module doc "source-order subtlety".
     ///

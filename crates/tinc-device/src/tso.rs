@@ -267,7 +267,7 @@ pub enum TsoError {
 /// half-done (it wrote the pseudo-header sum into the checksum field
 /// as the "initial value", expecting hardware to finish). We finish.
 ///
-/// `pkt` is the IP packet (NO eth header — this is called by `drain`
+/// `pkt` is the IP packet (no eth header — this is called by `drain`
 /// before the eth header is synthesized). Mutates in place.
 pub fn gso_none_checksum(pkt: &mut [u8], csum_start: u16, csum_offset: u16) {
     let csum_at = usize::from(csum_start) + usize::from(csum_offset);
@@ -287,11 +287,11 @@ pub fn gso_none_checksum(pkt: &mut [u8], csum_start: u16, csum_offset: u16) {
 
 /// Split a TCP super-segment into MTU-sized frames.
 ///
-/// `pkt`: the IP packet from the device read, AFTER stripping the
-/// 10-byte `vnet_hdr`. `[IP header][TCP header][≤64KB payload]`. NO
+/// `pkt`: the IP packet from the device read, after stripping the
+/// 10-byte `vnet_hdr`. `[IP header][TCP header][≤64KB payload]`. No
 /// eth header (`vnet_hdr` device uses `IFF_NO_PI` and L3 mode).
 ///
-/// `hdr`: the decoded `vnet_hdr`. `gso_type` MUST be `TcpV4` or `TcpV6`
+/// `hdr`: the decoded `vnet_hdr`. `gso_type` must be `TcpV4` or `TcpV6`
 /// (caller checks; we `debug_assert`).
 ///
 /// `out`: scratch buffer for the segments. Each segment is written
@@ -383,7 +383,7 @@ pub fn tso_split(
     let (addr_off, addr_len) = ip_addr_span(is_v6);
     let addrs = &pkt[addr_off..addr_off + addr_len];
 
-    // IPv4 ID from the FIRST segment, incremented per segment.
+    // IPv4 ID from the first segment, incremented per segment.
     // RFC 6864: ID need not be unique for atomic datagrams (DF set,
     // no frag), but the kernel still increments and receivers may
     // use it for diagnostics.
@@ -496,7 +496,7 @@ const GRO_MAX_IP_LEN: usize = 65535;
 /// Outcome of [`GroBucket::offer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroVerdict {
-    /// Packet merged into the bucket. Caller must NOT write it
+    /// Packet merged into the bucket. Caller must not write it
     /// individually — it's absorbed.
     Coalesced,
     /// Packet is a valid GRO candidate but doesn't fit the current
@@ -515,7 +515,7 @@ pub enum GroVerdict {
 /// segment + `virtio_net_hdr`, write once.
 ///
 /// **Single-slot, append-only.** No flow hashmap or prepend support:
-/// under a bulk transfer the receiving daemon sees ONE flow's data
+/// under a bulk transfer the receiving daemon sees one flow's data
 /// packets in seq order per batch. A mismatch → flush → restart
 /// handles the rare interleaved-flow case correctly (it just doesn't
 /// coalesce across the gap).
@@ -560,7 +560,7 @@ pub struct GroBucket {
     /// Expected seq of the NEXT packet to append. `first_seq +
     /// total_payload_appended`.
     next_seq: u32,
-    /// Payload size of the FIRST packet. Subsequent packets' payload
+    /// Payload size of the first packet. Subsequent packets' payload
     /// must be ≤ this (a smaller packet may end the run; a larger one
     /// would put a small packet mid-run, which the kernel's GSO can't
     /// represent).
@@ -605,7 +605,7 @@ impl GroBucket {
 
     /// Try to coalesce `ip` into the bucket.
     ///
-    /// `ip` is the raw IP packet (NO eth header, NO `vnet_hdr`) —
+    /// `ip` is the raw IP packet (no eth header, no `vnet_hdr`) —
     /// the daemon strips its synthetic eth before calling.
     ///
     /// `Coalesced`: packet absorbed, caller drops it. `FlushFirst`:
@@ -749,7 +749,7 @@ impl GroBucket {
             return GroVerdict::FlushFirst;
         }
 
-        // Append payload bytes only; headers stay from the FIRST
+        // Append payload bytes only; headers stay from the first
         // packet. PSH propagates to the head's flags so the kernel
         // sees it on the super.
         self.buf[self.len..self.len + payload_len].copy_from_slice(&ip[iphlen + tcphlen..]);
@@ -794,7 +794,7 @@ impl GroBucket {
             // Pseudo-header partial into the TCP csum field.
             // `NEEDS_CSUM` tells the kernel "L4 csum is partial;
             // finish from `csum_start`". We write the
-            // folded-but-NOT-complemented pseudo — the kernel chains
+            // folded-but-not-complemented pseudo — the kernel chains
             // it (RFC 1071) with the TCP-hdr+payload sum. Same shape
             // `gso_none_checksum` reads on ingest.
             let (addr_off, addr_len) = ip_addr_span(self.is_v6);

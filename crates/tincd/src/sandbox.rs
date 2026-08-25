@@ -1,14 +1,14 @@
 //! `Sandbox = none|normal|high` — Landlock path allowlist on Linux.
 //!
-//! Spec: `src/bsd/openbsd/tincd.c` (pledge+unveil). Linux gets the
-//! same shape via Landlock (kernel ≥5.13). The path-allowlist maps
+//! Same shape as C tinc's OpenBSD pledge+unveil sandbox, on Linux
+//! via Landlock (kernel ≥5.13). The path-allowlist maps
 //! 1:1; the syscall-filter half (pledge) we skip — Landlock does
 //! paths only. seccomp would be a separate feature.
 //!
 //! ## Ordering
 //!
-//! `enter()` is called from `main()` AFTER `drop_privs` (chroot+
-//! setuid), BEFORE the epoll loop. By that point `tinc-up` has
+//! `enter()` is called from `main()` after `drop_privs` (chroot+
+//! setuid), before the epoll loop. By that point `tinc-up` has
 //! already run with root (`Daemon::setup` fires
 //! it), the device is open, listeners are bound. Landlock is the
 //! last gate before steady-state.
@@ -49,8 +49,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-/// `sandbox_level_t` (`sandbox.h:7-10`).
-///
 /// `repr(u8)` for the atomic store. `None` is 0 so the static
 /// default (`AtomicU8::new(0)`) reads as `None` before `enter()`.
 #[repr(u8)]
@@ -85,8 +83,7 @@ impl Level {
     }
 }
 
-/// `sandbox_action_t` (`sandbox.h:12-15`). Only `START_PROCESSES`
-/// is wired; `USE_NEW_PATHS` exists for parity but the only caller
+/// Only `START_PROCESSES` is wired; `USE_NEW_PATHS` exists for parity but the only caller
 /// (`ScriptsInterpreter` reload guard) is commented out — we re-read
 /// the interpreter unconditionally
 /// because Landlock at `normal` grants `Execute` on confbase, so a
@@ -122,8 +119,7 @@ pub struct Paths {
     /// (`cache`, `hosts`, `invitations`) get `rwc` separately.
     pub confbase: PathBuf,
     /// `/dev/net/tun` on Linux. `rw`. `None` for `DeviceType=
-    /// dummy` (no device fd; the C skips it via `strcasecmp(device,
-    /// DEVICE_DUMMY)`).
+    /// dummy` (no device fd).
     pub device: Option<PathBuf>,
     /// `--logfile PATH`. `rwc`. `None` when logging to stderr (the
     /// fd is already open; Landlock doesn't gate fd I/O, only
@@ -334,7 +330,7 @@ fn build_and_apply_ruleset(p: SandboxPaths, level: Level) -> Result<(), String> 
     let access_rd: BitFlags<AccessFs> = AccessFs::ReadFile | AccessFs::ReadDir;
     // unveil "rwc" → write + create-file + create-dir + remove-*.
     // Not `from_write(abi)` — that includes MakeChar/MakeBlock/
-    // MakeFifo which the daemon never needs. MakeSock IS needed:
+    // MakeFifo which the daemon never needs. MakeSock is needed:
     // ControlSocket re-bind on restart unlinks+binds the socket
     // path, but that happened before enter(). Daemon::Drop
     // unlinks pidfile and ControlSocket::Drop unlinks the socket
@@ -349,7 +345,7 @@ fn build_and_apply_ruleset(p: SandboxPaths, level: Level) -> Result<(), String> 
     // (`fs.rs:613` `Err(_) => None`). Pre-create confbase subdirs
     // and pre-create $STATE_DIRECTORY/addrcache so the rules apply.
     // `makedirs(DIR_CACHE | DIR_HOSTS | DIR_INVITATIONS)`: lazy
-    // mkdir AFTER restrict_self would need MakeDir on confbase
+    // mkdir after restrict_self would need MakeDir on confbase
     // itself, which we don't grant.
     // /dev/* entries (the tun device) are char devices, not dirs;
     // skip them. Everything else in `rwc` is a directory we want
@@ -485,7 +481,7 @@ mod tests {
     }
 
     /// `can()` before `enter()` always returns true. tinc-up and
-    /// the subnet-up loop in `Daemon::setup` run BEFORE `main()`
+    /// the subnet-up loop in `Daemon::setup` run before `main()`
     /// calls `enter()`; they must not be gated.
     ///
     /// nextest per-process model means each #[test] is its own

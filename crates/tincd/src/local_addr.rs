@@ -1,7 +1,7 @@
 //! `choose_local_address` + `adapt_socket`: LAN-direct UDP address
 //! selection.
 //!
-//! `ADD_EDGE` carries TWO addresses: the WAN-visible one (`e->address`, what
+//! `ADD_EDGE` carries two addresses: the WAN-visible one (`e->address`, what
 //! the peer's `accept()` saw) and the local one (`e->local_address`,
 //! what `getsockname()` on the connecting end returned — see
 //! `daemon/connect.rs:192-210`). For two nodes behind the same
@@ -21,7 +21,7 @@
 //! - [`parse_addr_port`] / [`format_addr_port`]: the `protocol_key.c`
 //!   reflexive-address wire shape
 //!
-//! ## What's NOT here
+//! ## What's not here
 //!
 //! `n->status.send_locally` flag — daemon's `TunnelState`. The `try_udp` probe
 //! loop — `daemon/tx_control.rs`. Reflexive `ANS_KEY` append/consume —

@@ -31,7 +31,7 @@ use crate::listen::SockOpts;
 
 pub(crate) use crate::ids::OutgoingId;
 
-/// One outgoing-connection slot: the node NAME (not a `NodeId` —
+/// One outgoing-connection slot: the node name (not a `NodeId` —
 /// outgoings are config-derived, the node might not exist in the graph
 /// yet), the backoff seconds, and the address cache.
 ///
@@ -73,31 +73,25 @@ pub(crate) struct Outgoing {
 pub(crate) const MAX_TIMEOUT_DEFAULT: u32 = 900;
 
 impl Outgoing {
-    /// `retry_outgoing` arithmetic. Bumps `timeout += 5`, caps at
-    /// `maxtimeout`. The TIMER ARM
-    /// lives in the daemon (it owns `Timers`).
-    ///
-    /// Returns the new timeout for the caller to arm.
+    /// Bumps `timeout += 5`, capped at `maxtimeout`; returns the new
+    /// timeout for the daemon to arm (it owns `Timers`).
     pub(crate) fn bump_timeout(&mut self, maxtimeout: u32) -> u32 {
         self.timeout = (self.timeout + 5).min(maxtimeout);
         self.timeout
     }
 }
 
-/// Result of one connect attempt. The `goto begin` loop in
-/// `do_outgoing_connection` expressed as an enum so the
-/// daemon can drive the loop without `goto`.
+/// Result of one connect attempt; the daemon loops until `Started`
+/// or `Exhausted`.
 #[derive(Debug)]
 pub(crate) enum ConnectAttempt {
-    /// `connect()` returned 0 OR `EINPROGRESS`. The socket is
-    /// registered for WRITE; the connecting probe finishes it.
+    /// `connect()` returned 0 or `EINPROGRESS`. The socket is
+    /// registered for write; the connecting probe finishes it.
     Started { sock: Socket, addr: SocketAddr },
     /// This addr failed (socket creation or immediate connect
-    /// error). `goto begin` to try next addr. The error is logged
-    /// here; caller loops.
+    /// error); already logged, caller tries the next addr.
     Retry,
-    /// Addr cache exhausted. `retry_outgoing`. Caller arms the
-    /// backoff timer.
+    /// Addr cache exhausted. Caller arms the backoff timer.
     Exhausted,
 }
 
@@ -135,9 +129,9 @@ fn apply_dial_sockopts(sock: &Socket, sockopts: &SockOpts) {
 
 /// Shared socket-create + nonblocking-connect sequence used by both
 /// `try_connect` (direct) and `try_connect_via_proxy`. `desc` feeds the
-/// log lines so the two callers keep their distinct messages. NONBLOCK
-/// is set BEFORE `connect()` so it returns `EINPROGRESS` instead of
-/// blocking; V6ONLY is set defensively (C parity); `bind_to` is
+/// log lines so the two callers keep their distinct messages. Nonblocking
+/// is set before `connect()` so it returns `EINPROGRESS` instead of
+/// blocking; V6ONLY is set defensively; `bind_to` is
 /// best-effort (warn+continue) because the route-table source may still
 /// work.
 fn dial_nonblocking(
@@ -172,7 +166,7 @@ fn dial_nonblocking(
     if matches!(target, SocketAddr::V6(_)) {
         let _ = sock.set_only_v6(true);
     }
-    // SO_MARK + bind_to_interface. BEFORE bind_to_address.
+    // SO_MARK + bind_to_interface must precede bind().
     apply_dial_sockopts(&sock, sockopts);
     if let Some(local) = bind_to
         && let Err(e) = sock.bind(&SockAddr::from(local))
@@ -254,11 +248,8 @@ pub(crate) fn punch_connect(ps: PunchSock, target: SocketAddr) -> Option<Socket>
     }
 }
 
-/// One iteration of `do_outgoing_connection`'s `goto begin` loop.
-/// Creates a socket, sets nonblocking, calls `connect()`. The daemon
-/// loops this until `Started` or `Exhausted`.
-///
-/// `proxytype == NONE` path only. Proxy modes are chunk 10.
+/// One direct (no proxy) connect attempt: next cached addr, socket,
+/// nonblocking `connect()`.
 pub(crate) fn try_connect(
     addr_cache: &mut AddressCache,
     node_name: &str,
@@ -303,8 +294,8 @@ pub(crate) fn try_connect_via_proxy(
         sockopts,
         &format_args!("proxy {proxy_addr} for {node_name}"),
     ) {
-        // `addr` is the PEER addr (what `c->address` holds in C);
-        // the SOCKS CONNECT target is built from it later.
+        // `addr` is the peer addr; the SOCKS CONNECT target is built
+        // from it later.
         Some(sock) => ConnectAttempt::Started {
             sock,
             addr: peer_addr,
@@ -313,47 +304,35 @@ pub(crate) fn try_connect_via_proxy(
     }
 }
 
-/// `handle_meta_io` connecting branch. Probe the async connect:
-/// `send(fd, NULL, 0, 0)` returns 0 on success,
+/// Probe the async connect: a zero-length `send` returns 0 on success,
 /// `EWOULDBLOCK` on spurious wakeup (Linux), `ENOTCONN` on failure
 /// (POSIX) — in which case `getsockopt(SO_ERROR)` gets the cause.
 ///
 /// `Ok(true)` → connected; caller does `finish_connecting`.
-/// `Ok(false)` → spurious wakeup, stay registered for WRITE.
+/// `Ok(false)` → spurious wakeup, stay registered for write.
 ///
 /// # Errors
 /// Connect failed (`ECONNREFUSED`, `EHOSTUNREACH`, etc). Caller
 /// terminates and retries the next addr.
 ///
 /// Takes `BorrowedFd`, not `&Socket`: the connecting fd is owned by
-/// `Connection.fd` (the ONE owner). An earlier shape kept a separate
+/// `Connection.fd` (the one owner). An earlier shape kept a separate
 /// `socket2::Socket` around just for this probe, dup'd the fd into
 /// `Connection`, and registered the dup with epoll — two fds on one
 /// open-file-description. epoll keys on the description, so closing
 /// only the dup left a stale interest → 100% CPU busy-loop on
 /// ERR|HUP. One fd, one owner, no aliasing hazard.
 pub(crate) fn probe_connecting(fd: BorrowedFd<'_>) -> io::Result<bool> {
-    // `if(send(c->socket, NULL, 0, 0) != 0)`. nix's `send(fd, &[],
-    // empty)` does the same — a zero-byte write that touches the
-    // connection state without sending data.
+    // Zero-byte write: touches connection state without sending data.
     match send(fd.as_raw_fd(), &[], MsgFlags::empty()) {
-        Ok(_) => {
-            // Connected. `_` not `0`: send() returns bytes sent;
-            // we sent 0, so it's 0. Don't pin that.
-            Ok(true)
-        }
+        Ok(_) => Ok(true),
         Err(Errno::EAGAIN | Errno::EINPROGRESS) => {
             // Linux-specific spurious wakeup. Stay registered.
             Ok(false)
         }
         Err(Errno::ENOTCONN) => {
-            // POSIX path: send() says ENOTCONN, real cause is in
-            // SO_ERROR. `if(!socknotconn(sockerrno)) socket_error =
-            // sockerrno` — socknotconn is `errno == ENOTCONN`.
-            //
-            // `getsockopt(SOL_SOCKET, SO_ERROR)`. 0 means SO_ERROR
-            // was clear — shouldn't happen here (we got ENOTCONN,
-            // SOMETHING failed). Treat as spurious.
+            // POSIX path: real cause is in SO_ERROR. 0 there shouldn't
+            // happen after ENOTCONN; treat as spurious.
             match getsockopt(&fd, sockopt::SocketError) {
                 Ok(0) => Ok(false),
                 Ok(errno) => Err(io::Error::from_raw_os_error(errno)),
@@ -373,24 +352,22 @@ pub(crate) fn probe_connecting(fd: BorrowedFd<'_>) -> io::Result<bool> {
     }
 }
 
-/// Proxy configuration. `NONE` is `Option::None` at the
-/// `DaemonSettings.proxy` level. `SOCKS4A` is unimplemented (C tinc
-/// doesn't implement it either).
+/// Proxy configuration (`None` at the `DaemonSettings.proxy` level =
+/// direct). `socks4a` is rejected at parse time; C tinc never
+/// implemented it either.
 #[derive(Debug, Clone)]
 pub enum ProxyConfig {
-    /// `PROXY_EXEC`. `socketpair` + `fork` +
-    /// `/bin/sh -c <cmd>`. The simple mode: no handshake bytes.
+    /// `socketpair` + `fork` + `/bin/sh -c <cmd>`. No handshake bytes.
     Exec { cmd: String },
-    /// `PROXY_SOCKS4`. Connect to `{host}:{port}`, then send a
-    /// SOCKS4 CONNECT request (`socks::build_request`) with the PEER
-    /// addr as target. `user` is the SOCKS4 "userid" string
+    /// Connect to `{host}:{port}`, then send a SOCKS4 CONNECT request
+    /// (`socks::build_request`) with the peer addr as target. `user` is the SOCKS4 "userid" string
     /// (optional, no password — SOCKS4 has no real auth).
     Socks4 {
         host: String,
         port: u16,
         user: Option<String>,
     },
-    /// `PROXY_SOCKS5`. RFC 1928. Same connect-to-proxy-addr shape.
+    /// RFC 1928. Same connect-to-proxy-addr shape.
     /// `user`+`pass` are RFC 1929 password auth; both `None` →
     /// anonymous (`socks::build_request` handles the method choice).
     Socks5 {
@@ -399,19 +376,16 @@ pub enum ProxyConfig {
         user: Option<String>,
         pass: Option<String>,
     },
-    /// `PROXY_HTTP`. `CONNECT host:port HTTP/1.1\r\n\r\n`. Response
-    /// is line-based (NOT `tcplen`-exact like SOCKS): `protocol.c:
-    /// 148-161` special-cases the `HTTP/1.1 ` prefix in `receive_
-    /// request` BEFORE the normal dispatch. See `metaconn.rs::
-    /// on_conn_readable` HTTP intercept: gating on `allow_request
-    /// == Id` is sufficient (the gate closes naturally when `id_h`
-    /// runs); no separate `proxy_passed` flag needed.
+    /// `CONNECT host:port HTTP/1.1\r\n\r\n`. Response is line-based
+    /// (not `tcplen`-exact like SOCKS); `on_conn_readable` intercepts
+    /// the `HTTP/1.1 ` prefix while `allow_request == Id`, which closes
+    /// naturally once `id_h` runs.
     Http { host: String, port: u16 },
 }
 
 impl ProxyConfig {
     /// The proxy server's address, for `try_connect_via_proxy`.
-    /// `Exec` has no proxy addr (the pipe IS the connection).
+    /// `Exec` has no proxy addr (the pipe is the connection).
     #[must_use]
     pub const fn proxy_addr(&self) -> Option<(&str, u16)> {
         match self {
@@ -436,8 +410,7 @@ impl ProxyConfig {
 
     /// `socks::Creds` for `build_request`. SOCKS4 uses only `user`
     /// (the userid string). SOCKS5 uses both for password auth; if
-    /// either is missing, anonymous (`socks.rs:192` matches the C's
-    /// `proxyuser && proxypass` check).
+    /// either is missing, anonymous.
     #[must_use]
     pub fn socks_creds(&self) -> Option<crate::socks::Creds> {
         match self {
@@ -497,7 +470,7 @@ pub(crate) fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, Str
                 ));
             };
             // user/pass optional. Empty string → None (`if(proxyuser
-            // && *proxyuser)` — the pointer-nonnull AND
+            // && *proxyuser)` — the pointer-nonnull and
             // deref-nonNUL idiom).
             let user = toks.next().filter(|s| !s.is_empty()).map(str::to_owned);
             let pass = toks.next().filter(|s| !s.is_empty()).map(str::to_owned);
@@ -535,7 +508,7 @@ pub(crate) fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, Str
 /// standard mitigation is `exec()` immediately, before touching
 /// any std/allocator state. The child here does exactly that:
 /// libc-only (`close`, `dup2`, `setsid`, `execve`,
-/// `_exit`). The `CString` allocations happen in the PARENT before
+/// `_exit`). The `CString` allocations happen in the parent before
 /// the fork; the child only borrows their `.as_ptr()`.
 ///
 /// The daemon itself is single-threaded here, but the test harness
@@ -555,7 +528,7 @@ pub(crate) fn do_outgoing_pipe(
     node_name: &str,
     my_name: &str,
 ) -> io::Result<OwnedFd> {
-    // Pre-allocate ALL strings the child needs, BEFORE fork. The
+    // Pre-allocate all strings the child needs before fork. The
     // child only does libc:: pointer ops. CString panics on interior
     // NUL; cmd is user config, node_name is `check_id`-validated,
     // my_name is `Name = ` from tinc.conf (also `check_id`).
@@ -570,7 +543,7 @@ pub(crate) fn do_outgoing_pipe(
         core::ptr::null(),
     ];
 
-    // Build the full envp BEFORE fork (setenv post-fork is not
+    // Build the full envp before fork (setenv post-fork is not
     // async-signal-safe). Inherit parent env, override our four keys.
     let name_env =
         CString::new(format!("NAME={my_name}")).map_err(|_| nul_err("my_name has interior NUL"))?;
@@ -616,7 +589,7 @@ pub(crate) fn do_outgoing_pipe(
     )?;
     crate::set_cloexec(&parent_fd);
     crate::set_cloexec(&child_fd);
-    // Snapshot the raw ints BEFORE fork: the child path below is
+    // Snapshot the raw ints before fork: the child path below is
     // libc-only (see fn doc) and must not call into std, even for a
     // trivial `.as_raw_fd()` getter — keep it on plain integers.
     let (parent_raw, child_raw) = (parent_fd.as_raw_fd(), child_fd.as_raw_fd());
@@ -633,7 +606,7 @@ pub(crate) fn do_outgoing_pipe(
                 Err(io::Error::last_os_error())
             }
             0 => {
-                // CHILD.
+                // Child.
                 // libc-only until exec. NO std (locks could be held).
 
                 // close(0), close(1), close(fd[0]),
@@ -653,12 +626,12 @@ pub(crate) fn do_outgoing_pipe(
                 // NETNAME omitted (not threaded through yet; same as run_script).
                 libc::execve(sh.as_ptr(), argv.as_ptr(), envp.as_ptr());
 
-                // execve returned → failed. _exit (NOT exit — exit()
+                // execve returned → failed. _exit (not exit — exit()
                 // runs atexit handlers, which might allocate).
                 libc::_exit(1);
             }
             pid => {
-                // PARENT.
+                // Parent.
                 // `c->socket = fd[0]; close(fd[1]); return`. Don't
                 // waitpid here — the child is detached. Register the
                 // pid with the script reaper so it's collected by
@@ -805,7 +778,7 @@ mod tests {
         assert_eq!(o.bump_timeout(900), 900);
     }
 
-    /// `resolve_config_addrs` port precedence (C `address_cache.c:165`):
+    /// `resolve_config_addrs` port precedence:
     /// inline `Address host port` > `Port =` directive > 655.
     #[test]
     fn resolve_address_port_precedence() {

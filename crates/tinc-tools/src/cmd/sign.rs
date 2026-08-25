@@ -1,7 +1,7 @@
 //! `cmd_sign` + `cmd_verify`.
 //!
-//! Detached-ish signature over an arbitrary file. NOT a PEM envelope.
-//! NOT GPG-style ASCII armor. Format:
+//! Detached-ish signature over an arbitrary file. Not a PEM envelope.
+//! Not GPG-style ASCII armor. Format:
 //!
 //! ```text
 //! Signature = <name> <unix-time> <86-char-tinc-b64>\n
@@ -13,7 +13,7 @@
 //! and writes the rest to stdout, so `sign | verify` is identity on
 //! the file contents.
 //!
-//! ## The signed message is NOT what's in the output
+//! ## The signed message is not what's in the output
 //!
 //! This is the load-bearing subtlety. The signature input is:
 //!
@@ -154,7 +154,7 @@ pub fn sign(paths: &Paths, input: Option<&Path>, t: i64, out: impl Write) -> Res
     debug_assert_eq!(sig_b64.len(), SIG_B64_LEN);
 
     // Emit
-    // The body is the *original* `data`, NOT `msg` (which has the
+    // The body is the *original* `data`, not `msg` (which has the
     // trailer). Load-bearing.
     let mut out = out;
     writeln!(out, "Signature = {name} {t} {sig_b64}").map_err(io_err("<stdout>"))?;
@@ -188,7 +188,7 @@ impl Signer {
     /// `.` and `tinc.conf` is missing/nameless (propagated from
     /// `get_my_name`).
     pub fn parse(arg: &str, paths: &Paths) -> Result<Self, CmdError> {
-        // `.` then `*` then check_id. `.` and `*` are NOT validated
+        // `.` then `*` then check_id. `.` and `*` are not validated
         // as names — they're metasyntax (and would fail `check_id`
         // anyway: not alnum-or-underscore).
         match arg {

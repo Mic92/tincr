@@ -1,36 +1,29 @@
 //! Ethernet header constants + synthesis. RFC 894 / IEEE 802.3
-//! / IANA registry. NOT platform-specific.
+//! / IANA registry. Not platform-specific.
 //!
 //! Hoisted from `fd.rs` when BSD became a second consumer. The
 //! `read_fd`/`write_fd` don't-factor rule is about platform-varying
 //! syscalls; RFC constants don't vary across `cfg`. `pub(crate)`:
 //! header synthesis is a backend concern; the daemon only reads.
 //!
-//! NOT here: `ETH_P_ALL` (Linux `PF_PACKET` API value, not a wire
+//! Not here: `ETH_P_ALL` (Linux `PF_PACKET` API value, not a wire
 //! ethertype — stays in `raw.rs`); `AF_INET6` (per-platform kernel
 //! ABI: 10/Linux, 28/FreeBSD, 30/macOS — stays in `bsd.rs` via
 //! `libc`). `0x86DD` is wire-format truth; `AF_INET6` is local
 //! convention.
 
-// Ethernet header constants — `ethernet.h`, RFC 894, IEEE 802.3
+// Ethernet header constants — RFC 894, IEEE 802.3
 
-/// `ETH_HLEN` — `ethernet.h:31`. dhost(6) + shost(6) + type(2).
-/// gcc-verified vs `<linux/if_ether.h>`.
+/// dhost(6) + shost(6) + type(2).
 pub(crate) const ETH_HLEN: usize = 14;
 
-/// `ETHER_TYPE_LEN` — `ethernet.h:35`. `ETH_HLEN - ETHER_TYPE_LEN
-/// = 12` is the ethertype offset. Module-private: only
-/// `set_etherheader` and the `ethertype_at_12` test read it.
+/// `ETH_HLEN - ETHER_TYPE_LEN = 12` is the ethertype offset.
 const ETHER_TYPE_LEN: usize = 2;
 
-/// `ETH_P_IP` — `ethernet.h:44`. IPv4's IANA-registered ethertype.
-/// IANA "`EtherType`" registry, assigned 1983 (before IANA was
-/// IANA). Network byte order on the wire; we hold host order and
-/// `to_be_bytes()` at write time.
+/// IPv4 ethertype. Host order; `to_be_bytes()` at write time.
 pub(crate) const ETH_P_IP: u16 = 0x0800;
 
-/// `ETH_P_IPV6` — `ethernet.h:52`. IPv6's ethertype. IANA-
-/// registered 1995 (RFC 1883).
+/// IPv6 ethertype.
 pub(crate) const ETH_P_IPV6: u16 = 0x86DD;
 
 // from_ip_nibble — version → ethertype
@@ -57,7 +50,7 @@ pub(crate) const fn from_ip_nibble(ip0: u8) -> Option<u16> {
 /// ethertype write touch disjoint bytes (`[0..12]` vs `[12..14]`)
 /// so order doesn't matter. Caller guarantees `buf.len() ≥ 14`.
 pub(crate) fn set_etherheader(buf: &mut [u8], ethertype: u16) {
-    // Zero MACs. 12 bytes. NOT 14 — leave ethertype slot alone.
+    // Zero MACs. 12 bytes. Not 14 — leave ethertype slot alone.
     buf[..ETH_HLEN - ETHER_TYPE_LEN].fill(0);
     // Ethertype, big-endian. Bytes 12-13.
     buf[ETH_HLEN - ETHER_TYPE_LEN..ETH_HLEN].copy_from_slice(&ethertype.to_be_bytes());
@@ -108,7 +101,7 @@ mod tests {
     // set_etherheader
 
     /// Zero MACs, write ethertype big-endian. Pre-fill with garbage
-    /// to verify the zero AND that bytes past 14 are untouched.
+    /// to verify the zero and that bytes past 14 are untouched.
     #[test]
     fn set_etherheader_cases() {
         #[rustfmt::skip]

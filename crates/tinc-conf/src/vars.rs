@@ -45,7 +45,7 @@
 //! Tab-complete needs prefix scan; that's just `.iter()` on the
 //! slice. Expose `VARS` directly for that.
 //!
-//! ## The table is NOT in canonical order
+//! ## The table is not in canonical order
 //!
 //! Entry order (and therefore index) matches C tinc's `variables[]`
 //! table, including its alphabetical-order break at `MTUInfoInterval`
@@ -97,7 +97,7 @@ impl VarFlags {
     /// trust sends you a config blob. Letting that blob set `Device`
     /// or `ScriptsInterpreter` would be a remote-exec vector. SAFE
     /// is the allowlist — `Subnet`, `ConnectTo`, address-family/mode
-    /// stuff. Anything that picks a file path or a binary is NOT
+    /// stuff. Anything that picks a file path or a binary is not
     /// safe.
     pub const SAFE: Self = Self(16);
 
@@ -155,7 +155,7 @@ impl core::fmt::Debug for VarFlags {
     }
 }
 
-/// One row in the table. `var_t` (`tincctl.h:42-45`).
+/// One row in the table.
 #[derive(Debug, Clone, Copy)]
 pub struct Var {
     /// Canonical case. `Port`, not `port`. `cmd_config set port 655`
@@ -284,19 +284,19 @@ pub static VARS: &[Var] = &[
     // [48]).
     //
     // DNS stub (Rust-only). SERVER, MULTIPLE for DNSAddress (one v4
-    // + one v6). NOT SAFE: an invitation that sets DNSAddress points
+    // + one v6). Not SAFE: an invitation that sets DNSAddress points
     // every name lookup at an attacker-chosen resolver.
     v("DNSAddress", S.union(M)),
     v("DNSSuffix", S),
     // SPTPSCipher: SERVER+HOST so it can be set as a global default in
-    // tinc.conf or per-peer in `hosts/NAME`. NOT `Cipher` — that's the
+    // tinc.conf or per-peer in `hosts/NAME`. Not `Cipher` — that's the
     // C tinc legacy-protocol bulk cipher and reusing the name would
     // make a tincr host file change the legacy cipher on a C node
-    // reading the same file. NOT SAFE — an inviter setting this would
+    // reading the same file. Not SAFE — an inviter setting this would
     // wedge the invitee's first tunnel against every C tinc peer.
     v("SPTPSCipher", S.union(H)),
     // SPTPSKex: SERVER (tinc.conf default) | HOST (per-peer override).
-    // NOT SAFE: an inviter that could set this could force `x25519`
+    // Not SAFE: an inviter that could set this could force `x25519`
     // and strip the PQ leg — a downgrade. Both ends must agree out of
     // band; that's an operator decision, not something an untrusted
     // invitation gets to make.
@@ -432,7 +432,7 @@ mod tests {
     }
 
     /// `contains` semantics. `S | H` contains `S`, contains `H`,
-    /// contains `S | H`, does NOT contain `M`. Obvious, but `&==` vs
+    /// contains `S | H`, does not contain `M`. Obvious, but `&==` vs
     /// `&!=0` is a one-character bug that this would catch.
     #[test]
     fn flags_contains() {
@@ -467,7 +467,7 @@ mod tests {
     /// SAFE invariant: nothing SAFE picks a file path or binary.
     /// This is the *purpose* of SAFE (see module doc). The keys that
     /// pick paths (`Device`, `*KeyFile`, `ScriptsInterpreter`,
-    /// `Proxy`) are NOT safe. We can't statically know which keys are
+    /// `Proxy`) are not safe. We can't statically know which keys are
     /// path-ish, but we can spot-check the obvious ones.
     #[test]
     fn unsafe_paths_not_safe() {

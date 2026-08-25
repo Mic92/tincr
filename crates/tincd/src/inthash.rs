@@ -23,7 +23,7 @@
 //! ## What this does
 //!
 //! `write_u32`/`write_u64` apply one round of `splitmix64` mixing
-//! to the input. NOT bare identity: hashbrown's swisstable probes
+//! to the input. not bare identity: hashbrown's swisstable probes
 //! groups using the high 7 bits as a tag, so dense small integers
 //! (`NodeId(0)`, `NodeId(1)`, `NodeId(2)`, ...) would all share the
 //! tag byte `0x00` and degrade to linear scan within a group. One
@@ -31,7 +31,7 @@
 //!
 //! `write()` (the byte-slice path) is implemented for `[u8; 6]`
 //! `NodeId6` keys: load as little-endian `u64` (zero-extended) and
-//! mix. The derived `Hash` for `[u8; 6]` does NOT call `write` with
+//! mix. The derived `Hash` for `[u8; 6]` does not call `write` with
 //! 6 bytes — it calls `write` with the slice then `write_usize` with
 //! the length. We handle both: accumulate bytes via shift-or, mix
 //! via XOR on the length write. The whole thing inlines to a handful
@@ -68,7 +68,7 @@ pub(crate) struct IntHasher(u64);
 impl Hasher for IntHasher {
     #[inline]
     fn finish(&self) -> u64 {
-        // The mix already happened in write_*; the state IS the hash.
+        // The mix already happened in write_*; the state is the hash.
         // For the `write()` byte path, mix happens here (the derived
         // Hash impl calls `write` then `write_usize(len)` then
         // `finish`; see write_usize).
@@ -129,7 +129,7 @@ mod tests {
         hashes.sort_unstable();
         hashes.dedup();
         assert_eq!(hashes.len(), 1000, "no collisions in 0..1000");
-        // Tag-byte distribution: should NOT all be the same.
+        // Tag-byte distribution: should not all be the same.
         let tags: std::collections::HashSet<u8> =
             (0u32..128).map(|i| (bh.hash_one(i) >> 57) as u8).collect();
         assert!(

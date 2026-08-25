@@ -4,7 +4,7 @@
 //! `forward_packet` → `send_sptps_packet` → `send_sptps_data_relay`
 //! would walk, returning `Some(TxTarget)` only if the WHOLE super
 //! can take the direct-UDP path with no per-chunk side effects. No
-//! `&mut Daemon` reborrow: the `Arc<AtomicU64>` outseqno IS the seqno
+//! `&mut Daemon` reborrow: the `Arc<AtomicU64>` outseqno is the seqno
 //! allocator now.
 
 use std::sync::Arc;
@@ -36,7 +36,7 @@ pub(crate) struct TxTarget {
     pub sock: u8,
 }
 
-/// Probe whether THIS super can take the fast path. Runs `route()` on
+/// Probe whether this super can take the fast path. Runs `route()` on
 /// `chunk0`, walks the gate chain WITHOUT side effects (except seqno
 /// alloc), returns the copies the seal loop needs. `None` ⇒ slow path.
 ///
@@ -64,7 +64,7 @@ pub(crate) struct TxTarget {
 ///     Gating on it would reject every default-config peer (the bit
 ///     is default-on). Slow path's Frames arm still clamps.
 ///
-/// `count`: seqnos to reserve. The `fetch_add` is the ONE side effect:
+/// `count`: seqnos to reserve. The `fetch_add` is the one side effect:
 /// burns seqnos even when the result is discarded. Gaps are valid
 /// (SPTPS replay window is a sliding bitmap, REJECTS reused seqnos,
 /// doesn't accept-twice).
@@ -98,7 +98,7 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
         return None; // dispatch_route_result:1377 — loopback to TUN
     }
 
-    // `last_routes` lookup. DIRECT gate: target IS the relay AND IS
+    // `last_routes` lookup. DIRECT gate: target is the relay and is
     // the nexthop. Covers (a) distance-1 neighbor (`via=nexthop=to`
     // by tinc-graph:632 — `via = if indirect {n_via} else {e.to}`)
     // and (b) what the slow path actually checks: sptps.rs's
@@ -138,7 +138,7 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
     // address` builds a stack-local; can't copy what isn't cached.
     let (dst, sock) = handles.udp_addr.lock().unwrap().clone()?;
 
-    // ALL GATES PASSED. The one side effect: burn `count` seqnos.
+    // all GATES PASSED. The one side effect: burn `count` seqnos.
     // The `Arc<AtomicU64>` is shared with the control-side `Sptps`;
     // both see the same counter. `Relaxed`: uniqueness is the only
     // requirement; the peer's replay window does the ordering.
@@ -150,7 +150,7 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
     if prev.wrapping_sub(handles.out_key_base) >= tinc_sptps::SEAL_KEY_LIMIT {
         return None;
     }
-    // Intentional truncation: SPTPS wire seqno IS 32-bit; the
+    // Intentional truncation: SPTPS wire seqno is 32-bit; the
     // AtomicU64 is just headroom for the wrap math.
     #[expect(clippy::cast_possible_truncation)]
     let seqno_base = prev as u32;
@@ -225,7 +225,7 @@ mod tests {
 
         // TunnelHandles for bob: validkey=true, minmtu=1400 (PMTU
         // converged), outcompression=0, udp_addr cached. The outseqno
-        // Arc here is NOT shared with a real Sptps (no Sptps exists
+        // Arc here is not shared with a real Sptps (no Sptps exists
         // in this test); the gate logic is what we're proving.
         let handles = Arc::new(TunnelHandles {
             outseqno: Arc::new(AtomicU64::new(0)),
@@ -266,7 +266,7 @@ mod tests {
         (snap, bob)
     }
 
-    /// Positive case: the probe MUST return `Some` for a direct peer
+    /// Positive case: the probe must return `Some` for a direct peer
     /// with default-on options (`CLAMP_MSS|PMTU_DISCOVERY`). Regression
     /// for two former bugs: `via == myself` (structurally unreachable)
     /// and `CLAMP_MSS` gate (default-on, blocks every real peer).
@@ -323,7 +323,7 @@ mod tests {
     }
 
     /// Edge: `body_len` exactly equals minmtu — must pass. The gate is
-    /// `>`, not `>=`. minmtu IS the maximum body that fits.
+    /// `>`, not `>=`. minmtu is the maximum body that fits.
     #[test]
     fn body_len_eq_minmtu_is_some() {
         let (snap, bob) = fixture(0);

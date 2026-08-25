@@ -25,7 +25,7 @@
 //! line tokenizer** in this codebase (see `cmd/exchange.rs`
 //! `is_name_line` for the second; `tinc-conf` is the first). This one
 //! is prefix-16 + delimiter-at-16. `Ed25519PublicKeyBackup = ...` is
-//! NOT matched (char 16 is `B`, not in `" \t="`). It's narrower than
+//! not matched (char 16 is `B`, not in `" \t="`). It's narrower than
 //! `tinc-conf`'s tokenizer, which is fine — only the exact
 //! `Ed25519PublicKey` line format that key generation writes needs to be
 //! commented out.
@@ -123,7 +123,7 @@ pub fn run(paths: &Paths) -> Result<(), CmdError> {
 /// `Io` if reading the source, writing the tmpfile, or the final
 /// rename fails. The tmpfile is best-effort-unlinked on error.
 ///
-/// Does NOT error on file-not-found — that's `Ok(false)`.
+/// Does not error on file-not-found — that's `Ok(false)`.
 pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
     // Any open failure → `Ok(false)`; the downstream append surfaces
     // the real error.
@@ -293,7 +293,7 @@ mod tests {
         );
     }
 
-    /// `Ed25519PublicKeyBackup` is NOT matched (char 16 is `B`).
+    /// `Ed25519PublicKeyBackup` is not matched (char 16 is `B`).
     /// This is the prefix-16+delim-at-16 specificity — see module doc.
     #[test]
     fn disable_config_line_exact_len() {
@@ -343,7 +343,7 @@ mod tests {
         assert!(!disable_old_keys(&path).unwrap());
     }
 
-    /// `-----BEGIN MYED25519FOO-----` (no space before ED25519) NOT
+    /// `-----BEGIN MYED25519FOO-----` (no space before ED25519) not
     /// matched. ` ED25519 ` is space-delimited.
     #[test]
     fn disable_space_delimited_type() {
@@ -363,7 +363,7 @@ mod tests {
             "-----BEGIN ED25519 PRIVATE KEY-----\nbody\n-----END WHATEVER-----\nafter\n",
         );
         assert!(disable_old_keys(&path).unwrap());
-        // `after` is NOT prefixed — block ended at the (mismatched) END.
+        // `after` is not prefixed — block ended at the (mismatched) END.
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "#-----BEGIN ED25519 PRIVATE KEY-----\n#body\n#-----END WHATEVER-----\nafter\n"
@@ -428,7 +428,7 @@ mod tests {
         // File now has #-block then live block. read_pem gets the live one.
         let blob2 = read_pem(fs::File::open(&path).unwrap(), keypair::TY_PRIVATE, 96).unwrap();
         assert_eq!(&blob2[..], &sk2.to_blob()[..]);
-        // And it's NOT sk1. (Non-astronomical chance of collision.)
+        // And it's not sk1. (Non-astronomical chance of collision.)
         assert_ne!(&blob2[..], &blob1[..]);
 
         // The file shape: one #-block, one live block.

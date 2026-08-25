@@ -158,10 +158,10 @@ fn linebuf_compact_avoids_realloc() {
     assert_eq!(b.data.capacity(), cap, "compact should reuse capacity");
 }
 
-/// `net.h:45`. If MAXSIZE bumps (jumbo), this fails.
+/// If MAXSIZE bumps (jumbo), this fails.
 #[test]
 fn maxbufsize_matches_c() {
-    const MAXSIZE: usize = 1673; // net.h:42, no-jumbo
+    const MAXSIZE: usize = 1673; // no-jumbo
     let expected = (if MAXSIZE > 2048 { MAXSIZE } else { 2048 }) + 128;
     assert_eq!(MAXBUFSIZE, expected);
 }
@@ -503,7 +503,7 @@ fn write_all(fd: &OwnedFd, mut buf: &[u8]) {
 fn feed_sptpslen_single_chunk() {
     let (mut conn, _alice, wr) = sptps_conn_pair();
     conn.sptpslen = 12;
-    let blob = b"abcdefghijkl"; // 12 bytes, NOT SPTPS-framed
+    let blob = b"abcdefghijkl"; // 12 bytes, not SPTPS-framed
     write_all(&wr, blob);
     let r = conn.feed(&mut NoRng);
     match r {
@@ -551,7 +551,7 @@ fn feed_sptpslen_straddle() {
 /// THE TRAP. `["21 12\n" record | 12 raw bytes | PING record]` as
 /// one chunk. Before fix: `receive()` re-called on raw bytes →
 /// `DecryptFailed` → Dead. After: `feed()` peeks "21 ", sets sptpslen,
-/// next iter eats blob. Events MUST be `[Blob, Record(PING)]`.
+/// next iter eats blob. Events must be `[Blob, Record(PING)]`.
 #[test]
 fn feed_sptpslen_then_record() {
     use tinc_sptps::Output;

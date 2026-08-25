@@ -12,7 +12,7 @@
 //! 2. `nc > 3` → drop a random outgoing whose peer has `edge_count` ≥ 2.
 //! 3. `nc ≥ 3` → cancel `Outgoing` slots with no live conn.
 //! 4. Random all-node pick; dial if unreachable + has-address + not
-//!    connected. The all-node prng IS the back-off.
+//!    connected. The all-node prng is the back-off.
 //!
 //! ## Relay shortcuts
 //!
@@ -56,7 +56,7 @@ pub(crate) enum AutoAction {
     Disconnect { name: String, origin: OutOrigin },
     /// Cancel a between-retries pending outgoing.
     ///
-    /// **`ConnectTo`-seeded slots are NOT exempt** (matches C tinc):
+    /// `ConnectTo`-seeded slots are not exempt (same as C tinc):
     /// once we hit ≥3 active conns, a `ConnectTo` target that is
     /// currently unreachable stops being retried until SIGHUP re-reads
     /// the config. SIGALRM (`retry()`) only resets backoff on
@@ -86,7 +86,7 @@ pub(crate) struct NodeSnapshot {
     pub reachable: bool,
     /// We have a `hosts/` file with `Address =` for this node.
     pub has_address: bool,
-    /// We have a direct meta conn (inbound OR outbound).
+    /// We have a direct meta conn (inbound or outbound).
     pub directly_connected: bool,
     /// How many edges this node has in the gossiped graph.
     pub edge_count: usize,
@@ -122,7 +122,7 @@ pub(crate) struct OutgoingSnapshot {
     pub age: Duration,
 }
 
-/// Tunables. NOT user-configurable — the struct exists so unit tests
+/// Tunables. Not user-configurable — the struct exists so unit tests
 /// can isolate the classic autoconnect branches (`d_shortcut=0`) and
 /// probe band edges. The daemon always passes [`ShortcutKnobs::default`].
 ///
@@ -161,7 +161,7 @@ pub(crate) struct ShortcutKnobs {
     pub d_hi: usize,
     pub relay_hi_bps: u64,
     pub relay_lo_bps: u64,
-    /// A successful `AutoShortcut` conn is exempt from BOTH drop
+    /// A successful `AutoShortcut` conn is exempt from both drop
     /// arms until it has been active for this long. Symmetric with
     /// [`SHORTCUT_BACKOFF`]: don't re-add for 60s after a failed
     /// try, don't drop for 60s after a successful one. Stops the
@@ -193,23 +193,22 @@ impl Default for ShortcutKnobs {
 /// # Arguments
 ///
 /// - `myself_name` — skip `n == myself`.
-/// - `nodes` — ALL known nodes, including indirect/unreachable. May
+/// - `nodes` — all known nodes, including indirect/unreachable. May
 ///   include `myself` (filtered). Order matters for
 ///   `connect_to_unreachable` index-picking (the daemon sorts by name
 ///   so picks are deterministic).
-/// - `active_outgoing_conns` — OUTGOING conns past-ACK. Inbound conns
+/// - `active_outgoing_conns` — outgoing conns past-ACK. Inbound conns
 ///   are someone else's choice; we don't unilaterally close them.
-/// - `pending_outgoings` — `Outgoing` slots with NO live conn
+/// - `pending_outgoings` — `Outgoing` slots with no live conn
 ///   (between retries or pre-ACK).
 /// - `now` — for `backoff_until` comparison only.
 ///
 /// # The `connect_to_unreachable` back-off
 ///
-/// `prng(node_tree.count)` — randomizes over ALL nodes, **including
-/// ineligible ones**. If `r` lands on an ineligible node, immediate
-/// `Noop`. THIS IS THE FEATURE: P(connect) =
-/// `count_eligible_unreachable / count_all_nodes`. Don't "fix" by
-/// filtering first.
+/// The random index ranges over all nodes, including ineligible ones;
+/// landing on an ineligible node is an immediate `Noop`. That is the
+/// back-off: P(connect) = `eligible_unreachable / all_nodes`. Don't
+/// "fix" it by filtering first.
 ///
 /// # `make_new_connection` already-pending → `Noop`
 ///
@@ -225,19 +224,19 @@ pub(crate) fn decide(
     now: Instant,
     rng: &mut impl rand_core::CryptoRng,
 ) -> AutoAction {
-    // Count ALL active meta conns (past ACK),
+    // Count all active meta conns (past ACK),
     // inbound + outbound.
     let nc = nodes
         .iter()
         .filter(|n| n.directly_connected && n.name != myself_name)
         .count();
 
-    // < D_LO → eagerly make a new one. EARLY RETURN.
+    // Below D_LO: eagerly make a new one, nothing else this tick.
     if nc < knobs.d_lo {
         return make_new_connection(myself_name, nodes, pending_outgoings, rng);
     }
 
-    // A meta-conn that is currently `nexthop` for ANY peer with hot
+    // A meta-conn that is currently `nexthop` for any peer with hot
     // tx is load-bearing — dropping it reroutes that peer through a
     // worse path. Both drop arms below consult this.
     let hot_nexthops: HashSet<&str> = nodes
@@ -292,7 +291,7 @@ pub(crate) fn decide(
 
     // Idle shortcut reap. Only fires inside (D_LO, D_HI] — at D_LO
     // we'd rather keep the slot (it counts toward the resilience
-    // floor too). Judge by tx_rate (any path), NOT relay_rate.
+    // floor too). Judge by tx_rate (any path), not relay_rate.
     if nc > knobs.d_lo {
         let idle: Vec<&OutgoingSnapshot> = active_outgoing_conns
             .iter()
@@ -335,9 +334,7 @@ pub(crate) fn decide(
     connect_to_unreachable(myself_name, nodes, pending_outgoings, rng)
 }
 
-/// `make_new_connection`.
-///
-/// Eligible: not myself, not directly connected, AND
+/// Eligible: not myself, not directly connected, and
 /// `(has_address || reachable)`. The reachable-but-no-address case:
 /// the address can come from a learned `via` edge.
 ///
@@ -389,7 +386,7 @@ fn connect_to_unreachable(
     let r = (rng.next_u32() % (nodes.len() as u32)) as usize;
     let n = &nodes[r];
 
-    // Ineligible → return. NOT continue. THIS is the back-off.
+    // Ineligible → return, not continue: this is the back-off.
     if n.name == myself_name || n.directly_connected || n.reachable || !n.has_address {
         return AutoAction::Noop;
     }
@@ -403,8 +400,7 @@ fn connect_to_unreachable(
     }
 }
 
-/// `drop_superfluous_outgoing_connection`. Only OUTGOING, multi-homed,
-/// AND not currently `nexthop` for any hot peer — a conn carrying
+/// Only outgoing, multi-homed, and not currently `nexthop` for any hot peer — a conn carrying
 /// someone's traffic is by definition not superfluous.
 fn drop_superfluous_outgoing(
     nodes: &[NodeSnapshot],
@@ -419,7 +415,7 @@ fn drop_superfluous_outgoing(
             // A shortcut younger than `min_hold` is the conn the
             // previous tick asked for — not "superfluous" yet.
             // ConfigConnectTo/AutoBackbone are unaffected (those are
-            // not demand-driven; dropping them is the C-parity churn
+            // not demand-driven; dropping them is plain degree churn
             // prevention and has no flap mode to damp).
             (o.origin != OutOrigin::AutoShortcut || o.age >= knobs.min_hold)
                 && !hot_nexthops.contains(o.name.as_str())
@@ -567,7 +563,7 @@ mod tests {
         }
     }
 
-    /// Under 3, nobody eligible → Noop (and DOES early-return).
+    /// Under 3, nobody eligible → Noop (early return).
     #[test]
     fn connect_skips_ineligible() {
         let nodes = vec![
@@ -749,7 +745,7 @@ mod tests {
             node("out2", true, true, true, 3),
             node("out3", true, true, true, 3),
             node("out4", true, true, true, 3),
-            node("in1", true, true, true, 3), // NOT in outgoing
+            node("in1", true, true, true, 3), // not in outgoing
         ];
         let outgoing = outs(&["out1", "out2", "out3", "out4"]);
         for seed in 0..50 {
@@ -806,7 +802,7 @@ mod tests {
         );
     }
 
-    /// nc=6 (== `D_HI`), hot relay peer → falls through (NOT `Connect`).
+    /// nc=6 (== `D_HI`), hot relay peer → falls through (no `Connect`).
     #[test]
     fn shortcut_not_added_past_d_hi() {
         let mut nodes = vec![node("me", true, true, false, 6)];
@@ -937,8 +933,8 @@ mod tests {
         }
     }
 
-    /// Same as above but `tx_rate`=100 KiB/s, `relay_rate`=0 → NOT
-    /// disconnected. THIS is the oscillation damper: once direct,
+    /// Same as above but `tx_rate`=100 KiB/s, `relay_rate`=0 → not
+    /// disconnected. This is the oscillation damper: once direct,
     /// `relay_rate` is 0 by construction; `tx_rate` keeps the slot.
     #[test]
     fn shortcut_kept_while_tx_hot() {
@@ -975,7 +971,7 @@ mod tests {
         }
     }
 
-    /// Hot relay peer with `backoff_until` in the future → NOT connected.
+    /// Hot relay peer with `backoff_until` in the future → not connected.
     #[test]
     fn backoff_respected() {
         let now = Instant::now();
@@ -1010,7 +1006,7 @@ mod tests {
         );
     }
 
-    /// nc=3, one pending `AutoShortcut` still handshaking → NOT
+    /// nc=3, one pending `AutoShortcut` still handshaking → not
     /// `CancelPending`. Regression: unfiltered `first()` would cancel
     /// the slot the previous tick just added and loop.
     #[test]
@@ -1032,7 +1028,7 @@ mod tests {
     }
 
     /// nc=3, three hot peers, 2 shortcut slots already dialling →
-    /// NOT `Connect{AutoShortcut}`. The cap is `D_SHORTCUT`, not
+    /// not `Connect{AutoShortcut}`. The cap is `D_SHORTCUT`, not
     /// `D_HI`.
     #[test]
     fn shortcut_cap_enforced() {
@@ -1158,7 +1154,7 @@ mod tests {
     }
 
     /// nc=5, one `AutoShortcut` outgoing whose OWN `tx_rate` is idle
-    /// (2 KiB/s) but it's `nexthop` for peer X at 100 KiB/s → NOT
+    /// (2 KiB/s) but it's `nexthop` for peer X at 100 KiB/s → not
     /// reaped. A shortcut that became someone else's relay is still
     /// load-bearing.
     #[test]

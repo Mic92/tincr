@@ -41,7 +41,7 @@ pub fn parse_url(url: &str) -> Option<ParsedUrl> {
         return None;
     }
 
-    // Bracketed IPv6: the brackets are URL syntax, NOT part of the
+    // Bracketed IPv6: the brackets are URL syntax, not part of the
     // address. Strip them; `TcpStream::connect`'s `(&str, port)`
     // form takes the unbracketed literal.
     let (host, port) = if let Some(v6_body) = addr_part.strip_prefix('[') {

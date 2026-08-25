@@ -39,7 +39,7 @@ impl Daemon {
             return Err(crate::dispatch::DispatchError::Unauthorized);
         }
 
-        // PMTU only sticks if BOTH sides set it.
+        // PMTU only sticks if both sides set it.
         let mut his = parsed.his_options;
         if !(conn.options & his).contains(ConnOptions::PMTU_DISCOVERY) {
             conn.options.remove(ConnOptions::PMTU_DISCOVERY);
@@ -47,7 +47,7 @@ impl Daemon {
         }
         conn.options |= his;
 
-        // Per-host ClampMSS force-set/force-clear AFTER merging
+        // Per-host ClampMSS force-set/force-clear after merging
         // peer's options. Peer asked for ClampMSS but our hosts/NAME
         // says no → we win (local config trumps wire).
         if let Some(clamp) = conn.host_clamp_mss {
@@ -58,7 +58,7 @@ impl Daemon {
             }
         }
 
-        // Per-host AND global PMTU clamp. We init `pmtu` lazily
+        // Per-host and global PMTU clamp. We init `pmtu` lazily
         // (try_tx); seed it now with the clamp so the first probe
         // cycle starts from a sane ceiling instead of wasting probes
         // above the user's known path MTU. The min(host, global) is
@@ -176,10 +176,10 @@ impl Daemon {
             // graph() covered by unconditional call below.
         }
 
-        // Add ONLY the forward edge. The reverse comes from the
+        // Add only the forward edge. The reverse comes from the
         // PEER's `send_add_edge(everyone)` gossip. SSSP skips edges
         // without a reverse, so our edge is dead until peer's gossip
-        // arrives — which it does in the same burst. Do NOT
+        // arrives — which it does in the same burst. Do not
         // synthesize the reverse: at 3+ nodes the relay's
         // `lookup_edge` would find it, idempotent-return, never
         // forward, and transitive nodes never learn the reverse.
@@ -197,7 +197,7 @@ impl Daemon {
             // Ipv6Addr::Display doesn't bracket (matches NI_NUMERICHOST).
             let addr = AddrStr::new(ea.ip().to_string()).expect("numeric IP is whitespace-free");
             let port = AddrStr::new(ea.port().to_string()).expect("numeric");
-            // Rewrite local port to OUR udp port (peer sends UDP
+            // Rewrite local port to our udp port (peer sends UDP
             // there, not the ephemeral TCP port).
             let (la, lp) = if let Some(mut local) = local_addr {
                 local.set_port(self.my_udp_port);
@@ -227,7 +227,7 @@ impl Daemon {
         self.seen.purge_mentions(&name);
 
         // `active` is the `broadcast_targets` "past ACK" filter. Set
-        // BEFORE broadcast so the new conn DOES get its own edge back;
+        // before broadcast so the new conn does get its own edge back;
         // receiver's `seen.check` dups it.
         if let Some(conn) = self.conns.get_mut(id) {
             conn.active = true;
@@ -304,7 +304,7 @@ impl Daemon {
     /// Connection teardown. `conn.active` gates `DEL_EDGE` broadcast
     /// (only past-ACK conns have an edge to delete).
     pub(super) fn terminate(&mut self, id: ConnId) {
-        // Deregister from epoll BEFORE closing any fd. epoll keys on
+        // Deregister from epoll before closing any fd. epoll keys on
         // the open-file-description; closing the dup'd Connection.fd
         // first makes epoll_ctl(DEL) EBADF (silently swallowed), and
         // if connecting_socks still holds the original socket the
@@ -416,7 +416,7 @@ impl Daemon {
         }
 
         // Outgoing retry. C tinc retries UNCONDITIONALLY on `c->
-        // outgoing` (net.c:160). The previous `was_active` gate here
+        // outgoing`. The previous `was_active` gate here
         // wedged a pre-ACK timeout from the ping sweep forever:
         // `on_ping_tick` calls `terminate()` directly (not via
         // `on_connecting`), so nothing else re-drives the outgoing.
@@ -534,7 +534,7 @@ impl Daemon {
             // steer us at loopback/link-local.
             .filter(|sa| !crate::addr::is_unwanted_dial_addr(sa))
             // Off-thread getaddrinfo results for `Address=` hostnames
-            // are operator-authored config, NOT peer input — chain
+            // are operator-authored config, not peer input — chain
             // them *after* the unwanted-addr gate so e.g.
             // `Address = localhost 655` keeps working.
             .chain(self.dns_hints.get(&name).into_iter().flatten().copied())
@@ -685,7 +685,7 @@ impl Daemon {
                     // WRITE registration triggers `on_connecting`
                     // when kernel finishes async connect.
                     let now = self.timers.now();
-                    // ONE fd, ONE owner. probe_connecting() takes a
+                    // one fd, one owner. probe_connecting() takes a
                     // BorrowedFd from Connection.fd; no dup, no
                     // second map. (An earlier shape dup'd into a
                     // separate `connecting_socks` map — two fds on
@@ -695,7 +695,7 @@ impl Daemon {
                     let fd = OwnedFd::from(sock);
                     let conn = Connection::new_outgoing(fd, name, fmt_addr(&addr), addr, oid, now);
                     // IO_READ|IO_WRITE. EPOLLOUT fires on connect
-                    // complete OR fail. READ too (loopback connect+
+                    // complete or fail. READ too (loopback connect+
                     // immediate-data is possible).
                     if self.register_conn(conn, Io::ReadWrite).is_none() {
                         continue;
@@ -718,7 +718,7 @@ impl Daemon {
             return;
         };
         let timeout = outgoing.bump_timeout(self.settings.maxtimeout);
-        // Reset HERE so next retry walks from top.
+        // Reset here so next retry walks from top.
         outgoing.addr_cache.reset();
         let name = outgoing.node_name.clone();
         log::info!(target: "tincd::conn",
@@ -798,7 +798,7 @@ impl Daemon {
         conn.last_ping_time = self.timers.now();
         conn.connecting = false;
 
-        // send_proxyrequest BEFORE send_id. Both queue into outbuf,
+        // send_proxyrequest before send_id. Both queue into outbuf,
         // flush in one send(). Pipelining is intentional: proxy
         // buffers the ID line while processing greeting.
         let mut needs_write = false;
@@ -863,7 +863,7 @@ impl Daemon {
             }
         }
 
-        // send_id. WE go first (initiator); peer replies.
+        // send_id. We go first (initiator); peer replies.
         // Split borrow: helper would lock all of `self`.
         let conn = self.conns.get_mut(id).expect("ConnId not live");
         needs_write |= conn.send(format_args!(

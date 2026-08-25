@@ -83,7 +83,7 @@ pub(crate) enum Ready {
     Write,
 }
 
-/// Opaque io handle. The epoll token (`epoll_event.u64`) IS this
+/// Opaque io handle. The epoll token (`epoll_event.u64`) is this
 /// (same `usize`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct IoId(usize);
@@ -98,7 +98,7 @@ struct Slot<W> {
 }
 
 /// The event loop. Owns the epoll fd, the events buffer, and the
-/// slot slab. Does NOT own fds.
+/// slot slab. Does not own fds.
 ///
 /// Generic over `W: Copy` — the daemon's `enum IoWhat`. See lib.rs.
 pub(crate) struct EventLoop<W> {
@@ -184,7 +184,7 @@ impl<W: Copy> EventLoop<W> {
             return; // already del'd
         };
         // Best-effort. ENOENT is fine (fd closed → kernel auto-
-        // removed). EBADF is NOT: caller closed BEFORE ev.del();
+        // removed). EBADF is not: caller closed before ev.del();
         // a surviving dup would busy-loop ERR|HUP into a freed
         // slot. Tripwire in debug.
         if let Err(e) = del(&self.ep, slot.fd) {
@@ -199,7 +199,7 @@ impl<W: Copy> EventLoop<W> {
         self.live -= 1;
     }
 
-    /// ONE iteration of the event loop. The `while(running)` outer
+    /// one iteration of the event loop. The `while(running)` outer
     /// loop is the daemon's job.
     ///
     /// Blocks for at most `timeout` (or forever if `None`). Drains
@@ -244,7 +244,7 @@ impl<W: Copy> EventLoop<W> {
     ) -> io::Result<()> {
         out.clear();
 
-        // EINTR: `SA_RESTART` does NOT auto-retry epoll_wait (man 7
+        // EINTR: `SA_RESTART` does not auto-retry epoll_wait (man 7
         // signal "never restart" list), so every signal during the
         // wait surfaces here. Return `Ok` empty rather than looping
         // so the caller re-ticks timers before re-polling — the
@@ -367,7 +367,7 @@ mod tests {
 
         // Drain it. The id is what we got.
         assert_eq!(ev.what(id), Some(What::Device));
-        // Deregister BEFORE close — the order the EBADF tripwire in
+        // Deregister before close — the order the EBADF tripwire in
         // `del()` enforces.
         ev.del(id);
         drop((rd, wr));
@@ -392,7 +392,7 @@ mod tests {
 
     /// The READ ↔︎ READ|WRITE dance. Adding WRITE interest, getting
     /// WRITE readiness, then
-    /// dropping WRITE interest, NOT getting WRITE readiness anymore.
+    /// dropping WRITE interest, not getting WRITE readiness anymore.
     #[test]
     fn set_changes_interest() {
         let mut ev = EventLoop::new().unwrap();
@@ -413,7 +413,7 @@ mod tests {
         assert!(out.is_empty(), "got stale WRITE after reregister to READ");
 
         drop(rd);
-        // del BEFORE wr drops to avoid the EBADF tripwire.
+        // del before wr drops to avoid the EBADF tripwire.
         ev.del(id);
         drop(wr);
     }
