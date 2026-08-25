@@ -1,7 +1,8 @@
 use std::os::fd::AsRawFd;
 use std::time::Duration;
 
-use super::common::{Node, poll_until};
+use super::common::node::has_subnet;
+use super::common::{self, Node, poll_until};
 use super::fd_tunnel::{FdPair, mk_ipv4_pkt, read_fd_nb, sockpair_datagram, write_fd};
 use std::array;
 use std::thread;
@@ -142,4 +143,36 @@ fn traffic_survives_key_expiry() {
             >= 2,
         "{alice_log}"
     );
+}
+
+/// Switch mode: a learned MAC that expires must be gossiped away
+/// immediately. `on_age_subnets` queued the `DEL_SUBNET` without arming
+/// write interest, so the peer kept the stale subnet until unrelated
+/// traffic flushed the meta connection.
+#[test]
+fn expired_mac_lease_is_flushed_to_peer() {
+    let tmp = tmp!("mac-expire");
+    // PingInterval high so no PING happens to flush the outbuf for us.
+    let conf = "Mode = switch\nMacExpire = 1\nPingInterval = 600\n";
+    let pair = FdPair::new(tmp.path(), conf, conf).start();
+    // The fd device synthesises a zero eth header, so alice learns
+    // 00:00:00:00:00:00 as her own MAC on the first device read.
+    write_fd(
+        &pair.alice_dev,
+        &mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"x"),
+    );
+    let mac = "00:00:00:00:00:00";
+    common::try_poll(Duration::from_secs(5), || {
+        has_subnet(&pair.bob.ctl().dump(5), mac, "alice").then_some(())
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "bob never learned alice's MAC: {:?}",
+            pair.bob.ctl().dump(5)
+        )
+    });
+    // Lease 1s, swept on the 10s housekeeping timer.
+    poll_until(Duration::from_secs(15), || {
+        (!has_subnet(&pair.bob.ctl().dump(5), mac, "alice")).then_some(())
+    });
 }
