@@ -19,7 +19,7 @@ fn dump_nodes_formats_like_c() {
         ctl.send(CAROL_ROW);
         ctl.send("18 3");
     });
-    let stdout = conf.tinc(&["dump", "nodes"]).ok();
+    let stdout = conf.tinc(&["dump", "nodes"]).succeeds();
     daemon.finish();
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(
@@ -46,7 +46,7 @@ fn dump_reachable_nodes_filters() {
         ctl.send(CAROL_ROW);
         ctl.send("18 3");
     });
-    let stdout = conf.tinc(&["dump", "reachable", "nodes"]).ok();
+    let stdout = conf.tinc(&["dump", "reachable", "nodes"]).succeeds();
     daemon.finish();
     assert_eq!(stdout.lines().count(), 1);
     assert!(stdout.starts_with("alice "));
@@ -61,7 +61,7 @@ fn list_nodes_alias() {
         ctl.send(CAROL_ROW);
         ctl.send("18 3");
     });
-    let stdout = conf.tinc(&["list", "nodes"]).ok();
+    let stdout = conf.tinc(&["list", "nodes"]).succeeds();
     daemon.finish();
     assert!(stdout.starts_with("carol id "));
 }
@@ -79,7 +79,7 @@ fn dump_subnets() {
         ctl.send("18 5 172.16.0.0/12#10 carol");
         ctl.send("18 5");
     });
-    let stdout = conf.tinc(&["dump", "subnets"]).ok();
+    let stdout = conf.tinc(&["dump", "subnets"]).succeeds();
     daemon.finish();
     assert_eq!(
         stdout.lines().collect::<Vec<_>>(),
@@ -111,7 +111,7 @@ fn dump_digraph() {
         ctl.send("18 4 bob alice 1.1.1.1 port 655 unspec port unspec 0 100");
         ctl.send("18 4");
     });
-    let stdout = conf.tinc(&["dump", "digraph"]).ok();
+    let stdout = conf.tinc(&["dump", "digraph"]).succeeds();
     daemon.finish();
     assert_eq!(
         stdout.lines().collect::<Vec<_>>(),
@@ -139,7 +139,7 @@ fn dump_graph_dedups_edges() {
         ctl.send("18 4 b a 1.1.1.1 port 1 unspec port unspec 0 100");
         ctl.send("18 4");
     });
-    let stdout = conf.tinc(&["dump", "graph"]).ok();
+    let stdout = conf.tinc(&["dump", "graph"]).succeeds();
     daemon.finish();
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 4, "{stdout}");
@@ -153,17 +153,17 @@ fn dump_graph_dedups_edges() {
 fn dump_invitations_without_daemon() {
     let conf = Conf::init("alice");
     assert_eq!(
-        conf.tinc(&["dump", "invitations"]).ok(),
+        conf.tinc(&["dump", "invitations"]).succeeds(),
         "",
         "none outstanding: message goes to stderr"
     );
 
     let host = conf.read("hosts/alice");
     conf.write("hosts/alice", &format!("Address = 192.0.2.1\n{host}"));
-    conf.tinc(&["invite", "bob"]).ok();
+    conf.tinc(&["invite", "bob"]).succeeds();
     let run = conf.tinc(&["dump", "invitations"]);
     assert!(!run.stderr.contains("pid file"), "{}", run.stderr);
-    let stdout = run.ok();
+    let stdout = run.succeeds();
     let [hash, invitee] = stdout.trim_end().split(' ').collect::<Vec<_>>()[..] else {
         panic!("{stdout:?}");
     };

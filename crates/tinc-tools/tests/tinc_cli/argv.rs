@@ -47,8 +47,8 @@ fn tinc_auth_sockpath_alias() {
 
 #[test]
 fn help_and_version_aliases() {
-    let version = tinc(&["--version"]).ok();
-    assert_eq!(tinc(&["version"]).ok(), version);
+    let version = tinc(&["--version"]).succeeds();
+    assert_eq!(tinc(&["version"]).succeeds(), version);
     assert!(
         version.contains("tinc") && version.contains("(Rust)"),
         "{version}"
@@ -56,9 +56,9 @@ fn help_and_version_aliases() {
 
     let run = tinc(&["--help"]);
     assert_eq!(run.stderr, "");
-    let help = run.ok();
-    assert_eq!(tinc(&["help"]).ok(), help);
-    assert_eq!(tinc(&["-h"]).ok(), help);
+    let help = run.succeeds();
+    assert_eq!(tinc(&["help"]).succeeds(), help);
+    assert_eq!(tinc(&["-h"]).succeeds(), help);
     assert!(help.contains("Usage: tinc") && help.contains("init NAME"));
     assert!(help.contains("--pidfile"));
     // `help` and `version` are not listed as commands (only as options).
@@ -77,7 +77,7 @@ fn help_and_version_aliases() {
 /// here rather than skipped.
 #[test]
 fn help_commands_aligned() {
-    let help = tinc(&["--help"]).ok();
+    let help = tinc(&["--help"]).succeeds();
     let commands = help
         .lines()
         .skip_while(|line| *line != "Commands:")
@@ -135,16 +135,16 @@ fn netname_sources() {
     const BOTH: &str = "Both netname and configuration directory given";
     let conf = Conf::bare();
     let base = conf.arg();
-    let stderr = tinc_env(&[("NETNAME", "fromenv")], &["-c", &base, "init", "a"]).ok_stderr();
+    let stderr = tinc_env(&[("NETNAME", "fromenv")], &["-c", &base, "init", "a"]).succeeds_stderr();
     assert!(stderr.contains(BOTH), "{stderr}");
     assert!(conf.base().join("tinc.conf").exists(), "confbase wins");
 
     let conf = Conf::bare();
-    let stderr = tinc(&["-n", "fromflag", "-c", &conf.arg(), "init", "a"]).ok_stderr();
+    let stderr = tinc(&["-n", "fromflag", "-c", &conf.arg(), "init", "a"]).succeeds_stderr();
     assert!(stderr.contains(BOTH), "{stderr}");
 
     let conf = Conf::bare();
-    let stderr = tinc_env(&[("NETNAME", ".")], &["-c", &conf.arg(), "init", "a"]).ok_stderr();
+    let stderr = tinc_env(&[("NETNAME", ".")], &["-c", &conf.arg(), "init", "a"]).succeeds_stderr();
     assert!(!stderr.contains(BOTH), "{stderr}");
 
     tinc_env(&[("NETNAME", "../escape")], &["init", "a"])
@@ -155,6 +155,6 @@ fn netname_sources() {
 #[test]
 fn glued_short_c() {
     let conf = Conf::bare();
-    tinc(&[&format!("-c{}", conf.arg()), "init", "alice"]).ok();
+    tinc(&[&format!("-c{}", conf.arg()), "init", "alice"]).succeeds();
     assert!(conf.base().join("tinc.conf").exists());
 }

@@ -14,7 +14,7 @@ fn generate_keys_rotates() {
         "{}",
         run.stderr
     );
-    run.ok();
+    run.succeeds();
 
     let private_after = conf.read("ed25519_key.priv");
     for line in private_before.lines() {

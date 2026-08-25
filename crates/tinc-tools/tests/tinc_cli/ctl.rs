@@ -43,7 +43,7 @@ fn disconnect_validates_before_connecting() {
 fn pid_comes_from_greeting() {
     let conf = Conf::bare();
     let daemon = conf.serve(|_| {});
-    assert_eq!(conf.tinc(&["pid"]).ok().trim(), "1");
+    assert_eq!(conf.tinc(&["pid"]).succeeds().trim(), "1");
     daemon.finish();
 }
 
@@ -54,7 +54,7 @@ fn reload_round_trip() {
         ctl.expect("18 1");
         ctl.send("18 1 0");
     });
-    assert_eq!(conf.tinc(&["reload"]).ok(), "");
+    assert_eq!(conf.tinc(&["reload"]).succeeds(), "");
     daemon.finish();
 }
 

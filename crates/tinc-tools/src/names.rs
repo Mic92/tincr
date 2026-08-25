@@ -644,7 +644,7 @@ mod tests {
         // Don't fail — just don't assert. The string-surgery tests
         // above cover the derivation; this one is for the probe order.
 
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Forgetting `resolve_runtime()` panics. The panic is the

@@ -269,7 +269,7 @@ mod bench {
         let perf_out = std::env::var_os("TINCD_PERF_DIR")
             .map_or_else(|| PathBuf::from("/tmp/tincd-perf"), PathBuf::from);
         if perf_enabled() {
-            std::fs::create_dir_all(&perf_out).ok();
+            std::fs::create_dir_all(&perf_out).unwrap();
         } else {
             eprintln!("(set TINCD_PERF=1 for sample(1) profile)");
         }

@@ -21,7 +21,7 @@ fn invite_prints_url() {
     let conf = with_address("alice");
     let run = conf.tinc(&["invite", "bob"]);
     assert!(run.stderr.contains("restart or reload"), "{}", run.stderr);
-    let stdout = run.ok();
+    let stdout = run.succeeds();
     assert_eq!(stdout.lines().count(), 1, "{stdout:?}");
     let slug = stdout
         .trim()
@@ -32,7 +32,7 @@ fn invite_prints_url() {
 
     let fsck = conf.tinc(&["fsck"]);
     assert_eq!(fsck.stderr, "");
-    fsck.ok();
+    fsck.succeeds();
 }
 
 /// Checked before anything is created (C leaves an empty
@@ -51,7 +51,7 @@ fn invite_without_address() {
 #[test]
 fn invite_records_netname() {
     let conf = with_address("alice");
-    conf.tinc(&["-n", "mymesh", "invite", "bob"]).ok();
+    conf.tinc(&["-n", "mymesh", "invite", "bob"]).succeeds();
     let invitation = std::fs::read_dir(conf.base().join("invitations"))
         .unwrap()
         .map(|entry| entry.unwrap().path())

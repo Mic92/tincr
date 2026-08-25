@@ -14,7 +14,7 @@ fn edit(conf: &Conf, editor: &str, target: &str) -> super::Run {
 #[test]
 fn editor_exit_status_propagates() {
     let conf = Conf::init("node1");
-    edit(&conf, "true", "alice").ok();
+    edit(&conf, "true", "alice").succeeds();
     let stderr = edit(&conf, "false", "alice").fails_with("exited");
     assert!(stderr.contains("false"), "{stderr}");
 }
@@ -27,12 +27,12 @@ fn editor_invocation_via_shell() {
     let conf = Conf::init("node1");
     let host = conf.host("alice");
     let host = host.to_str().unwrap();
-    assert_eq!(edit(&conf, "echo", "alice").ok().trim_end(), host);
+    assert_eq!(edit(&conf, "echo", "alice").succeeds().trim_end(), host);
     assert_eq!(
-        edit(&conf, "echo extraarg", "alice").ok().trim_end(),
+        edit(&conf, "echo extraarg", "alice").succeeds().trim_end(),
         format!("extraarg {host}")
     );
-    let stdout = edit(&conf, "echo", "$HOME").ok();
+    let stdout = edit(&conf, "echo", "$HOME").succeeds();
     assert!(
         stdout.contains("$HOME") && !stdout.contains("/tmp/WRONG"),
         "{stdout}"

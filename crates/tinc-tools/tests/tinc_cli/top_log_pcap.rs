@@ -34,7 +34,7 @@ fn log_prints_pushed_records() {
         ctl.close();
         ctl.expect_eof();
     });
-    assert_eq!(conf.tinc(&["log"]).ok(), "Hello\nWorld\n");
+    assert_eq!(conf.tinc(&["log"]).succeeds(), "Hello\nWorld\n");
     daemon.finish();
 }
 
@@ -45,7 +45,7 @@ fn log_level_forwarded() {
         ctl.expect("18 15 5 0");
         ctl.close();
     });
-    assert_eq!(conf.tinc(&["log", "5"]).ok(), "");
+    assert_eq!(conf.tinc(&["log", "5"]).succeeds(), "");
     daemon.finish();
 }
 
