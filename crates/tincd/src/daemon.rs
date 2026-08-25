@@ -28,6 +28,7 @@ use crate::seen::SeenRequests;
 use crate::subnet_tree::SubnetTree;
 use crate::{icmp, mac_lease, route_mac};
 
+mod autoconnect;
 mod connect;
 mod dp;
 mod dump;
@@ -42,6 +43,7 @@ mod purge;
 mod settings;
 mod setup;
 mod tx_control;
+mod udp_info;
 
 pub(crate) use dp::DataPlane;
 pub use settings::{DaemonSettings, ForwardingMode, RoutingMode};
