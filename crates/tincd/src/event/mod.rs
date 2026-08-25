@@ -28,8 +28,7 @@ pub(crate) use timer::{TimerId, Timers};
 #[cfg(unix)]
 pub(crate) use sig::SelfPipe;
 
-/// Maximum events processed per `turn()`. Ports `MAX_EVENTS_PER_LOOP`
-/// from `net.h:31`. The C comment doesn't explain it; it's just the
-/// `epoll_wait` `maxevents` cap. `Vec::with_capacity` in
+/// Maximum events processed per `turn()`: the `epoll_wait`
+/// `maxevents` cap. `Vec::with_capacity` in
 /// `EventLoop::new` sets the same knob.
 pub(crate) const MAX_EVENTS_PER_TURN: usize = 32;

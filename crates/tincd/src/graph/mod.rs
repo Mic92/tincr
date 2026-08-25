@@ -25,8 +25,7 @@ pub struct NodeId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EdgeId(pub u32);
 
-/// `OPTION_INDIRECT` from `connection.h`. The one option bit BFS reads.
-/// Sourced from [`crate::dispatch::ConnOptions::INDIRECT`] so the bit
+/// The one option bit BFS reads. Sourced from [`crate::dispatch::ConnOptions::INDIRECT`] so the bit
 /// value lives in exactly one place.
 pub const OPTION_INDIRECT: u32 = crate::dispatch::ConnOptions::INDIRECT.bits();
 
@@ -40,7 +39,7 @@ pub const STICKY_THRESHOLD_PCT: i32 = 133;
 ///
 /// `sticky_wdist[n]` is `Some(w)` iff the BFS discovered an equal-hop
 /// path to `n` whose first hop is `prev[n].nexthop`, with cumulative
-/// weight `w`. That is the ONLY safe stickiness: the old nexthop
+/// weight `w`. That is the only safe stickiness: the old nexthop
 /// provably still reaches `n` at the same hop count in the current
 /// graph. Checking merely "old nexthop is still a neighbour" is not
 /// enough — the far-side edge may be gone, and pinning it would loop.
@@ -413,7 +412,7 @@ impl Graph {
             .map(|i| from_edges[i])
     }
 
-    /// `n->status.reachable = r`. Daemon calls after diffing SSSP results.
+    /// Daemon calls after diffing SSSP results.
     ///
     /// # Panics
     /// If `n` is a freed slot. The daemon walks `sssp` results indexed
@@ -464,9 +463,8 @@ impl Graph {
     /// `to_name`). We
     /// have a flat slab; this yields slot order (insertion-then-recycle).
     ///
-    /// **Order divergence is intentional**: `tincctl.c` reads dump rows
-    /// into an unordered set and the CLI sorts client-side before
-    /// display. The wire format is one edge per line, no inter-row
+    /// Order differs from C tinc's per-node walk on purpose: the CLI
+    /// sorts client-side before display. The wire format is one edge per line, no inter-row
     /// dependency. Slab order is one pass over `Vec<Option<Edge>>`,
     /// no per-node indirection.
     ///
@@ -521,7 +519,7 @@ impl Graph {
     /// [`STICKY_THRESHOLD_PCT`] % of the freshly-computed best, keep
     /// the previous `nexthop`/`weighted_distance` instead of
     /// switching. Pure local damping — absorbs weight jitter without
-    /// any re-gossip. Does NOT override hop-count or indirect→direct
+    /// any re-gossip. Does not override hop-count or indirect→direct
     /// changes (those are topology, not metric noise).
     ///
     /// `prev` is the last `sssp` result (slot-indexed, same shape).
@@ -544,11 +542,11 @@ impl Graph {
         // and never reads dead slots.
         let n_nodes = self.nodes.len();
         let mut route: Vec<Option<Route>> = vec![None; n_nodes];
-        // Per-node: cheapest equal-hop wdist via the PREVIOUS nexthop,
+        // Per-node: cheapest equal-hop wdist via the previous nexthop,
         // if the BFS encounters one. Consumed by `sticky_post_pass`.
         let mut sticky_wdist: Vec<Option<i32>> = vec![None; n_nodes];
 
-        // `myself`'s entry. C lines 138-145.
+        // `myself`'s entry.
         route[myself.0 as usize] = Some(Route {
             indirect: false,
             distance: 0,
@@ -588,19 +586,20 @@ impl Graph {
                 let indirect = n_indirect || (e.options & OPTION_INDIRECT) != 0;
 
                 let cand_hops = n_distance + 1;
-                // Peer-supplied weight: saturate so MAX hops can't wrap negative and win the tie-break.
+                // Peer-supplied weight: saturate so a chain of i32::MAX
+                // hops can't wrap negative and win the tie-break.
                 let cand_wdist = n_wdist.saturating_add(e.weight);
                 let cand_nexthop = if n_nexthop == myself { e.to } else { n_nexthop };
 
                 // Stickiness bookkeeping: record the cheapest wdist of
                 // any candidate that (a) arrives via this node's
-                // PREVIOUS nexthop and (b) is at the same hop count as
+                // previous nexthop and (b) is at the same hop count as
                 // whatever the BFS ultimately picks. (b) is enforced
-                // by only recording when first-visit OR same-hop
+                // by only recording when first-visit or same-hop
                 // revisit — BFS never lowers `distance` after first
-                // visit, and the indirect→direct upgrade (which CAN
+                // visit, and the indirect→direct upgrade (which can
                 // raise it) doesn't touch nexthop so stickiness is
-                // moot there. Recorded BEFORE the skip so the
+                // moot there. Recorded before the skip so the
                 // "heavier equal-hop alternative" case (the whole
                 // point) isn't lost.
                 if Some(cand_nexthop) == prev_nh(e.to) {
@@ -613,10 +612,9 @@ impl Graph {
                     }
                 }
 
-                // The revisit condition. C lines 180-184.
                 if let Some(prev) = &route[e.to.0 as usize] {
-                    // visited. Skip if (already direct OR new indirect)
-                    // AND (different hop OR not lighter).
+                    // Visited. Skip if (already direct or new indirect)
+                    // and (different hop or not lighter).
                     let directness_unchanged = !prev.indirect || indirect;
                     let not_lighter =
                         prev.distance != cand_hops || prev.weighted_distance <= cand_wdist;
@@ -626,7 +624,7 @@ impl Graph {
                 }
 
                 // nexthop and weighted_distance update only if first
-                // visit OR (same hop, lighter weight). The
+                // visit or (same hop, lighter weight). The
                 // indirect→direct upgrade case *doesn't* update nexthop
                 // — it keeps the old one. But it *does* update
                 // distance, prevedge, via, options. Yes, this means
@@ -1100,7 +1098,7 @@ mod tests {
     fn sticky_switches_when_clearly_better() {
         // The connect-outlier case: r1 mis-measured at 197, true 15
         // on r2. 207 > 25×1.33 → must switch. Proves sssp-sticky
-        // alone does NOT fix the SYN-retransmit bug (control variant).
+        // alone does not fix the SYN-retransmit bug (control variant).
         let (g0, [src, r1, r2, dst]) = diamond(197, 200);
         let prev = g0.sssp(src);
         assert_eq!(prev[dst.0 as usize].unwrap().nexthop, r1);
@@ -1117,7 +1115,7 @@ mod tests {
     #[test]
     fn sticky_ignored_when_old_nexthop_gone() {
         // Old nexthop r1 loses its meta-conn (src↔r1 edge deleted).
-        // Stickiness must NOT pin a dead first hop.
+        // Stickiness must not pin a dead first hop.
         let (g0, [src, r1, r2, dst]) = diamond(15, 16);
         let prev = g0.sssp(src);
         assert_eq!(prev[dst.0 as usize].unwrap().nexthop, r1);
@@ -1186,10 +1184,9 @@ mod tests {
 // host-up/host-down script, subnet-up/down, SPTPS reset, MTU probe
 // timer reset.
 //
-// All of those touch daemon state outside the graph (`process.c`
-// script spawn, per-node SPTPS sessions, timer wheel). Same pattern
-// as `tinc_sptps::Output`: return a `Vec<Transition>`, daemon match-
-// arms grow as later chunks land.
+// All of those touch daemon state outside the graph (script spawn,
+// per-node SPTPS sessions, timer wheel). Same pattern as
+// `tinc_sptps::Output`: return a `Vec<Transition>` for the daemon.
 //
 // The one side-effect that *does* belong here: writing the new
 // `reachable` bit back into the `Graph`. The next `sssp` reads it
@@ -1257,7 +1254,7 @@ pub(crate) fn diff_reachability(
             continue;
         }
 
-        // Write-back BEFORE emitting — `mst()` in `run_graph` reads
+        // Write-back before emitting — `mst()` in `run_graph` reads
         // this.
         graph.set_reachable(n, visited);
 
@@ -1357,7 +1354,7 @@ mod glue_tests {
     #[test]
     fn myself_excluded() {
         // Even if myself's reachable bit somehow started false, no
-        // transition is emitted and the bit is NOT written back
+        // transition is emitted and the bit is not written back
         // (`continue`s before the diff).
         let (mut g, [a, ..]) = chain();
         g.set_reachable(a, false);
@@ -1386,7 +1383,7 @@ mod glue_tests {
 
     #[test]
     fn cascade() {
-        // Chain a-b-c-d, cut b-c. c AND d both go unreachable in
+        // Chain a-b-c-d, cut b-c. c and d both go unreachable in
         // one `run_graph` call. Tests that the diff walk emits
         // multiple transitions, not just the first.
         let (mut g, [a, b, c, d]) = chain();

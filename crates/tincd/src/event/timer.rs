@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 ///
 /// In C the caller owns the `timeout_t` struct (it's a static or a
 /// field). Here the `Timers` owns the slot; the caller holds an id.
-/// `TimerId` is a slab index, NOT the `BTreeMap` key — the map key
+/// `TimerId` is a slab index, not the `BTreeMap` key — the map key
 /// changes on every re-arm, the id doesn't.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct TimerId(usize);
@@ -76,7 +76,7 @@ impl<W: Copy> Timers<W> {
     /// per-re-arm. Separating them makes the dynamic timers
     /// (`RetryOutgoing(OutgoingId)`) cheap to pre-create.
     ///
-    /// Returns a stable handle. Unlike `IoId` this is NOT an epoll token
+    /// Returns a stable handle. Unlike `IoId` this is not an epoll token
     /// — timers don't go through the poll fd.
     pub(crate) fn add(&mut self, what: W) -> TimerId {
         let slot = Some(Slot { what, at: None });
@@ -137,9 +137,9 @@ impl<W: Copy> Timers<W> {
     /// until the next one (`None` = empty) for the poll timeout.
     ///
     /// Unlike C `event.c` we don't fire callbacks inline (the daemon
-    /// owns `&mut Timers` AND `&mut everything_else`); the daemon
+    /// owns `&mut Timers` and `&mut everything_else`); the daemon
     /// matches on `out`. Consequence: C's implicit "cb didn't re-arm
-    /// → auto-delete" is NOT ported — a fired timer stays disarmed
+    /// → auto-delete" is not ported — a fired timer stays disarmed
     /// but allocated until the daemon's match arm calls `set` again.
     ///
     /// `out` is borrowed so the caller can reuse one `Vec` across
@@ -168,7 +168,7 @@ impl<W: Copy> Timers<W> {
             let idx = self.by_deadline.remove(&key).expect("just peeked");
             // Invariant: anything in `by_deadline` has a live slot.
             let slot = self.slots[idx].as_mut().expect("armed slot is live");
-            // Disarm; auto-del NOT ported (see doc).
+            // Disarm; auto-del not ported (see doc).
             slot.at = None;
             out.push(slot.what);
         }
@@ -188,7 +188,7 @@ impl<W: Copy> Timers<W> {
     }
 
     /// Current cached `now`. Exposed because the daemon's ping-interval
-    /// check wants the SAME now the timer comparisons used, not a fresh
+    /// check wants the same now the timer comparisons used, not a fresh
     /// `Instant::now()` per check.
     #[must_use]
     pub(crate) const fn now(&self) -> Instant {
@@ -246,7 +246,7 @@ mod tests {
         // Immediately: not yet expired (5ms in the future from `t.now`
         // which was set in `Timers::new`). tick() refreshes now; might
         // already be 5ms later on a slow CI box, so don't assert
-        // out.is_empty() here. Instead: sleep past, then it MUST fire.
+        // out.is_empty() here. Instead: sleep past, then it must fire.
         sleep(Duration::from_millis(10));
         let next = t.tick(&mut out);
         assert_eq!(out, vec![What::Ping]);
@@ -254,7 +254,7 @@ mod tests {
     }
 
     /// `set()` on an already-armed timer unlinks the old entry first.
-    /// Re-arming to a later deadline must NOT
+    /// Re-arming to a later deadline must not
     /// leave a ghost entry firing at the old time.
     #[test]
     fn rearm_removes_old_deadline() {
@@ -267,7 +267,7 @@ mod tests {
         sleep(Duration::from_millis(5));
         let mut out = Vec::new();
         let next = t.tick(&mut out);
-        // Old 1ms deadline must NOT fire. Only the 3600s one is
+        // Old 1ms deadline must not fire. Only the 3600s one is
         // armed, so tick returns Some(almost-an-hour).
         assert!(out.is_empty(), "ghost entry fired: {out:?}");
         let next = next.expect("3600s timer is armed");
@@ -386,7 +386,7 @@ mod tests {
         t.tick(&mut out);
         assert_eq!(out, vec![What::Ping]);
 
-        // Slot is disarmed: `at` is None, NOT in the map.
+        // Slot is disarmed: `at` is None, not in the map.
         assert!(t.is_idle());
         assert!(t.slots[ping.0].as_ref().unwrap().at.is_none());
 

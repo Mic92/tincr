@@ -17,7 +17,7 @@ use crate::tunnel::TunnelState;
 
 use super::net;
 
-/// Data-plane state. The per-packet hot loop reads and writes ONLY
+/// Data-plane state. The per-packet hot loop reads and writes only
 /// this struct + `last_routes` (an `Arc` snapshot, read-only) +
 /// `myself: NodeId` (Copy) + `listeners` (the UDP socket fd table).
 ///
@@ -26,7 +26,7 @@ use super::net;
 /// the same way it built the inline fields before.
 pub(crate) struct DataPlane {
     /// Data-plane half. Separate from `nodes`/`NodeState` because
-    /// the lifecycles differ — `TunnelState` exists for ANY
+    /// the lifecycles differ — `TunnelState` exists for any
     /// reachable node (we send UDP to nodes we have no TCP
     /// connection to, forwarding the handshake via nexthop's conn).
     ///
@@ -40,7 +40,7 @@ pub(crate) struct DataPlane {
     pub tunnels: IntHashMap<NodeId, TunnelState>,
 
     /// `choose_udp_address` cycle counter. 2-of-3 calls explore an
-    /// edge address; 1-of-3 sticks with the reflexive. NOT random —
+    /// edge address; 1-of-3 sticks with the reflexive. Not random —
     /// a strict cycle. One global counter, not per-node.
     pub choose_udp_x: u8,
 
@@ -129,7 +129,7 @@ pub(crate) struct DataPlane {
     /// `tso_split` output scratch.
     /// `DrainResult::Super` means the device put a ≤64KB IP super-
     /// segment in `device_arena`; `tso_split` writes N × ~1500B
-    /// eth frames into THIS buffer (the input slice can't overlap
+    /// eth frames into this buffer (the input slice can't overlap
     /// the output — same arena would alias). Same `mem::take` dance:
     /// `forward_packet` borrows `&mut self`, the slot borrow conflicts.
     ///

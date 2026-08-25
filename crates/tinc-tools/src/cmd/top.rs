@@ -34,7 +34,7 @@
 //!
 //! Rates are `current.wrapping_sub(previous) / interval`. When the daemon
 //! restarts and its counters reset, the wrap produces a huge spike for one
-//! tick, then self-corrects. Intentional: the spike IS the restart signal;
+//! tick, then self-corrects. Intentional: the spike is the restart signal;
 //! saturating would hide it (and matches what C tinc shows).
 //!
 //! ## First-tick rates are ~zero
@@ -74,7 +74,7 @@ pub struct NodeStats {
     pub out_packets: u64,
     pub out_bytes: u64,
 
-    /// Per-second rates (delta over `interval`). Only valid AFTER
+    /// Per-second rates (delta over `interval`). Only valid after
     /// `Stats::update`; the `Default` impl gives 0.0.
     pub in_packets_rate: f32,
     pub in_bytes_rate: f32,

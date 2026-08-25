@@ -20,7 +20,7 @@ impl Daemon {
         data: &mut [u8],
         from: Option<NodeId>,
     ) -> bool {
-        // pcap is FIRST — a tap, sees everything (incl. kernel-mode
+        // pcap is first — a tap, sees everything (incl. kernel-mode
         // forward, runt frames, ARP). The cheap-gate is the field
         // load; `send_pcap` walks conns only when armed (debugging).
         let mut nw = false;
@@ -30,7 +30,7 @@ impl Daemon {
 
         // Kernel-mode shortcut — peer traffic straight to TUN, OS
         // forwarding table decides. Packets from our device still
-        // route (we're the originator). BEFORE the length check
+        // route (we're the originator). before the length check
         // (device.write rejects short).
         if self.settings.forwarding_mode == ForwardingMode::Kernel && from.is_some() {
             self.send_packet_myself(data);
@@ -48,7 +48,7 @@ impl Daemon {
             RoutingMode::Router => {}
         }
 
-        // ARP intercept. ROUTER-ONLY (Switch treats ARP as opaque
+        // ARP intercept. ROUTER-only (Switch treats ARP as opaque
         // eth, returned above). `handle_arp` does its own subnet
         // lookup so handle it before `route()` (which would return
         // `Unsupported{"arp"}`).
@@ -62,7 +62,7 @@ impl Daemon {
         // ingress (`wgengine/netstack/netstack.go:847-858`). ROUTER-
         // mode + device-read only — `from.is_some()` means a peer
         // sent us a DNS query, which is either misconfig (their
-        // resolved is pointed at OUR magic IP) or weird; let it hit
+        // resolved is pointed at our magic IP) or weird; let it hit
         // route() and Forward/Unreachable normally. The `is_some()`
         // gate is the cheap path: feature off = one branch.
         if from.is_none() && self.dns.is_some() && self.try_dns_intercept(data) {
@@ -217,7 +217,7 @@ impl Daemon {
             nw |= self.send_subnet(cid, Request::AddSubnet, &myname, &subnet);
         }
 
-        // Arm only when learn() says table was empty AND no slot
+        // Arm only when learn() says table was empty and no slot
         // (defensive).
         if arm_timer && self.age_subnets_timer.is_none() {
             let tid = self.timers.add(TimerWhat::AgeSubnets);
@@ -381,7 +381,7 @@ impl Daemon {
         // FMODE_OFF — operator says "I am an endpoint, not a
         // relay". Gate is `source != myself && owner !=
         // myself`: `from.is_some()` is the first; this match
-        // arm (NOT the `to == self.myself` arm above) is the
+        // arm (not the `to == self.myself` arm above) is the
         // second. v4 → NET_ANO, v6 → ADMIN; MAC (Switch) →
         // silent drop. Gap audit `bcc5c3e3`: parsed in
         // `parse_settings`, never read — the security knob
@@ -413,7 +413,7 @@ impl Daemon {
             return false;
         }
 
-        // clamp_mss BEFORE send, AFTER routing. last_routes
+        // clamp_mss before send, after routing. last_routes
         // is current for any Forward target (route() only
         // returns Forward for reachable owners).
         let route = self.route_of(to_nid);
@@ -426,7 +426,7 @@ impl Daemon {
             }
         });
 
-        // Next hop IS the sender — bounce loop (stale graph
+        // Next hop is the sender — bounce loop (stale graph
         // data, DEL_EDGE arrived but run_graph hasn't
         // recomputed via).
         if Some(via_nid) == from {
@@ -497,7 +497,7 @@ impl Daemon {
                             from,
                         );
                     }
-                    // RFC 791 §2.3: routers MUST fragment.
+                    // RFC 791 §2.3: routers must fragment.
                     // Rare path (modern OS sets DF on TCP)
                     // but UDP without DF through narrow-
                     // MTU relay needs this.
@@ -541,7 +541,7 @@ impl Daemon {
         }
 
         // `source != myself` gate: don't decrement on
-        // TUN-origin (we ARE the first hop).
+        // TUN-origin (we are the first hop).
         if self.settings.decrement_ttl && from.is_some() {
             match route_decide::decrement_ttl(data) {
                 TtlResult::Decremented => {}
@@ -618,7 +618,7 @@ impl Daemon {
             let Some(reply) = crate::dns::answer(dns, &cfg, &self.subnets, &self.name) else {
                 // Malformed past header recovery (truncated ID, or
                 // QR bit set = reflection attempt). Drop silently.
-                // NOT route() — it'd Forward{to:myself} (the magic IP
+                // not route() — it'd Forward{to:myself} (the magic IP
                 // is on the TUN), and the kernel would ICMP port-
                 // unreachable, leaking that something's there.
                 self.dns = Some(cfg);

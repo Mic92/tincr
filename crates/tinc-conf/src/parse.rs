@@ -422,7 +422,7 @@ impl Config {
 
 // read_server_config
 //
-// Command-line `-o Key=Value` overrides are NOT merged here; when the
+// Command-line `-o Key=Value` overrides are not merged here; when the
 // caller has any, it merges them into the `Config` before calling.
 //
 // ## conf.d handling
@@ -450,10 +450,10 @@ impl Config {
 ///
 /// Reads `<confbase>/tinc.conf`, then every `<confbase>/conf.d/*.conf`
 /// (sorted by name), merging into a fresh [`Config`]. The cmdline
-/// merge (`-o Port=655`) is NOT done here — caller owns that list and
+/// merge (`-o Port=655`) is not done here — caller owns that list and
 /// can `cfg.merge(it)` separately. fsck doesn't have one.
 ///
-/// `read_host_config` is intentionally NOT a function. It's two lines:
+/// `read_host_config` is intentionally not a function. It's two lines:
 /// `cfg.merge(parse_file(confbase.join("hosts").join(name))?)`. Adding
 /// a wrapper would obscure that the host file is just another file.
 ///
@@ -474,7 +474,7 @@ pub fn read_server_config(confbase: impl AsRef<Path>) -> Result<Config, ReadErro
     // with the path, so the error message says which file.
     cfg.merge(parse_file(confbase.join("tinc.conf"))?);
 
-    // (3) conf.d/. ANY failure to open the dir (ENOENT, EACCES,
+    // (3) conf.d/. Any failure to open the dir (ENOENT, EACCES,
     // ENOTDIR) is a silent skip: if conf.d is a regular file or
     // unreadable, the daemon starts anyway with just tinc.conf.
     // Tightening this would refuse configs that have worked for
@@ -912,7 +912,7 @@ more garbage
         // Three values total. Order: tinc.conf:2 (bob), then conf.d
         // files at line 1 each. Per the 4-tuple, line-before-file:
         // both conf.d entries are line 1, so file name tiebreaks →
-        // 10-one before 20-two. THEN tinc.conf line 2 (higher line).
+        // 10-one before 20-two. Then tinc.conf line 2 (higher line).
         //
         // The compare is line-then-file, not file-then-line, so
         // conf.d/*.conf:1 sorts before tinc.conf:2. Surprising but
@@ -970,7 +970,7 @@ more garbage
         assert!(matches!(err, ReadError::Parse(_)));
     }
 
-    /// **The 40719189 regression test.** conf.d/ exists AND has a
+    /// **The 40719189 regression test.** conf.d/ exists and has a
     /// file, and it must be read. C tinc HEAD (commit 40719189) fails
     /// this case; we implement the long-stable behavior instead.
     ///

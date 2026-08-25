@@ -120,7 +120,7 @@ const CTL_VERSION: u8 = 0;
 /// fallback) is skipped during parse but not stored.
 ///
 /// `cookie` is the bearer token: 32 random bytes, hex-encoded. The
-/// pidfile is mode 0600, so being able to read the cookie IS the
+/// pidfile is mode 0600, so being able to read the cookie is the
 /// authorization.
 #[derive(Debug)]
 pub struct Pidfile {
@@ -350,7 +350,7 @@ impl<S: Read + Write> CtlSocket<S> {
     }
 
     /// Send with one int argument. `REQ_SET_DEBUG`, `REQ_PCAP`
-    /// (snaplen). NOT `REQ_LOG`: that's two ints, see `send_int2`.
+    /// (snaplen). Not `REQ_LOG`: that's two ints, see `send_int2`.
     ///
     /// # Errors
     /// Same as `send`.
@@ -358,7 +358,7 @@ impl<S: Read + Write> CtlSocket<S> {
         writeln!(self.writer, "{CONTROL} {} {arg}", req as u8).map_err(CtlError::Io)
     }
 
-    /// Send with two int arguments. The ONLY consumer is `REQ_LOG`:
+    /// Send with two int arguments. The only consumer is `REQ_LOG`:
     /// `level` then `use_color` (a 0/1 boolean printed as int).
     ///
     /// `i32` × 2 keeps the wire shape symmetric with `send_int`.

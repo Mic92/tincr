@@ -29,7 +29,7 @@
 //!
 //! `Paths::confdir_always()` synthesizes `CONFDIR/tinc` even when
 //! `-c` was given. `tinc -c /foo network` thus reads `/etc/tinc`,
-//! not `/foo/..`. Correct: `-c` names ONE confbase, not a directory
+//! not `/foo/..`. Correct: `-c` names one confbase, not a directory
 //! of confbases. The list is "all networks the system knows about,"
 //! orthogonal to which one this invocation is configured for.
 //!
@@ -77,7 +77,7 @@ pub(crate) fn list(confdir: &Path, out: &mut impl Write) -> Result<usize, CmdErr
         let ent = ent.map_err(io_err(confdir))?;
         let name = ent.file_name();
 
-        // STARTS-WITH `.`, not equals. Skips `.`, `..`, AND `.git`,
+        // STARTS-WITH `.`, not equals. Skips `.`, `..`, and `.git`,
         // `.hidden`, etc. (people version-control confdir).
         //
         // `OsStr` doesn't have `starts_with` for chars. `as_encoded_
@@ -370,7 +370,7 @@ mod tests {
             msg.contains("no -n") || msg.contains("default"),
             "msg: {msg}"
         );
-        // NOT the generic `-n NAME` advice.
+        // Not the generic `-n NAME` advice.
         assert!(!msg.contains("-n NAME"), "msg: {msg}");
     }
 }

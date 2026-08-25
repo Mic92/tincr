@@ -32,8 +32,6 @@ impl fmt::Display for Finding {
                 }
             }
             F::NoName => {
-                // Upstream prints this twice (once in `read_node_name`,
-                // once in `fsck()`). We don't.
                 write!(f, "tinc cannot run without a valid Name.")
             }
             F::ConfigReadFailed(e) => {
@@ -89,9 +87,7 @@ impl fmt::Display for Finding {
                 }
             }
             F::UnknownScript { path } => {
-                // Upstream uses `static bool explained` to print the
-                // explanation once. We always print it — two lines,
-                // and >1 unknown script is rare.
+                // Explanation printed every time; >1 unknown script is rare.
                 write!(
                     f,
                     "Unknown script {} found. The only scripts in the configuration directory executed by tinc are: tinc-up, tinc-down, host-up, host-down, subnet-up, subnet-down.",
@@ -99,9 +95,6 @@ impl fmt::Display for Finding {
                 )
             }
             F::ScriptNotExecutable { path } => {
-                // Upstream prints the strerror; for EACCES that's
-                // "Permission denied" which is implied by "cannot
-                // execute". Dropped for terseness.
                 write!(f, "cannot read and execute {}", path.display())
             }
             F::ScriptAccessError { path, err } => {

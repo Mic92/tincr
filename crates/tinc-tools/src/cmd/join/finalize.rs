@@ -44,7 +44,7 @@ impl OpenFiles {
         let tinc_conf_path = paths.tinc_conf();
         let mut f = create_nofollow(&tinc_conf_path)?;
         created.push(tinc_conf_path.clone());
-        // FIRST line of tinc.conf. Everything else is appended below.
+        // First line of tinc.conf. Everything else is appended below.
         writeln!(f, "Name = {name}").map_err(io_err(&tinc_conf_path))?;
 
         let host_file_path = paths.host_file(name);
@@ -97,7 +97,7 @@ const CHUNK2_DROP_KEYS: &[&str] = &[
 /// Preconditions the caller must check (`cmd_join` does these before
 /// the SPTPS loop):
 /// - `paths.confbase` is writable (or creatable)
-/// - `paths.tinc_conf()` does NOT already exist
+/// - `paths.tinc_conf()` does not already exist
 ///
 /// We re-check the second one because TOCTOU between `cmd_join`'s
 /// check and this call is possible (the SPTPS handshake takes
@@ -359,7 +359,7 @@ fn write_host_chunks<'a>(
         // Inner loop: lines until next `Name = X` or EOF.
         for line in lines.by_ref() {
             // Exact match — the separator. (Regular `#` comments are
-            // NOT skipped here, unlike chunk 1. The host file is
+            // not skipped here, unlike chunk 1. The host file is
             // verbatim.)
             if line == crate::cmd::invite::SEPARATOR {
                 continue;

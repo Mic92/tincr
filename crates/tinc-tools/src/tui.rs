@@ -5,7 +5,7 @@
 //! | curses call | What it does | Here |
 //! |---|---|---|
 //! | `initscr()` + `endwin()` | Alt screen + raw mode + restore | [`RawMode`] RAII |
-//! | `timeout(ms)` + `getch()` | Read 1 byte OR timeout | [`getch_timeout`] |
+//! | `timeout(ms)` + `getch()` | Read 1 byte or timeout | [`getch_timeout`] |
 //! | `mvprintw(r, c, ...)` | Positioned printf | [`goto`] then `write!` |
 //! | `attrset(A_BOLD)` | Bold on | [`BOLD`] |
 //! | `attrset(A_DIM)` | Dim on | [`DIM`] |
@@ -87,7 +87,7 @@ pub(crate) struct Winsize {
 ///
 /// `nix::ioctl_read_bad!` generates an `unsafe fn` because ioctl
 /// is variadic at the C level — `nix` can't prove the third arg
-/// type matches the request. The macro IS the safe-usage pattern;
+/// type matches the request. The macro is the safe-usage pattern;
 /// the `unsafe` is the FFI calling convention, not the logic.
 #[allow(unsafe_code)]
 #[must_use]
@@ -175,7 +175,7 @@ impl RawMode {
             return Err(io::Error::other("stdin is not a terminal"));
         }
 
-        // Snapshot BEFORE mutation.
+        // Snapshot before mutation.
         let original = termios::tcgetattr(fd)?;
 
         // Mutate
@@ -194,7 +194,7 @@ impl RawMode {
         // TCSANOW: apply immediately, nothing to drain yet.
         termios::tcsetattr(fd, SetArg::TCSANOW, &raw)?;
 
-        // Alt screen + cursor AFTER tcsetattr: if that had failed
+        // Alt screen + cursor after tcsetattr: if that had failed
         // we'd return with nothing to undo. `print!` per struct doc.
         print!("{ALT_SCREEN_ENTER}{CURSOR_HIDE}");
         io::stdout().flush()?;
@@ -283,7 +283,7 @@ pub(crate) fn getch_timeout(ms: u16) -> io::Result<Option<u8>> {
         Ok(0) | Err(nix::errno::Errno::EINTR) => Ok(None),
 
         Ok(_) => {
-            // `unistd::read` on the raw fd, NOT `Stdin::read`:
+            // `unistd::read` on the raw fd, not `Stdin::read`:
             // std's BufReader may hold stale bytes left by
             // `with_cooked`'s `read_line`. Raw fd bypasses that.
             let mut c = [0u8; 1];

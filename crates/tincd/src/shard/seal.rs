@@ -8,7 +8,7 @@
 //!
 //! Wire-identical to the slow path's `seal_data_into` →
 //! `send_sptps_data_relay` → `ship_tx_batch` chain because:
-//!   - `SptpsCipher::seal_into` IS what `Sptps::seal_with_seqno`
+//!   - `SptpsCipher::seal_into` is what `Sptps::seal_with_seqno`
 //!     calls internally; we just inline the prefix/seqno header writes
 //!   - same `TxBatch::can_coalesce`/`stage`/`take` calls, same
 //!     `(dst, sock, relay, origlen)` tuple, same egress trait
@@ -48,7 +48,7 @@ pub(crate) type SealErr = (NodeId, u16);
 /// path uses (`dp.tx_scratch`), so no new alloc.
 ///
 /// # Errors
-/// `EMSGSIZE` from `send_batch` — PMTU shrank under us. The batch IS
+/// `EMSGSIZE` from `send_batch` — PMTU shrank under us. The batch is
 /// reset (`ship` always resets on take). EMSGSIZE may have happened
 /// mid-super: frames before it shipped fine, frames after it never
 /// sealed. Same loss profile as `ship_tx_batch`; inner-TCP retransmits.
@@ -86,7 +86,7 @@ pub(crate) fn seal_super(
         cipher.seal_into(u64::from(seqno), PKT_NORMAL, body, tx_scratch, 16);
         // tx_scratch.len() == 16 + 1 + body_len + 16 == body_len + 33
 
-        // Ship-on-full BEFORE stage. `can_coalesce` returns true for
+        // Ship-on-full before stage. `can_coalesce` returns true for
         // empty, so first iteration always falls through to stage.
         // `target.sock`: daemon picks the listener's egress; the
         // sock recorded in `batch` must match the egress passed to

@@ -32,7 +32,7 @@
 //! umask 077, tinc-up ends up 0755 instead of 0700; the security-
 //! relevant file (the key) is unaffected.
 //!
-//! ## Idempotency: NO
+//! ## Idempotency: no
 //!
 //! `tinc init` on an existing confbase fails (`tinc.conf already
 //! exists`). Re-init would overwrite the private key. No rollback on
@@ -107,7 +107,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
 
     // Generate Ed25519 keypair
     // Private → PEM (daemon reads it); public → config *line* in
-    // `hosts/NAME` (NOT a PEM — *peers* read it via the config parser).
+    // `hosts/NAME` (not a PEM — *peers* read it via the config parser).
     eprintln!("Generating Ed25519 key pair:");
     let sk = keypair::generate();
     eprintln!("Done.");
@@ -117,7 +117,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     write_private_key(&paths.ed25519_private(), &sk, OpenKind::CreateExcl)?;
 
     // Public: config line in `hosts/NAME`. The b64 is tinc's LSB-first
-    // variant — `b64::encode`, NOT standard base64. Standard b64 here
+    // variant — `b64::encode`, not standard base64. Standard b64 here
     // would fail to round-trip on the peer side and the key would be
     // rejected. Highest-stakes line in the file.
     //
@@ -259,7 +259,7 @@ mod tests {
         assert!(paths.cache_dir().is_dir());
     }
 
-    /// Re-init on an existing confbase fails. The private key is NOT
+    /// Re-init on an existing confbase fails. The private key is not
     /// touched. This is the footgun guard.
     #[test]
     fn reinit_fails() {

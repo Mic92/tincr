@@ -62,7 +62,7 @@ pub(crate) struct NodeViewEntry {
     /// Shard can't read `ConnId` (control owns conns), but it doesn't need
     /// to — the hot path only asks "is there one."
     pub has_direct_conn: bool,
-    /// `graph.node(nid).reachable`. NOT redundant with `routes[nid].is_some()`:
+    /// `graph.node(nid).reachable`. Not redundant with `routes[nid].is_some()`:
     /// the route exists for `myself` too (`distance: 0`), and the relay-recv
     /// gate (`rx.rs:468`) wants "is the *destination* up", which for
     /// `myself` is trivially yes. Carrying it explicitly avoids the
@@ -183,7 +183,7 @@ impl NodeView {
             .edge_addr
     }
 
-    /// Daemon-side builder. Called from `run_graph_and_log` AFTER the
+    /// Daemon-side builder. Called from `run_graph_and_log` after the
     /// transition loop (so `reachable` reflects the *post*-BFS state) and
     /// from `on_ack` / `terminate` (when `nodes.insert`/`conn = None`
     /// flips `has_direct_conn`).
@@ -293,7 +293,7 @@ mod tests {
         // Only `b` is a direct neighbor. `conn: Some` would need a
         // real `ConnId` (slotmap key) — the daemon constructs those
         // via `conns.insert`. For the snapshot, all that matters is
-        // `is_some()`. Cheat: `NodeState::edge_addr` IS what we read,
+        // `is_some()`. Cheat: `NodeState::edge_addr` is what we read,
         // and `conn` we test as `None` (transitive) — the
         // `has_direct_conn: true` case is covered in the daemon's
         // integration tests where a real ConnId exists.

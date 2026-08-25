@@ -9,7 +9,7 @@
 //! navigation than code. Contrast with `cmd::init` or `cmd::join` —
 //! those have actual substance.
 //!
-//! ## What's NOT here despite being a one-shot
+//! ## What's not here despite being a one-shot
 //!
 //! `dump invitations`: not a daemon RPC at all — pure filesystem
 //! readdir. Belongs in `cmd::dump`.
@@ -157,7 +157,7 @@ pub fn debug(paths: &Paths, level: i32) -> Result<i32, CmdError> {
 /// Connect failure. `BadInput("Could not disconnect")` if daemon
 /// returns nonzero (node not found, or disconnect failed).
 pub fn disconnect(paths: &Paths, name: &str) -> Result<(), CmdError> {
-    // Validate FIRST — don't waste a socket on a bad name.
+    // Validate first — don't waste a socket on a bad name.
     if !check_id(name) {
         return Err(CmdError::BadInput("Invalid name for node.".into()));
     }
@@ -264,15 +264,15 @@ mod tests {
         let mut ctl = CtlSocket::handshake(ours, &cookie).unwrap();
         ctl.send_int(CtlRequest::SetDebug, 5).unwrap();
         let prev = ctl.recv_ack(CtlRequest::SetDebug).unwrap();
-        // Previous level. NOT an error code. `debug()` would NOT
+        // Previous level. Not an error code. `debug()` would not
         // map this to an error.
         assert_eq!(prev, 2);
 
         daemon.join().unwrap();
     }
 
-    /// `disconnect` with bad name fails BEFORE connect. We test the
-    /// public `disconnect()` here because the validation IS the
+    /// `disconnect` with bad name fails before connect. We test the
+    /// public `disconnect()` here because the validation is the
     /// function — no socket needed for the failure path.
     #[test]
     fn disconnect_bad_name_preflight() {

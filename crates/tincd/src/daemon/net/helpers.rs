@@ -66,7 +66,7 @@ pub(super) fn is_udp_unreachable_errno(e: &std::io::Error) -> bool {
 /// Handle "destination unreachable" on UDP send: clear cached
 /// `udp_addr` so `choose_udp_address` picks a different candidate.
 /// Rate-limits the warn log to once per [`UDP_UNREACHABLE_WARN_INTERVAL`]
-/// per peer. Does NOT tear down SPTPS or pmtu — this is a routing event.
+/// per peer. Does not tear down SPTPS or pmtu — this is a routing event.
 pub(super) fn handle_udp_unreachable(
     tunnels: &mut IntHashMap<NodeId, TunnelState>,
     tunnel_handles: &IntHashMap<NodeId, Arc<TunnelHandles>>,

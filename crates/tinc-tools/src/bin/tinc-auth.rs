@@ -168,7 +168,7 @@ fn check_socket_activation() -> Option<usize> {
 
 struct Args {
     input: PathsInput,
-    /// The socket nginx connects to. NOT tincd's control socket,
+    /// The socket nginx connects to. Not tincd's control socket,
     /// which is derived from `--pidfile` like the `tinc` CLI does.
     listen_socket: Option<PathBuf>,
     idp_listen: Option<SocketAddr>,

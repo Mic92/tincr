@@ -18,7 +18,7 @@ const ICMP6_SIZE: usize = 8;
 const ETH_P_IPV6: u16 = 0x86DD;
 const ETH_P_8021Q: u16 = 0x8100;
 
-// ICMPv4 (RFC 792, RFC 1122). `ipv4.h:35-63`.
+// ICMPv4 (RFC 792, RFC 1122).
 pub(crate) const ICMP_DEST_UNREACH: u8 = 3;
 pub(crate) const ICMP_NET_UNKNOWN: u8 = 6;
 /// Code 9 (admin prohibited). Used for `directonly` and `FMODE_OFF`:
@@ -208,7 +208,7 @@ pub(crate) fn route_ipv6<T>(
 pub(crate) enum TtlResult {
     /// : TTL>1 decremented (or unknown ethertype).
     Decremented,
-    /// : TTL≤1 AND already ICMP-time-exceeded.
+    /// : TTL≤1 and already ICMP-time-exceeded.
     /// Silent drop (storm guard).
     DropSilent,
     /// : TTL≤1, not already time-exceeded. Daemon bounces.
@@ -245,7 +245,7 @@ pub(crate) fn decrement_ttl(data: &mut [u8]) -> TtlResult {
             // :343-349. TTL at [ethlen+8]. C bug (since 2012): the
             // storm-guard reads proto at [ethlen+11] (ip_sum low byte;
             // should be +9) and ICMP type at [ethlen+32] (wrong too).
-            // The check almost never matches. Ported AS-IS; `.get()`
+            // The check almost never matches. Ported AS-is; `.get()`
             // for the +32 read (checklength only guarantees +20).
             if data[ethlen + 8] <= 1 {
                 if data[ethlen + 11] != IPPROTO_ICMP
@@ -620,7 +620,7 @@ mod tests {
 
         assert_eq!(r, RouteResult::NeighborSolicit);
 
-        // Too short for icmp6 hdr → divert does NOT fire, falls
+        // Too short for icmp6 hdr → divert does not fire, falls
         // through to subnet lookup. Proves length-guard ordering.
         let p = &p[..ETHER_SIZE + IP6_SIZE];
         let r = route_ipv6(p, &t, always);

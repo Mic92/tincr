@@ -81,7 +81,7 @@ impl Tarpit {
     }
 
     /// Returns `true` if this connection should be pitted; the caller
-    /// hands the fd to `pit()` and does NOT register the connection.
+    /// hands the fd to `pit()` and does not register the connection.
     ///
     /// Mutates self even on `false` — the buckets always update.
     ///
@@ -112,7 +112,7 @@ impl Tarpit {
             }
         }
 
-        // Update prev AFTER the same-host check. First connection from
+        // Update prev after the same-host check. First connection from
         // a new host doesn't tick the same-host bucket (it's
         // "different from prev"); the SECOND connection does.
         self.prev_addr = Some(addr);
@@ -143,7 +143,7 @@ impl Tarpit {
     /// Shove the fd into the pit ring. Evict-on-insert: if the slot is
     /// occupied, drop the old fd (closes it).
     ///
-    /// The fd MUST NOT be registered with the event loop. We're
+    /// The fd must not be registered with the event loop. We're
     /// silent-treatment-ing the peer: their `connect` succeeded (the
     /// kernel did the 3-way handshake before `accept` returned),
     /// reads block, writes succeed until the kernel buffer fills.
@@ -210,7 +210,7 @@ mod tests {
     }
 
     /// The same-host early-return. When same-host triggers, `check`
-    /// returns BEFORE updating `prev_addr` or the all-host bucket.
+    /// returns before updating `prev_addr` or the all-host bucket.
     ///
     /// Observable effect: once same-host triggers, the attacker's burst
     /// stops ticking all-host. The all-host bucket can leak. A legit
@@ -220,13 +220,13 @@ mod tests {
     /// - conn 1 (A): prev=None, no match. sh=0. ah=1.
     /// - conn 2..9 (A): prev=A, match. sh ticks: 1,2,...,8. ah: 2..9.
     /// - conn 10 (A): sh=9. ah=10, >=10, PITTED by all-host. ah clamped
-    ///   at 10. `prev_addr` was updated (`prev_sa` update is BEFORE the
-    ///   all-host check, AFTER the same-host check).
+    ///   at 10. `prev_addr` was updated (`prev_sa` update is before the
+    ///   all-host check, after the same-host check).
     /// - conn 11 (A): sh=10. >10? no. ah: 10-0+1=11, >=10, PITTED by
     ///   all-host. Clamped at 10 again.
-    /// - conn 12 (A): sh=11. >10? YES. PITTED BY SAME-HOST. Early
+    /// - conn 12 (A): sh=11. >10? YES. PITTED BY same-HOST. Early
     ///   return: ah stays at 10, `prev_addr` stays A.
-    /// - conn 13 (A): sh=12. Same-host pit again. ah STILL 10.
+    /// - conn 13 (A): sh=12. Same-host pit again. ah still 10.
     /// - conn 14 (B) at t=2: prev=A, no match. sh stays 12. ah: 10-2=8,
     ///   refill to 9. PASSES.
     ///
@@ -258,8 +258,8 @@ mod tests {
         assert!(tp.check(attacker, t0), "conn 11: all-host pit again");
         assert_eq!(tp.buckets(), (10, 10));
 
-        // conn 12: sh=11. >10? YES. SAME-HOST pit. Early return:
-        // ah NOT touched.
+        // conn 12: sh=11. >10? YES. same-HOST pit. Early return:
+        // ah not touched.
         assert!(tp.check(attacker, t0), "conn 12: SAME-HOST pit");
         assert_eq!(tp.buckets(), (11, 10), "ah frozen — early return");
 

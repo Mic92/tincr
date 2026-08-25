@@ -109,8 +109,7 @@ fn check_script_exec(path: &Path, force: bool, findings: &mut Vec<Finding>) {
         let meta = match fs::metadata(path) {
             Ok(m) => m,
             Err(e) => {
-                // Upstream's caller ignores this return value, so
-                // it's effectively just a print. Same here.
+                // Effectively just a print; doesn't fail fsck.
                 findings.push(Finding::ScriptAccessError {
                     path: path.to_owned(),
                     err: e.to_string(),

@@ -17,7 +17,7 @@ impl Daemon {
     /// and pulls `GSO_NONE` ACKs that pile up behind a TSO super.
     ///
     /// One `device.drain(&mut arena, cap)` returns N frames in arena
-    /// slots. The default `drain()` IS `read()`-in-a-loop — byte-for-
+    /// slots. The default `drain()` is `read()`-in-a-loop — byte-for-
     /// byte the same syscall sequence on bsd/fd backends. The Linux
     /// `vnet_hdr` device override returns `Super` for TSO segments.
     // `Super` arm is the TSO-split path. Factoring it out
@@ -35,8 +35,8 @@ impl Daemon {
         );
         let mut nw = false;
         // The default `Device::drain` loops INTERNALLY until EAGAIN
-        // or cap; one call suffices. The vnet_hdr drain reads ONE
-        // skb (`Super` or `Frames{1}`) per call — looping HERE pulls
+        // or cap; one call suffices. The vnet_hdr drain reads one
+        // skb (`Super` or `Frames{1}`) per call — looping here pulls
         // the GSO_NONE ACKs queued behind a TSO super. Bounded so a
         // saturating sender doesn't starve UDP/timers (`0f120b11`).
         //
@@ -102,7 +102,7 @@ impl Daemon {
                     // into `tx_scratch` per-frame, batch COPIES from
                     // there (one ~1.5KB memcpy vs 43× fewer syscalls).
                     //
-                    // Arm on a burst: count>1 OR iters>1. An idle ping
+                    // Arm on a burst: count>1 or iters>1. An idle ping
                     // (count==1 && iters==1) falls through to immediate
                     // send. Once armed, stays armed across iterations
                     // so vnet's Frames{1}×N then Super coalesce into
@@ -341,7 +341,7 @@ impl Daemon {
                 // kernel's UDP sndbuf doesn't partial-accept a
                 // GSO send (`udp_send_skb` is all-or-nothing).
             } else if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) {
-                // PMTU shrank under us; frames in THIS batch are
+                // PMTU shrank under us; frames in this batch are
                 // lost (kernel rejected the whole sendmsg) — same
                 // outcome as the per-frame path, just `count×`.
                 super::helpers::handle_udp_emsgsize(tunnels, graph, relay_nid, origlen);

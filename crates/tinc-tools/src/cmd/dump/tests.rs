@@ -72,7 +72,7 @@ fn kind_err() {
 }
 
 /// `needs_daemon`: only invitations is false. The binary checks
-/// this BEFORE connect — `dump invitations` works daemon-down.
+/// this before connect — `dump invitations` works daemon-down.
 #[test]
 fn kind_needs_daemon() {
     assert!(Kind::Nodes.needs_daemon());
@@ -174,7 +174,7 @@ fn node_parse_short() {
 /// - status zero-padded to 4 hex digits (contrast conn dump's unpadded)
 #[test]
 fn node_fmt_plain_contract() {
-    // Full string match — this IS the spec.
+    // Full string match — this is the spec.
     let r = NodeRow::parse(NODE_BODY).unwrap();
     assert_eq!(
         r.fmt_plain(),
@@ -238,11 +238,11 @@ fn node_dot_color_cascade() {
         ("alice 0 1.1.1.1 port 1 0 0 0 0 0 12 bob bob 1 1500 1400 1500 0 -1 0 0 0 0",     "orange", false),
         // 4. Reachable, direct (via==name), no validkey (status 0x10: bit 4 only) → black.
         ("alice 0 1.1.1.1 port 1 0 0 0 0 0 10 bob alice 1 0 0 0 0 -1 0 0 0 0",            "black",  false),
-        // 5. Reachable, direct, validkey (0x12), minmtu=1400 > 0 → green (UDP ok). NOT filled.
+        // 5. Reachable, direct, validkey (0x12), minmtu=1400 > 0 → green (UDP ok). Not filled.
         ("alice 0 1.1.1.1 port 1 0 0 0 0 0 12 bob alice 1 1500 1400 1500 0 -1 0 0 0 0",   "green",  false),
         // 6. Reachable, direct, validkey, minmtu=0 → black (TCP only, PMTU not converged).
         ("alice 0 1.1.1.1 port 1 0 0 0 0 0 12 bob alice 1 0 0 1500 0 -1 0 0 0 0",         "black",  false),
-        // 7. CASCADE ORDER: host=MYSELF but status=0 (not reachable). MYSELF check is FIRST
+        // 7. CASCADE ORDER: host=MYSELF but status=0 (not reachable). MYSELF check is first
         //    → green, not red. Unlikely in practice but the cascade admits it.
         ("me 0 MYSELF port 655 0 0 0 0 0 0 - me 0 0 0 0 0 -1 0 0 0 0",                    "green",  true),
     ];
@@ -471,7 +471,7 @@ fn mk_filename(tag: u8) -> String {
     s
 }
 
-/// Empty results: dir present-but-empty AND dir missing both
+/// Empty results: dir present-but-empty and dir missing both
 /// yield `Ok(vec![])`. The dir is created by the first `tinc
 /// invite`, not by `init`, so a never-invited node has no
 /// `invitations/`.
@@ -534,13 +534,13 @@ fn inv_skipped() {
         //          (filename,              content,           why)
         // wrong-length filename: the 24-char filter
         // `ed25519_key.priv` is in the same dir (per-invitation key);
-        // must NOT show up as an invitation.
+        // must not show up as an invitation.
         ("ed25519_key.priv",     "key blob",         "key file (wrong length)"),
         // 23 chars, valid b64.
         (&short,                 "Name = nope\n",    "23-char name"),
         // 25 chars — the exact-24 filter rejects it.
         (&long,                  "Name = nope\n",    "25-char name"),
-        // 24 chars, NOT valid b64
+        // 24 chars, not valid b64
         (&bad_b64,               "Name = bob\n",     "bad b64 (`*` not in alphabet)"),
         // valid filename, bad content
         // First line not a `Name` key at all.

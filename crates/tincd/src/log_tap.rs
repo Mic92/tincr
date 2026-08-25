@@ -18,7 +18,7 @@
 //! ## Perf
 //!
 //! - **No log conns** (steady state): one Relaxed atomic load per
-//!   `log::*!` call, BEFORE format. The `log::log!` macro calls
+//!   `log::*!` call, before format. The `log::log!` macro calls
 //!   `enabled()` first and only evaluates `format_args!` if that
 //!   returns true — the format is the expensive part.
 //! - **Log conn exists**: per log line, one `to_string()` format
@@ -40,7 +40,7 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-/// Gate. `enabled()` checks this BEFORE formatting.
+/// Gate. `enabled()` checks this before formatting.
 static LOG_TAP_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// The tinc-style debug level (0..=5+). Separate from
@@ -61,7 +61,7 @@ const fn level_to_filter(d: i32) -> log::LevelFilter {
 }
 
 /// Seed the C-style debug level. main.rs calls this once after
-/// `init()`. Does NOT touch `log::max_level()`: `init()` already
+/// `init()`. Does not touch `log::max_level()`: `init()` already
 /// set it from `inner.filter()`, which reflects `RUST_LOG`. Calling
 /// `set_debug_level` here would clobber that (`RUST_LOG=debug` + no
 /// `-d` flag → we'd reset `max_level` back to Info).
@@ -119,7 +119,7 @@ impl log::Log for TapLogger {
     fn enabled(&self, m: &log::Metadata<'_>) -> bool {
         // Short-circuit: if neither stderr nor the tap wants it,
         // skip the format entirely. The format is the expensive part.
-        // The `log::log!` macro calls this BEFORE evaluating
+        // The `log::log!` macro calls this before evaluating
         // `format_args!`; returning `false` here means the args
         // (which may include `Display` impls) never execute.
         self.inner.enabled(m) || LOG_TAP_ACTIVE.load(Ordering::Relaxed)
@@ -158,7 +158,7 @@ impl log::Log for TapLogger {
 ///
 /// `max_level` is computed from the inner logger's filter. With no
 /// log conns, that's the floor: `log::log!` checks `max_level()`
-/// FIRST (before `enabled()`), so a `trace!` with stderr at `Info`
+/// first (before `enabled()`), so a `trace!` with stderr at `Info`
 /// is zero-cost — the macro doesn't even reach our `enabled()`.
 ///
 /// When a log conn arrives, `set_active(true)` ALSO bumps
@@ -188,7 +188,7 @@ pub fn drain() -> Vec<(log::Level, String)> {
 /// disconnects.
 ///
 /// `on=true` also raises `max_level` to `Trace` so the `log!` macro
-/// reaches our `enabled()`. `on=false` does NOT lower it back: we
+/// reaches our `enabled()`. `on=false` does not lower it back: we
 /// don't know what the inner filter wanted, and the cost is one
 /// `enabled()` call per log macro (which short-circuits on the
 /// atomic). The next `set_active(true)/false` cycle costs nothing

@@ -149,14 +149,14 @@ fn host_file_deleted() {
 
     let r = run(&paths, false).unwrap();
     assert!(!r.ok);
-    // ConfigReadFailed, NOT NoPublicKey. Phase 1 failed.
+    // ConfigReadFailed, not NoPublicKey. Phase 1 failed.
     assert_eq!(count(&r, |f| matches!(f, Finding::ConfigReadFailed(_))), 1);
     assert_eq!(count(&r, |f| matches!(f, Finding::NoPublicKey { .. })), 0);
 }
 
 /// `hosts/NAME` exists but has no pubkey (just `Subnet =` etc.)
-/// → `NoPublicKey`, fail. THIS is the path where the keypair
-/// check runs and finds nothing. NOT fixable without `--force`.
+/// → `NoPublicKey`, fail. This is the path where the keypair
+/// check runs and finds nothing. Not fixable without `--force`.
 #[test]
 fn no_public_key() {
     let cd = ConfDir::bare();
@@ -171,7 +171,7 @@ fn no_public_key() {
     let r = run(&paths, false).unwrap();
     assert!(!r.ok);
     assert_eq!(count(&r, |f| matches!(f, Finding::NoPublicKey { .. })), 1);
-    // File IS readable (we just wrote it); no early-warning.
+    // File is readable (we just wrote it); no early-warning.
     assert_eq!(
         count(&r, |f| matches!(f, Finding::HostFileUnreadable { .. })),
         0
@@ -282,7 +282,7 @@ fn no_public_key_force_fixes() {
     assert!(r2.ok, "second fsck should be clean: {:?}", r2.findings);
 }
 
-/// `Ed25519PublicKey` with bad b64 → `NoPublicKey` (NOT
+/// `Ed25519PublicKey` with bad b64 → `NoPublicKey` (not
 /// `KeyMismatch`). The `b64::decode` failure means "no usable
 /// pubkey"; we don't fall through to PEM. Upstream returns NULL
 /// on bad b64, and
@@ -498,7 +498,7 @@ fn all_known_scripts() {
 }
 
 /// `hosts/alice-up` (per-host script) is checked for executability
-/// but NOT for prefix validity. Any `*-up` in `hosts/` is a node
+/// but not for prefix validity. Any `*-up` in `hosts/` is a node
 /// script.
 #[cfg(unix)]
 #[test]
@@ -536,7 +536,7 @@ fn non_scripts_ignored() {
     // A junk file with no -up/-down suffix.
     fs::write(confbase.join("README"), "hello\n").unwrap();
     // A file ending in `-up` but not as a suffix-match: nope,
-    // `-up` IS a suffix match. Let's do something that almost
+    // `-up` is a suffix match. Let's do something that almost
     // matches: `-ups`.
     fs::write(confbase.join("backup-ups"), "data\n").unwrap();
 
@@ -676,7 +676,7 @@ fn duplicate_non_multiple() {
     assert_eq!(where_, "tinc.conf");
 }
 
-/// Two `Subnet =` lines → NO duplicate warning. `Subnet` is
+/// Two `Subnet =` lines → no duplicate warning. `Subnet` is
 /// `VAR_MULTIPLE`. Multi-homed nodes have many subnets.
 #[test]
 fn duplicate_multiple_ok() {
@@ -697,7 +697,7 @@ fn duplicate_multiple_ok() {
     assert_eq!(count(&r, |f| matches!(f, Finding::DuplicateVar { .. })), 0);
 }
 
-/// Unknown var → silent skip. NOT a warning. The TODO(feature)
+/// Unknown var → silent skip. Not a warning. The TODO(feature)
 /// case.
 #[test]
 fn unknown_var_silent() {
@@ -720,7 +720,7 @@ fn unknown_var_silent() {
     assert!(r.findings.is_empty(), "{:?}", r.findings);
 }
 
-/// Variable check runs on ALL hosts files, not just `hosts/MYNAME`.
+/// Variable check runs on all hosts files, not just `hosts/MYNAME`.
 #[test]
 fn checks_all_hosts() {
     let cd = ConfDir::bare();

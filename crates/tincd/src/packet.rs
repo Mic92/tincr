@@ -1,10 +1,6 @@
-//! Packet header structs + RFC 1071 checksum (`route.c` prep).
-//!
-//! `route.c` SYNTHESIZES packets — ICMP unreachable, ARP replies,
-//! NDP NA — with hand-computed checksums. `etherparse` is read-only.
-//! These are the `#[repr(C, packed)]` structs and the `inet_checksum`
-//! function the builders will use (chunk 7, when `vpn_packet_t`
-//! lands).
+//! Packet header structs + RFC 1071 checksum for the packets routing
+//! synthesizes (ICMP unreachable, ARP replies, NDP NA). `etherparse`
+//! is read-only, so these are hand-rolled `#[repr(C, packed)]` structs.
 //!
 //! ## `#[repr(C, packed)]` + zerocopy
 //!
@@ -12,27 +8,23 @@
 //! assert!(size_of == N)` checks prove it). Serialization is just
 //! a transmute; `zerocopy::{FromBytes, IntoBytes}` derive that.
 //!
-//! Packed → fields may be unaligned → Rust REFUSES `&self.field`.
+//! Packed → fields may be unaligned → no `&self.field`.
 //! Read with `let x = self.field;` (copy to local). The accessors
 //! below all copy out; setters write back.
 //!
 //! ## Endianness
 //!
-//! Fields are stored RAW — network-order bytes as they sit on the
+//! Fields are stored raw — network-order bytes as they sit on the
 //! wire. Getters do `u16::from_be(raw)`. Setters take host-order
 //! and write `to_be()`. We push the `htons`/`ntohs` into accessors
 //! so the caller never sees a wrong-endian number.
 //!
 //! ## No bitfields
 //!
-//! `struct ip` has `ip_hl:4` and `ip_v:4`. C bitfield order is
-//! implementation-defined, which is why `ipv4.h:67-72` flips the
-//! definition under `__BYTE_ORDER == __LITTLE_ENDIAN`. The C is
-//! FIGHTING the compiler. The wire byte is always `(v<<4)|hl`. We
-//! store one `u8` and shift/mask. No fight, no `bitfield` crate.
+//! IPv4's version/IHL nibbles are one `u8` with shift/mask; the wire
+//! byte is always `(v<<4)|hl`.
 
-// Field names mirror the C structs (`ip_ttl`, `icmp6_cksum`, ...) so
-// cross-referencing `route.c` line-by-line stays mechanical.
+// Field names follow the BSD/netinet headers (`ip_ttl`, `icmp6_cksum`).
 #![allow(clippy::struct_field_names)]
 #![forbid(unsafe_code)]
 
@@ -48,16 +40,16 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 /// previous return value as `prevsum` to fold in more data (e.g.
 /// ICMP header, then chain the payload).
 ///
-/// **Endianness**: `memcpy(&word, data, 2)` is a NATIVE-
-/// endian load. We use `from_ne_bytes`. RFC 1071 §2(B) proves the
+/// **Endianness**: words are loaded native-
+/// endian (`from_ne_bytes`). RFC 1071 §2(B) proves the
 /// sum is byte-order independent on the wire (the byte-swapped sum
 /// equals the swap of the sum), but the *numeric* `u16` we return
 /// is host-order. Doesn't matter: it's always written back into a
 /// raw checksum field via `memcpy`/`to_ne_bytes`, so the bytes on
 /// the wire are correct on either endianness.
 ///
-/// **Odd tail**: `checksum += *data` puts the last byte in the LOW
-/// half of the u32, NOT high. Easy to get wrong if you "fix" it to
+/// **Odd tail**: the last byte goes in the low half of the u32, not
+/// high. Easy to get wrong if you "fix" it to
 /// look like a big-endian high-byte pad.
 #[must_use]
 pub(crate) fn inet_checksum(data: &[u8], prevsum: u16) -> u16 {
@@ -65,7 +57,7 @@ pub(crate) fn inet_checksum(data: &[u8], prevsum: u16) -> u16 {
 
     let (chunks, rem) = data.as_chunks::<2>();
     for pair in chunks {
-        // memcpy(&word, data, 2) — NATIVE-endian, not BE.
+        // Native-endian load, not BE (see fn doc).
         checksum += u32::from(u16::from_ne_bytes(*pair));
     }
     // Tail byte goes in the LOW half. RFC 1071 §4.1.
@@ -86,16 +78,12 @@ pub(crate) fn inet_checksum(data: &[u8], prevsum: u16) -> u16 {
 
 // IPv4 header.
 
-/// `struct ip` (`ipv4.h:74-85`). 20 bytes, no options.
-///
-/// `ip_vhl` is the bitfield byte: `(version << 4) | ihl`. The C
-/// uses bitfields with `__BYTE_ORDER` gymnastics (`ipv4.h
-/// :67-72`); we use a `u8` and getters. Wire byte for normal IPv4
-/// is `0x45` (v=4, ihl=5 words = 20 bytes).
+/// `IPv4` header, 20 bytes, no options. `ip_vhl` = `(version << 4) |
+/// ihl`; `0x45` for a normal header.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub(crate) struct Ipv4Hdr {
-    /// `(ip_v << 4) | ip_hl`. Bitfield in C; one byte here.
+    /// `(ip_v << 4) | ip_hl`.
     pub ip_vhl: u8,
     pub ip_tos: u8,
     /// Total length, network order. Use [`Self::total_len`]/[`Self::set_total_len`].
@@ -104,8 +92,7 @@ pub(crate) struct Ipv4Hdr {
     ip_off: u16,
     pub ip_ttl: u8,
     pub ip_p: u8,
-    /// Checksum, raw. NOT byte-swapped: `inet_checksum` returns
-    /// host-order which `memcpy`'s back as-is.
+    /// Checksum, raw: `inet_checksum` output is stored as-is.
     pub ip_sum: u16,
     /// `struct in_addr ip_src`. Raw bytes, network order.
     pub ip_src: [u8; 4],
@@ -128,12 +115,12 @@ const _: () = assert!(size_of::<Ipv6Pseudo>() == 40);
 
 const _: () = assert!(size_of::<Ipv4Pseudo>() == 12);
 
-/// `IP_OFFMASK` (`ipv4.h:96`). Low 13 bits of `ip_off`.
+/// Low 13 bits of `ip_off`.
 pub(crate) const IP_OFFMASK: u16 = 0x1fff;
-/// `IP_DF` (`ipv4.h:90`). Don't Fragment.
+/// Don't Fragment.
 #[cfg(test)]
 pub(crate) const IP_DF: u16 = 0x4000;
-/// `IP_MF` (`ipv4.h:91`). More Fragments.
+/// More Fragments.
 pub(crate) const IP_MF: u16 = 0x2000;
 
 impl Ipv4Hdr {
@@ -190,15 +177,9 @@ impl Ipv4Hdr {
 
 // ICMP header (short).
 
-/// `struct icmp`, FIRST 8 BYTES ONLY. The full C struct (`ipv4.h
-/// :100-148`) is 28 bytes with a variant tail union. `route.c` only
-/// touches type/code/cksum/nextmtu and uses `icmp_size = 8`. We
-/// model just that.
-///
-/// `icmp.icmp_nextmtu = htons(...)` is `icmp_hun.ih_pmtu.ipm_nextmtu`
-/// — bytes 6-7 of the struct (the
-/// SECOND `u16` of the 4-byte union). Bytes 4-5 are `ipm_void`
-/// (unused, zero).
+/// ICMP header, first 8 bytes only (type/code/cksum + the PMTU arm of
+/// the union: bytes 4-5 unused, 6-7 next-hop MTU). Routing never
+/// builds the longer variants.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub(crate) struct IcmpHdr {
@@ -206,9 +187,9 @@ pub(crate) struct IcmpHdr {
     pub icmp_code: u8,
     /// Raw, like `Ipv4Hdr::ip_sum`. `inet_checksum` output.
     pub icmp_cksum: u16,
-    /// `ipm_void` (`ipv4.h:116`). Always zero in `route.c`.
+    /// Always zero.
     pub icmp_void: u16,
-    /// `ipm_nextmtu` (`ipv4.h:117`). Network order.
+    /// Network order.
     icmp_nextmtu: u16,
 }
 
@@ -221,7 +202,7 @@ impl IcmpHdr {
 
 // IPv6 header.
 
-/// `struct ip6_hdr` (`ipv6.h:42-53`). 40 bytes.
+/// `IPv6` header, 40 bytes.
 ///
 /// `ip6_flow` is `(v<<28)|(tc<<20)|flow`. `htonl(0x60000000)` is
 /// version 6, tc 0, flow 0.
@@ -272,10 +253,8 @@ impl Ipv6Hdr {
 
 // ICMPv6 header.
 
-/// `struct icmp6_hdr` (`ipv6.h:66-75`). 8 bytes.
-///
-/// `icmp6_data32[0]` aliases `icmp6_mtu` (`ipv6.h:89`). `route.c
-/// :281`: `icmp6.icmp6_mtu = htonl(len)` for `ICMP6_PACKET_TOO_BIG`.
+/// `ICMPv6` header, 8 bytes. The 32-bit data word is the MTU for
+/// `ICMP6_PACKET_TOO_BIG`.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub(crate) struct Icmp6Hdr {
@@ -296,7 +275,7 @@ impl Icmp6Hdr {
 
 // ARP.
 
-/// `struct arphdr` (`ethernet.h:75-81`). Fixed 8-byte ARP header.
+/// Fixed 8-byte ARP header.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub(crate) struct ArpHdr {
@@ -310,11 +289,8 @@ pub(crate) struct ArpHdr {
     ar_op: u16,
 }
 
-/// `ARPOP_REQUEST` (`ethernet.h:82`).
 pub(crate) const ARPOP_REQUEST: u16 = 1;
-/// `ARPOP_REPLY` (`ethernet.h:83`).
 pub(crate) const ARPOP_REPLY: u16 = 2;
-/// `ARPHRD_ETHER` (`ethernet.h:40`).
 pub(crate) const ARPHRD_ETHER: u16 = 1;
 
 // `ETH_P_IP`/`ETH_P_IPV6` live in `tinc-device/src/ether.rs` (the
@@ -322,7 +298,7 @@ pub(crate) const ARPHRD_ETHER: u16 = 1;
 // with a pointer back. RFC constants; can't drift.
 /// `ETH_P_IP` — see `tinc-device/src/ether.rs:32`.
 pub(crate) const ETH_P_IP: u16 = 0x0800;
-/// `ETH_P_ARP` (`ethernet.h:48`). NOT in `tinc-device`.
+/// Not exported by `tinc-device`.
 pub(crate) const ETH_P_ARP: u16 = 0x0806;
 
 impl ArpHdr {
@@ -354,10 +330,7 @@ impl ArpHdr {
     }
 }
 
-/// `struct ether_arp` (`ethernet.h:93-99`). 28 bytes: `arphdr` +
-/// sender/target HA(6)/PA(4) for Ethernet/IPv4. The C nests
-/// `struct arphdr ea_hdr` and uses `#define arp_op ea_hdr.ar_op`
-/// to flatten access; we just embed.
+/// Ethernet/`IPv4` ARP, 28 bytes: `ArpHdr` + sender/target HA(6)/PA(4).
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub(crate) struct EtherArp {
@@ -371,7 +344,7 @@ pub(crate) struct EtherArp {
 // Pseudo-headers (checksum only).
 
 /// IPv6 pseudo-header for upper-layer checksum (RFC 2460 §8.1). 40
-/// bytes. NOT a wire header — never transmitted; checksum input
+/// bytes. Not a wire header — never transmitted; checksum input
 /// only. `length` and `next` are `uint32_t`, written with `htonl`.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
@@ -394,8 +367,8 @@ impl Ipv6Pseudo {
 }
 
 /// IPv4 pseudo-header for TCP/UDP checksum (RFC 793 §3.1). 12 bytes.
-/// `route.c`'s MSS clamping uses this (chunk 7). Same shape as the
-/// kernel's `struct tcp_pseudo_hdr`.
+/// Used by MSS clamping. Same shape as the kernel's
+/// `struct tcp_pseudo_hdr`.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub(crate) struct Ipv4Pseudo {
@@ -422,27 +395,24 @@ mod tests {
 
     // Struct sizes — pin layout.
 
-    /// `STATIC_ASSERT(sizeof(struct ip) == 20)` (`ipv4.h:93`).
     /// Already const-asserted at module level; this test exists so
     /// `cargo test packet` shows it in the count.
     #[test]
     fn struct_sizes_match_c_static_asserts() {
-        assert_eq!(size_of::<Ipv4Hdr>(), 20); // ipv4.h:93
+        assert_eq!(size_of::<Ipv4Hdr>(), 20);
         assert_eq!(size_of::<IcmpHdr>(), 8); // icmp_size
-        assert_eq!(size_of::<Ipv6Hdr>(), 40); // ipv6.h:63
-        assert_eq!(size_of::<Icmp6Hdr>(), 8); // ipv6.h:91
-        assert_eq!(size_of::<ArpHdr>(), 8); // ethernet.h:90
-        assert_eq!(size_of::<EtherArp>(), 28); // ethernet.h:107
+        assert_eq!(size_of::<Ipv6Hdr>(), 40);
+        assert_eq!(size_of::<Icmp6Hdr>(), 8);
+        assert_eq!(size_of::<ArpHdr>(), 8);
+        assert_eq!(size_of::<EtherArp>(), 28);
         assert_eq!(size_of::<Ipv6Pseudo>(), 40);
         assert_eq!(size_of::<Ipv4Pseudo>(), 12);
     }
 
     // Bitfield byte ordering.
 
-    /// THE bitfield test. `ipv4.h:67-72` flips `ip_hl`/`ip_v`
-    /// nibble order under `__LITTLE_ENDIAN` because GCC packs
-    /// bitfields LSB-first on LE. The wire byte is ALWAYS
-    /// `(v<<4)|hl`: v=4, hl=5 → `0x45`. Not `0x54`. Ever.
+    /// The wire byte is `(v<<4)|hl`: v=4, hl=5 → `0x45`, never `0x54`
+    /// (C bitfield order on little-endian is the classic trap).
     #[test]
     fn ipv4_ihl_v_packing() {
         let mut h = Ipv4Hdr::default();
@@ -596,7 +566,7 @@ mod tests {
 
     /// Separate test: chain == single. The chained-checksum pattern
     /// (ICMP header, then payload) relies on this property: result
-    /// MUST equal checksumming both at once.
+    /// must equal checksumming both at once.
     #[test]
     fn inet_checksum_is_chainable() {
         let data = decode_hex("0001f203f4f5f6f7");

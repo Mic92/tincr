@@ -42,7 +42,7 @@ impl Daemon {
             conn.srtt_ms = u32::try_from(new).unwrap_or(1).max(1);
         }
 
-        // The advertised weight `g` is what's in the graph for OUR
+        // The advertised weight `g` is what's in the graph for our
         // forward edge to this peer (set by `on_ack` and any prior
         // re-gossip from here). `NodeState.edge_weight` mirrors it.
         let Some(nid) = self.node_ids.get(&conn.name).copied() else {
@@ -63,7 +63,7 @@ impl Daemon {
 
         // Re-gossip floor: 5·PingInterval. Hard cap on flood rate
         // independent of jitter (REPORT.md σ_j=20 row). Skipped for
-        // the FIRST re-gossip (`last_weight_gossip == None`) so the
+        // the first re-gossip (`last_weight_gossip == None`) so the
         // connect-time outlier is corrected at t≈PingInterval, same
         // latency as the one-shot outlier-reject scheme.
         let floor = std::time::Duration::from_secs(5 * pinginterval);

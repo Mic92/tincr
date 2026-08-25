@@ -1,6 +1,6 @@
 //! tincd binary entry point.
 //!
-//! Boot ordering (matches C `tincd.c::main2`):
+//! Boot ordering (same as C tincd, tinc-up needs root):
 //!     detach → mlockall → `setup_network` (binds + tinc-up as root)
 //!     → `ProcessPriority` → `drop_privs` → `main_loop`.
 //!
@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use tinc_conf::{Config, Source, parse_line};
 use tincd::{Daemon, RunOutcome, sandbox, sd_notify};
 
-/// `CONFDIR` from `config.h`; packagers override via `TINC_CONFDIR`.
+/// System config dir; packagers override via `TINC_CONFDIR`.
 /// Duplicated in `tinc-tools/src/names.rs` (the dep arrow goes the
 /// other way).
 const CONFDIR: &str = match option_env!("TINC_CONFDIR") {
@@ -30,7 +30,7 @@ const CONFDIR: &str = match option_env!("TINC_CONFDIR") {
     None => "/etc",
 };
 
-/// `LOCALSTATEDIR` from `config.h`; default for pidfile/logfile.
+/// Default base for pidfile/logfile; override via `TINC_LOCALSTATEDIR`.
 const LOCALSTATEDIR: &str = match option_env!("TINC_LOCALSTATEDIR") {
     Some(d) => d,
     None => "/var",
@@ -47,7 +47,7 @@ const fn debug_level_to_filter(d: u32) -> log::LevelFilter {
     }
 }
 
-#[allow(clippy::struct_excessive_bools)] // mirrors C tincd's flat `do_*` globals
+#[allow(clippy::struct_excessive_bools)] // independent CLI switches
 struct Args {
     confbase: PathBuf,
     pidfile: PathBuf,
@@ -738,7 +738,7 @@ fn main() -> ExitCode {
     // Disable coredumps before any key load (Daemon::setup below).
     harden_process(args.allow_coredump);
 
-    // chdir confbase BEFORE detach: `daemon(3)`'s nochdir=1 carries
+    // chdir confbase before detach: `daemon(3)`'s nochdir=1 carries
     // the cwd across fork, and tinc-up / tinc-down / host-* scripts
     // rely on cwd == confbase to resolve `hosts/$NODE`. The chroot
     // path overrides cwd to "/" in drop_privs, which still resolves
@@ -751,7 +751,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Socket activation BEFORE detach: a forked child has a new PID
+    // Socket activation before detach: a forked child has a new PID
     // so LISTEN_PID would no longer match — we'd lose the inherited
     // fds. So clear `do_detach` here when activated.
     let socket_activation = check_socket_activation(
@@ -779,7 +779,7 @@ fn main() -> ExitCode {
         args.logfile = Some(args.default_logfile.clone());
     }
 
-    // detach BEFORE logger init: avoid fds/threads crossing the fork.
+    // detach before logger init: avoid fds/threads crossing the fork.
     if args.do_detach
         && let Err(e) = detach()
     {
@@ -1029,7 +1029,7 @@ mod tests {
         // that would consume it).
         let a = parse_args(argv(&["-n", "foo", "--pidfile=/tmp/p"])).unwrap();
         assert!(a.default_logfile.ends_with("log/tinc.foo.log"));
-        // parse_args itself does NOT apply the fallback (that would
+        // parse_args itself does not apply the fallback (that would
         // pre-empt the socket-activation foreground decision in
         // main()); logfile stays None until main() decides.
         assert_eq!(a.logfile, None);
@@ -1130,7 +1130,7 @@ mod tests {
     #[test]
     fn loglevel_from_cmdline_o() {
         // No tinc.conf on disk → if this passes, we know -o was
-        // checked BEFORE the file (and the file read short-circuited).
+        // checked before the file (and the file read short-circuited).
         let a = parse_args(argv(&[
             "-o",
             "LogLevel=3",

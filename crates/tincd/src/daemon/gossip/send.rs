@@ -34,7 +34,7 @@ impl Daemon {
         Some(msg.format(nonce))
     }
 
-    /// Correction path: send back what WE know about an edge.
+    /// Correction path: send back what we know about an edge.
     pub(in crate::daemon) fn send_add_edge(&mut self, to: ConnId, eid: EdgeId) -> bool {
         let Some(line) = self.fmt_add_edge(eid, Self::nonce()) else {
             log::warn!(target: "tincd::proto",
@@ -84,7 +84,7 @@ impl Daemon {
     /// output, order irrelevant.
     pub(in crate::daemon) fn send_everything(&mut self, to: ConnId) -> bool {
         if self.settings.tunnelserver {
-            // ONLY myself's subnets, NO edges. Peer's edge to us
+            // only myself's subnets, no edges. Peer's edge to us
             // comes from on_ack's send_add_edge.
             let mut lines: Vec<String> = Vec::new();
             for (subnet, owner) in self.subnets.iter() {

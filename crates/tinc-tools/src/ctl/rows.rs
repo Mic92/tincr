@@ -40,7 +40,7 @@ pub struct StatusBit(pub u32);
 impl StatusBit {
     /// Field 1 (after `unused_active`). Set when we have a working
     /// session key for this node — SPTPS or legacy KEY exchange
-    /// completed. The DOT graph greens when validkey AND `minmtu >
+    /// completed. The DOT graph greens when validkey and `minmtu >
     /// 0`; else black.
     pub const VALIDKEY: Self = Self(1 << 1);
     /// Field 3. Set during the daemon's graph BFS to mark seen nodes;

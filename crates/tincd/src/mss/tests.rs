@@ -172,7 +172,7 @@ fn non_tcp_noop() {
 fn skips_other_option_then_finds_mss() {
     // [opt 8 (timestamp) len=10, ..8 bytes.., NOP, NOP, MSS]
     // Wait — the len check reads packet[start+21] which is the
-    // FIRST option's len byte (10), not the MSS option's (4).
+    // first option's len byte (10), not the MSS option's (4).
     // So this would bail. Upstream bug. Skip; covered separately.
     //
     // Instead test: [NOP, NOP, NOP, NOP, MSS]. NOPs are

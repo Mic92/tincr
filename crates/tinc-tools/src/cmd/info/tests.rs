@@ -108,7 +108,7 @@ fn cascade_row(
 
 /// `Reachability::from_row` cascade table. An if-else-if chain.
 /// ORDER matters: a row satisfying multiple arms picks the
-/// FIRST. Five-for-five on read-the-spec-before-coding: the
+/// first. Five-for-five on read-the-spec-before-coding: the
 /// The MYSELF check must come before the reachable-bit check; this
 /// table pins that ordering.
 #[test]
@@ -132,9 +132,9 @@ fn cascade_table() {
         (cascade_row("1.1.1.1",  rv,                      "alice", 1400,   "alice", -1),   Reachability::DirectUdp { pmtu: 1518, rtt_us: None }),
         // 6. nexthop == name → DirectTcp. minmtu=0 (no UDP), nexthop=alice (meta conn).
         (cascade_row("1.1.1.1",  rv,                      "alice", 0,      "alice", -1),   Reachability::DirectTcp),
-        // 7. else → Forwarded. minmtu=0, nexthop=bob (NOT alice).
+        // 7. else → Forwarded. minmtu=0, nexthop=bob (not alice).
         (cascade_row("1.1.1.1",  rv,                      "alice", 0,      "bob",   -1),   Reachability::Forwarded { nexthop: "bob".into() }),
-        // ORDER tests: row satisfies multiple arms, FIRST wins
+        // ORDER tests: row satisfies multiple arms, first wins
         // MYSELF + unreachable → still Myself. (Daemon should never produce
         // this, but the cascade admits it.)
         (cascade_row("MYSELF",   0,                       "alice", 0,      "-",     -1),   Reachability::Myself),
@@ -198,7 +198,7 @@ fn reachability_display_single_line() {
     );
 }
 
-/// `0` rtt: `udp_ping_rtt == 0` is NOT `-1`, so the RTT line
+/// `0` rtt: `udp_ping_rtt == 0` is not `-1`, so the RTT line
 /// prints. `if(rtt != -1)` not `if(rtt > 0)`. 0us is a valid
 /// (loopback-fast) RTT.
 #[test]
@@ -355,7 +355,7 @@ Edges:       \nSubnets:     \n";
 /// alphabetical, no gaps).
 #[test]
 fn nodeinfo_status_order() {
-    // ALL six bits set.
+    // All six bits set.
     let row = cascade_row(
         "MYSELF",
         StatusBit::VALIDKEY.0

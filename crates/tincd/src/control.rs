@@ -78,9 +78,7 @@ pub(crate) fn generate_cookie() -> String {
 ///
 /// `tinc-tools::Pidfile::read` parses this. The `fscanf` format is
 /// `"%20d %64s %128s port %128s"` — `port` is a literal in the
-/// format string. We match: `host port portnum` is one space-joined
-/// `address` arg in C (`fprintf(f, "%d %s %s\n", pid, cookie,
-/// address)` where `address = "127.0.0.1 port 655"`).
+/// format string, so the address is written as `127.0.0.1 port 655`.
 ///
 /// Mode 0600 via `OpenOptions::mode`. See module doc for why this
 /// is sufficient (umask only removes bits).
@@ -134,7 +132,7 @@ pub(crate) struct ControlSocket {
 
 /// The `EADDRINUSE` distinguishing case for `bind()`. We've already
 /// proven (via the connect-probe) that nothing is listening. If
-/// bind STILL fails with EADDRINUSE after the unlink, something
+/// bind still fails with EADDRINUSE after the unlink, something
 /// raced us — another tincd starting in parallel.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum BindError {
@@ -339,7 +337,7 @@ mod tests {
     /// connect-probe gets ECONNREFUSED, unlink clears it.
     ///
     /// Simulating a crash: bind a raw `UnixListener`, drop it. std
-    /// closes the fd but does NOT unlink the socket file (the kernel
+    /// closes the fd but does not unlink the socket file (the kernel
     /// has no listener, the file is just a path-layer artifact).
     /// `ControlSocket::bind`'s connect-probe sees ECONNREFUSED,
     /// unlinks, re-binds.

@@ -65,7 +65,7 @@ impl Daemon {
                     // dropping local-only updates leaves
                     // LocalDiscovery probing a stale LAN address. An
                     // absent/unspec incoming local (6-token form,
-                    // older peers) is NOT a change.
+                    // older peers) is not a change.
                     let addr_same = a == &edge.addr && p == &edge.port;
                     let local_same = match &edge.local {
                         None => true,
@@ -78,17 +78,17 @@ impl Daemon {
                 return Ok(false); // no forward, no graph()
             }
 
-            // Peer's view of OUR edge is wrong.
+            // Peer's view of our edge is wrong.
             if from_id == self.myself {
                 log::debug!(target: "tincd::proto",
                             "Got ADD_EDGE from {conn_name} for ourself \
                              which does not match existing entry");
-                // Send back what WE know (existing, not wire body).
+                // Send back what we know (existing, not wire body).
                 let nw = self.send_add_edge(from_conn, existing);
                 return Ok(nw);
             }
 
-            // In-place update. NOT del+add: edge_addrs is keyed on
+            // In-place update. not del+add: edge_addrs is keyed on
             // EdgeId; del+add recycles same slot only by
             // LIFO-freelist accident. update_edge makes it explicit.
             log::debug!(target: "tincd::proto",
@@ -130,7 +130,7 @@ impl Daemon {
         Ok(nw)
     }
 
-    /// Missing node/edge is warn-and-drop (NOT `lookup_or_add`).
+    /// Missing node/edge is warn-and-drop (not `lookup_or_add`).
     pub(in crate::daemon) fn on_del_edge(
         &mut self,
         from_conn: ConnId,
@@ -192,7 +192,7 @@ impl Daemon {
 
         // If `to` became unreachable and we still hold a synthesized
         // reverse edge `to → myself` (from on_ack), drop it locally
-        // but do NOT broadcast DEL_EDGE for it. That edge is owned by
+        // but do not broadcast DEL_EDGE for it. That edge is owned by
         // `to`; broadcasting our local SSSP observation on its behalf
         // makes every receiver do the same, cascading (issue #8). If
         // `to` is really dead, its meta-peers send first-party DELs.

@@ -60,7 +60,7 @@ pub(super) fn check_variables(paths: &Paths, findings: &mut Vec<Finding>) {
 /// `hosts/NODE` file. Determines which "wrong file" check applies.
 ///
 /// `where_`: `nodename` or `"tinc.conf"` — what to print in the
-/// duplicate message. NOT a path.
+/// duplicate message. Not a path.
 fn check_conf(cfg: &Config, is_server: bool, where_: &str, findings: &mut Vec<Finding>) {
     // Per-entry pass: obsolete + wrong-file.
     // Index = position in `VARS` (see vars.rs module doc).
@@ -74,7 +74,7 @@ fn check_conf(cfg: &Config, is_server: bool, where_: &str, findings: &mut Vec<Fi
             .iter()
             .position(|v| v.name.eq_ignore_ascii_case(&entry.variable))
         else {
-            // Unknown var: NOT a warning — see vars.rs doc.
+            // Unknown var: not a warning — see vars.rs doc.
             // TODO(feature): warn on unknown vars. Not a port; a
             // feature.
             continue;

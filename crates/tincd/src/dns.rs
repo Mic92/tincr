@@ -47,7 +47,7 @@ pub(crate) struct DnsConfig {
     pub dns_addr6: Option<Ipv6Addr>,
     /// Suffix WITHOUT leading/trailing dot. `tinc.internal` →
     /// answers `alice.tinc.internal.`. ICANN reserved `.internal`
-    /// for private use July 2024 — it will NEVER be delegated.
+    /// for private use July 2024 — it will never be delegated.
     /// `.tinc` alone could theoretically be sold as a gTLD.
     pub suffix: String,
     /// `Alias = <name>` lines from hosts/ files, lowercased alias →
@@ -448,7 +448,7 @@ pub(crate) fn answer(
             }
         }
         // Found the name but no records of the requested type:
-        // that's NOERROR with ANCOUNT=0 (RFC 2308 "NODATA"), NOT
+        // that's NOERROR with ANCOUNT=0 (RFC 2308 "NODATA"), not
         // NXDOMAIN. NXDOMAIN means "the name doesn't exist". A node
         // with only a v4 /32 queried for AAAA is "name exists, no
         // AAAA" — different cache behavior in resolved.
@@ -460,7 +460,7 @@ pub(crate) fn answer(
         // wrong qtype); NODATA otherwise. Close enough.
         if answers.is_empty() {
             // Second walk to distinguish NX from NODATA: did we see
-            // the node at ALL (any subnet, any family)? Compare
+            // the node at all (any subnet, any family)? Compare
             // against `myname` too — we have no subnets of our own
             // until tinc-up runs and a peer ADD_SUBNETs us, but `dig
             // <myname>` should still NODATA not NX.
@@ -563,7 +563,7 @@ fn build_rr(name_wire: &[u8], rtype: u16, rdata: &[u8]) -> Vec<u8> {
 
 /// Header-only or header+question error response.
 ///
-/// The echoed question section MUST include the original QTYPE —
+/// The echoed question section must include the original QTYPE —
 /// dig 9.20 validates `QNAME/QTYPE/QCLASS` of the echoed question
 /// against what it sent and rejects on mismatch ("Question section
 /// mismatch: got x/TYPE0/IN"). Older resolvers tolerated qtype=0.
@@ -708,7 +708,7 @@ pub(crate) fn wrap_v4(
 
 /// IPv6 wrap. UDP checksum is **mandatory** (RFC 8200 §8.1: "Unlike
 /// IPv4, the default behavior when UDP packets are originated by an
-/// IPv6 node is that the UDP checksum is NOT optional").
+/// IPv6 node is that the UDP checksum is not optional").
 #[must_use]
 pub(crate) fn wrap_v6(
     original: &[u8],

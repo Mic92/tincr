@@ -104,7 +104,7 @@ impl Subnet {
     /// | `as_address` | meaning | match |
     /// |---|---|---|
     /// | `true`  | route lookup | `find` is INSIDE `self`: top `self.prefix` bits agree |
-    /// | `false` | exact subnet | `find` IS `self`: prefix equal AND all addr bytes equal |
+    /// | `false` | exact subnet | `find` is `self`: prefix equal and all addr bytes equal |
     ///
     /// MAC subnets ignore `as_address` (no prefix → only exact-match).
     /// Mismatched types (V4 vs V6) never match. Weight is ignored —
@@ -112,11 +112,11 @@ impl Subnet {
     /// typed a `#` suffix).
     ///
     /// The C does this inline with three nested `if`s per type. We
-    /// pull it here because (a) `Subnet` IS the wire-format type,
+    /// pull it here because (a) `Subnet` is the wire-format type,
     /// (b) `tinc-tools` doesn't have access to `Subnet`'s addr bytes
     /// without re-matching, (c) the daemon's own routing-table lookup
-    /// (`subnet.c:lookup_subnet_ipv4`) does the SAME `maskcmp` against
-    /// the SAME prefix — this is the routing decision, factored.
+    /// (`subnet.c:lookup_subnet_ipv4`) does the same `maskcmp` against
+    /// the same prefix — this is the routing decision, factored.
     ///
     /// Example:
     /// ```
@@ -628,7 +628,7 @@ mod tests {
 
     /// Address mode: "which subnet routes 10.0.0.5?". The /24 wins;
     /// the /16 wins too (it's a less-specific match — `info_subnet`
-    /// prints ALL matches, doesn't pick the longest).
+    /// prints all matches, doesn't pick the longest).
     #[test]
     fn matches_address_mode_v4() {
         let host = sn("10.0.0.5"); // /32 default
@@ -636,13 +636,13 @@ mod tests {
         assert!(sn("10.0.0.0/24").matches(&host, true));
         // The /16 contains it.
         assert!(sn("10.0.0.0/16").matches(&host, true));
-        // 10.0.1.0/24 does NOT.
+        // 10.0.1.0/24 does not.
         assert!(!sn("10.0.1.0/24").matches(&host, true));
         // /0 contains everything.
         assert!(sn("0.0.0.0/0").matches(&host, true));
     }
 
-    /// Exact mode: prefix AND addr must match. /24 != /32, so the
+    /// Exact mode: prefix and addr must match. /24 != /32, so the
     /// host doesn't match the /24 even though it's inside.
     #[test]
     fn matches_exact_mode_v4() {
@@ -653,9 +653,9 @@ mod tests {
         assert!(!net.matches(&sn("10.0.0.0/25"), false));
         // Different addr (same prefix) → no.
         assert!(!net.matches(&sn("10.0.1.0/24"), false));
-        // The C uses memcmp on ALL addr bytes, not just the masked
+        // The C uses memcmp on all addr bytes, not just the masked
         // ones. So `10.0.0.1/24` (non-canonical, host bit set)
-        // does NOT match `10.0.0.0/24`. Daemon never sends non-
+        // does not match `10.0.0.0/24`. Daemon never sends non-
         // canonical, but the user could TYPE it (and `str2net`
         // accepts it; only `subnetcheck` rejects, and `info_subnet`
         // doesn't call subnetcheck on the find).

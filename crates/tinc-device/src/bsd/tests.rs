@@ -3,7 +3,7 @@ use super::*;
 // to_af_prefix — the inverse map
 
 /// `0x0800` → `htonl(AF_INET)`. `AF_INET = 2` everywhere
-/// (4.2BSD legacy). Bytes are `[0, 0, 0, 2]` ON ALL
+/// (4.2BSD legacy). Bytes are `[0, 0, 0, 2]` ON all
 /// PLATFORMS — this one we CAN pin literally.
 #[test]
 fn prefix_ipv4_is_af_inet_be() {
@@ -161,7 +161,7 @@ fn tun_write_strips_ether() {
     let mut bsd = fake_bsd(dev, BsdVariant::Tun);
     let n = bsd.write(&mut frame).unwrap();
 
-    // Wrote len-14. NOT the full frame.
+    // Wrote len-14. Not the full frame.
     assert_eq!(n, frame.len() - ETH_HLEN);
 
     drop(bsd); // close write end → drain hits EOF
@@ -251,7 +251,7 @@ fn utun_write_synthesizes_ipv6_prefix() {
     drop(bsd);
     let got = drain(&test_r);
 
-    // The structure: htonl(AF_INET6) for THIS platform.
+    // The structure: htonl(AF_INET6) for this platform.
     let want = (libc::AF_INET6 as u32).to_be_bytes();
     assert_eq!(&got[..4], &want);
     // High three bytes always zero (AF values are small).

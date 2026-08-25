@@ -40,7 +40,7 @@ impl Daemon {
             return false;
         };
         // Snatch the kernel's MAC. parse_arp_req gated data.len()≥42
-        // so [6..12] is safe. Snatch BEFORE the subnet lookup; the
+        // so [6..12] is safe. Snatch before the subnet lookup; the
         // snatch is the only useful side effect even if no subnet
         // owns the target.
         if self.overwrite_mac {
@@ -87,7 +87,7 @@ impl Daemon {
             return;
         };
         // Snatch the kernel's MAC. parse_ndp_solicit gated
-        // data.len()≥78. Snatch BEFORE the subnet lookup; the snatch
+        // data.len()≥78. Snatch before the subnet lookup; the snatch
         // is the only useful side effect even if no subnet owns the
         // target (we still learned the kernel's MAC).
         if self.overwrite_mac {
@@ -132,7 +132,7 @@ impl Daemon {
     /// `ICMP6_TIME_EXCEEDED=3` (bug audit `deef1268`). data.len()≥14
     /// holds: every caller is `post-route()` (`TooShort` gate) or
     /// post-decrement_ttl. For `Unreach { discover_src: true }`: do
-    /// the `local_ip_facing` lookup so traceroute shows OUR hop —
+    /// the `local_ip_facing` lookup so traceroute shows our hop —
     /// `TIME_EXCEEDED` only; plain `DEST_UNREACH` uses orig-dst.
     pub(super) fn emit_icmp(&mut self, data: &[u8], kind: IcmpKind, from: Option<NodeId>) -> bool {
         let now_sec = self.timers.now().duration_since(self.started_at).as_secs();

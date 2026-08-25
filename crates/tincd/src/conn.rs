@@ -35,8 +35,7 @@ impl std::fmt::Write for VecFmt<'_> {
     }
 }
 
-/// `MAXBUFSIZE` (`net.h:45`): `(max(MAXSIZE,2048) + 128)` = 2176
-/// (no-jumbo `MAXSIZE = 1673`). Jumbo would be `9163 + 128 = 9291`.
+/// Read chunk size: max packet (1673, no jumbo) rounded to 2048 + 128.
 pub(crate) const MAXBUFSIZE: usize = 2176;
 
 /// Hard cap on queued outbuf bytes. The periodic sweep also checks
@@ -48,12 +47,12 @@ pub(crate) const OUTBUF_HARD_CAP: usize = 1 << 20;
 
 // LineBuf
 
-/// `buffer_t` (`buffer.c`). `data[offset..]` is live; `data[..offset]`
-/// is consumed-not-yet-compacted.
+/// `data[offset..]` is live; `data[..offset]` is consumed but not yet
+/// compacted.
 #[derive(Default)]
 pub(crate) struct LineBuf {
     data: Vec<u8>,
-    /// `buffer_t.offset`. Index of first unconsumed byte.
+    /// Index of first unconsumed byte.
     offset: usize,
 }
 
@@ -139,11 +138,10 @@ impl LineBuf {
 
 // Connection
 
-/// `connection_t`.
-// `struct_excessive_bools`: `connection_status_t` is a packed
-// bitfield. The bits are independent (a conn is active AND pinged
-// in steady state); a state-enum doesn't fit.
-#[expect(clippy::struct_excessive_bools)] // mirrors C bitfield: independent bits, not a state enum
+/// One meta connection (TCP peer or unix control client).
+// The bools are independent bits (a conn is active and pinged in
+// steady state); a state enum doesn't fit.
+#[expect(clippy::struct_excessive_bools)]
 pub(crate) struct Connection {
     fd: OwnedFd,
     /// Event-loop registration for `fd`. `None` only in the narrow
@@ -157,44 +155,40 @@ pub(crate) struct Connection {
     /// The periodic sweep terminates any conn with `dead == true`;
     /// further appends are dropped.
     pub dead: bool,
-    /// `c->allow_request`. `None` = `ALL` (`protocol.h:42`).
+    /// Next request the peer may send; `None` = any.
     pub allow_request: Option<Request>,
-    /// `c->status.control`.
     pub control: bool,
     /// Set only by `new_control` (unix-socket accept). Gates the
     /// `^cookie` branch in `handle_id` — control is local-only.
     pub is_unix_ctl: bool,
-    /// `c->status.pcap` (bit 10). Set by `REQ_PCAP`; read by
-    /// `send_pcap`.
+    /// Set by `REQ_PCAP`; read by `send_pcap`.
     pub pcap: bool,
-    /// `c->outmaclength` repurposed. Legacy MAC length field reused
-    /// as pcap snaplen — pcap subscribers don't use legacy crypto so
-    /// the field was free. 0 = full packet (`if(c->outmaclength &&
-    /// c->outmaclength < len)`). We use u16: MTU is 1518, snaplen >
-    /// that captures everything anyway.
+    /// pcap snaplen; 0 = full packet. u16: anything above MTU captures
+    /// everything anyway.
     pub pcap_snaplen: u16,
-    /// `c->status.invitation`. When `Some`, SPTPS records dispatch via
+    /// When `Some`, SPTPS records dispatch via
     /// `dispatch_invitation_outputs` (raw bytes, not request lines).
     pub invite: Option<InvitePhase>,
-    /// `c->name`. `"<unknown>"` until `id_h`.
+    /// `"<unknown>"` until `id_h`.
     pub name: String,
-    /// `c->hostname`. Set at accept; never changes.
+    /// Set at accept; never changes.
     pub hostname: String,
-    /// `c->last_ping_time`. Control conns get +1h, refreshed on stream writes.
+    /// Activity stamp for the idle sweep. Control conns get +1h,
+    /// refreshed on stream writes.
     pub last_ping_time: Instant,
-    /// `c->protocol_minor`. `>= 2` means SPTPS; `< 2` is rejected.
+    /// `>= 2` means SPTPS; `< 2` is rejected.
     pub protocol_minor: u8,
-    /// `c->ecdsa`. Peer's public key, loaded by `id_h`.
+    /// Peer's public key, loaded by `id_h`.
     pub ecdsa: Option<[u8; PUBLIC_LEN]>,
-    /// `c->sptps`. Boxed: ~1KB, most conns are control with `None`.
+    /// Boxed: ~1KB, most conns are control with `None`.
     pub sptps: Option<Box<Sptps>>,
-    /// `c->options` (`connection.h:32-36`). Top byte is `PROT_MINOR`.
+    /// Top byte is `PROT_MINOR`.
     pub options: crate::dispatch::ConnOptions,
-    /// `c->estimated_weight`. RTT ms. i32: wire `%d`.
+    /// RTT ms. i32: wire `%d`.
     pub estimated_weight: i32,
     /// Connection start time, set at construct.
     pub start: Instant,
-    /// `c->address` (`connection.h:90`). `None` for unix-socket control.
+    /// `None` for unix-socket control.
     pub address: Option<SocketAddr>,
     /// Past-ACK mark that `broadcast_meta` keys on.
     pub active: bool,
@@ -206,7 +200,7 @@ pub(crate) struct Connection {
     /// the autoconnect snapshot builder so a freshly-activated
     /// shortcut conn isn't reaped before `min_hold`.
     pub activated_at: Option<Instant>,
-    /// `c->status.pinged` (`connection.h:38`, bit 0).
+    /// Meta `PING` in flight.
     pub pinged: bool,
     /// Send-time of the in-flight meta `PING`. `None` once `PONG`
     /// arrives. Separate from `last_ping_time` (that field is
@@ -221,19 +215,15 @@ pub(crate) struct Connection {
     /// Last time this conn re-gossiped its own edge weight. Gates
     /// the 5·PingInterval re-advertise floor.
     pub last_weight_gossip: Option<Instant>,
-    /// `c->status.connecting` (`connection.h:41`, bit 2). EINPROGRESS
-    /// probe runs instead of read/write dispatch when set.
+    /// EINPROGRESS probe runs instead of read/write dispatch when set.
     pub connecting: bool,
-    /// `c->outgoing` (`connection.h:92`).
     pub outgoing: Option<OutgoingId>,
-    /// `c->tcplen`. After `PACKET 17 <len>`, the next record is a
-    /// raw VPN-packet blob. We don't SEND TCP probes but a C peer
-    /// does (found by cross-impl tests).
+    /// After `PACKET 17 <len>`, the next record is a raw VPN-packet
+    /// blob. We never send these but C tinc peers do.
     pub tcplen: u16,
-    /// `c->sptpslen` (`connection.h:88`). After `SPTPS_PACKET 21 <len>`,
-    /// the next `sptpslen` RAW bytes (NOT SPTPS-framed,
-    /// `send_meta_raw`) are an encrypted UDP wireframe. Checked
-    /// FIRST (outer loop); `tcplen` is inside the SPTPS callback.
+    /// After `SPTPS_PACKET 21 <len>`, the next `sptpslen` raw bytes
+    /// (not SPTPS-framed) are an encrypted UDP wireframe. Checked in
+    /// the outer read loop; `tcplen` is inside the SPTPS callback.
     pub sptpslen: u16,
     /// `sptpslen` accumulator. Separate Vec keeps the "inbuf is
     /// plaintext-only" invariant.
@@ -254,21 +244,16 @@ pub(crate) struct Connection {
     /// connection because `load_peer_host_config` runs before
     /// `Sptps::start` and the host config isn't kept around.
     pub sptps_cipher: tinc_sptps::SptpsAead,
-    /// PMTU clamp. MIN of per-host
-    /// `PMTU` and global tinc.conf `PMTU` — both clamp, both `&& mtu
-    /// < n->mtu`. `None` = neither set. Named `cap` not `host_` since
-    /// the value may come from the global config.
+    /// PMTU clamp: min of per-host and global `PMTU`. `None` = neither
+    /// set. Named `cap` not `host_` since it may come from tinc.conf.
     pub pmtu_cap: Option<u16>,
     /// `hosts/NAME` `SPTPSKex`, with the tinc.conf global already
     /// folded in (`load_peer_host_config` applies the fallback). Read
     /// by `id_h`'s `Sptps::start_with`.
     pub sptps_kex: tinc_sptps::SptpsKex,
-    /// `c->status.log` + `c->log_level` (`connection.h:51,112`). When
-    /// `Some`, this conn receives `REQ_LOG` records for messages at or
-    /// above the level. C uses C debug-level ints (`-1..=10`); we map
-    /// to `log::Level` at the `REQ_LOG` arm. `c->status.log_color` is
-    /// not stored: we don't ANSI-format (`env_logger` does, but we
-    /// send the bare `args()` — see `log_tap.rs`).
+    /// When `Some`, this conn receives `REQ_LOG` records for messages at
+    /// or above the level (the wire's debug-level int is mapped at the
+    /// `REQ_LOG` arm). No colour: we send the bare message.
     pub log_level: Option<log::Level>,
     /// Debug level before this conn's `REQ_SET_DEBUG`; restored on close.
     pub prev_debug_level: Option<i32>,
@@ -409,23 +394,22 @@ impl AsFd for Connection {
 }
 
 impl Connection {
-    /// For `socket2::SockRef::from` (`getsockname` in `ack_h:1040-1045`).
+    /// For `socket2::SockRef::from` (`getsockname` in `on_ack`).
     #[must_use]
     pub(crate) const fn owned_fd(&self) -> &OwnedFd {
         &self.fd
     }
 
-    /// `c->status.value`. GCC packs LSB-first; declaration-order
-    /// bool N → bit N: 0=pinged, `1=unused_active`, 2=connecting,
-    /// 9=control.
+    /// `dump connections` status word, bit-compatible with C tinc's
+    /// packed `connection_status_t`: 0=pinged, 1=active, 2=connecting,
+    /// 9=control, 10=pcap, 11=log.
     #[must_use]
     pub(crate) const fn status_value(&self) -> u32 {
         let mut v = 0u32;
         if self.pinged {
             v |= 1 << 0;
         }
-        // Bit 1: C never sets it (`c->edge` is the runtime check).
-        // Exposed so the two-daemon test can poll "past ACK".
+        // Bit 1 is unused in C tinc; tests poll it for "past ACK".
         if self.active {
             v |= 1 << 1;
         }
@@ -435,7 +419,6 @@ impl Connection {
         if self.control {
             v |= 1 << 9;
         }
-        // Bit 11: `status.log` (`connection.h:51`).
         if self.log_level.is_some() {
             v |= 1 << 11;
         }
@@ -491,22 +474,17 @@ impl Connection {
         };
         let chunk = &buf[..n];
 
-        // `if(c->protocol_minor >= 2)`. `sptps.is_some()` is the
-        // same condition (`id_h` sets both together).
         if self.sptps.is_some() {
-            // do-while. Inlined (NOT delegated to
-            // feed_sptps): the same chunk has [SPTPS-framed "21 LEN" |
-            // raw blob], and feed_sptps would eat the whole chunk before
-            // sptpslen could be set. C dispatches INSIDE receive()
-            // (callback → `sptps_tcppacket_h:148` → outer loop sees it);
-            // we peek the record body for "21 " instead.
+            // Inlined rather than delegated to feed_sptps: one chunk can
+            // hold [SPTPS-framed "21 LEN" | raw blob], and feed_sptps
+            // would eat the whole chunk before sptpslen could be set.
+            // We peek the record body for "21 " instead.
             //
             // take() the Box: can't `&mut sptps` + `&mut self.sptpslen`.
             let mut sptps = self.sptps.take().expect("checked is_some");
             let mut events = Vec::new();
             let mut off = 0;
             'outer: while off < chunk.len() {
-                // sptpslen check FIRST.
                 if self.sptpslen > 0 {
                     let want = usize::from(self.sptpslen) - self.sptps_buf.len();
                     let take = want.min(chunk.len() - off);
@@ -579,7 +557,7 @@ impl Connection {
         rng: &mut impl rand_core::CryptoRng,
     ) -> FeedResult {
         if chunk.is_empty() {
-            // Common: the ID line was ALL of the recv.
+            // Common: the ID line was the whole recv.
             return FeedResult::Sptps(Vec::new());
         }
         let mut events = Vec::new();
@@ -687,8 +665,7 @@ impl Connection {
         }
         let was_empty = self.outbuf.is_empty();
 
-        // `if(c->protocol_minor >= 2)`. ORDERING: `id_h` calls
-        // `send()` BEFORE `Sptps::start` (dispatch.rs), so `sptps` is
+        // `id_h` calls `send()` before `Sptps::start`, so `sptps` is
         // None for the id-reply line, which goes out plaintext.
         if let Some(sptps) = self.sptps.as_deref_mut() {
             let mut line = Vec::with_capacity(64);

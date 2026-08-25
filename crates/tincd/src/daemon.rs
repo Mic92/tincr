@@ -1,4 +1,4 @@
-//! `Daemon` — all the C-global state as one struct, plus the main loop.
+//! `Daemon` — all mutable daemon state as one struct, plus the main loop.
 //!
 //! Loop shape: tick → turn → match. `IoWhat` is the `W` in
 //! `EventLoop<W>`. `run()` consumes `self`; teardown is `Drop`.
@@ -50,8 +50,8 @@ pub use settings::{DaemonSettings, ForwardingMode, RoutingMode};
 
 // `UPnP` config knob. With the feature off the type still exists
 // (settings.rs stores it unconditionally) but only `No` is reachable
-// — `load_settings` warns and ignores the config line, C parity with
-// the `--disable-miniupnpc` build.
+// — `load_settings` warns and ignores the config line, like a C tinc
+// built with `--disable-miniupnpc`.
 #[cfg(feature = "upnp")]
 pub use crate::portmap::UpnpMode;
 #[cfg(not(feature = "upnp"))]
@@ -77,7 +77,7 @@ pub(crate) use settings::{
 };
 
 // SPTPS record-type bits for the per-tunnel data channel.
-// Type 0 = plain IP packet (router mode, no compression). Bits OR.
+// Type 0 = plain IP packet (router mode, no compression). Bits are OR-combined.
 pub(crate) const PKT_NORMAL: u8 = 0;
 const PKT_COMPRESSED: u8 = 1;
 const PKT_MAC: u8 = 2;
@@ -142,7 +142,7 @@ pub enum TimerWhat {
     RetryOutgoing(OutgoingId),
     /// `sd_notify(WATCHDOG=1)` keepalive at half of `WatchdogSec`.
     /// Armed iff `WATCHDOG_USEC` was in the env at startup. Driven
-    /// from the event loop (NOT a side thread) so a wedged loop
+    /// from the event loop (not a side thread) so a wedged loop
     /// stops pinging and systemd actually restarts us.
     Watchdog,
     /// One-shot: fire the sim-open dial for a `Delaying` punch.
@@ -194,8 +194,8 @@ pub(crate) struct ListenerSlot {
 /// the main loop.
 ///
 /// Why fields are `pub(crate)` not `pub`: the loop body matches on
-/// `IoWhat` and reaches into ALL the fields. There's no encapsulation
-/// to defend - the loop IS the daemon. The Rust gain is `&mut self`
+/// `IoWhat` and reaches into all the fields. There's no encapsulation
+/// to defend - the loop is the daemon. The Rust gain is `&mut self`
 /// exclusivity: the compiler knows no two handlers run concurrently.
 #[expect(clippy::struct_excessive_bools)] // independent gates
 // (overwrite_mac, any_pcap, etc), not a state enum.
@@ -320,7 +320,7 @@ pub struct Daemon {
     /// Split so the graph crate stays `#![no_std]`-clean.
     ///
     /// Stored as `(addr, port, local_addr, local_port)` raw `AddrStr`
-    /// pairs (NOT parsed `SocketAddr`): `dump_edges` round-trips
+    /// pairs (not parsed `SocketAddr`): `dump_edges` round-trips
     /// what arrived on the wire byte-exact.
     ///
     /// Populated by `on_ack` (direct edges) and `on_add_edge`
@@ -343,7 +343,7 @@ pub struct Daemon {
     /// alongside `node_ids` in `lookup_or_add_node`.
     pub(crate) id6_table: NodeId6Table,
 
-    /// Incremented when a peer claims WE have an edge we don't.
+    /// Incremented when a peer claims we have an edge we don't.
     /// Read by `periodic_handler`: if it exceeds a threshold,
     /// log+restart. The contradiction means
     /// our world-view diverged from the mesh's badly enough that
@@ -366,12 +366,12 @@ pub struct Daemon {
     pub(crate) sleeptime: u32,
 
     /// ICMP rate-limit time base. The limiter only compares for
-    /// SAME-SECOND; any monotonic-integer source works. We use
+    /// same-second; any monotonic-integer source works. We use
     /// daemon-uptime seconds. Set at setup; never reset.
     pub(crate) started_at: Instant,
 
     /// Rate-limit state for ICMP error synthesis. Max 3/sec across
-    /// ALL unreachable destinations.
+    /// all unreachable destinations.
     pub(crate) icmp_ratelimit: icmp::IcmpRateLimit,
 
     /// Laptop-suspend detector: if `now - this > 2 *
@@ -390,7 +390,7 @@ pub struct Daemon {
     /// must not freeze the data plane on reachability flips.
     pub(crate) script_worker: crate::scriptworker::ScriptWorker,
 
-    /// Derived, NOT a config var: `(device emits full eth frames) &&
+    /// Derived, not a config var: `(device emits full eth frames) &&
     /// (Mode=router)`. Router-mode IGNORES MACs but the kernel
     /// doesn't - a TAP write with zero dst-MAC is dropped by the rx
     /// filter. Fix: snatch the kernel's MAC from its own ARP/NDP
@@ -399,7 +399,7 @@ pub struct Daemon {
 
     /// The kernel's interface MAC. Seeded at setup (SIOCGIFHWADDR on
     /// Linux TAP), then REFRESHED on every ARP/NDP from the kernel -
-    /// the eth-src of those frames IS the kernel's MAC. Init
+    /// the eth-src of those frames is the kernel's MAC. Init
     /// `{0xFE,0xFD,0,0,0,0}` (locally-administered placeholder).
     pub(crate) mymac: [u8; 6],
 
@@ -424,7 +424,7 @@ pub struct Daemon {
     ///
     /// **Why a `HashSet`, not a `NodeState` field**: `NodeState` is
     /// direct-peers-only (allocated in `on_ack`). `has_address`
-    /// applies to ANY node we have a hosts/ file for, including ones
+    /// applies to any node we have a hosts/ file for, including ones
     /// we've never connected to. `load_all_nodes` does add every
     /// hosts/-file name to the GRAPH so `node_ids` is the
     /// authoritative "nodes I know exist" set; this is just the
@@ -484,8 +484,8 @@ pub struct Daemon {
     /// `on_age_subnets`, `on_add_subnet`, `on_del_subnet`, reload.
     pub(crate) mac_table: HashMap<route_mac::Mac, String>,
 
-    /// Expiry tracker for OUR learned MACs (those owned by
-    /// `myself`). NOT all MAC subnets - peers' learned MACs are in
+    /// Expiry tracker for our learned MACs (those owned by
+    /// `myself`). Not all MAC subnets - peers' learned MACs are in
     /// `mac_table` (via gossip `ADD_SUBNET`) but not here. Lifecycles
     /// kept separate (see `mac_lease.rs` doc).
     pub(crate) mac_leases: mac_lease::MacLeases,
@@ -547,7 +547,7 @@ pub struct Daemon {
     /// Cheap gate before `send_pcap`. Armed by `REQ_PCAP`. LAZILY
     /// recomputed inside `send_pcap` itself: the loop sets it false,
     /// then back to true if any conn still wants it. So a pcap
-    /// subscriber dropping its connection costs ONE extra
+    /// subscriber dropping its connection costs one extra
     /// `send_pcap` walk - `terminate()` doesn't need to know about
     /// pcap.
     pub(crate) any_pcap: bool,
@@ -567,7 +567,7 @@ pub struct Daemon {
     /// connection` dials `[0]`.
     pub(crate) proxy_addrs: Vec<SocketAddr>,
 
-    /// UPnP-IGD/NAT-PMP refresh thread (Rust port of C `upnp.c`).
+    /// UPnP-IGD/NAT-PMP refresh thread.
     /// `Some` iff `UPnP != no` and the feature is compiled in. Polled
     /// from `on_periodic_tick`.
     #[cfg(feature = "upnp")]
@@ -677,9 +677,9 @@ impl Daemon {
     ///     for (w, ready) in fired_io: dispatch_io
     /// ```
     ///
-    /// Timers FIRST: pingtimer might close a connection; that
+    /// Timers first: pingtimer might close a connection; that
     /// connection then doesn't show up as readable. "Fire timers,
-    /// THEN compute timeout" so a timer that re-arms itself yields
+    /// then compute timeout" so a timer that re-arms itself yields
     /// the correct next deadline.
     ///
     /// `timeout = None` means block forever - only safe because
@@ -750,7 +750,7 @@ impl Daemon {
             for &(what, ready) in &fired_io {
                 match what {
                     IoWhat::Signal => {
-                        // drain reads ALL pending bytes (signals
+                        // drain reads all pending bytes (signals
                         // coalesce in the pipe).
                         self.signals.drain(&mut fired_signals);
                         for &s in &fired_signals {
@@ -771,7 +771,7 @@ impl Daemon {
                         if !self.conns.contains_key(id) {
                             continue;
                         }
-                        // Connecting check FIRST. The async-connect
+                        // Connecting check first. The async-connect
                         // probe. On success FALL THROUGH to the
                         // write/read dispatch — the socket is
                         // writable now and the ID line is queued; do
@@ -844,14 +844,14 @@ impl Drop for Daemon {
     /// Unlink pidfile + socket. `ControlSocket::drop` already
     /// unlinks the socket; we do the pidfile.
     fn drop(&mut self) {
-        // Subnet-down first (may `ip route del`), THEN tinc-down
+        // Subnet-down first (may `ip route del`), then tinc-down
         // (brings the iface down). Mirror of the setup-time
         // subnet-up loop.
         for s in &self.subnets.owned_by(&self.name) {
             self.run_subnet_script_sync(false, &self.name, s);
         }
 
-        // tinc-down BEFORE device close (the device's own `Drop`
+        // tinc-down before device close (the device's own `Drop`
         // runs after). Gate on whether tinc-up actually fired -
         // more correct than checking `!device_standby`: if standby
         // and a peer was reachable at shutdown, we don't run graph
@@ -898,11 +898,11 @@ impl SetupError {
 
 // tests
 //
-// `setup()` and `run()` are NOT unit-testable: SelfPipe is a process
+// `setup()` and `run()` are not unit-testable: SelfPipe is a process
 // singleton, signal handlers are process-global. The integration test
 // (tests/stop.rs) does the real thing in a subprocess.
 //
-// What IS testable here: the small pieces that don't touch signals
+// What is testable here: the small pieces that don't touch signals
 // — the IoWhat/TimerWhat enum shapes, rate-limit/backoff arithmetic.
 
 #[cfg(test)]
@@ -936,7 +936,7 @@ mod tests {
     /// Mirrors `on_periodic_tick`'s body. Any divergence between
     /// this and the real fn would be caught by the integration
     /// test (which doesn't exist for the storm case - hard to
-    /// induce). The arithmetic IS the easy bit; pin it.
+    /// induce). The arithmetic is the easy bit; pin it.
     #[test]
     fn periodic_contradicting_edge_backoff() {
         // Same arithmetic as `on_periodic_tick`.
@@ -953,7 +953,7 @@ mod tests {
         assert_eq!(step(0, 0, 10), (10, Duration::ZERO));
         assert_eq!(step(0, 0, 100), (50, Duration::ZERO));
         assert_eq!(step(0, 0, 11), (10, Duration::ZERO)); // 5 → floor
-        // BOTH must exceed 100.
+        // Both must exceed 100.
         assert_eq!(step(101, 50, 10), (10, Duration::ZERO));
         assert_eq!(step(50, 101, 10), (10, Duration::ZERO));
 

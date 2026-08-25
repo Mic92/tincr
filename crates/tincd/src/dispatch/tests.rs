@@ -60,7 +60,7 @@ fn gate_cases() {
         // blocks unexpected.
         // Fresh conn allows only ID (0). CONTROL (18) is gated.
         (Some(Request::Id), b"18 0",       Unauthorized),
-        // None = ALL.
+        // None = all.
         (None,              b"18 0",       Ok(Request::Control)),
         (None,              b"0 foo 17.7", Ok(Request::Id)),
         (None,              b"8",          Ok(Request::Ping)),
@@ -141,7 +141,7 @@ fn id_cookie_mismatch() {
     assert!(c.outbuf.is_empty());
 }
 
-/// Early-reject paths: all bail BEFORE the pubkey load. `mkctx`
+/// Early-reject paths: all bail before the pubkey load. `mkctx`
 /// (confbase=".") suffices; the Err proves we never hit the fs.
 #[test]
 fn id_early_rejects() {
@@ -298,7 +298,7 @@ fn id_peer_no_dot_minor_zero() {
         panic!("expected BadId, got {r:?}");
     };
     assert!(msg.contains("roll back"), "msg: {msg}");
-    // protocol_minor set BEFORE the reject.
+    // protocol_minor set before the reject.
     assert_eq!(c.protocol_minor, 0);
 }
 
@@ -339,7 +339,7 @@ fn id_invitation_bad_throwaway() {
 }
 
 /// `"tinc invitation", 15` — explicit count,
-/// NOT `sizeof()`. NO trailing NUL (cf `tcp_label_has_trailing_nul`).
+/// not `sizeof()`. No trailing NUL (cf `tcp_label_has_trailing_nul`).
 #[test]
 fn invite_label_no_nul() {
     assert_eq!(INVITE_LABEL.len(), 15);
@@ -551,7 +551,7 @@ fn control_unknown_subtype() {
     assert_eq!(c.outbuf.live(), b"18 -1\n");
 }
 
-/// `control.c:53`: `sscanf != 1` → terminate (not `REQ_INVALID`).
+/// Unparseable control int → terminate (not `REQ_INVALID`).
 #[test]
 fn control_malformed_subtype_drops() {
     for line in [b"18".as_slice(), b"18 ", b"18 garbage"] {
@@ -636,7 +636,7 @@ fn myself_options_indirect_only() {
 }
 
 /// Explicit `PMTUDiscovery = yes` overrides
-/// the `!TCPONLY` default. The C reads `PMTUDiscovery` AFTER
+/// the `!TCPONLY` default. The C reads `PMTUDiscovery` after
 /// computing the default — explicit wins.
 #[test]
 fn myself_options_tcponly_but_pmtu_forced_on() {
@@ -673,13 +673,13 @@ fn send_ack_per_host_tcponly_clears_pmtu() {
     assert!(!c.options.contains(ConnOptions::PMTU_DISCOVERY));
     // ClampMSS unaffected (default on).
     assert!(c.options.contains(ConnOptions::CLAMP_MSS));
-    // Wire bits: 0x0b = INDIRECT|TCPONLY|CLAMP_MSS, NOT 0x0c.
+    // Wire bits: 0x0b = INDIRECT|TCPONLY|CLAMP_MSS, not 0x0c.
     let line = std::str::from_utf8(c.outbuf.live()).unwrap();
     assert!(line.ends_with(" 700000b\n"), "got {line:?}");
 }
 
 /// `ClampMSS` per-host overrides global
-/// (not OR'd). `ClampMSS = no` in hosts/NAME clears it even though
+/// (not or'd). `ClampMSS = no` in hosts/NAME clears it even though
 /// the daemon default is on.
 #[test]
 fn send_ack_per_host_clamp_mss_overrides() {
@@ -692,7 +692,7 @@ fn send_ack_per_host_clamp_mss_overrides() {
 }
 
 /// `IndirectData = yes` per-host. The
-/// `&& choice` means `= no` in hosts/NAME does NOT clear a global
+/// `&& choice` means `= no` in hosts/NAME does not clear a global
 /// INDIRECT (asymmetric with `ClampMSS`).
 #[test]
 fn send_ack_per_host_indirect() {
@@ -749,7 +749,7 @@ fn send_ack_global_weight_fallback() {
 }
 
 /// Per-host suppresses global. Fallback
-/// chain, NOT min: per-host > global > RTT.
+/// chain, not min: per-host > global > RTT.
 #[test]
 fn send_ack_per_host_beats_global() {
     let mut c = mkconn();
@@ -760,8 +760,8 @@ fn send_ack_per_host_beats_global() {
     assert_eq!(c.estimated_weight, 42); // per-host wins
 }
 
-/// Per-host AND global PMTU both
-/// clamp (min wins). NOT a fallback. The match in `handle_id`.
+/// Per-host and global PMTU both
+/// clamp (min wins). not a fallback. The match in `handle_id`.
 #[test]
 fn pmtu_cap_is_min_of_host_and_global() {
     // The `[a, b].into_iter().flatten().min()` idiom. Direct

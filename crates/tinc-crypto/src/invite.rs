@@ -18,7 +18,7 @@
 //! ## The composition (and why it's its own module)
 //!
 //! ```text
-//! fingerprint = b64_std(pubkey)              43 chars; +/ alphabet, NOT urlsafe
+//! fingerprint = b64_std(pubkey)              43 chars; +/ alphabet, not urlsafe
 //! key_hash    = sha512(fingerprint)[..18]    hash the STRING, not the raw key
 //! cookie_hash = sha512(cookie || fingerprint)[..18]   same fingerprint reused
 //! slug        = b64_url(key_hash) || b64_url(cookie)
@@ -275,7 +275,7 @@ mod tests {
         let f2 = cookie_filename(&cookie, &pk);
         assert_eq!(f1, f2);
         assert_eq!(f1.len(), SLUG_PART_LEN);
-        // Filename does NOT contain the cookie's b64. That's the point.
+        // Filename does not contain the cookie's b64. That's the point.
         assert!(!f1.contains(&b64::encode_urlsafe(&cookie)));
     }
 

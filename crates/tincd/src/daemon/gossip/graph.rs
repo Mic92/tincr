@@ -16,8 +16,8 @@ impl Daemon {
         // Side-table for dump_nodes. Swap-whole: sssp built a fresh Vec.
         // Old Arc drops here (refcount 1, single-thread).
         self.last_routes = std::sync::Arc::new(routes);
-        // Snapshot refresh: must happen BEFORE the transition loop's
-        // BecameUnreachable arm clears tunnel_handles, but AFTER the
+        // Snapshot refresh: must happen before the transition loop's
+        // BecameUnreachable arm clears tunnel_handles, but after the
         // BFS so routes are post-sssp. The transition loop only
         // touches dp.tunnels, not the graph/node_ids that NodeView
         // reads. Refresh once here; the post-transition state is the
@@ -69,7 +69,7 @@ impl Daemon {
                         tunnel.udp_addr_cached = None;
                     }
 
-                    // host-up AFTER addr known.
+                    // host-up after addr known.
                     self.run_host_script(true, &name_owned, addr);
 
                     // subnet-up for every owned subnet.
@@ -88,7 +88,7 @@ impl Daemon {
                                "Node {name} became unreachable");
 
                     let name_owned = name.to_owned();
-                    // Read addr BEFORE reset clears it.
+                    // Read addr before reset clears it.
                     let addr = self
                         .dp
                         .tunnels
@@ -129,10 +129,10 @@ impl Daemon {
                 self.device_disable();
             }
         }
-        // Refresh AFTER the transition loop: `reachable` is post-BFS,
+        // Refresh after the transition loop: `reachable` is post-BFS,
         // and `nodes`/`node_ids` reflect any `on_ack`/`terminate`
         // mutation that triggered this call (both call sites do the
-        // mutation FIRST, then `run_graph_and_log`).
+        // mutation first, then `run_graph_and_log`).
         self.tx_snap_refresh_graph();
     }
 

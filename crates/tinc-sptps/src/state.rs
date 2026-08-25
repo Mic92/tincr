@@ -107,11 +107,9 @@ pub const SEAL_REKEY_THRESHOLD: u64 = SEAL_KEY_LIMIT / 2;
 
 /// Why the state machine refused to make progress.
 ///
-/// Every variant maps to a specific `error(s, ...)` call site in `sptps.c`.
-/// The C version stuffs an `errno` into a logger callback; we keep the
-/// distinctions in the type instead. None of these carry data — the C
-/// doesn't expose any either, and the differential tests assert "fails at
-/// the same point", not "fails with the same message".
+/// One variant per failure point in the state machine. None carry
+/// data: the differential tests assert "fails at the same point", not
+/// "fails with the same message".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SptpsError {
     /// `receive_kex`: KEX body length wasn't 65, or version byte wasn't 0,
@@ -188,8 +186,7 @@ pub enum Framing {
 /// What the state machine produced. Analogous to `tinc-ffi`'s `Event` —
 /// same shape on purpose so the differential test can compare directly.
 ///
-/// `sptps.c` doesn't have this type; it fires callbacks instead. The set
-/// of variants is exactly the set of callback signatures.
+/// One variant per callback C tinc would fire.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Output {
     /// Bytes to put on the wire. Fully framed: header + encrypted body +
@@ -236,8 +233,7 @@ impl core::fmt::Debug for Output {
 
 // Internal state
 
-/// `sptps_state_t` in C. The four reachable states of `receive_handshake`'s
-/// switch.
+/// The four reachable states of `receive_handshake`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     /// Sent KEX, waiting for peer's KEX. Set by `start` and `force_kex`.
@@ -258,23 +254,23 @@ enum State {
     Confirm,
 }
 
-/// Replay window for datagram mode. `sptps_check_seqno` in C.
+/// Replay window for datagram mode.
 ///
 /// A sliding bitmap: bit N of `late[]` is 1 iff sequence number
 /// `(inseqno - replaywin*8 + N) mod replaywin*8` has *not* been seen yet.
-/// (Yes, the polarity is "1 = not seen". The C calls them "late" packets:
-/// the bit is set when we skip past it, cleared when it arrives.)
+/// (Yes, the polarity is "1 = not seen" — "late" packets: the bit is
+/// set when we skip past it, cleared when it arrives.)
 ///
 /// `farfuture` is a heuristic for "peer rebooted and seqnos reset": if we
 /// see too many packets way ahead, give up and resync. The threshold is
-/// `replaywin >> 2`, hardcoded in C.
+/// `replaywin >> 2`.
 /// Fields are private; the daemon never touches them directly.
 #[derive(Default)]
 pub struct ReplayWindow {
     /// Expected next seqno.
     pub(crate) inseqno: u32,
     /// Circular bitmap. Length = `replaywin` bytes = `replaywin * 8` slots.
-    /// Default 16 bytes (128 packets) per `sptps_replaywin` in C.
+    /// Default 16 bytes (128 packets).
     pub(crate) late: Vec<u8>,
     /// Far-future drop counter.
     pub(crate) farfuture: u32,
@@ -297,7 +293,7 @@ impl ReplayWindow {
     /// borrows `self.replay` through `Sptps`, and the shard has the
     /// lock guard directly.
     ///
-    /// Call AFTER decrypt succeeds. The window is order-sensitive
+    /// Call after decrypt succeeds. The window is order-sensitive
     /// (`farfuture` heuristic); a forged seqno that fails the tag
     /// must not advance it. Same gate as [`Sptps::open_data_into`].
     ///
@@ -329,10 +325,8 @@ impl ReplayWindow {
                     // the peer reset and we're behind, mark everything in
                     // between as lost.
                     //
-                    // Yes, this is wrap-unsafe in C too. seqno is u32 and
-                    // wraps at ~4 billion records; tincd reconnects long
-                    // before that. We use wrapping_add to silence the lint
-                    // but the semantics are "C does what C does".
+                    // Wrap-unsafe, same as C tinc: seqno is u32 and wraps
+                    // at ~4 billion records; tincd rekeys long before.
                     let early = self.farfuture < (win >> 2);
                     if update {
                         self.farfuture += 1;
@@ -372,9 +366,6 @@ impl ReplayWindow {
             // intended semantics: after seqno=MAX, inseqno wraps to 0.
             self.inseqno = seqno.wrapping_add(1);
         }
-        // C also tracks `received` (total packet count, resets on inseqno
-        // wrap). It's read by net_packet.c for stats but never by sptps.c
-        // itself. Omitted here; the daemon counts packets at its own layer.
         Ok(())
     }
 }
@@ -426,8 +417,7 @@ pub struct Sptps {
     replay: Arc<Mutex<ReplayWindow>>,
 
     // Crypto state
-    // `instate`/`outstate` in C are bools that gate encryption. Rust models
-    // that with Option: `None` = plaintext, `Some(cipher)` = encrypted.
+    // `None` = plaintext, `Some(cipher)` = encrypted.
     // The seqnos live alongside even when None because they tick during
     // the plaintext handshake too (`outseqno++` happens unconditionally
     // in send_record_priv).
@@ -449,11 +439,8 @@ pub struct Sptps {
     out_key_base: u64,
 
     // Handshake-transient state
-    // mykex/hiskex/ecdh/key are all heap-allocated in C, freed at specific
-    // points in the handshake. Same lifecycle here as Options.
-    //
     // `mykex`/`hiskex` are 65-byte KEX bodies. They live from KEX-send to
-    // SIG-receive: the SIG transcript needs both. C frees them in
+    // SIG-receive: the SIG transcript needs both; dropped in
     // `receive_sig` after the verify.
     // `Vec`, not `[u8; KEX_LEN]`: hybrid mode's KEX body is 1249 bytes
     // (classical 65 + ML-KEM ek 1184). The body length is fully
@@ -629,17 +616,17 @@ impl Sptps {
     /// the seqno ticks on every send, encrypted or not, so the first
     /// encrypted record's seqno is 2 (after KEX=0 and SIG=1), not 0.
     ///
-    /// Hot-path note: this is the ONE per-packet allocation on the SPTPS
+    /// Hot-path note: this is the one per-packet allocation on the SPTPS
     /// send side. One right-sized `Vec`, one `extend_from_slice(body)`
     /// inside `seal_into`, encrypt-in-place.
     fn send_record_priv(&mut self, ty: u8, body: &[u8], out: &mut Vec<Output>) {
         // u64 -> u32 truncate: the wire seqno is mod 2^32.
         // fetch_add returns the *previous* value.
         #[expect(clippy::cast_possible_truncation)]
-        // wire seqno IS 4 bytes; mod-2^32 is the protocol
+        // wire seqno is 4 bytes; mod-2^32 is the protocol
         let seqno = self.outseqno.fetch_add(1, Ordering::Relaxed) as u32;
 
-        // Compute final length so the ONE alloc is right-sized.
+        // Compute final length so the one alloc is right-sized.
         // Stream:   2 (len)   + 1 (type) + body + [16 (tag) if encrypted]
         // Datagram: 4 (seqno) + 1 (type) + body + [16 (tag) if encrypted]
         let header_len = match self.framing {
@@ -677,7 +664,7 @@ impl Sptps {
         });
     }
 
-    /// Public app-record send. `sptps_send_record` in C.
+    /// Public app-record send.
     ///
     /// # Errors
     ///
@@ -761,7 +748,7 @@ impl Sptps {
     /// disjoint seqnos. The seqno space stays exactly what `n` calls
     /// to [`seal_data_into`] would have produced.
     ///
-    /// Caller MUST emit all `n` reserved seqnos. Gaps are harmless on
+    /// Caller must emit all `n` reserved seqnos. Gaps are harmless on
     /// the wire (replay window tolerates skips) but waste seqno space.
     ///
     /// `None` once [`SEAL_KEY_LIMIT`] records have been sealed under
@@ -781,7 +768,7 @@ impl Sptps {
             return None;
         }
         #[expect(clippy::cast_possible_truncation)]
-        // wire seqno IS 4 bytes; mod-2^32 is the protocol
+        // wire seqno is 4 bytes; mod-2^32 is the protocol
         let base = prev as u32;
         Some(base)
     }
@@ -853,7 +840,7 @@ impl Sptps {
     }
 
     /// Clone the replay window for shard hand-off. Shard locks for
-    /// ~50ns AFTER decrypt (which is ~4µs/pkt at MTU); contention only
+    /// ~50ns after decrypt (which is ~4µs/pkt at MTU); contention only
     /// when two shards hit the same peer in the same instant. The
     /// far-future heuristic inside is order-sensitive across shards,
     /// but two shards' arrivals are *already* ordered by the kernel's
@@ -1002,7 +989,7 @@ impl Sptps {
         // packet that fails decrypt shouldn't advance the window.
         let (seqno, ty) = self.open_with_seqno(data, out, headroom)?;
 
-        // Check replay BEFORE leaving plaintext in `out`. On reject,
+        // Check replay before leaving plaintext in `out`. On reject,
         // truncate — same Err contract as open_with_seqno's BadRecord
         // arm: `out == [0u8; headroom]` on every Err return. Decrypt
         // first is still required (forged seqnos must not advance the
@@ -1136,8 +1123,6 @@ impl Sptps {
             self.mlkem = Some(dk);
         }
 
-        // Wire it before stashing — C does `s->mykex = ...; send_record(mykex)`
-        // but the order doesn't observably matter, both touch only mykex.
         self.send_record_priv(REC_HANDSHAKE, &kex, out);
         self.mykex = Some(kex);
         self.ecdh = Some(ecdh);
@@ -1204,7 +1189,7 @@ impl Sptps {
     }
 
     /// `receive_kex` precondition. Factored so `SecondaryKex` can run
-    /// it BEFORE `send_kex` (a bad unsolicited rekey mustn't burn `mykex`).
+    /// it before `send_kex` (a bad unsolicited rekey mustn't burn `mykex`).
     fn kex_body_ok(&self, body: &[u8]) -> bool {
         body.len() == kex_len(self.kex) && body[0] == VERSION && self.hiskex.is_none()
     }
@@ -1397,35 +1382,32 @@ impl Sptps {
             }
         }
 
-        // ORDER-SENSITIVE FROM HERE
-        // C lines 357..375. Don't reorder without re-reading the doc
-        // comment above and `stream_rekey_rust_initiator` in tests/vs_c.rs.
+        // Order-sensitive from here (see the fn doc and
+        // `stream_rekey_rust_initiator` in tests/vs_c.rs).
 
         // The discriminant for "was this a rekey?". Captured before any
         // sends — send_sig/send_ack don't touch outcipher, but reading it
         // up here makes the data flow obvious.
         let was_rekey = self.outcipher.is_some();
 
-        // C line 357: `if(!s->initiator && !send_sig(s)) return false;`
-        // OLD outcipher (or None, during initial handshake — same thing).
+        // Old outcipher (or None during the initial handshake).
         if !self.role.is_initiator() {
             self.send_sig(out);
         }
 
-        // C lines 360-363: free mykex/hiskex. Zeroize-on-drop here.
+        // Zeroize-on-drop.
         self.mykex = None;
         self.hiskex = None;
         // Hybrid transients: dk already `take`n above; the (ct, ss)
         // pair is done now that the responder's `send_sig` has run.
         self.mlkem_encap = None;
 
-        // C line 366: `if(s->outstate && !send_ack(s)) return false;`
-        // STILL the old outcipher.
+        // Still the old outcipher.
         if was_rekey {
             self.send_ack(out);
         }
 
-        // C lines 370-374: NOW set the new outcipher.
+        // Now switch to the new outcipher.
         // Initiator encrypts with key1, responder with key0.
         let key = self.key.as_ref().expect("just set");
         self.outcipher = Some(SptpsCipher::new(
@@ -1500,8 +1482,8 @@ impl Sptps {
             State::Sig => {
                 let was_rekey = self.receive_sig(body, out)?;
                 if was_rekey {
-                    // C line 420. outcipher is already the new key (set in
-                    // receive_sig); but incipher is still the OLD key.
+                    // outcipher is already the new key (set in
+                    // receive_sig); but incipher is still the old key.
                     // We sit in Ack until the peer's ACK arrives and tells
                     // us they've switched their outcipher — then we can
                     // safely switch our incipher.
@@ -1595,7 +1577,7 @@ impl Sptps {
     ) -> Result<(), SptpsError> {
         let min = if self.incipher.is_some() { 21 } else { 5 };
         if data.len() < min {
-            return Err(SptpsError::BadSeqno); // "short packet" in C
+            return Err(SptpsError::BadSeqno); // short packet
         }
         let seqno = u32::from_be_bytes(data[..4].try_into().unwrap());
         let payload = &data[4..];
@@ -1624,7 +1606,7 @@ impl Sptps {
 
         // Encrypted phase. Decrypt first, *then* check seqno — that order
         // matters for the replay window's update semantics: a packet that
-        // fails decrypt shouldn't advance the window. C does it this way.
+        // fails decrypt shouldn't advance the window.
         let cipher = self.incipher.as_ref().unwrap();
         let pt = cipher
             .open(u64::from(seqno), payload)
@@ -1634,11 +1616,8 @@ impl Sptps {
         self.dispatch_record(pt[0], &pt[1..], true, rng, out)
     }
 
-    /// Stream-mode reassembly. The bottom half of `sptps_receive_data`.
-    ///
-    /// The C does this in one flat function with `s->buflen` tracking
-    /// progress. We do the same, just with `self.stream.buf.len()` as the
-    /// progress counter instead of a separate field.
+    /// Stream-mode reassembly; `self.stream.buf.len()` is the progress
+    /// counter.
     fn receive_stream(
         &mut self,
         data: &[u8],
@@ -1674,7 +1653,6 @@ impl Sptps {
         }
 
         // Phase 2: read the rest. Body + type + maybe tag.
-        // `instate` in C; `incipher.is_some()` here.
         let extra = if self.incipher.is_some() {
             usize::from(self.stream.reclen) + 1 + TAG_LEN
         } else {
@@ -1699,11 +1677,8 @@ impl Sptps {
         self.inseqno = self.inseqno.wrapping_add(1);
 
         // Pull the framed bytes out and reset the buffer immediately.
-        // The C does `buflen = 0` at the *end*, after processing — but if
-        // processing errors and the caller calls receive again, the C
-        // re-processes the same buffer. That's a latent C bug (replay on
-        // error). We clear first; the differential test doesn't probe
-        // post-error behaviour anyway.
+        // Clearing first (C tinc clears after processing) means an
+        // error doesn't re-process the same buffer on the next call.
         let mut framed = std::mem::take(&mut self.stream.buf);
         self.stream.reclen = 0;
 

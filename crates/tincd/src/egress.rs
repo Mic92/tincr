@@ -31,9 +31,9 @@ pub(crate) mod macos;
 /// doesn't silently overflow the kernel limit.
 pub(crate) const UDP_MAX_SEGMENTS: u16 = 128;
 
-/// `udp_sendmsg` rejects `len > 0xFFFF` with `EMSGSIZE` BEFORE the
+/// `udp_sendmsg` rejects `len > 0xFFFF` with `EMSGSIZE` before the
 /// GSO branch even runs — this is the UDP datagram-length field cap, not a path-MTU thing. The cmsg parse
-/// happens AFTER, so the kernel never learns we wanted GSO; it just
+/// happens after, so the kernel never learns we wanted GSO; it just
 /// sees a too-big plain send. The daemon's `EMSGSIZE` handler then
 /// shrinks PMTU thinking it's a path-MTU failure → death spiral.
 /// `can_coalesce` must cap below this. Conservative: leave headroom
@@ -103,19 +103,19 @@ pub(crate) trait UdpEgress: Send {
 /// ## Dense packing, not arena slots
 ///
 /// Frames are appended at `[count*stride .. count*stride + len]`,
-/// NOT at fixed STRIDE-sized slots. `UDP_SEGMENT` splits at
+/// not at fixed STRIDE-sized slots. `UDP_SEGMENT` splits at
 /// `gso_size` boundaries; a gap between frames
-/// would land in the previous datagram's tail. The buffer IS the
+/// would land in the previous datagram's tail. The buffer is the
 /// wire layout.
 ///
-/// `stride` is the encrypted-frame size of the FIRST frame in the
+/// `stride` is the encrypted-frame size of the first frame in the
 /// run. Subsequent frames must match (`can_coalesce` checks). The
 /// SPTPS overhead is fixed (+33: `mt-kernel-findings.md`), so a TCP
 /// burst at one MSS produces same-size encrypted frames.
 ///
 /// ## One run at a time
 ///
-/// Tailscale's `coalesceMessages` builds a `Vec<run>`; we keep ONE
+/// Tailscale's `coalesceMessages` builds a `Vec<run>`; we keep one
 /// run and flush on mismatch. Simpler, and the common case (iperf3
 /// TCP burst to one peer) is one run anyway. Multi-peer interleave
 /// degrades to per-change flushes — still fewer syscalls than per-
@@ -124,7 +124,7 @@ pub(crate) struct TxBatch {
     /// Dense-packed encrypted frames. Capacity sized for one drain
     /// pass at MTU+overhead; never reallocs after warmup.
     buf: Vec<u8>,
-    /// Encrypted-frame size for THIS run. All frames except possibly
+    /// Encrypted-frame size for this run. All frames except possibly
     /// the last are exactly this size. Set on first stage; checked
     /// on subsequent stages.
     stride: u16,
@@ -211,7 +211,7 @@ impl TxBatch {
         self.sock == sock
             && self.count < UDP_MAX_SEGMENTS
             // Total bytes after this stage ≤ the UDP datagram cap.
-            // `udp_sendmsg` rejects `len > 0xFFFF` BEFORE the GSO
+            // `udp_sendmsg` rejects `len > 0xFFFF` before the GSO
             // cmsg parse — it sees the whole iovec as
             // one too-big plain send. At MTU≈1500 + 33 overhead this
             // caps batches at ~43 frames; the "43 same-MSS segments"
@@ -224,7 +224,7 @@ impl TxBatch {
             // one would put the full one's head in the short one's
             // datagram.
             && self.last_len == self.stride
-            // Same encrypted size OR smaller (becomes the new tail).
+            // Same encrypted size or smaller (becomes the new tail).
             // Larger can't coalesce: it would span two stride slots.
             && frame_len <= self.stride
             // SockAddr PartialEq compares storage bytes (socket2
@@ -233,7 +233,7 @@ impl TxBatch {
             && self.dst.as_ref() == Some(dst)
     }
 
-    /// Append `frame` to the run. Caller MUST have checked
+    /// Append `frame` to the run. Caller must have checked
     /// `can_coalesce` (or this is the first frame). Stores the
     /// per-run metadata (`dst`/`sock`/`relay`/`origlen`) on first
     /// stage; subsequent stages only append.
@@ -287,9 +287,9 @@ impl TxBatch {
         let sock = self.sock;
         let relay = self.relay;
         let origlen = self.origlen;
-        // Reset BEFORE returning the borrow would conflict; but the
+        // Reset before returning the borrow would conflict; but the
         // batch borrows `self.buf` and `self.dst`. So: caller drops
-        // the batch, THEN calls `reset`. Two-step.
+        // the batch, then calls `reset`. Two-step.
         Some((batch, sock, relay, origlen))
     }
 
@@ -311,7 +311,7 @@ impl TxBatch {
 
 /// The floor. `count` × `sendto`. Works on macOS, BSD, anything
 /// POSIX. Produces wire output identical to today's `net.rs:1930`
-/// `send_to` — `Portable::send_batch` with `count=1` IS one `sendto`.
+/// `send_to` — `Portable::send_batch` with `count=1` is one `sendto`.
 // Linux uses `linux::Fast`; `Portable` stays for the wire-equivalence
 // test in `egress/linux.rs` and as the non-Linux backend.
 #[cfg_attr(any(target_os = "linux", target_os = "android"), allow(dead_code))]
@@ -540,7 +540,7 @@ mod tests {
         assert_eq!(batch.count, 3);
         assert_eq!(batch.stride, 12);
         assert_eq!(batch.last_len, 5);
-        // Dense: 12 + 12 + 5 = 29, NOT 3×12.
+        // Dense: 12 + 12 + 5 = 29, not 3×12.
         assert_eq!(batch.frames.len(), 29);
 
         p.send_batch(&batch).unwrap();
@@ -560,9 +560,9 @@ mod tests {
 
     /// `BATCH_MAX_BYTES` cap: a 44th frame at stride=1519 (MTU+33,
     /// the SPTPS on-wire size for a full-MSS inner-TCP segment) does
-    /// NOT coalesce — 43×1519 = 65317 fits the UDP datagram cap,
+    /// not coalesce — 43×1519 = 65317 fits the UDP datagram cap,
     /// 44×1519 = 66836 doesn't. The kernel rejects
-    /// the latter with `EMSGSIZE` BEFORE the GSO cmsg parse, the
+    /// the latter with `EMSGSIZE` before the GSO cmsg parse, the
     /// daemon's PMTU machinery shrinks `maxmtu` thinking it's a
     /// path-MTU failure, and the next batch goes TCP. Regression
     /// test for the death-spiral the throughput gate caught.

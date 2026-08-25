@@ -112,8 +112,8 @@ impl Daemon {
     /// Called from per-packet decode-error paths (`rx.rs` UDP,
     /// `metaconn.rs` binary `SPTPS_PACKET`, `gossip.rs` b64
     /// `SPTPS_PACKET`). C tinc fires `send_req_key` on every
-    /// `sptps_receive_data` failure once `last_req_key+10` has passed
-    /// (`net_packet.c:444`). We additionally gate on `!validkey`: a
+    /// `sptps_receive_data` failure once `last_req_key+10` has passed.
+    /// We additionally gate on `!validkey`: a
     /// session that is currently delivering data must not be torn
     /// down by a single bad datagram. UDP is unauthenticated up to
     /// the AEAD tag check, so anyone who can spoof the peer's source
@@ -288,7 +288,7 @@ impl Daemon {
     ) -> Result<bool, DispatchError> {
         let (body_str, msg) = crate::dispatch::parse_key_msg(body, "REQ_KEY", ReqKey::parse)?;
 
-        // lookup, NOT lookup_or_add.
+        // lookup, not lookup_or_add.
         let Some((conn_name, from_nid, to_nid)) =
             self.routed_prologue(from_conn, "REQ_KEY", &msg.from, &msg.to)
         else {
@@ -640,7 +640,7 @@ impl Daemon {
                 // Same gate as the UDP/SPTPS_PACKET decode-error
                 // sites: only escalate if `!validkey`. A stale or
                 // duplicated ANS_KEY (relay re-forward, peer retried
-                // before our REQ_KEY arrived) landing AFTER
+                // before our REQ_KEY arrived) landing after
                 // HandshakeDone would otherwise nuke a healthy
                 // session here - the production log line that
                 // motivated this fix was exactly this site.

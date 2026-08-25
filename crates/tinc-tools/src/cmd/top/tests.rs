@@ -211,7 +211,7 @@ fn compare_table() {
     #[rustfmt::skip]
     let cases: &[(NodeStats, NodeStats, SortMode, bool, std::cmp::Ordering)] = &[
         //          (a,                       b,                       mode,                   cumul, expected)
-        // InPackets cumulative: heavy comes BEFORE light → Less.
+        // InPackets cumulative: heavy comes before light → Less.
         (ns(1000,0,0,0),          ns(100,0,0,0),           SortMode::InPackets,    true,  Less),
         (ns(100,0,0,0),           ns(1000,0,0,0),          SortMode::InPackets,    true,  Greater),
         // InPackets rate (cumulative=false): use rate not counter.
@@ -277,7 +277,7 @@ fn render_header_row0_golden() {
         row0,
         // `goto(0,0)` + body + `CLEAR_EOL`. `vpn` left-padded to
         // 16. `0` right-padded to 4. `name` left-padded to 10.
-        // TWO spaces between fields.
+        // Two spaces between fields.
         "\x1b[1;1HTinc vpn               Nodes:    0  Sort: name        Current\x1b[K"
     );
 }
@@ -338,7 +338,7 @@ fn render_row_attribute_logic() {
     assert!(r.contains("\x1b[1m")); // BOLD
 
     // Out only: known=true, out_packets_rate > 0 → BOLD
-    // `||` of in OR out.
+    // `||` of in or out.
     let out_only = NodeStats {
         known: true,
         out_packets_rate: 50.0,
@@ -358,7 +358,7 @@ fn render_row_attribute_logic() {
         ..Default::default() // in_packets_rate=0
     };
     let r = render_row("eve", &bytes_only, &stats, 3);
-    assert!(!r.contains("\x1b[1m")); // NOT bold — packets check
+    assert!(!r.contains("\x1b[1m")); // not bold — packets check
 }
 
 /// `"%-16s %10.0f %10.0f %10.0f %10.0f"`. Golden the column

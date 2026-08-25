@@ -357,7 +357,7 @@ mod tests {
         assert_eq!(&out[6..12], &orig[0..6]);
     }
 
-    /// The quote IS the original IP datagram, byte-for-byte.
+    /// The quote is the original IP datagram, byte-for-byte.
     #[test]
     fn v4_quotes_original() {
         let orig = v4_orig_frame();
@@ -433,7 +433,7 @@ mod tests {
     }
 
     /// TTL-exceeded source override. The override becomes the new IP
-    /// src (→ traceroute shows OUR hop, not the
+    /// src (→ traceroute shows our hop, not the
     /// original destination). dst still = orig src. Checksum covers it.
     #[test]
     fn v4_src_override() {
@@ -441,7 +441,7 @@ mod tests {
         // ICMP_TIME_EXCEEDED=11, ICMP_EXC_TTL=0
         let out = build_v4_unreachable(&orig, 11, 0, None, Some([172, 16, 0, 5])).expect("built");
         let ip = Ipv4Hdr::read_from_bytes(&out[14..34]).unwrap();
-        assert_eq!(ip.ip_src, [172, 16, 0, 5]); // override, NOT orig dst
+        assert_eq!(ip.ip_src, [172, 16, 0, 5]); // override, not orig dst
         assert_eq!(ip.ip_dst, [10, 0, 0, 1]); // still orig src
         // IP checksum verifies (override is in the summed region).
         assert_eq!(inet_checksum(&out[14..34], 0xFFFF), 0);
@@ -546,7 +546,7 @@ mod tests {
     }
 
     /// v6 TTL-exceeded source override. Override becomes `ip6_src`
-    /// AND feeds the pseudo-header checksum.
+    /// and feeds the pseudo-header checksum.
     #[test]
     fn v6_src_override() {
         let orig = v6_orig_frame();
@@ -554,7 +554,7 @@ mod tests {
         // ICMP6_TIME_EXCEEDED=3, ICMP6_TIME_EXCEED_TRANSIT=0
         let out = build_v6_unreachable(&orig, 3, 0, None, Some(our_ip)).expect("built");
         let ip6 = Ipv6Hdr::read_from_bytes(&out[14..54]).unwrap();
-        assert_eq!(ip6.ip6_src, our_ip); // override, NOT orig dst
+        assert_eq!(ip6.ip6_src, our_ip); // override, not orig dst
         assert_eq!(ip6.ip6_dst, *b"\xfe\x80\0\0\0\0\0\0\0\0\0\0\0\0\0\x01"); // orig src
 
         // Pseudo-header checksum verifies with the override addr.

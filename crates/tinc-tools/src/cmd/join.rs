@@ -118,7 +118,7 @@ pub struct JoinResult {
     pub name: String,
     /// The new node's pubkey, as the b64 string the daemon expects.
     /// `b64::encode(pk)`, 43 chars. Goes back as type-1 record body.
-    /// NOT secret — it's the public key.
+    /// Not secret — it's the public key.
     pub pubkey_b64: String,
     /// Names of host files written from secondary chunks. For tests
     /// and for the binary's "Configuration stored" summary.
@@ -149,9 +149,9 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         parse_url(url).ok_or_else(|| CmdError::BadInput("Invalid invitation URL.".into()))?;
 
     // Preflight: confbase must be fresh
-    // Do this BEFORE connecting — the cookie is single-use on the
+    // Do this before connecting — the cookie is single-use on the
     // daemon side (rename to .used). If we connect, send cookie,
-    // daemon renames, then WE fail on "tinc.conf exists" — the
+    // daemon renames, then we fail on "tinc.conf exists" — the
     // invitation is burned.
     //
     // makedirs(DIR_CONFDIR | DIR_CONFBASE) — created here (and
@@ -171,7 +171,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
     }
 
     // Generate throwaway key
-    // This key is ONLY for the SPTPS handshake; it's not the node's
+    // This key is only for the SPTPS handshake; it's not the node's
     // identity. The daemon doesn't store it. (The real node key is
     // generated inside `finalize_join`.)
     let throwaway = keypair::generate();

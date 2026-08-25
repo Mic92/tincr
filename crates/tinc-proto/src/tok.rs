@@ -19,9 +19,9 @@
 //! format string is how `sscanf` skips the word. `lit()` does the
 //! same here.
 //!
-//! That means the dump-format strings have ONE more sscanf conversion
+//! That means the dump-format strings have one more sscanf conversion
 //! than they have printf conversions, per `" port "` instance. The
-//! `ADD_EDGE` message-protocol format does NOT have this — there `addr`
+//! `ADD_EDGE` message-protocol format does not have this — there `addr`
 //! and `port` are separate `%s` tokens both ways — because the daemon
 //! formats them with `sockaddr2str` (two outputs) not `sockaddr2hostname`
 //! (one fused). Dump uses the fused form. The asymmetry is annoying;

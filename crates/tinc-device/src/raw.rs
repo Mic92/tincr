@@ -47,7 +47,7 @@ const ETH_P_ALL: u16 = 0x0003;
 /// attaches to an EXISTING interface (sniffing, not hosting); the
 /// daemon doesn't originate ARP replies on a real segment.
 /// `mac() → None` is correct despite TAP mode — `linux::Tun` in TAP
-/// creates a NEW interface and IS the host, hence the difference.
+/// creates a NEW interface and is the host, hence the difference.
 #[derive(Debug)]
 pub struct RawSocket {
     /// `PF_PACKET` socket, `SOCK_RAW`, bound to `iface`. `OwnedFd`
@@ -242,7 +242,7 @@ mod tests {
     }
 
     // SEQPACKET (not STREAM/DGRAM): preserves datagram boundary like
-    // PF_PACKET AND EOFs on peer close (DGRAM blocks instead, which
+    // PF_PACKET and EOFs on peer close (DGRAM blocks instead, which
     // hung the eof test on first try).
 
     /// `RawSocket` wrapping one end of a SEQPACKET socketpair; can't
@@ -321,7 +321,7 @@ mod tests {
         let mut raw = fake_raw(sock);
 
         let n = raw.write(&mut frame).unwrap();
-        // Wrote ALL of it. NOT len-14 (that's `fd.rs`). +0.
+        // Wrote all of it. Not len-14 (that's `fd.rs`). +0.
         assert_eq!(n, frame_len);
 
         // Read from peer. Same frame, byte-for-byte.

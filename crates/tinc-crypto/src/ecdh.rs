@@ -16,7 +16,7 @@
 //! ```text
 //! seed     <- random 32 bytes
 //! private  <- SHA-512(seed)           -- 64 bytes; low 32 clamped, high 32 unused here
-//! public   <- private[0..32] * B      -- Ed25519 base-point mult, NOT X25519 base
+//! public   <- private[0..32] * B      -- Ed25519 base-point mult, not X25519 base
 //! ```
 //!
 //! Agreement (`ecdh_compute_shared`, via `ed25519_key_exchange`):

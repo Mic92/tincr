@@ -43,12 +43,12 @@ impl Daemon {
         let tunnel = self.dp.tunnels.entry(to_nid).or_default();
 
         // PACKET 17 short-circuit: direct meta-conn + doesn't fit
-        // MTU → single-encrypt via meta-SPTPS. Gated BEFORE
+        // MTU → single-encrypt via meta-SPTPS. Gated before
         // validkey: with a direct conn, validkey doesn't matter;
         // with TCPOnly, validkey stays false forever and this is
-        // the ONLY way to send.
+        // the only way to send.
         //
-        // Gate BEFORE compression: gating after means if compression
+        // Gate before compression: gating after means if compression
         // helped, the eth-header bytes (offset 0..14) are
         // uninitialized → garbage on the wire → receiver drops.
         let direct_conn = self.nodes.get(&to_nid).and_then(|ns| ns.conn);
@@ -72,7 +72,7 @@ impl Daemon {
                 len: data.len() as u16,
             };
             let mut nw = conn.send(format_args!("{}", req.format()));
-            // FULL eth frame, NOT stripped/compressed (see above).
+            // FULL eth frame, not stripped/compressed (see above).
             nw |= conn.send_sptps_record(0, data);
             return nw;
         }
@@ -157,7 +157,7 @@ impl Daemon {
                 }
                 Output::HandshakeDone => {
                     let tunnel = self.dp.tunnels.entry(peer).or_default();
-                    // `prev_sptps` is intentionally NOT cleared here:
+                    // `prev_sptps` is intentionally not cleared here:
                     // our `HandshakeDone` does not imply the peer has
                     // switched their `outcipher` yet (initiator vs
                     // responder finish at different times, plus
@@ -183,7 +183,7 @@ impl Daemon {
                     // incipher_key are post-handshake invariants.
                     // outseqno_handle/replay_handle clone the existing
                     // Arcs inside the Sptps — the fast path's
-                    // fetch_add/lock hits the SAME counter the
+                    // fetch_add/lock hits the same counter the
                     // control-side seal_data_into would. Rekey: this
                     // arm fires again, fresh Arc replaces; old drops.
                     if let Some(sptps) = tunnel.sptps.as_deref() {
@@ -251,7 +251,7 @@ impl Daemon {
             return false;
         }
 
-        // PMTU probe. Probes only make sense over UDP (they ARE the
+        // PMTU probe. Probes only make sense over UDP (they are the
         // PMTU discovery mechanism); TCP-tunneled probe = peer bug.
         if record_type == PKT_PROBE {
             let udppacket = self
@@ -325,7 +325,7 @@ impl Daemon {
 
         // Build the frame. Three cases:
         //  1. compressed: body in `decompressed`, build a fresh Vec.
-        //  2. has_mac (Switch): body at rx_scratch[14..] IS the eth
+        //  2. has_mac (Switch): body at rx_scratch[14..] is the eth
         //     frame. Route that slice directly.
         //  3. !has_mac (Router, hot path): body at rx_scratch[14..],
         //     headroom [0..14] is zeros. Stamp ethertype at [12..14],
@@ -358,7 +358,7 @@ impl Daemon {
             }
             &mut frame_vec
         } else if offset == 0 {
-            // Switch mode: body at scratch[14..] IS the frame.
+            // Switch mode: body at scratch[14..] is the frame.
             &mut scratch[14..]
         } else {
             // Router mode (THE HOT PATH).
@@ -584,7 +584,7 @@ impl Daemon {
         let tcponly =
             (self.myself_options.bits() | relay_options) & crate::dispatch::OPTION_TCPONLY != 0;
 
-        // C parity (`net_packet.c:974`): data stays on TCP until a
+        // Same as C tinc: data stays on TCP until a
         // probe reply lifts `minmtu` above 0. Probes are exempt so
         // discovery still runs; behind a UDP-blackholing firewall
         // minmtu stays 0 and data correctly never goes UDP.
@@ -600,7 +600,7 @@ impl Daemon {
             || too_big;
 
         // relay_tx_bytes.
-        // Autoconnect-shortcut signal: bytes WE originated for `to`
+        // Autoconnect-shortcut signal: bytes we originated for `to`
         // that left via a relay (not direct). `!direct` already
         // encodes "from==myself && relay!=to"; the only exclusions
         // are probes (drive PMTU, not demand) and handshakes (rare,
@@ -703,7 +703,7 @@ impl Daemon {
         }
 
         // Immediate-send path. Hit when: outside the drain loop,
-        // OR cold path (no cached addr), OR relay/
+        // or cold path (no cached addr), or relay/
         // handshake (`ct.is_some()`).
         TunnelSendOutcome {
             needs_write: false,

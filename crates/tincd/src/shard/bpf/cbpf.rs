@@ -8,7 +8,7 @@
 //!
 //! 1. cBPF return-value-is-index works just as well IF bind order
 //!    is deterministic. We open shards in order; `reuse->socks[k]`
-//!    IS shard k. Validated 100/100 in shard-proto.
+//!    is shard k. Validated 100/100 in shard-proto.
 //!
 //! 2. cBPF needs **no `bpf()` syscall**, no `CAP_BPF`. The whole
 //!    test suite exercises this path, not just the with-root NixOS
@@ -39,7 +39,7 @@
 //!
 //! - **XOR-fold**: `A = b[6] ^ b[7] ^ b[8] ^ b[9] ^ b[10] ^ b[11]`.
 //!   8-bit output, 256 buckets. With N≤8 shards: `% N` distributes
-//!   uniformly IF the input is uniform. `src_id6` IS uniform (it's
+//!   uniformly IF the input is uniform. `src_id6` is uniform (it's
 //!   SHA-512 prefix). 6 instructions.
 //!
 //! - **Load 4 bytes**: `BPF_LD|BPF_W|BPF_ABS` at offset 6 gives
@@ -66,7 +66,7 @@
 //! prefix — it's `[seq:4][type:1][data...]` raw. Word at offset 6
 //! reads into the handshake payload, returns garbage % N. **Doesn't
 //! matter**: the receiving shard finds no `tunnel.sptps` for that
-//! seq, falls back to the daemon's id6-absent path, which DOES work
+//! seq, falls back to the daemon's id6-absent path, which does work
 //! (trial-mac). One garbage steer per handshake; fine.
 //!
 //! Actually wait — handshake goes over TCP (the meta-conn), not UDP.
@@ -90,7 +90,7 @@ const BPF_RET: u16 = 0x06;
 const BPF_A: u16 = 0x10;
 
 /// Offset in UDP payload where `src_id6` starts. tincd wire format:
-/// `[dst_id6:6][src_id6:6][sptps...]` (`net.h:92` `SRCID` macro).
+/// `[dst_id6:6][src_id6:6][sptps...]`.
 /// The reuseport prog sees post-UDP-header bytes.
 const SRC_ID6_OFFSET: u32 = 6;
 
@@ -98,7 +98,7 @@ const SRC_ID6_OFFSET: u32 = 6;
 /// into the prog's `MOD` instruction — re-attach on shard count change
 /// (which only happens at daemon startup; `TINCD_SHARDS` is read once).
 ///
-/// Attaches to the FIRST socket in the group. The reuseport group
+/// Attaches to the first socket in the group. The reuseport group
 /// shares one prog (`reuseport_attach_prog` stores it on the
 /// `sock_reuseport` struct, not per-socket). Socket 0 must already
 /// be bound (the group exists at first bind).
@@ -203,7 +203,7 @@ pub fn open_reuseport_group(ip: std::net::IpAddr, port: u16, n: u32) -> io::Resu
         sock.set_reuse_port(true)?;
         sock.bind(&addr.into())?;
 
-        // Attach AFTER socket 0 is bound: the reuseport group doesn't
+        // Attach after socket 0 is bound: the reuseport group doesn't
         // exist until first bind. `reuseport_attach_prog` checks
         // `rcu_dereference(sk->sk_reuseport_cb)` which is set at
         // `reuseport_alloc` (bind time). Attach-before-bind: ENOENT.

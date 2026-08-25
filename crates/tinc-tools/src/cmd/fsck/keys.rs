@@ -16,9 +16,7 @@ use crate::names::Paths;
 
 use super::Finding;
 
-/// Full keypair-coherence check. Upstream's four small functions
-/// collapsed: under `DISABLE_LEGACY` each was called from exactly one
-/// place and the indirection was just `#ifdef` scaffolding.
+/// Full keypair-coherence check.
 ///
 /// Returns the success bool: `false` only for unfixable failures (no
 /// private key, or mismatch + `!force`). With `force`, mismatch is
@@ -82,10 +80,6 @@ pub(super) fn check_keypairs(
     //   pub=Some, !match → KeyMismatch, fixable
     //   pub=None         → NoPublicKey, fixable
     //
-    // We compare bytes directly — no need to round-trip through b64.
-    // (Upstream uses b64-strcmp because `ecdsa_t` is opaque and the
-    // b64 accessor is the only "give me the pubkey" API. Our
-    // `SigningKey` exposes `public_key()` as bytes.)
     let priv_derived: &[u8; PUBLIC_LEN] = sk.public_key();
 
     match pubkey {
@@ -98,11 +92,8 @@ pub(super) fn check_keypairs(
             findings.push(Finding::KeyMismatch {
                 host_file: host_file.to_owned(),
             });
-            // Upstream considers "user declined to fix" as success
-            // (the fix-helper returns `true` when the prompt is
-            // declined). We tighten: a mismatch you didn't fix is a
-            // failed fsck. The user said `--force` to fix; they said
-            // nothing to fail.
+            // Stricter than C tinc (where declining the prompt counts
+            // as success): a mismatch you didn't fix is a failed fsck.
             if force {
                 fix_public_key(host_file, priv_derived, findings)
             } else {

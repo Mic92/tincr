@@ -44,7 +44,7 @@ const DEFAULT_DEVICE: &str = "/dev/net/tun";
 /// Linux device. Owns the fd; `Drop` closes it (via `File::drop`,
 /// which is `close(2)`).
 ///
-/// NOT `Clone`: there's one TUN fd per daemon. Cloning would
+/// Not `Clone`: there's one TUN fd per daemon. Cloning would
 /// either dup the fd (two fds, same device — confusing) or share
 /// it (then who closes?). The daemon stores `Box<dyn Device>`.
 #[derive(Debug)]
@@ -88,7 +88,7 @@ impl Tun {
     pub fn open(cfg: &DeviceConfig) -> io::Result<Self> {
         let device = cfg.device.as_deref().unwrap_or(DEFAULT_DEVICE);
 
-        // Pack ifr_name BEFORE open: validation is pure; open needs
+        // Pack ifr_name before open: validation is pure; open needs
         // CAP_NET_ADMIN. Validate first so tests can hit the error
         // path without root.
         let ifr_name = pack_ifr_name(cfg.iface.as_deref())?;
@@ -101,7 +101,7 @@ impl Tun {
         // to preserve the real eth header instead of synthesizing
         // one. Widen when switch-mode throughput matters.
         //
-        // Set on the FIRST TUNSETIFF: the kernel's flag-update
+        // Set on the first TUNSETIFF: the kernel's flag-update
         // path on a second TUNSETIFF (`tun.c:2744`) requires
         // re-attach (`:2729`) which fails on an already-attached
         // fd — there's no "change flags only" ioctl.
@@ -173,7 +173,7 @@ impl Tun {
     /// Kernel `tun_automq_select_queue` (`tun.c:474`) hashes the inner
     /// flow's 4-tuple to pick a queue. One TCP connection → one queue →
     /// one reader thread, no eBPF prog needed. The kernel's flow learning
-    /// IS the steering: 1024 distinct flows across 2 queues showed a
+    /// is the steering: 1024 distinct flows across 2 queues showed a
     /// 354k/402k split (1.1× balance ratio) in the prototype.
     ///
     /// `n=1` → calls `Tun::open` (no `IFF_MULTI_QUEUE` flag, exact same
@@ -189,7 +189,7 @@ impl Tun {
     ///
     /// `TUNSETIFF` flags = `IFF_TUN | IFF_NO_PI | IFF_MULTI_QUEUE |
     /// IFF_VNET_HDR` = `0x5101`. The `IFF_MULTI_QUEUE` bit must be set
-    /// on EVERY call; `tun.c:2719` rejects the second call if the bit
+    /// on every call; `tun.c:2719` rejects the second call if the bit
     /// doesn't match the first (`EINVAL`).
     ///
     /// `TUNSETOFFLOAD` once on fd[0]: offload bits live on the netdev
@@ -267,7 +267,7 @@ impl Tun {
 
 // ifr_name packing — the testable seam
 
-/// `[c_char; IFNAMSIZ]` from `Option<&str>`. Called BEFORE
+/// `[c_char; IFNAMSIZ]` from `Option<&str>`. Called before
 /// `open(/dev/net/tun)` so length validation fires without
 /// `CAP_NET_ADMIN`.
 ///
@@ -450,7 +450,7 @@ fn tunsetoffload(fd: BorrowedFd<'_>) -> io::Result<()> {
     // SAFETY:
     //   - `fd` is the post-TUNSETIFF TUN fd. Valid.
     //   - `TUNSETOFFLOAD` takes the flag word BY VALUE as the third
-    //     ioctl arg (`tun.c:3213`: `set_offload(tun, arg)`). NOT a
+    //     ioctl arg (`tun.c:3213`: `set_offload(tun, arg)`). Not a
     //     pointer. The `_IOW(..., unsigned int)` size encoding is
     //     for the value; the kernel reads it directly from the
     //     varargs slot. Passing `flags as c_ulong` matches what
@@ -547,7 +547,7 @@ impl Device for Tun {
             // after write returns).
             //
             // The GRO coalesce path fills a real vnet_hdr via
-            // `write_super`; THIS path (per-packet write) always
+            // `write_super`; this path (per-packet write) always
             // sends gso_type=NONE.
             Mode::Tun => {
                 debug_assert!(buf.len() > ETH_HLEN, "vnet write buf too short");
@@ -601,8 +601,8 @@ impl Device for Tun {
     /// when `IFF_VNET_HDR` is on; otherwise delegates.
     ///
     /// Read shape with `vnet_hdr` (`tun_put_user`, `tun.c:2064`):
-    /// `[virtio_net_hdr(10)][raw IP packet (≤65535)]`. NO `tun_pi`
-    /// (`IFF_NO_PI` set), NO eth header (TUN mode). One read = one
+    /// `[virtio_net_hdr(10)][raw IP packet (≤65535)]`. No `tun_pi`
+    /// (`IFF_NO_PI` set), no eth header (TUN mode). One read = one
     /// skb. For `gso_type==TCPV4/6`, the IP packet is a super-
     /// segment (`totlen > MTU`).
     ///
@@ -621,7 +621,7 @@ impl Device for Tun {
         }
 
         // TUN: vnet_hdr path
-        // ONE read into the contiguous arena. A super-packet can be
+        // one read into the contiguous arena. A super-packet can be
         // 65535 + 10 bytes; `as_contiguous_mut` is `cap*STRIDE` =
         // 64*1600 = 102400 bytes. Fits.
         //
@@ -672,7 +672,7 @@ impl Device for Tun {
                 //   before: [vnet_hdr(10)][IP pkt]
                 //   after:  [eth(14)][IP pkt]
                 // The IP packet shifts right by 4. Do the csum fix
-                // BEFORE the shift (csum_start is relative to IP
+                // before the shift (csum_start is relative to IP
                 // start, currently at +10).
                 if hdr.needs_csum() {
                     gso_none_checksum(&mut buf[VNET_HDR_LEN..n], hdr.csum_start, hdr.csum_offset);
@@ -721,7 +721,7 @@ impl Device for Tun {
 mod tests {
     use super::*;
 
-    /// `open_mq(n>1)` validation happens BEFORE open (no
+    /// `open_mq(n>1)` validation happens before open (no
     /// `CAP_NET_ADMIN` needed): rejects TAP (router-mode only).
     /// `iface = None` is allowed — queue 0 takes the kernel name.
     #[test]
@@ -782,7 +782,7 @@ mod tests {
         assert!(msg.contains("15"), "msg should name limit: {msg}");
     }
 
-    /// `Tun::open` with too-long iface → `Err` BEFORE open. The
+    /// `Tun::open` with too-long iface → `Err` before open. The
     /// reordering (validate first, open second) is the testability
     /// fix. Without it, CI without `/dev/net/tun` would ENOENT
     /// before reaching the validation.
@@ -797,13 +797,13 @@ mod tests {
         };
         let e = Tun::open(&cfg).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
-        // NOT NotFound (which would mean we hit open() first).
-        // NOT PermissionDenied (same). The validation fired.
+        // Not NotFound (which would mean we hit open() first).
+        // Not PermissionDenied (same). The validation fired.
     }
 
     /// `Tun::open` with valid config but no `CAP_NET_ADMIN` → some
     /// `Err` (EACCES on open, or ENOENT if /dev/net/tun missing).
-    /// NOT `InvalidInput` — the validation passed, the syscall
+    /// Not `InvalidInput` — the validation passed, the syscall
     /// failed.
     ///
     /// SKIP under root: open might actually succeed, and then
