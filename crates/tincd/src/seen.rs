@@ -154,8 +154,7 @@ impl FloodLimiter {
         // ms granularity; clamp before u32 cast so long idle can't wrap.
         let add = (u128::from(FLOOD_RATE_PER_SEC) * elapsed.as_millis() / 1000)
             .min(u128::from(FLOOD_BURST));
-        #[expect(clippy::cast_possible_truncation)] // ≤ FLOOD_BURST: u32
-        let add = add as u32;
+        let add = u32::try_from(add).unwrap_or(FLOOD_BURST);
         if add > 0 {
             self.tokens = self.tokens.saturating_add(add).min(FLOOD_BURST);
             self.last_refill = Some(now);

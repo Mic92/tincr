@@ -27,6 +27,7 @@
 
 use zerocopy::{FromBytes, IntoBytes};
 
+use crate::packet::len_u16;
 use crate::packet::{IP_MF, IP_OFFMASK, Ipv4Hdr, inet_checksum};
 
 const ETH_SIZE: usize = 14;
@@ -97,8 +98,7 @@ pub(crate) fn fragment_v4(frame: &[u8], dest_mtu: u16) -> Option<Vec<Vec<u8>>> {
         let len = todo.min(maxlen);
 
         // len ≤ maxlen < dest_mtu ≤ u16::MAX, so IP_SIZE+len fits.
-        #[expect(clippy::cast_possible_truncation)] // len < dest_mtu (u16) per above
-        ip.set_total_len((IP_SIZE + len) as u16);
+        ip.set_total_len(len_u16(IP_SIZE + len));
 
         // MF on every fragment except the last — UNLESS origf already
         // has MF set (re-fragmentation), in which case all get it.

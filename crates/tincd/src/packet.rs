@@ -32,6 +32,15 @@ use std::mem::size_of;
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
+/// Narrow a packet/buffer length to a 16-bit wire field. Callers pass
+/// lengths bounded by `MTU` or a fixed buffer; debug builds assert it.
+#[inline]
+#[expect(clippy::cast_possible_truncation)]
+pub(crate) fn len_u16(n: usize) -> u16 {
+    debug_assert!(u16::try_from(n).is_ok(), "length {n} exceeds u16");
+    n as u16
+}
+
 /// RFC 1071 one's-complement sum, chainable: start with `0xFFFF`, feed each
 /// return as the next `prevsum`. Words are loaded native-endian; the sum is
 /// byte-order independent on the wire (RFC 1071 §2(B)) and the host-order

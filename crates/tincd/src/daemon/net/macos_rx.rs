@@ -18,6 +18,7 @@ use std::net::SocketAddr;
 use super::{UDP_RX_BATCH, UDP_RX_BUFSZ, UdpRxBatch};
 use crate::darwin_x::{MsghdrX, recvmsg_x, zeroed_boxed_array};
 use crate::listen::unmap;
+use crate::packet::len_u16;
 use std::io;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
@@ -118,8 +119,7 @@ pub(super) fn phase1(
     #[expect(clippy::cast_sign_loss)]
     let n = ret as usize;
     for (i, m) in meta.iter_mut().enumerate().take(n) {
-        #[expect(clippy::cast_possible_truncation)] // ≤ UDP_RX_BUFSZ = 2048
-        let len = x.hdrs[i].msg_datalen.min(UDP_RX_BUFSZ) as u16;
+        let len = len_u16(x.hdrs[i].msg_datalen.min(UDP_RX_BUFSZ));
         let peer = ss_to_socketaddr(&x.addrs[i], x.hdrs[i].msg_namelen);
         *m = (len, peer.map(unmap));
     }

@@ -4,6 +4,7 @@ use std::os::fd::AsFd;
 
 use crate::compress;
 use crate::node_id::NodeId6;
+use crate::packet::len_u16;
 use crate::tunnel::{MTU, TunnelState};
 
 use super::helpers;
@@ -74,9 +75,8 @@ impl Daemon {
                 return true; // fake success
             }
             // len fits u16: MTU=1518.
-            #[expect(clippy::cast_possible_truncation)] // data.len() ≤ MTU (1518)
             let req = tinc_proto::msg::TcpPacket {
-                len: data.len() as u16,
+                len: len_u16(data.len()),
             };
             let mut nw = conn.send(format_args!("{}", req.format()));
             // FULL eth frame, not stripped/compressed (see above).
@@ -256,8 +256,7 @@ impl Daemon {
                             "Got SPTPS PROBE from {peer_name} via TCP");
                 return false;
             }
-            #[expect(clippy::cast_possible_truncation)] // body ≤ MTU
-            let body_len_u16 = body_len as u16;
+            let body_len_u16 = len_u16(body_len);
             if let Some(p) = self.dp.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
                 && body_len_u16 > p.maxrecentlen
             {
@@ -370,8 +369,7 @@ impl Daemon {
 
         // maxrecentlen for try_udp's gratuitous probe-reply size.
         // Gated on udppacket: TCP-tunneled frames don't inform PMTU.
-        #[expect(clippy::cast_possible_truncation)] // frame.len() ≤ 14+MTU
-        let frame_len = frame.len() as u16;
+        let frame_len = len_u16(frame.len());
         if let Some(t) = self.dp.tunnels.get_mut(&peer)
             && t.status.udppacket
             && let Some(p) = t.pmtu.as_mut()
@@ -658,8 +656,7 @@ impl Daemon {
             let dp = &mut self.dp;
             // origlen for EMSGSIZE → pmtu.on_emsgsize. Same value
             // the immediate-send path uses below.
-            #[expect(clippy::cast_possible_truncation)] // ≤ MTU
-            let at_len = origlen as u16;
+            let at_len = len_u16(origlen);
             if !dp
                 .tx_batch
                 .can_coalesce(sockaddr, sock, dp.tx_scratch.len())
@@ -700,8 +697,7 @@ impl Daemon {
         relay_nid: NodeId,
         origlen: usize,
     ) -> bool {
-        #[expect(clippy::cast_possible_truncation)] // tx_scratch ≤ MTU+33+12 < u16::MAX
-        let len = self.dp.tx_scratch.len() as u16;
+        let len = len_u16(self.dp.tx_scratch.len());
         let Some(slot) = self.listeners.get_mut(usize::from(sock)) else {
             return false;
         };
@@ -717,8 +713,7 @@ impl Daemon {
         if e.kind() == io::ErrorKind::WouldBlock {
             // Drop; UDP is unreliable.
         } else if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) {
-            #[expect(clippy::cast_possible_truncation)] // origlen ≤ MTU
-            let at_len = origlen as u16;
+            let at_len = len_u16(origlen);
             helpers::handle_udp_emsgsize(&mut self.dp.tunnels, &self.graph, relay_nid, at_len);
         } else if helpers::is_udp_unreachable_errno(&e) {
             // node_log_name borrows self; clone for the helper.
