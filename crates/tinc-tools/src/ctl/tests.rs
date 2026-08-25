@@ -104,26 +104,14 @@ fn pidfile_missing() {
     assert!(err.to_string().contains("Could not open pid file"));
 }
 
-// The fake daemon. A thread doing the greeting dance + canned
-// responses on a UnixStream::pair() half.
-//
-// Why a thread, not an in-process pump like join's: the control
-// protocol is *blocking* — handshake() blocks on recv until the
-// greeting arrives. The SPTPS pump worked because Sptps::receive
-// returns "consumed 0, no progress" on partial input. read_line
-// doesn't; it blocks. So: thread.
-//
-// Why this is fine: UnixStream::pair() is in-process (no socket
-// file, no port, no race with parallel tests). The thread is
-// joined before the test returns (no leak).
+// The fake daemon is a thread on a `UnixStream::pair()` half because
+// `handshake()` blocks in `read_line` until the greeting arrives (unlike the
+// SPTPS pump, which can be stepped in-process). In-process pair, thread joined
+// before return.
 
-/// Spawn a fake daemon on `theirs`. Reads the ID line (asserts
-/// the cookie), sends greeting line 1 + 2, then runs `serve` to
-/// handle whatever the test sends.
-///
-/// `serve` gets a `BufReader` and the raw write half. It can do
-/// `read_line` and `writeln!`. When it returns, the daemon side
-/// drops, closing the socket — the CLI side sees EOF.
+/// Spawn a fake daemon on `theirs`: read the ID line (asserting the cookie),
+/// send both greeting lines, run `serve(reader, writer)`, then drop so the CLI
+/// side sees EOF.
 pub(crate) fn fake_daemon<F>(
     theirs: UnixStream,
     expected_cookie: &str,
@@ -430,15 +418,9 @@ fn stop_drains_to_eof() {
     daemon.join().unwrap();
 }
 
-// recv_row: the dump prefix-strip + terminator detect
-//
-// Same harness as `recv_lines_until_eof`, but using the typed
-// `recv_row` instead of hand-tokenizing. The parse step (body →
-// NodeRow etc.) lives in ctl::rows / cmd::dump tests; this is just the
-// "18 N " prefix and the End vs Row distinction.
-
-/// Three rows, terminator. The body is byte-exact: spaces inside
-/// `"10.0.0.1 port 655"` survive.
+/// `recv_row`: three rows then terminator; only the `18 N ` strip and Row/End
+/// distinction are under test here (row parsing lives in `ctl::rows`). The body
+/// is byte-exact, spaces in `10.0.0.1 port 655` included.
 #[test]
 fn recv_row_basic() {
     let cookie = "2".repeat(64);
@@ -608,22 +590,10 @@ fn recv_row_trailing_space_is_terminator() {
     daemon.join().unwrap();
 }
 
-/// `recv_data` after `recv_line`: the shared-buffer concern.
-///
-/// Daemon writes header + data in one syscall (it doesn't, but
-/// TCP can coalesce). `BufReader` reads it all into its 8KiB
-/// buffer on the first `read_line`. The data is now in the
-/// `BufReader`'s buffer, not the socket. `recv_data` must see it.
-///
-/// THE test for the plan's "blocked on draining `buffer()`".
-/// `BufReader<T>: Read` is what makes this work — `read_exact`
-/// drains the buffer first. The test pins it: if someone
-/// "optimizes" `recv_data` to `self.reader.get_mut().0.borrow_
-/// mut().read_exact()` (bypassing `BufReader`), this fails.
-///
-/// `Cursor<Vec<u8>>` is the in-memory stream. One buffer, two
-/// records (header + data each), back-to-back, no separator.
-/// Exactly what TCP coalescing gives.
+/// `recv_data` after `recv_line` must see bytes already sitting in the
+/// `BufReader` (header and data coalesced into one read). Pins that `recv_data`
+/// goes through the `BufReader` rather than the raw stream. A `Cursor` with two
+/// back-to-back header+data records stands in for the socket.
 #[test]
 fn recv_data_after_recv_line_shared_buffer() {
     // Record 1: "18 15 7\n" + 7 bytes "LOGDATA"

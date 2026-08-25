@@ -81,14 +81,9 @@ pub(crate) struct Winsize {
     pub cols: u16,
 }
 
-/// `TIOCGWINSZ` on stdout. Falls back to 24×80 if stdout isn't
-/// a tty (shouldn't happen — `RawMode::enter` already failed)
-/// or the ioctl fails.
-///
-/// `nix::ioctl_read_bad!` generates an `unsafe fn` because ioctl
-/// is variadic at the C level — `nix` can't prove the third arg
-/// type matches the request. The macro is the safe-usage pattern;
-/// the `unsafe` is the FFI calling convention, not the logic.
+/// `TIOCGWINSZ` on stdout, falling back to 24×80 if it isn't a tty or the ioctl
+/// fails. `nix::ioctl_read_bad!` yields an `unsafe fn` only because ioctl is
+/// variadic in C.
 #[expect(unsafe_code)]
 #[must_use]
 pub(crate) fn winsize() -> Winsize {
@@ -105,18 +100,9 @@ pub(crate) fn winsize() -> Winsize {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    // SAFETY:
-    //   - `STDOUT_FILENO` is a valid fd (or the ioctl fails with
-    //     EBADF, which is the `Err` arm).
-    //   - `&mut ws` is a valid aligned `*mut winsize` to writable
-    //     memory of the right size.
-    //   - `TIOCGWINSZ` reads no memory from us, writes the struct.
-    //     The macro picked `_IOR` direction, kernel agrees.
-    //   - Thread-safe: ioctl on the FD, no global state. A SIGWINCH
-    //     race → one tick at the old size. Harmless.
-    // `&raw mut ws` not `&mut ws`: the macro takes `*mut T`. `&mut`
-    // would auto-coerce; `&raw mut` makes it explicit no Rust borrow
-    // ever exists (silences `clippy::borrow_as_ptr`). Same machine code.
+    // SAFETY: `STDOUT_FILENO` is valid or the ioctl fails with EBADF; `&raw mut
+    // ws` is a valid aligned `*mut winsize` the kernel writes and never reads. A
+    // SIGWINCH race costs one tick at the old size.
     let ok = unsafe { ioctl::tiocgwinsz(io::stdout().as_raw_fd(), &raw mut ws) };
 
     match ok {
@@ -132,37 +118,22 @@ pub(crate) fn winsize() -> Winsize {
     }
 }
 
-// RawMode — RAII termios restore
-
-/// `initscr()` + `endwin()` as a Drop guard. The point of RAII
-/// here is **panic safety**: if `top`'s loop panics, Drop fires
-/// during unwind and the terminal is restored. Without it the
-/// user's shell is left in raw mode — no echo, no line buffering,
-/// `stty sane` to recover.
-///
-/// Ctrl-C → SIGINT → process death → kernel doesn't restore termios.
-/// Known gap; the fix would be a SIGINT handler that drops the guard.
-///
-/// We don't hold a `StdoutLock` — it would block cooked-mode
-/// `read_line`. Writes lock per-call via `print!`; fine at 1Hz.
+/// Raw-mode RAII guard (`initscr`/`endwin`): Drop restores the terminal even if
+/// `top`'s loop panics, instead of leaving the shell without echo. SIGINT still
+/// bypasses it (known gap). No `StdoutLock` is held, since that would block the
+/// cooked-mode `read_line`.
 pub(crate) struct RawMode {
     /// The termios as it was before we touched it. Drop restores.
     original: Termios,
 }
 
 impl RawMode {
-    /// Enter raw mode + alt screen + hide cursor. Everything
-    /// `initscr()` does, minus terminfo (hardcoded ANSI).
-    ///
-    /// "Raw mode" here = `ECHO` off (no key echo), `ICANON` off
-    /// (`read` per-byte not per-line), `ISIG` off (Ctrl-C is byte
-    /// 0x03, not SIGINT — hence `case 'q'` not a signal handler).
-    ///
-    /// `cfmakeraw` would also clear `OPOST`, killing `\n` → `\r\n`
-    /// translation. We leave it on so stray output stays readable.
+    /// Enter raw mode (ECHO, ICANON, ISIG off — Ctrl-C arrives as byte 0x03, hence
+    /// the `'q'` key), alt screen, hidden cursor; hardcoded ANSI instead of
+    /// terminfo. `OPOST` stays on so stray output keeps its `\r\n`.
     ///
     /// # Errors
-    /// Stdin isn't a tty. Caller maps to `CmdError`.
+    /// Stdin isn't a tty.
     pub(crate) fn enter() -> io::Result<Self> {
         let stdin = io::stdin();
         let fd = stdin.as_fd();
@@ -201,15 +172,11 @@ impl RawMode {
         Ok(Self { original })
     }
 
-    /// Temporarily restore cooked mode, run `f`, re-enter raw.
-    /// Used for the `'s'` key prompt (`read_line` + parse).
-    ///
-    /// Stays on alt screen; cursor shown so the user sees where
-    /// they're typing.
+    /// Temporarily restore cooked mode (cursor shown, still on the alt screen), run
+    /// `f`, re-enter raw. Used for the `'s'` delay prompt.
     ///
     /// # Errors
-    /// `tcsetattr` failure or `f`'s errors propagate. The re-raw
-    /// `tcsetattr` is best-effort (Drop will try again).
+    /// `tcsetattr` or `f`'s error; re-entering raw is best-effort (Drop retries).
     pub(crate) fn with_cooked<T>(
         &self,
         f: impl FnOnce(&mut dyn io::BufRead) -> io::Result<T>,
@@ -252,22 +219,12 @@ impl Drop for RawMode {
     }
 }
 
-// getch_timeout — poll + read
-
-/// `timeout(delay)` + `getch()`: poll stdin with a deadline,
-/// return `None` on timeout, `Some(byte)` on key.
-///
-/// **No keycode decoding.** Arrow keys arrive as 3 separate
-/// `Some` returns (`ESC`, `[`, `A`); `top` only binds single
-/// ASCII keys so the switch no-ops them. Harmless.
-///
-/// **EOF → `Some(b'q')`.** Returning `None` would spin (poll
-/// says readable, read says 0, repeat); mapping to `'q'` fires
-/// the existing quit path.
+/// Poll stdin with a deadline: `None` on timeout, `Some(byte)` on key. No
+/// keycode decoding (arrow keys arrive as three bytes that `top` ignores). EOF
+/// maps to `Some(b'q')` so a closed stdin quits instead of spinning.
 ///
 /// # Errors
-/// Real I/O errors on stdin. EINTR maps to `None` (treated as
-/// timeout — next tick redraws, e.g. after SIGWINCH).
+/// Real stdin I/O errors; EINTR (e.g. SIGWINCH) is `None`.
 pub(crate) fn getch_timeout(ms: u16) -> io::Result<Option<u8>> {
     let stdin = io::stdin();
     let fd = stdin.as_fd();

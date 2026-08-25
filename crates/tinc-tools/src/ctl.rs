@@ -50,14 +50,10 @@ use std::path::PathBuf;
 
 pub mod rows;
 
-/// Control request type: the second int after `CONTROL` in every control
-/// line. The numeric values are a closed set shared with the daemon;
-/// new values are added at the end, never reordered.
-///
-/// The daemon's `REQ_INVALID = -1` error response is represented as
-/// `Option<CtlRequest>::None` on parse. `Restart`, `DumpGraph`, and
-/// `Connect` are never sent, but keeping them avoids surprising gaps in
-/// the discriminant sequence.
+/// Control request type: the second int after `CONTROL` in every control line.
+/// A closed set shared with the daemon, append-only. The daemon's `REQ_INVALID
+/// = -1` parses as `None`; `Restart`, `DumpGraph` and `Connect` are never sent
+/// but keep the discriminants gap-free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CtlRequest {
@@ -221,21 +217,11 @@ pub enum CtlError {
     Io(#[source] io::Error),
 }
 
-/// The connected control socket, plus the daemon's pid (from greeting
-/// line 2).
-///
-/// Generic over the stream so tests can pass `UnixStream::pair()` halves;
-/// in production it's always `UnixStream`.
-///
-/// The reader half is a `BufReader`, which is essential: `recv_line` may
-/// over-read past the `\n` into a following raw data block, and a later
-/// `recv_data` (`read_exact` on the same `BufReader`) drains that internal
-/// buffer first, so no bytes are lost.
-///
-/// Writes are unbuffered: control commands are one line each, so a
-/// `BufWriter` would only add a mandatory flush after every send.
-///
-/// Not `Debug` — that would require `S: Debug` for no benefit.
+/// The connected control socket plus the daemon's pid from greeting line 2.
+/// Generic over the stream for tests (`UnixStream::pair()`). The reader is a
+/// `BufReader` on purpose: `recv_line` may over-read into a following data
+/// block and `recv_data`'s `read_exact` on the same reader drains that first.
+/// Writes are unbuffered, one line each.
 pub struct CtlSocket<S: Read + Write> {
     /// Reader half. Buffered for `read_line`.
     reader: BufReader<ReadHalf<S>>,
@@ -272,14 +258,9 @@ impl<S: Write> Write for WriteHalf<S> {
 }
 
 impl<S: Read + Write> CtlSocket<S> {
-    /// Test seam: wrap an existing stream without doing the handshake, so
-    /// tests can feed canned daemon output into a `CtlSocket` without
-    /// mocking the greeting each time.
-    ///
-    /// `pid` is set to 0 (only `cmd_pid` reads it). Taking the
-    /// `Rc<RefCell<S>>` lets the test keep a clone and inspect what was
-    /// written. `pub(crate)` + `#[cfg(test)]` so test modules in `cmd::*`
-    /// can call it while it's compiled out of release builds.
+    /// Test seam: wrap a stream without the handshake so tests can feed canned
+    /// daemon output; `pid` is 0. Taking the `Rc<RefCell<S>>` lets the test keep a
+    /// clone to inspect writes.
     #[cfg(test)]
     pub(crate) fn wrap(shared: Rc<RefCell<S>>) -> Self {
         Self {
@@ -289,16 +270,12 @@ impl<S: Read + Write> CtlSocket<S> {
         }
     }
 
-    /// Do the greeting exchange over an already-connected stream.
-    ///
-    /// Separate from `connect()` (which does the pidfile read, liveness
-    /// check, and socket connect) so tests can pass a mock stream and a
-    /// synthesized cookie.
+    /// Greeting exchange over an already-connected stream; split from `connect()`
+    /// (pidfile, liveness, socket) so tests can pass a mock stream and cookie.
     ///
     /// # Errors
-    /// `Greeting` if the daemon's response doesn't match the
-    /// expected shape. Wrong cookie → daemon closes after our send,
-    /// next recv returns 0 → `Greeting("Cannot read greeting...")`.
+    /// `Greeting` if the response has the wrong shape; a wrong cookie makes the
+    /// daemon close, which reads as "Cannot read greeting".
     pub fn handshake(stream: S, cookie: &str) -> Result<Self, CtlError> {
         let shared = Rc::new(RefCell::new(stream));
         let mut reader = BufReader::new(ReadHalf(Rc::clone(&shared)));
@@ -372,11 +349,8 @@ impl<S: Read + Write> CtlSocket<S> {
         writeln!(self.writer, "{CONTROL} {} {a} {b}", req as u8).map_err(CtlError::Io)
     }
 
-    /// Send with one string argument. `REQ_DISCONNECT` (node name).
-    ///
-    /// `arg` should be a single token (no spaces) — the daemon reads
-    /// one word. Node names pass `check_id` so this holds; we don't
-    /// re-validate (caller's job).
+    /// Send with one string argument (`REQ_DISCONNECT` node name). `arg` must be a
+    /// single token; callers pass `check_id`'d names.
     ///
     /// # Errors
     /// Same as `send`.
@@ -384,16 +358,12 @@ impl<S: Read + Write> CtlSocket<S> {
         writeln!(self.writer, "{CONTROL} {} {arg}", req as u8).map_err(CtlError::Io)
     }
 
-    /// Receive and parse a one-shot ack.
-    ///
-    /// Returns the `result` int: 0 = success, anything else = daemon-side
-    /// failure — except `REQ_SET_DEBUG`, which repurposes it as "previous
-    /// debug level", so callers must interpret per request.
+    /// Receive and parse a one-shot ack, returning the `result` int: 0 = success,
+    /// except `REQ_SET_DEBUG` where it is the previous level.
     ///
     /// # Errors
-    /// `Io` if recv fails. `Greeting` (variant reused for shape errors) if
-    /// the response has the wrong code, echoes the wrong request, or
-    /// doesn't parse.
+    /// `Io` on recv failure; `Greeting` if the code, echoed request or shape is
+    /// wrong.
     pub fn recv_ack(&mut self, expected: CtlRequest) -> Result<i32, CtlError> {
         let line = recv_one(&mut self.reader, "lost connection to tincd")?;
         let mut t = line.split_ascii_whitespace();
@@ -431,20 +401,13 @@ impl<S: Read + Write> CtlSocket<S> {
         }
     }
 
-    /// Receive one dump row: parse the `"18 N"` prefix and hand back
-    /// `(kind, body)`. A line with no body is the dump terminator (`End`).
-    ///
-    /// `Row` carries the request type because graph mode fires two dumps
-    /// (nodes then edges) and reads both responses in one loop.
-    ///
-    /// `body` is an owned `String`: a borrow into the `BufReader` buffer
-    /// couldn't outlive the next `read_line`. Dump output is dozens of
-    /// rows, so the per-row allocation is fine.
+    /// Receive one dump row: strip the `18 N` prefix, return `(kind, body)`; a
+    /// bodyless line is `End`. `kind` matters because graph mode reads node and
+    /// edge dumps in one loop. `body` is owned; it can't outlive the next
+    /// `read_line`.
     ///
     /// # Errors
-    /// `Io` on read failure. `Greeting` if EOF before terminator.
-    /// The daemon closing the socket mid-dump is daemon-crashed; we
-    /// don't try to use partial results.
+    /// `Io`, or `Greeting` on EOF before the terminator.
     pub fn recv_row(&mut self) -> Result<DumpRow, CtlError> {
         let line = self
             .recv_line()?
@@ -473,13 +436,9 @@ impl<S: Read + Write> CtlSocket<S> {
         })
     }
 
-    /// Drain a dump response, invoking `f` for every `Row` until the
-    /// `End` terminator. The closure sees the per-row `CtlRequest`
-    /// and the body string; most callers ignore the former.
-    ///
-    /// Generic over the error type so callers can return their own
-    /// `CmdError` from the closure while `recv_row`'s `CtlError`
-    /// still propagates via `From`.
+    /// Drain a dump response, calling `f(kind, body)` per row until `End`. Generic
+    /// over the error type so the closure can return `CmdError` while `CtlError`
+    /// converts via `From`.
     ///
     /// # Errors
     /// Whatever `recv_row` or `f` returns.
@@ -495,16 +454,12 @@ impl<S: Read + Write> CtlSocket<S> {
         }
     }
 
-    /// Receive exactly `buf.len()` raw bytes after a header line.
-    ///
-    /// `read_exact` on the shared `BufReader` first drains any bytes the
-    /// previous `read_line` over-read (see struct doc). The caller sizes
-    /// and reuses `buf` to avoid per-packet allocation in the log/pcap
-    /// stream loops.
+    /// Receive exactly `buf.len()` raw bytes after a header line; `read_exact` on
+    /// the shared `BufReader` first drains what `read_line` over-read. Callers
+    /// reuse `buf` across the log/pcap loops.
     ///
     /// # Errors
-    /// `Io` on read failure or unexpected EOF mid-data (daemon died
-    /// between the header and the data).
+    /// `Io` on read failure or EOF mid-data.
     pub fn recv_data(&mut self, buf: &mut [u8]) -> Result<(), CtlError> {
         self.reader.read_exact(buf).map_err(CtlError::Io)
     }
@@ -542,15 +497,11 @@ fn recv_one<R: BufRead>(r: &mut R, eof_msg: &str) -> Result<String, CtlError> {
 
 #[cfg(unix)]
 impl CtlSocket<UnixStream> {
-    /// The full OS-side connect: read the pidfile, check the daemon is
-    /// alive, connect the unix socket, do the greeting. Each failure has
-    /// its own `CtlError` variant.
-    ///
-    /// `paths` must have had `resolve_runtime()` called; `pidfile()`
-    /// panics otherwise.
+    /// The full connect: read the pidfile, check the daemon is alive, connect the
+    /// unix socket, do the greeting. `paths` must be `resolve_runtime()`d.
     ///
     /// # Errors
-    /// See `CtlError` variants.
+    /// One `CtlError` variant per step.
     pub fn connect(paths: &Paths) -> Result<Self, CtlError> {
         let pidfile_path = paths.pidfile();
         let pf = Pidfile::read(pidfile_path)?;

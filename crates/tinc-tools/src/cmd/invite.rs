@@ -100,26 +100,13 @@ pub struct InviteResult {
     pub key_is_new: bool,
 }
 
-/// `tinc invite NODENAME`.
-///
-/// `now` is parameterized for tests; production passes
-/// `SystemTime::now()`. Same pattern as `cmd::sign`.
-///
-/// `netname` threads through to the invitation file's `NetName =` line;
-/// `Paths` doesn't carry it (only the *resolved* confbase). `None` =
-/// no `NetName` line.
+/// `tinc invite NODENAME`. `now` is injectable for tests; `netname` feeds the
+/// invitation's `NetName =` line (`Paths` only has the resolved confbase). One
+/// sequence of validate, mkdir, sweep, key, hash, file, url sharing local
+/// state.
 ///
 /// # Errors
-/// - `BadInput`: invalid node name, name collision with existing host,
-///   no `Address` in config (we don't probe).
-/// - `Io`: any filesystem operation. invitations/ creation, key write,
-///   invitation file write.
-///
-/// # Panics
-/// Only via `OsRng::fill_bytes` if the OS entropy source is broken.
-/// Same panic contract as `keypair::generate`.
-// Sequence of distinct steps (validate, mkdir, sweep, key, hash, file,
-// url) sharing local state. Splitting would mean threading 6 args.
+/// `BadInput` (invalid or taken name, no `Address` configured) or `Io`.
 pub fn invite(
     paths: &Paths,
     netname: Option<&str>,
@@ -152,14 +139,9 @@ pub fn invite(
     let inv_dir = paths.invitations_dir();
     makedir(&inv_dir, 0o700)?;
 
-    // Sweep expired invitations, count live ones
-    // Walk invitations/: each file with a 24-char name (the
-    // b64-of-18-byte hash format), if mtime > week old, unlink it.
-    // Count the survivors.
-    //
-    // `count == 0` after the sweep means "no live invitations" → safe
-    // to rotate the invitation key. A leaked key from an old invite
-    // is now useless: the new key has a different fingerprint.
+    // Sweep invitations/: unlink 24-char-named files older than a week, count the
+    // survivors. Zero survivors means the invitation key can be rotated, rendering
+    // any leaked old key useless.
     let live_count = sweep_expired(&inv_dir, now)?;
 
     // Load or generate invitation key
@@ -210,14 +192,9 @@ pub fn invite(
     let inv_filename = cookie_filename(&cookie, pubkey);
     let inv_path = inv_dir.join(&inv_filename);
 
-    // Write the invitation file
-    // O_EXCL, 0600. EXCL: cookie collision is cryptographically
-    // impossible (18 bytes from OsRng), so EEXIST means something is
-    // very wrong.
-    //
-    // We build the *whole* file as a string then write_all once.
-    // Easier to test (the builder is a separate fn), no partial-write
-    // risk, and the file is a few KB at most.
+    // Write the invitation file, O_EXCL 0600 (an 18-byte random cookie can't
+    // collide, so EEXIST is a real problem). Built as one string and written once:
+    // testable builder, no partial writes.
     let body = build_invitation_file(paths, netname, invitee, &myname, &address)?;
     write_invitation_file(&inv_path, &body)?;
 
@@ -232,18 +209,9 @@ pub fn invite(
     Ok(InviteResult { url, key_is_new })
 }
 
-// Helpers
-
-/// Expiry sweep + live count.
-///
-/// Walks `inv_dir`, for each entry with a 24-char name:
-/// - if `mtime + 1 week < now`, unlink it
-/// - else, count it as live
-///
-/// 24 chars is `SLUG_PART_LEN` — the b64-of-18-bytes shape. Any other
-/// filename (`.`, `..`, `ed25519_key.priv`) is skipped.
-///
-/// `now` parameterized so tests don't need to mess with file mtimes.
+/// Expiry sweep plus live count over `inv_dir`: entries with a 24-char
+/// (`SLUG_PART_LEN`) name are unlinked if `mtime + 1 week < now`, else counted;
+/// other names are skipped. `now` is injectable so tests needn't touch mtimes.
 fn sweep_expired(inv_dir: &Path, now: SystemTime) -> Result<u32, CmdError> {
     let deadline = now.checked_sub(EXPIRY).unwrap_or(SystemTime::UNIX_EPOCH);
 
@@ -300,20 +268,11 @@ fn write_invitation_file(path: &Path, body: &str) -> Result<(), CmdError> {
     f.write_all(body.as_bytes()).map_err(io_err(path))
 }
 
-/// Build the invitation file body.
-///
-/// The file is two chunks separated by `#--...--#`:
-/// 1. The invitee's bootstrap config: `Name`, `NetName`, `ConnectTo`,
-///    plus copies of `Mode`/`Broadcast` from our tinc.conf.
-/// 2. Our own host config (with `Port` substituted if it was `0`).
-///
-/// `finalize_join` parses the first chunk variable-by-variable through
-/// the `VAR_SAFE` filter, then writes subsequent chunks (separated by
-/// `Name = X` lines) as host files verbatim. So this format is
-/// daemon-locked: chunk 1 = invitee's config, chunk 2+ = host files.
-///
-/// Separated from `invite()` so tests can check the format without
-/// touching the filesystem.
+/// Build the invitation file body: chunk 1 is the invitee's bootstrap config
+/// (`Name`, `NetName`, `ConnectTo`, copied `Mode`/`Broadcast`), then `#---#`,
+/// then our host file (with `Port` substituted if 0). `finalize_join` filters
+/// chunk 1 through `VAR_SAFE` and writes later chunks as host files, so the
+/// format is daemon-locked. Pure, for tests.
 fn build_invitation_file(
     paths: &Paths,
     netname: Option<&str>,
@@ -331,14 +290,9 @@ fn build_invitation_file(
     out.push_str(invitee);
     out.push('\n');
 
-    // Only emitted if netname is set. We don't have `check_netname`
-    // ported yet; the binary's `-n` parser already does a
-    // path-traversal guard, and `finalize_join` re-validates on the
-    // receiving side anyway. So: if set, emit it; let join's filter
-    // catch bad values.
-    //
-    // TODO: port `check_netname` to names.rs when more callers need
-    // it. ~20 lines: rejects control chars, / \, shell metachars.
+    // Emitted only if netname is set. `check_netname` isn't ported yet; the
+    // binary's `-n` parser guards path traversal and `finalize_join` re-validates
+    // on the receiving side.
     if let Some(n) = netname {
         out.push_str("NetName = ");
         out.push_str(n);
@@ -393,41 +347,19 @@ fn copy_mesh_vars(paths: &Paths, out: &mut String) -> Result<(), CmdError> {
     Ok(())
 }
 
-/// Copies `hosts/myname` line-by-line, but: if a line's variable name
-/// is `Port`, replace the whole line with `Port = ACTUAL_PORT`. This
-/// handles the `Port = 0` case (ephemeral port) — the invitation needs
-/// the *actual* port the daemon bound, not `0`.
-///
-/// In our case (no daemon connection) we use whatever port was in the
-/// `Address` line, or `655` default. The `Port = 0` substitution still
-/// happens, just with whatever port `get_my_address` resolved to. If
-/// the user has `Port = 0` and no port on their `Address` line and no
-/// daemon running, they get `Port = 655` here, which is wrong but at
-/// least it's a sensible default — and they'll find out when join fails
-/// to connect.
-///
-/// This is the **byte-preserving** copy. Unlike `copy_mesh_vars`, the
-/// host file may contain a PEM block, comments, blank lines — things
-/// `parse_file` would silently drop. So `read_line` loop, not parse.
-/// Same lesson as `disable_old_keys`: byte-level passthrough needs
-/// `read_line`, not tinc-conf.
+/// Copy `hosts/myname` line by line, replacing any `Port` line with `Port =
+/// ACTUAL_PORT` so a `Port = 0` config advertises the port from the `Address`
+/// line (or 655) rather than 0. Byte-preserving `split_inclusive` copy, not
+/// `parse_file`, because the host file carries PEM blocks and comments.
 fn copy_host_replacing_port(
     host_file: &Path,
     port: &str,
     out: &mut String,
 ) -> Result<(), CmdError> {
-    // Extract the first whitespace-delimited token (after leading
-    // whitespace). Match: token is exactly 4 chars and those 4 chars
-    // are "Port" case-insensitively. "Port" matches, "PORT" matches,
-    // "Porting" does not (token is 7 chars).
-    //
-    // Subtlety: token stops at TAB or SPACE but not at `=`. So
-    // `Port=655` has token "Port=655" (8 chars), doesn't match.
-    // `Port=655` passes through unchanged; init writes the `Port = X`
-    // form anyway.
-    //
-    // `split_inclusive('\n')`: each chunk includes its trailing `\n`
-    // (if there was one). Same fidelity as a `read_line` loop.
+    // Match when the first whitespace-delimited token is exactly `Port`,
+    // case-insensitive (`Porting` and `Port=655` don't match; init writes `Port =
+    // X`). `split_inclusive('\n')` keeps trailing newlines like a `read_line`
+    // loop.
     let body = fs::read_to_string(host_file).map_err(io_err(host_file))?;
 
     for chunk in body.split_inclusive('\n') {
@@ -453,15 +385,9 @@ fn copy_host_replacing_port(
     Ok(())
 }
 
-/// Our address for the URL host part. `host[:port]` formatted.
-///
-/// Looks for `Address` in the host file, then tinc.conf, and bails with a
-/// clear message if neither has it.
-///
-/// The pidfile read is for `Port = 0` resolution: the daemon writes
-/// its actual bound port there. Without a daemon connection we can't
-/// get that, so `Port = 0` + no port on the `Address` line = error.
-/// (`Port` defaults to 655 if absent; `0` is explicit "ephemeral".)
+/// Our `host[:port]` for the URL: `Address` from the host file, then tinc.conf,
+/// else a clear error. Without a daemon connection `Port = 0` can't be resolved
+/// from the pidfile, so it needs a port on the `Address` line.
 fn get_my_address(paths: &Paths, myname: &str) -> Result<AddressPort, CmdError> {
     // We handle `Address = host port` (port-on-address-line) —
     // `Address = 1.2.3.4 1234` ≡ `Address = 1.2.3.4` + `Port = 1234`.
@@ -723,19 +649,8 @@ mod tests {
         fs::write(&live, "").unwrap();
         fs::write(&dead, "").unwrap();
 
-        // mtime is "now" for both. To make `dead` expired, advance
-        // `now` past it but not past `live`. But they have the same
-        // mtime... so we set `dead`'s mtime to the past instead.
-        //
-        // `filetime` crate? No new deps. Use `nix::sys::stat::utimes`.
-        // Actually simpler: just shift `now` for the sweep. Both files
-        // have the same mtime so they'd both be live or both dead.
-        // To distinguish, we DO need to set one's mtime.
-        //
-        // Simplest: write `dead`, sleep, write `live`, then `now =
-        // dead's mtime + 8 days`. But sleep in tests is bad.
-        //
-        // Use `nix` directly — it's already a dep.
+        // Both files were just written with the same mtime, so backdate `dead` via
+        // `nix` utimes (already a dep) instead of sleeping.
         let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
         let old_tv = nix::sys::time::TimeVal::new(1_000_000, 0);
         nix::sys::stat::utimes(&dead, &old_tv, &old_tv).unwrap();

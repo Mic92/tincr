@@ -110,21 +110,13 @@ fn pick_editor() -> OsString {
         .unwrap_or_else(|| OsString::from("vi"))
 }
 
-/// Spawn the editor via `sh -c` so `$EDITOR` is shell-tokenized
-/// (`EDITOR="emacsclient -nw"` works) while the filename passes through
-/// `"$@"` and is never re-expanded.
-///
-/// The resolved editor is passed via a private `TINC_EDITOR` env var
-/// because the VISUAL/EDITOR/vi fallback already happened in
-/// [`pick_editor`]; re-doing it in the shell would duplicate the logic.
-/// `$0` is set to `tinc-edit` so it shows up usefully in ps and shell
-/// error messages.
-///
-/// Returns the editor's exit status. The editor exiting nonzero is
-/// `Ok(nonzero)`, not an `Err`.
+/// Spawn the editor via `sh -c` so `$EDITOR` is shell-tokenized (`emacsclient
+/// -nw` works) while the filename goes through `"$@"` unexpanded. The
+/// already-resolved editor is passed as `TINC_EDITOR`; `$0` is `tinc-edit` for
+/// ps and error messages. A nonzero editor exit is `Ok(status)`.
 ///
 /// # Errors
-/// I/O errors from spawning `sh` itself.
+/// I/O errors spawning `sh`.
 fn spawn_editor(editor: &OsString, file: &PathBuf) -> io::Result<ExitStatus> {
     // `$TINC_EDITOR` unquoted → word-split (flags allowed); `"$@"` quoted →
     // filename stays one word. `exec` so the editor replaces the shell and

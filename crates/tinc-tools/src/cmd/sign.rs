@@ -127,17 +127,12 @@ fn signed_message(data: &[u8], name: &str, t: i64) -> Vec<u8> {
     msg
 }
 
-/// `cmd_sign`. The header + body, written to `out`.
-///
-/// `t` is the unix time to embed. Caller supplies the current time;
-/// tests supply a fixed value. `i64` — won't overflow until 292
-/// billion years from now.
+/// `tinc sign`: header plus body to `out`, embedding unix time `t` (caller
+/// supplies now; tests a fixed value).
 ///
 /// # Errors
-///
-/// `BadInput` if `tinc.conf` missing or no `Name`. `Io` for the
-/// private key open or the input file open. **Not** for the signature
-/// itself — `SigningKey::sign` returns `[u8; 64]` directly.
+/// `BadInput` if `tinc.conf`/`Name` is missing; `Io` opening the private key or
+/// input. Signing itself can't fail.
 pub fn sign(paths: &Paths, input: Option<&Path>, t: i64, out: impl Write) -> Result<(), CmdError> {
     let name = get_my_name(paths)?;
     let sk = keypair::read_private(&paths.ed25519_private())?;
@@ -182,14 +177,11 @@ pub enum Signer {
 }
 
 impl Signer {
-    /// Parse the user-supplied arg. `paths` for the `.` case.
+    /// Parse the signer argument; `paths` is needed for `.` (our own name).
     ///
     /// # Errors
-    ///
-    /// `BadInput` if `arg` is neither `.` nor `*` and fails
-    /// `check_id` (i.e., it's not a valid node name). `BadInput` if
-    /// `.` and `tinc.conf` is missing/nameless (propagated from
-    /// `get_my_name`).
+    /// `BadInput` if `arg` is neither `.` nor `*` nor a valid node name, or `.`
+    /// with no readable `Name`.
     pub fn parse(arg: &str, paths: &Paths) -> Result<Self, CmdError> {
         // `.` then `*` then check_id. `.` and `*` are not validated
         // as names — they're metasyntax (and would fail `check_id`
@@ -223,26 +215,13 @@ pub struct Verified {
     pub body: Vec<u8>,
 }
 
-/// `cmd_verify`. Validates the signature, returns the body.
+/// `tinc verify`: validate the signature and return the body.
 ///
 /// # Errors
-///
-/// `BadInput("Invalid input")` for any header parse failure (no
-/// newline, header too long, shape mismatch, sig length wrong,
-/// `t == 0`, signer fails `check_id`). All bundled into one message.
-///
-/// `BadInput("Signature is not made by NAME")` if `Signer::Named` and
-/// the header's signer doesn't match.
-///
-/// `BadInput("Invalid signature")` if the crypto fails. Covers both
-/// b64-decode failure and Ed25519 verify failure.
-///
-/// `Io` for host-file open failure.
-///
-/// `BadInput("Could not read public key from PATH")` if the host file
-/// exists but has neither `Ed25519PublicKey =` line nor PEM block.
-/// (Distinct from `Io` — the file opened fine, the contents are
-/// wrong.)
+/// `BadInput("Invalid input")` for any header problem; `"Signature is not made
+/// by NAME"` for a `Signer::Named` mismatch; `"Invalid signature"` for b64 or
+/// Ed25519 failure; `Io` opening the host file; `"Could not read public key
+/// from PATH"` if it has no key.
 pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verified, CmdError> {
     // Find the header line
     // No newline, or header too long → fail.
@@ -336,14 +315,11 @@ pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verifi
     })
 }
 
-/// `cmd_verify`, full pipeline. Slurp + `verify_blob` + write body.
-///
-/// Separated from `verify_blob` so tests can supply the blob directly
-/// without filesystem/stdin choreography.
+/// `tinc verify`, full pipeline: slurp, [`verify_blob`], write body. Split so
+/// tests can pass the blob directly.
 ///
 /// # Errors
-///
-/// See [`verify_blob`]. Plus `Io` for input file open.
+/// See [`verify_blob`], plus `Io` opening the input.
 pub fn verify_cmd(
     paths: &Paths,
     signer: &Signer,

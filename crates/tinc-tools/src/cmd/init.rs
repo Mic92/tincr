@@ -54,18 +54,12 @@ use std::path::Path;
 use std::path::PathBuf;
 use tinc_crypto::b64;
 
-/// `cmd_init`. Takes the resolved `Paths` and the node name from argv.
-///
-/// Progress goes to stderr. Stdout is reserved for command *output*
-/// (export does this); progress chatter is diagnostics.
+/// `tinc init NAME` on the resolved `Paths`. Progress goes to stderr; stdout is
+/// for command output. No rollback on partial failure (module doc).
 ///
 /// # Errors
-///
-/// `Exists` if `tinc.conf` already exists. `BadInput` if the name fails
-/// `check_id`. `Io` for any filesystem failure (mkdir, open, write,
-/// chmod) — the path tells you which.
-///
-/// Doesn't roll back on partial failure. See module doc.
+/// `Exists` if `tinc.conf` exists, `BadInput` if the name fails `check_id`,
+/// `Io` (with path) for mkdir/open/write/chmod.
 pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     // Guard: already initialized?
     // `try_exists` not `exists`: `exists` swallows EACCES (returns

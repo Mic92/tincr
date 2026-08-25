@@ -37,20 +37,10 @@ use conf::check_variables;
 use keys::check_keypairs;
 use scripts::check_scripts;
 
-// Finding — one diagnostic or fix-result.
-//
-// The goal is enough structure for tests to `matches!()` on without
-// going stringly-typed, but not so much that adding a check means
-// three new variants. Paths are carried for the variants that mention
-// them in the message; tests check `path.ends_with()` not equality.
-//
-// Why not just `(Severity, String)`: tests would have to parse
-// strings. Why not full structure (every field of every message):
-// 30 variants for 18 message shapes, half of which are tested once.
-// Middle ground: variant per *kind*, strings/paths as payload.
-
-/// A single fsck diagnostic. Produced during the scan; the binary
-/// formats them to stderr. Tests `matches!` on the variant.
+/// A single fsck diagnostic, produced during the scan and formatted to stderr
+/// by the binary. One variant per kind with strings/paths as payload:
+/// structured enough for tests to `matches!` on, without a field for every
+/// message detail.
 #[derive(Debug)]
 pub enum Finding {
     // Fatal: no point continuing keypair check
@@ -123,14 +113,10 @@ pub enum Finding {
     HostVarInServer { name: String, source: Source },
     /// Non-`VAR_HOST` var in `hosts/*`.
     ServerVarInHost { name: String, source: Source },
-    /// Non-`VAR_MULTIPLE` var appears more than once. **The only
-    /// place that surfaces silent-first-wins.** The
-    /// `Config::lookup().next()` pattern means a second `Port = 999`
-    /// is invisibly ignored — fsck is the canary.
-    ///
-    /// `where_` is `"tinc.conf"` for the server check or the node
-    /// name for a host check. Not a path. The duplicate spans the
-    /// whole file so there's no single line number to print.
+    /// Non-`VAR_MULTIPLE` var appears more than once; the only place the silent
+    /// first-wins of `Config::lookup().next()` surfaces. `where_` is `"tinc.conf"`
+    /// or the node name, not a path; a duplicate spans the file so there is no
+    /// single line number.
     DuplicateVar { name: String, where_: String },
 
     // Fix results
@@ -223,24 +209,12 @@ pub struct Report {
     pub ok: bool,
 }
 
-// The scan
-
-/// `force` is `--force`: apply fixes (chmod, rewrite pubkey) instead
-/// of just warning.
-///
-/// The scan is **side-effecting** when `force` is true. Tests that
-/// pass `force: true` should expect their tempdir to be mutated.
+/// Run the scan. `force` (`--force`) applies fixes (chmod, rewrite pubkey)
+/// instead of just warning, so the confbase is mutated.
 ///
 /// # Errors
-///
-/// Never returns `Err` — fsck's whole job is to *report* errors, not
-/// propagate them. `CmdError` is in the signature for consistency
-/// with the dispatch table; the `Result` is always `Ok`.
-///
-/// (The one place we *could* `Err` is "internal invariant violated"
-/// — e.g., `b64::encode` returning the wrong length. We `expect()`
-/// those instead. If that fires, it's a bug, not a user-facing fsck
-/// finding.)
+/// Never; fsck reports problems as findings. The `Result` matches the dispatch
+/// table. Internal invariant violations `expect()` instead.
 pub fn run(paths: &Paths, force: bool) -> Result<Report, CmdError> {
     let mut findings = Vec::new();
 

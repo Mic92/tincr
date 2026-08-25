@@ -828,17 +828,9 @@ fn get_port_with_value_skips_pidfile() {
     assert!(host.contains("Port = 655\n"));
 }
 
-/// The `!node && !(type & VAR_SERVER)` condition uses
-/// not-SERVER, not HAS-HOST. A var with NEITHER flag (which
-/// doesn't exist in the real table, but the logic admits it)
-/// would resolve to hosts/$me. Only SERVER → tinc.conf. The
-/// dual-tagged test above covers HAS-both; this covers the
-/// symmetry.
-///
-/// We can't test with a real var (every var has SERVER or
-/// HOST), but we CAN check that the test's understanding of
-/// the condition is correct by reading the table: every var
-/// lacking SERVER must have HOST.
+/// The file choice tests not-SERVER rather than HOST, so a var with neither
+/// flag would go to hosts/$me. No real var lacks both, so instead assert the
+/// table invariant this relies on: every var without SERVER has HOST.
 #[test]
 fn every_nonserver_var_is_host() {
     // Trip-wire on the variables table. The build_intent logic

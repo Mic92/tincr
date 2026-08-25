@@ -112,22 +112,13 @@ pub fn run(paths: &Paths) -> Result<(), CmdError> {
     Ok(())
 }
 
-/// `disable_old_keys`, minus the RSA branch (see module doc).
-///
-/// Returns `Ok(true)` if any lines were commented out (and thus the
-/// file was rewritten via rename), `Ok(false)` if nothing matched
-/// (file untouched — tmpfile was unlinked). `Ok(false)` also if the
-/// file didn't exist at all.
-///
-/// The bool isn't used by `genkey::run` (append happens either way).
-/// It's for `fsck`, which calls this and warns if it was a no-op.
+/// Comment out existing Ed25519 key lines. `Ok(true)` if any were (file
+/// rewritten via rename), `Ok(false)` if nothing matched or the file doesn't
+/// exist (tmpfile unlinked); fsck uses the bool to warn on a no-op.
 ///
 /// # Errors
-///
-/// `Io` if reading the source, writing the tmpfile, or the final
-/// rename fails. The tmpfile is best-effort-unlinked on error.
-///
-/// Does not error on file-not-found — that's `Ok(false)`.
+/// `Io` reading the source, writing the tmpfile, or renaming; the tmpfile is
+/// unlinked best-effort.
 pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
     // Any open failure → `Ok(false)`; the downstream append surfaces
     // the real error.

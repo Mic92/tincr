@@ -8,14 +8,9 @@ use crate::names::{Paths, check_id};
 
 use super::Finding;
 
-/// Scan server config + each `hosts/*` for obsolete/wrong-file/
-/// duplicate vars. Warnings only; returns nothing.
-///
-/// Re-parses every file: wasteful — we already parsed them in Phase 1
-/// — but the merged tree from Phase 1 has lost the per-file separation
-/// (server vs each-host). Re-parse-per-check is the simplest way to
-/// get that back. The waste is one extra pass over ~100 lines of
-/// config; not worth a refactor.
+/// Scan server config and each `hosts/*` for obsolete, wrong-file and duplicate
+/// vars; warnings only. Re-parses every file because the merged tree from phase
+/// 1 lost the per-file separation; the cost is one extra pass over ~100 lines.
 pub(super) fn check_variables(paths: &Paths, findings: &mut Vec<Finding>) {
     // Server config
     if let Ok(cfg) = read_server_config(&paths.confbase) {
@@ -53,14 +48,9 @@ pub(super) fn check_variables(paths: &Paths, findings: &mut Vec<Finding>) {
     }
 }
 
-/// The four warnings: obsolete, host-var-in-server,
-/// server-var-in-host, duplicate-non-multiple.
-///
-/// `is_server`: `true` for `tinc.conf`+`conf.d/`, `false` for a
-/// `hosts/NODE` file. Determines which "wrong file" check applies.
-///
-/// `where_`: `nodename` or `"tinc.conf"` — what to print in the
-/// duplicate message. Not a path.
+/// The four warnings: obsolete, host-var-in-server, server-var-in-host,
+/// duplicate-non-multiple. `is_server` selects which wrong-file check applies;
+/// `where_` (`nodename` or `"tinc.conf"`) is what the duplicate message prints.
 fn check_conf(cfg: &Config, is_server: bool, where_: &str, findings: &mut Vec<Finding>) {
     // Per-entry pass: obsolete + wrong-file.
     // Index = position in `VARS` (see vars.rs module doc).

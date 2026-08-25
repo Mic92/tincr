@@ -19,18 +19,10 @@ pub struct ParsedUrl {
     pub cookie: Zeroizing<[u8; COOKIE_LEN]>,
 }
 
-/// Parse the invitation URL.
-///
-/// Accepts: `host:port/SLUG`, `host/SLUG`, `[v6]:port/SLUG`,
-/// `[v6]/SLUG`. Port defaults to `"655"`. Slug is exactly 48 b64-url
-/// chars.
-///
-/// Rejects garbage at every step by returning `None`, which the caller
-/// maps to `CmdError::BadInput("Invalid invitation URL.")`.
-///
-/// Doesn't validate that `host` is a real hostname or that `port`
-/// is numeric — `getaddrinfo`/`TcpStream::connect` will fail on
-/// garbage and that's a clearer error than "Invalid URL".
+/// Parse `host[:port]/SLUG` or `[v6][:port]/SLUG`; port defaults to `655`, slug
+/// is exactly 48 b64-url chars. `None` on any garbage (caller reports an
+/// invalid URL). Host and port aren't validated further; connect will fail more
+/// descriptively.
 #[must_use]
 pub fn parse_url(url: &str) -> Option<ParsedUrl> {
     let slash = url.find('/')?;

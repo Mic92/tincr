@@ -48,18 +48,10 @@ use crate::names::{Paths, check_id};
 use std::io;
 use std::mem::MaybeUninit;
 
-/// Format a Unix timestamp as `"%Y-%m-%d %H:%M:%S"` in local time.
-///
-/// Uses `localtime_r` (reentrant — cargo test runs threads). Only unsafe
-/// block in the crate:
-///
-///   1. `time_t` is `i64` on all targeted platforms, so the `as` cast is
-///      an identity conversion.
-///   2. `tm` is `MaybeUninit::zeroed()`: `localtime_r` fully initializes
-///      it on success, but zero-init keeps the `tm_zone` pointer valid
-///      (null) even before that.
-///   3. NULL return (EOVERFLOW for absurd years) maps to `"never"`.
-///   4. Only `c_int` fields are read afterwards; no pointer deref.
+/// Format a Unix timestamp as `%Y-%m-%d %H:%M:%S` local time via `localtime_r`
+/// (reentrant; tests run threaded). `tm` is zero-initialised so `tm_zone` is
+/// valid even before the call; a NULL return (EOVERFLOW) maps to `"never"`;
+/// only `c_int` fields are read.
 #[expect(unsafe_code)]
 fn fmt_localtime(t: i64) -> String {
     // 0 means "no state change recorded"; guard here so callers don't repeat it.
@@ -70,19 +62,10 @@ fn fmt_localtime(t: i64) -> String {
     // time_t is i64 except on old 32-bit ABIs; saturate there.
     let time = libc::time_t::try_from(t).unwrap_or(libc::time_t::MAX);
     let mut tm = MaybeUninit::<libc::tm>::zeroed();
-    // SAFETY:
-    //   - `&time` is a valid aligned pointer to a live `time_t` for
-    //     the call duration. `localtime_r` reads it once.
-    //   - `tm.as_mut_ptr()` is a valid aligned `*mut tm` to writable
-    //     memory of size `sizeof(tm)`. `localtime_r` writes it.
-    //   - No aliasing: both pointers are to locals on this stack.
-    //   - Thread-safe: that's the `_r` (caller provides storage).
-    //   - POSIX: returns NULL on error, else `result` (the second
-    //     arg, echoed). We check NULL.
-    //
-    // `&raw const time` not `&time`: clippy::borrow_as_ptr. Makes
-    // the place-to-pointer explicit (no Rust borrow ever exists;
-    // the pointer is consumed by FFI immediately).
+    // SAFETY: `&raw const time` and `tm.as_mut_ptr()` are valid, aligned,
+    // unaliased pointers to stack locals for the duration of the call;
+    // `localtime_r` reads the first, writes the second, and returns NULL on error,
+    // which we check.
     let ok = unsafe { libc::localtime_r(&raw const time, tm.as_mut_ptr()) };
     if ok.is_null() {
         return "never".to_owned();
@@ -244,16 +227,10 @@ pub struct NodeInfo {
 }
 
 impl NodeInfo {
-    /// Render the full output.
-    ///
-    /// Column alignment is byte-exact with C tinc so
-    /// `diff <(tinc-c info alice) <(tinc-rs info alice)` is clean:
-    /// labels are 14 chars, except `Status:`/`Options:`/`Edges:`/`Subnets:`
-    /// which are one shorter because each value carries its own leading
-    /// space — values still start at column 14.
-    ///
-    /// `name` is the queried name, used for the cascade's via/nexthop
-    /// compare (same value as `row.name`).
+    /// Render the full output, byte-aligned with C tinc so the two diff clean:
+    /// labels are 14 chars, except `Status:`/`Options:`/`Edges:`/`Subnets:` whose
+    /// values carry their own leading space. `name` is the queried name for the
+    /// via/nexthop compare.
     #[must_use]
     pub fn format(&self, name: &str) -> String {
         let row = &self.row;
@@ -347,17 +324,10 @@ fn parse_err(what: &str, body: &str) -> CmdError {
     CmdError::BadInput(format!("Unable to parse {what} dump from tincd.\n{body}"))
 }
 
-/// Find one node, drain the rest.
-///
-/// Sends `DUMP_NODES name` (the daemon ignores the name — see module
-/// doc), reads rows until `name` matches or terminator. On match, drains
-/// the remaining rows: the daemon sends all nodes regardless, and an
-/// unread tail would corrupt the next request's recv.
-///
-/// Returns `Ok(Some(row))` if found, `Ok(None)` if not.
-///
-/// Generic over the socket type so unit tests can pass a
-/// `UnixStream::pair()` half without `connect()`.
+/// Send `DUMP_NODES`, read rows until `name` matches or the terminator, then
+/// drain the rest (an unread tail would corrupt the next request). `Ok(None)`
+/// if not found. Generic over the socket so tests can use a
+/// `UnixStream::pair()` half.
 fn find_node<S: io::Read + io::Write>(
     ctl: &mut CtlSocket<S>,
     name: &str,
@@ -461,22 +431,13 @@ pub struct SubnetMatch {
     pub owner: String,
 }
 
-/// Find which subnet(s) match `item`.
-///
-/// `item` is the user's input string. We parse it once for the
-/// match logic (`find: Subnet`) and ALSO inspect the string for
-/// `/` and `#` — those drive the match semantics:
-///
-///   - No `/` → address mode: find subnets that CONTAIN `item`.
-///     Returns possibly many (10.0.0.5 is in /24, /16, /8, /0).
-///   - Has `/` → exact mode: prefix and addr must equal.
-///   - Has `#` → ALSO match weight. Else weight-agnostic.
-///
-/// Returns all matches. Empty result → caller errors with
-/// "Unknown address/subnet".
+/// Find the subnets matching the user's `item`. Without `/` it's address mode
+/// (subnets containing `item`, possibly several); with `/` prefix and address
+/// must be equal; with `#` the weight must match too. Empty result → caller
+/// reports unknown address/subnet.
 ///
 /// # Errors
-/// Parse failure on `item` (str2net rejected it), or daemon I/O.
+/// `item` doesn't parse as a subnet, or daemon I/O.
 fn info_subnet(paths: &Paths, item: &str) -> Result<Vec<SubnetMatch>, CmdError> {
     let find: Subnet = item
         .parse()
@@ -532,19 +493,12 @@ pub enum InfoOutput {
     Subnet(Vec<SubnetMatch>),
 }
 
-/// Dispatch by argument shape: `check_id` first (node names), then
-/// `.` or `:` (subnet/address), else error. Ambiguity goes to node:
-/// `ff` is a valid node name and never reaches the subnet check.
+/// Dispatch by argument shape: `check_id` first (node; `ff` is a node name, not
+/// hex), then `.`/`:` (subnet or address), else error.
 ///
 /// # Errors
-/// - `"Argument is not a node name, subnet or address."` if neither
-///   check matches (e.g., `tinc info @!$`).
-/// - `"Unknown node X."` if name passed `check_id` but daemon
-///   doesn't have it.
-/// - `"Unknown address X."` / `"Unknown subnet X."` if no match.
-/// - `"Could not parse subnet or address 'X'."` if `.`/`:` matched
-///   but `str2net` rejected (e.g., `tinc info ...`).
-/// - Daemon I/O / parse failures.
+/// Not a node/subnet/address; unknown node; unknown address/subnet; unparseable
+/// subnet; daemon I/O.
 pub fn info(paths: &Paths, item: &str) -> Result<InfoOutput, CmdError> {
     if check_id(item) {
         return info_node(paths, item).map(InfoOutput::Node);

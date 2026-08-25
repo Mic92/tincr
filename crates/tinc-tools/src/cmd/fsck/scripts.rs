@@ -84,18 +84,10 @@ fn scan_scripts_in(dir: &Path, kind: ScriptDir, force: bool, findings: &mut Vec<
             continue;
         }
 
-        // Executability check
-        // We don't have `access(2)` directly without the `nix`
-        // `unistd` feature, but we can check via metadata mode bits —
-        // for the *owner*. `access` checks effective UID against the
-        // bits, which is more correct (you might own a 0755 file as
-        // non-owner and still be able to exec it via the other-exec
-        // bit). But: scripts created by `tinc init` are owned by you;
-        // the case where fsck cares is "tinc-up exists but isn't +x",
-        // and that's an owner-bit check 99% of the time.
-        //
-        // The remaining 1% (you `chown`'d your tinc-up to someone
-        // else for... reasons?) gets a false positive. Acceptable.
+        // Executability via the owner mode bit rather than `access(2)`: scripts from
+        // `tinc init` are owned by us, and the case fsck cares about is "tinc-up
+        // exists but isn't +x". A script chowned to someone else can false-positive;
+        // acceptable.
         check_script_exec(&full_path, force, findings);
     }
 

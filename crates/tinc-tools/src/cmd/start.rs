@@ -61,35 +61,20 @@ use crate::names::Paths;
 use std::env;
 use std::io;
 
-/// `cmd_start`. Spawn tincd, wait for the umbilical nul-byte ready
-/// signal.
-///
-/// `paths` must have had `resolve_runtime()` called — we pass
-/// `--pidfile` and `--socket` explicitly to the spawned daemon
-/// (the daemon's argv parser requires them).
-///
-/// `extra_args` are passed through to tincd: everything after
-/// `start` becomes a tincd arg, so `tinc start -d 5` runs
-/// `tincd -d 5`.
+/// `tinc start [ARGS]`: spawn tincd with `extra_args`, wait for the
+/// umbilical nul-byte ready signal. `paths` must be `resolve_runtime()`d
+/// (`--pidfile`/`--socket` are passed on). Already running is `Ok`.
 ///
 /// # Errors
-/// - Socketpair / spawn / fcntl failure: `BadInput` wrapping the
-///   `io::Error`.
-/// - Daemon didn't send the nul byte before closing the umbilical
-///   (setup failed; whatever it logged to stderr is the diagnostic):
-///   `BadInput("Error starting <path>")`.
-///
-/// "Already running" is **not** an error: prints a message, returns
-/// Ok. Idempotent start.
+/// `BadInput` wrapping socketpair/spawn/fcntl errors, or `Error starting
+/// <path>` if the umbilical closed without the nul byte (see tincd stderr).
 pub fn start(paths: &Paths, extra_args: &[String]) -> Result<(), CmdError> {
     start_with(paths, extra_args, &find_tincd())
 }
 
-/// [`start`] with an explicit `tincd` binary path, bypassing
-/// [`find_tincd`]'s env/PATH probing. Exists so tests can point at
-/// `CARGO_BIN_EXE_tincd` without mutating process-global env (which
-/// races other test threads under `cargo test`'s default thread
-/// pool).
+/// [`start`] with an explicit `tincd` path instead of [`find_tincd`], so tests
+/// can use `CARGO_BIN_EXE_tincd` without mutating process-global env under a
+/// threaded test runner.
 ///
 /// # Errors
 /// See [`start`].
@@ -122,14 +107,9 @@ pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<
     let colorize = i32::from(use_ansi_escapes_stderr());
     let umbilical_val = format!("{theirs_fd} {colorize}");
 
-    // spawn
-    // We don't replay our `-c`/`-n` — instead pass the *resolved*
-    // paths as explicit `--pidfile`/`--socket`/`-c`. This is what
-    // every test in `crates/tincd/tests/` does already.
-    //
-    // `Command` does fork+exec internally. The child inherits our
-    // env (including `TINC_UMBILICAL` via `.env()`) and our open
-    // fds (including `theirs_fd`, made non-CLOEXEC in `pre_exec`).
+    // Spawn with the resolved paths as explicit `--pidfile`/`--socket`/`-c` rather
+    // than replaying our `-c`/`-n`. The child inherits `TINC_UMBILICAL` via
+    // `.env()` and `theirs_fd`, made non-CLOEXEC in `pre_exec`.
     let mut cmd = Command::new(tincd);
     cmd.arg("-c")
         .arg(&paths.confbase)
@@ -139,17 +119,11 @@ pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<
         .arg(paths.unix_socket())
         .args(extra_args)
         .env("TINC_UMBILICAL", &umbilical_val);
-    // Clear CLOEXEC on `theirs` *in the child*, post-fork. Doing it
-    // in the parent pre-fork (the obvious place) opens a race: any
-    // other thread that forks while the fd is non-CLOEXEC leaks the
-    // write end into an unrelated child, and the drain loop below
-    // never sees EOF — it hangs until that child exits. `cargo
-    // test`'s thread pool hits this; a multi-threaded caller could
-    // too. `fcntl(2)` is async-signal-safe, so it's legal in
-    // `pre_exec`.
-    //
-    // SAFETY: closure only calls `fcntl` (async-signal-safe) on a
-    // raw fd we own; no allocation, no locks.
+    // Clear CLOEXEC on `theirs` in the child, post-fork. Doing it pre-fork in the
+    // parent races other threads that fork meanwhile: they leak the write end into
+    // an unrelated child and the drain loop below never sees EOF (`cargo test`
+    // hits this). SAFETY: the closure only calls async-signal-safe `fcntl` on an
+    // fd we own.
     #[expect(unsafe_code)]
     unsafe {
         cmd.pre_exec(move || {
@@ -196,15 +170,9 @@ pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<
         }
     }
 
-    // reap the child
-    // The daemon detaches by default — its `daemon(3)` call exits
-    // the original child with status 0 immediately. So wait returns
-    // fast and `status.success()`. The *grandchild* (the actual
-    // daemon) keeps running.
-    //
-    // If the daemon was started with `-D` in extra_args, this blocks
-    // until the daemon exits. That's correct for `tinc start -D`
-    // (you asked for foreground; `tinc start` waits with you).
+    // Reap the child. tincd detaches by default, so the direct child exits 0
+    // immediately while the grandchild daemon runs on. With `-D` in extra_args
+    // this blocks until the daemon exits, which is what foreground start means.
     let status = child
         .wait()
         .map_err(|e| CmdError::BadInput(format!("Error waiting for {}: {e}", tincd.display())))?;
@@ -230,16 +198,9 @@ pub fn restart(paths: &Paths, extra_args: &[String]) -> Result<(), CmdError> {
     start(paths, extra_args)
 }
 
-/// Find the tincd binary.
-///
-/// Precedence:
-///   1. `TINCD_PATH` env (our addition; for tests)
-///   2. Sibling of the `tinc` binary (`dirname(current_exe)/tincd`)
-///   3. Bare `tincd` (Command searches PATH)
-///
-/// `current_exe()` is the absolute resolved path on Linux
-/// (`/proc/self/exe` readlink) and macOS (`_NSGetExecutablePath`).
-/// More reliable than argv[0].
+/// Find tincd: `TINCD_PATH` env (for tests), then a `tincd` next to the running
+/// `tinc` binary (`current_exe()`, more reliable than argv[0]), then bare
+/// `tincd` via PATH.
 fn find_tincd() -> PathBuf {
     if let Ok(p) = env::var("TINCD_PATH") {
         return PathBuf::from(p);

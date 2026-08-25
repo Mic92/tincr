@@ -253,17 +253,11 @@ fn sort_name_is_ascending() {
     assert_eq!(s.display_order, vec!["alice", "bob", "carol"]);
 }
 
-// render_* — golden ANSI strings
-//
-// We assert WITH the escape codes inline. Stripping them would
-// miss the attribute logic (BOLD/DIM/NORMAL). The codes are
-// string constants; embedding them in expected output is fine.
+// Golden ANSI strings, escape codes included, since stripping them would hide
+// the BOLD/DIM/NORMAL logic.
 
-/// `"Tinc %-16s  Nodes: %4d  Sort: %-10s  %s"`. Golden the
-/// row-0 portion.
-///
-/// `goto(0,0)` is `"\x1b[1;1H"`. Then the body. Then `CLEAR_EOL`
-/// `"\x1b[K"`.
+/// Row 0: `goto(0,0)` = `\x1b[1;1H`, then `Tinc %-16s  Nodes: %4d  Sort: %-10s
+/// %s`, then `CLEAR_EOL` = `\x1b[K`.
 #[test]
 fn render_header_row0_golden() {
     let stats = Stats::default(); // 0 nodes, name sort, current

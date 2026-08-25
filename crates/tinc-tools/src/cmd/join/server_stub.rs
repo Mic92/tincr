@@ -16,22 +16,10 @@ use std::str;
 use std::time::SystemTime;
 use tinc_crypto::invite::cookie_filename;
 
-/// What the daemon's `receive_invitation_sptps` does, minus daemon
-/// state.
-///
-/// This is the *seed* for the daemon's invitation handler (per the
-/// plan). The daemon version will take `&mut Connection` instead of
-/// `&Paths`, and the `name` extracted from the file will go into
-/// `c->name`. But the cookie→filename recovery, the rename-to-.used,
-/// the file read, the Name validation — same code. When the daemon
-/// lands, this function moves to `tincd::auth` mostly unchanged.
-///
-/// Exposed `pub(crate)` for the in-process roundtrip test. NOT
-/// `myself`-aware: the caller passes `myname`; the daemon checks
-/// `!strcmp(name, myself->name)` and bails (you can't invite
-/// yourself).
-///
-/// `now` parameterized for tests (the expiry check).
+/// The daemon's invitation handler minus daemon state: cookie → filename,
+/// rename to `.used`, read, validate `Name`, with expiry against `now`.
+/// `pub(crate)` for the in-process roundtrip test; the caller passes `myname`
+/// since there is no `myself` here.
 #[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn server_receive_cookie(
     paths: &Paths,

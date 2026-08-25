@@ -129,16 +129,11 @@ pub struct InviteRow {
     pub invitee: String,
 }
 
-/// Walks `confbase/invitations/`, finds 24-char-b64-named files, reads
-/// `Name = ` from line 1, collects.
-///
-/// Per-file problems (unreadable, empty, first line not `Name = VALID_ID`)
-/// are silently skipped: lib code doesn't print to stderr, and "show
-/// what's valid" is the most useful behavior.
+/// Walk `confbase/invitations/` for 24-char-b64-named files and collect `Name =
+/// ` from each first line. Unreadable or malformed files are skipped silently.
 ///
 /// # Errors
-/// `Io` if the directory exists but readdir fails. ENOENT is not an
-/// error — exit 0 with empty Vec.
+/// `Io` if the directory exists but readdir fails; ENOENT yields an empty Vec.
 pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
     let dir = paths.invitations_dir();
 
@@ -204,19 +199,12 @@ pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
     Ok(out)
 }
 
-/// Run one of the daemon-backed dumps; returns lines ready for stdout.
-/// An empty vec means no output, exit 0.
-///
-/// `paths` must be `resolve_runtime()`d (the binary's `needs_daemon`
-/// gate handles this).
-///
-/// One function, one recv loop: graph mode interleaves node and edge rows,
-/// so the loop body dispatches on the row's kind rather than per-kind
-/// helpers.
+/// Run one of the daemon-backed dumps; returns lines for stdout (empty = no
+/// output). `paths` must be `resolve_runtime()`d. One recv loop dispatching on
+/// row kind, since graph mode interleaves node and edge rows.
 ///
 /// # Errors
-/// Connect failure, recv failure (daemon crashed mid-dump), or row parse
-/// failure (format drift between client and daemon).
+/// Connect/recv failure or row parse failure (client/daemon format drift).
 #[cfg(unix)]
 pub fn dump(paths: &Paths, kind: Kind) -> Result<Vec<String>, CmdError> {
     debug_assert!(kind.needs_daemon(), "use dump_invitations()");
