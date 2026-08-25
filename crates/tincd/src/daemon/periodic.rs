@@ -462,6 +462,7 @@ impl Daemon {
         let (expired, any_left) = self.mac_leases.age(now);
 
         let myname = self.name.clone();
+        let mut nw = false;
         for mac in &expired {
             // weight=10 matches learn_mac. del compares full Subnet
             // incl weight.
@@ -473,7 +474,7 @@ impl Daemon {
 
             let targets = self.broadcast_targets(None);
             for cid in targets {
-                let _ = self.send_subnet(cid, Request::DelSubnet, &myname, &subnet);
+                nw |= self.send_subnet(cid, Request::DelSubnet, &myname, &subnet);
             }
 
             // Originator's expiry doesn't run subnet-down (only
@@ -488,6 +489,9 @@ impl Daemon {
         // but lease duration is 600s — most ticks delete nothing.
         if !expired.is_empty() {
             self.tx_snap_refresh_subnets();
+        }
+        if nw {
+            self.maybe_set_write_any();
         }
 
         // Re-arm only if leases remain. Else clear slot; next
