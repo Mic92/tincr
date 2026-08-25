@@ -17,7 +17,7 @@ workspace = true
 
 [[bin]]
 name = "tincd"
-path = "src/main.rs"
+path = "src/bin/tincd/main.rs"
 
 [dependencies]
 tinc-conf = { path = "../tinc-conf" }

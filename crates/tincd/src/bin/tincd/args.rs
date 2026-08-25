@@ -1,46 +1,13 @@
-//! tincd binary entry point.
-//!
-//! Boot ordering (same as C tincd, tinc-up needs root):
-//!     detach → mlockall → `setup_network` (binds + tinc-up as root)
-//!     → `ProcessPriority` → `drop_privs` → `main_loop`.
-//!
-//! `-D` (no-detach) is required for the test suite; `tests/common/
-//! mod.rs::tincd_cmd()` sets it. `-n NETNAME` (or `NETNAME` env)
-//! derives confbase as `CONFDIR/tinc/NETNAME`. `-o KEY=VALUE` is
-//! parsed via `tinc-conf::parse_line` and merged with `Source::
-//! Cmdline` so it beats file values.
+//! argv parsing and the config-derived paths/log level.
 
-// New unsafe in the entrypoint should trip the lint; remaining
-// per-site uses carry an explicit `#[expect(unsafe_code)]`.
-#![deny(unsafe_code)]
-
-use std::ffi::CString;
-use std::os::fd::FromRawFd;
-use std::path::PathBuf;
-use std::process::ExitCode;
-
-use nix::fcntl::{FcntlArg, FdFlag, fcntl};
-use nix::sys::mman::{MlockAllFlags, mlockall};
 use nix::unistd::{AccessFlags, access};
-use std::env;
 use std::ffi::OsString;
-use std::fs::OpenOptions;
-use std::iter;
 use std::iter::Peekable;
-use std::os::fd::OwnedFd;
-use std::os::fd::RawFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::OpenOptionsExt;
-use std::panic;
-use std::panic::AssertUnwindSafe;
-use std::path::Path;
-use std::process;
+use std::path::PathBuf;
+use std::{env, iter, process};
 use tinc_conf::{Config, Source, parse_line};
-use tincd::{Daemon, RunOutcome, sandbox, sd_notify};
 
-/// System config dir; packagers override via `TINC_CONFDIR`.
-/// Duplicated in `tinc-tools/src/names.rs` (the dep arrow goes the
-/// other way).
 const CONFDIR: &str = match option_env!("TINC_CONFDIR") {
     Some(d) => d,
     None => "/etc",
@@ -55,7 +22,7 @@ const LOCALSTATEDIR: &str = match option_env!("TINC_LOCALSTATEDIR") {
 /// Map C debug levels (0=NOTHING through 5=TRAFFIC) onto Rust's
 /// 3-level filter. `target: "tincd"` filtering via `RUST_LOG`
 /// recovers finer granularity.
-const fn debug_level_to_filter(d: u32) -> log::LevelFilter {
+pub(crate) const fn debug_level_to_filter(d: u32) -> log::LevelFilter {
     match d {
         0 => log::LevelFilter::Info,
         1 | 2 => log::LevelFilter::Debug,
@@ -64,35 +31,35 @@ const fn debug_level_to_filter(d: u32) -> log::LevelFilter {
 }
 
 #[expect(clippy::struct_excessive_bools)] // independent CLI switches
-struct Args {
-    confbase: PathBuf,
-    pidfile: PathBuf,
-    socket: PathBuf,
+pub(crate) struct Args {
+    pub confbase: PathBuf,
+    pub pidfile: PathBuf,
+    pub socket: PathBuf,
     /// `-o` entries, `Source::Cmdline`-tagged. Empty when none given.
-    cmdline_conf: Config,
+    pub cmdline_conf: Config,
 
     /// `-D` clears (default true).
-    do_detach: bool,
+    pub do_detach: bool,
     /// `-L`.
-    do_mlock: bool,
+    pub do_mlock: bool,
     /// `--allow-coredump` / `TINCR_ALLOW_COREDUMP=1`. Opts out of
     /// [`harden_process`] so `coredumpctl gdb` works.
-    allow_coredump: bool,
+    pub allow_coredump: bool,
     /// `-U USER`. None → don't drop.
-    switchuser: Option<String>,
+    pub switchuser: Option<String>,
     /// `-R`. Applied inside `drop_privs` between setgid and setuid.
-    do_chroot: bool,
+    pub do_chroot: bool,
     /// `-d` / `--debug`. None means "not given" — distinct from 0,
     /// because the `LogLevel` tinc.conf fallback only fires when
     /// `-d` was absent. `RUST_LOG` still wins over both.
-    debug_level: Option<u32>,
+    pub debug_level: Option<u32>,
     /// `--logfile [PATH]`; bare form derives
     /// `LOCALSTATEDIR/log/tinc.NETNAME.log` post-loop.
-    logfile: Option<PathBuf>,
+    pub logfile: Option<PathBuf>,
     /// Default sink for the detach-with-no-`--logfile` fallback.
     /// Applied in `main()` after socket activation has finalised
     /// `do_detach`, not in `parse_args`.
-    default_logfile: PathBuf,
+    pub default_logfile: PathBuf,
 }
 
 /// Parse a `-o KEY=VALUE` argument; the `o_lineno` counter for
@@ -138,7 +105,7 @@ fn next_str(args: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<Str
 }
 
 #[expect(clippy::too_many_lines)] // flat getopt-style match
-fn parse_args<I>(args: I) -> Result<Args, String>
+pub(crate) fn parse_args<I>(args: I) -> Result<Args, String>
 where
     I: IntoIterator<Item = OsString>,
 {
@@ -424,225 +391,13 @@ where
     })
 }
 
-/// `tinc start` umbilical handshake: write a nul byte and close so
-/// the spawning `tinc start` exits 0. We don't tee log output
-/// through the umbilical (`env_logger` has no hook); the
-/// detach-without-logfile warning in `init_logging` covers that gap.
-/// No-op when `TINC_UMBILICAL` is unset.
-fn cut_umbilical() {
-    let Ok(spec) = env::var("TINC_UMBILICAL") else {
-        return;
-    };
-    // First token is the fd; second (`colorize`) is ignored — we don't tee.
-    let Some(fd) = spec
-        .split_whitespace()
-        .next()
-        .and_then(|s| s.parse::<RawFd>().ok())
-    else {
-        return;
-    };
-    // Reject stdio: taking ownership of 0/1/2 would close it and
-    // let the next open() reuse the slot. `tinc start` always
-    // passes a socketpair half (≥3).
-    if fd <= 2 {
-        log::warn!(target: "tincd",
-            "TINC_UMBILICAL={spec}: fd {fd} is stdio/invalid, ignoring");
-        return;
-    }
-    // SAFETY: fd > 2 checked above. The TINC_UMBILICAL env var is
-    // the ownership transfer protocol — spawner set it, no one else
-    // in this process knows the number. Stale fd → F_GETFL fails →
-    // we drop (close) harmlessly.
-    #[expect(unsafe_code)]
-    let f = unsafe { OwnedFd::from_raw_fd(fd) };
-    if fcntl(&f, FcntlArg::F_GETFL).is_err() {
-        return; // drop closes the fd
-    }
-    let _ = fcntl(&f, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
-    let _ = nix::unistd::write(&f, b"\0");
-    // Drop closes. snip!
-}
-
-fn detach() -> Result<(), String> {
-    // Single-threaded here (logger not yet initialised), so the
-    // single-fork `daemon(3)` is safe; SIGPIPE is already SIG_IGN
-    // via Rust's runtime, and USR1/USR2/WINCH get masked later in
-    // `register_signals`.
-    tincd::daemonize()
-}
-
-/// `getpwnam → initgroups → setgid → [chroot] → setuid`. chroot must
-/// run after initgroups (which reads `/etc/group`, outside the jail)
-/// and before setuid (chroot needs root); setuid is last so it can't
-/// be undone.
-fn drop_privs(switchuser: Option<&str>, do_chroot: bool, confbase: &Path) -> Result<(), String> {
-    let uid_gid = if let Some(user) = switchuser {
-        let pw = nix::unistd::User::from_name(user)
-            .map_err(|e| format!("getpwnam_r `{user}': {e}"))?
-            .ok_or_else(|| format!("unknown user `{user}'"))?;
-
-        // initgroups: supplementary groups from /etc/group.
-        // Single-threaded here (event loop not started).
-        let cuser = CString::new(user).map_err(|_| "username contains NUL".to_string())?;
-        tincd::initgroups(&cuser, pw.gid)
-            .map_err(|e| format!("System call `initgroups' failed: {e}"))?;
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        nix::unistd::setresgid(pw.gid, pw.gid, pw.gid)
-            .map_err(|e| format!("System call `setresgid' failed: {e}"))?;
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        nix::unistd::setgid(pw.gid).map_err(|e| format!("System call `setgid' failed: {e}"))?;
-
-        Some((pw.uid, pw.gid))
-    } else {
-        None
-    };
-
-    if do_chroot {
-        // tzset before chroot: load /etc/localtime so log timestamps
-        // stay in local tz inside the jail.
-        // SAFETY: tzset is non-reentrant; single-threaded here.
-        #[expect(unsafe_code)]
-        {
-            unsafe extern "C" {
-                fn tzset();
-            }
-            unsafe { tzset() };
-        }
-
-        nix::unistd::chroot(confbase).map_err(|e| format!("System call `chroot' failed: {e}"))?;
-        // Don't leave a cwd handle pointing outside the jail.
-        env::set_current_dir("/").map_err(|e| format!("chdir / after chroot: {e}"))?;
-    }
-
-    // setresuid last (real/effective/saved); after this we can't undo.
-    if let Some((uid, gid)) = uid_gid {
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        {
-            nix::unistd::setresuid(uid, uid, uid)
-                .map_err(|e| format!("System call `setresuid' failed: {e}"))?;
-
-            // Verify the kernel applied the drop to all three of each.
-            let ru = nix::unistd::getresuid().map_err(|e| format!("getresuid: {e}"))?;
-            let rg = nix::unistd::getresgid().map_err(|e| format!("getresgid: {e}"))?;
-            if ru.real != uid || ru.effective != uid || ru.saved != uid {
-                return Err(format!("setresuid did not stick: got {ru:?}, want {uid}"));
-            }
-            if rg.real != gid || rg.effective != gid || rg.saved != gid {
-                return Err(format!("setresgid did not stick: got {rg:?}, want {gid}"));
-            }
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        {
-            let _ = gid; // gid already set via setgid above
-            nix::unistd::setuid(uid).map_err(|e| format!("System call `setuid' failed: {e}"))?;
-        }
-    }
-
-    // PR_SET_NO_NEW_PRIVS: future execve can't grant setuid/file caps.
-    // Set unconditionally; the sandbox path sets it again harmlessly.
-    #[cfg(target_os = "linux")]
-    if let Err(e) = nix::sys::prctl::set_no_new_privs() {
-        log::warn!(target: "tincd", "prctl(PR_SET_NO_NEW_PRIVS): {e}");
-    }
-
-    Ok(())
-}
-
-/// `ProcessPriority` config key. Best-effort: a daemon that can't
-/// nice itself can still tunnel packets. Re-reads tinc.conf rather
-/// than threading the merged config out of `Daemon::setup`.
-fn apply_process_priority(confbase: &Path, cmdline: &Config) {
-    let mut config = match tinc_conf::read_server_config(confbase) {
-        Ok(c) => c,
-        // Daemon::setup already validated this read; failure here is
-        // a race. Priority is a hint, skip.
-        Err(e) => {
-            log::warn!(target: "tincd", "ProcessPriority: re-read tinc.conf failed: {e}");
-            return;
-        }
-    };
-    config.merge(cmdline.entries().iter().cloned());
-
-    let Some(e) = config.lookup("ProcessPriority").next() else {
-        return; // not set, default scheduling
-    };
-    let prio_str = e.get_str();
-
-    // Unix nice mapping of C's Windows priority-class names.
-    let nice: i32 = match prio_str.to_ascii_lowercase().as_str() {
-        "normal" => 0,
-        "low" => 10,
-        "high" => -10,
-        other => {
-            log::error!(target: "tincd", "Invalid priority `{other}`!");
-            return;
-        }
-    };
-
-    // SAFETY: setpriority(PRIO_PROCESS, 0, nice); who=0 = current process.
-    // PRIO_PROCESS type varies (c_uint on gnu, c_int on musl/bsd) —
-    // rely on the libc const's own type via `as _`.
-    #[expect(unsafe_code)]
-    let r = unsafe { libc::setpriority(libc::PRIO_PROCESS as _, 0, nice) };
-    if r != 0 {
-        log::warn!(
-            target: "tincd",
-            "System call `setpriority' failed: {}",
-            std::io::Error::last_os_error()
-        );
-    }
-}
-
-/// Precedence: `RUST_LOG` > `-d` > default Info. `LogLevel` from
-/// `-o`/tinc.conf is already folded into `args.debug_level` by
-/// [`resolve_debug_level`].
-fn init_logging(args: &Args) {
-    // Global `info`, not `tincd=info`: dependent crates' warn/error
-    // (tinc-sptps decrypt failures, tinc-device ioctl errors) must
-    // surface at default verbosity.
-    let mut builder =
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
-
-    // RUST_LOG (target-scoped) wins over filter_level (global floor).
-    if let Some(d) = args.debug_level {
-        builder.filter_level(debug_level_to_filter(d));
-    }
-
-    if let Some(path) = &args.logfile {
-        match OpenOptions::new()
-            .create(true)
-            .append(true)
-            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
-            .open(path)
-        {
-            Ok(f) => {
-                builder.target(env_logger::Target::Pipe(Box::new(f)));
-            }
-            Err(e) => {
-                // Logger not init'd — fall through to stderr.
-                eprintln!("tincd: --logfile {}: {e}", path.display());
-            }
-        }
-    }
-
-    // log_tap wraps env_logger so REQ_LOG control conns can tee.
-    let inner = builder.build();
-    tincd::log_tap::init(inner);
-
-    // Seed log_tap's debug-level atomic for REQ_SET_DEBUG replies.
-    // `init_*`, not `set_*`: the latter would clobber the level
-    // env_logger just installed from RUST_LOG.
-    #[expect(clippy::cast_possible_wrap)] // debug_level is 0..=5 (CLI-validated)
-    tincd::log_tap::init_debug_level(args.debug_level.map_or(0, |d| d as i32));
-}
-
 /// Precedence (first hit wins): `-d` argv > `-o LogLevel=N` >
 /// `LogLevel` in tinc.conf > None (caller defaults to Info).
 ///
 /// Re-reads tinc.conf (~1KB) here rather than reordering logger
 /// init after `Daemon::setup`. Negative `LogLevel` rejected via
 /// `u32::try_from` (stricter than C's atoi).
-fn resolve_debug_level(args: &Args) -> Option<u32> {
+pub(crate) fn resolve_debug_level(args: &Args) -> Option<u32> {
     fn lookup(c: &Config) -> Option<u32> {
         c.lookup("LogLevel")
             .next()
@@ -663,247 +418,12 @@ fn resolve_debug_level(args: &Args) -> Option<u32> {
         .and_then(|c| lookup(&c))
 }
 
-/// `Sandbox` config key; `-o` overrides tinc.conf. Default `none`
-/// (Landlock is always compiled in but unconfigured daemons keep
-/// pre-sandbox behaviour).
-fn resolve_sandbox_level(confbase: &Path, cmdline: &Config) -> Result<sandbox::Level, String> {
-    fn lookup(c: &Config) -> Option<Result<sandbox::Level, String>> {
-        c.lookup("Sandbox").next().map(|e| {
-            sandbox::Level::parse(e.get_str()).map_err(|v| format!("Bad sandbox value {v}!"))
-        })
-    }
-    if let Some(r) = lookup(cmdline) {
-        return r;
-    }
-    // Read failure silent; Daemon::setup reports it.
-    if let Ok(c) = tinc_conf::read_server_config(confbase)
-        && let Some(r) = lookup(&c)
-    {
-        return r;
-    }
-    Ok(sandbox::Level::None)
-}
-
-/// systemd socket activation env parse: `Some(n)` only if `LISTEN_PID` is our
-/// pid and `LISTEN_FDS` is a positive count. The pid check stops a stale
-/// `LISTEN_FDS` inherited through a wrapper from making us adopt random fds as
-/// listeners. Values are passed in so tests avoid `set_var`.
-fn check_socket_activation(
-    listen_pid: Option<String>,
-    listen_fds: Option<String>,
-) -> Option<usize> {
-    let pid_ok = listen_pid.and_then(|s| s.parse::<u32>().ok()) == Some(process::id());
-    if !pid_ok {
-        return None;
-    }
-    listen_fds
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-}
-
-/// Disable core dumps before any key load: a core file would leak
-/// the Ed25519 private key and every live SPTPS key. `RLIMIT_CORE=0`
-/// covers on-disk dumps; Linux `PR_SET_DUMPABLE=0` additionally
-/// blocks same-uid ptrace and systemd-coredump pipe handlers (which
-/// ignore `RLIMIT_CORE`).
-fn harden_process(allow_coredump: bool) {
-    if allow_coredump {
-        return;
-    }
-    if let Err(e) = nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0) {
-        // pre-init_logging → eprintln
-        eprintln!("tincd: setrlimit(RLIMIT_CORE, 0): {e} (continuing)");
-    }
-    #[cfg(target_os = "linux")]
-    if let Err(e) = nix::sys::prctl::set_dumpable(false) {
-        eprintln!("tincd: prctl(PR_SET_DUMPABLE, 0): {e} (continuing)");
-    }
-}
-
-fn main() -> ExitCode {
-    let mut args = match parse_args(env::args_os().skip(1)) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("tincd: {e}");
-            eprintln!("Try `tincd --help` for usage.");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    // Disable coredumps before any key load (Daemon::setup below).
-    harden_process(args.allow_coredump);
-
-    // chdir confbase before detach: `daemon(3)`'s nochdir=1 carries
-    // the cwd across fork, and tinc-up / tinc-down / host-* scripts
-    // rely on cwd == confbase to resolve `hosts/$NODE`. The chroot
-    // path overrides cwd to "/" in drop_privs, which still resolves
-    // inside the jail.
-    if let Err(e) = env::set_current_dir(&args.confbase) {
-        eprintln!(
-            "Could not change to configuration directory {}: {e}",
-            args.confbase.display()
-        );
-        return ExitCode::FAILURE;
-    }
-
-    // Socket activation before detach: a forked child has a new PID
-    // so LISTEN_PID would no longer match — we'd lose the inherited
-    // fds. So clear `do_detach` here when activated.
-    let socket_activation =
-        check_socket_activation(env::var("LISTEN_PID").ok(), env::var("LISTEN_FDS").ok());
-    // SAFETY: single-threaded pre-detach, no concurrent getenv.
-    #[expect(unsafe_code)]
-    unsafe {
-        env::remove_var("LISTEN_PID");
-        env::remove_var("LISTEN_FDS");
-    }
-    if socket_activation.is_some() {
-        args.do_detach = false;
-    }
-
-    // Detach + no `--logfile` would leave us mute (stderr →
-    // /dev/null); derive a default. Done after socket activation so
-    // an activated daemon keeps logging to stderr → journald.
-    if args.do_detach && args.logfile.is_none() {
-        eprintln!(
-            "tincd: detaching without --logfile; writing logs to {}",
-            args.default_logfile.display()
-        );
-        args.logfile = Some(args.default_logfile.clone());
-    }
-
-    // detach before logger init: avoid fds/threads crossing the fork.
-    if args.do_detach
-        && let Err(e) = detach()
-    {
-        eprintln!("tincd: {e}");
-        return ExitCode::FAILURE;
-    }
-
-    // Fold tinc.conf LogLevel into args.debug_level before logger
-    // init so init_debug_level seeds REQ_SET_DEBUG with it too.
-    args.debug_level = resolve_debug_level(&args);
-
-    init_logging(&args);
-
-    // No build date — reproducible builds.
-    log::info!(
-        target: "tincd",
-        "tincd {} starting, debug level {}",
-        env!("CARGO_PKG_VERSION"),
-        args.debug_level.unwrap_or(0)
-    );
-
-    // mlockall after fork (parent is short-lived). Hard-fail on
-    // EPERM: if `-L` was requested without CAP_IPC_LOCK, key pages
-    // could swap — the user wants to know.
-    if args.do_mlock
-        && let Err(e) = mlockall(MlockAllFlags::MCL_CURRENT | MlockAllFlags::MCL_FUTURE)
-    {
-        log::error!(target: "tincd", "System call `mlockall' failed: {e}");
-        return ExitCode::FAILURE;
-    }
-
-    // ProcessPriority before setup: covers TUN open and tinc-up,
-    // and the control socket appearing implies priority applied
-    // (tests sync on that). Before drop_privs: negative nice needs
-    // root or CAP_SYS_NICE.
-    apply_process_priority(&args.confbase, &args.cmdline_conf);
-
-    // setup_network opens TUN, binds sockets, runs tinc-up. All
-    // need root; drop_privs is after.
-    let daemon = match Daemon::setup(
-        &args.confbase,
-        &args.pidfile,
-        &args.socket,
-        &args.cmdline_conf,
-        socket_activation,
-    ) {
-        Ok(d) => d,
-        Err(e) => {
-            log::error!(target: "tincd", "Setup failed: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    // tinc-down (Daemon::Drop) inherits the post-drop_privs uid:
-    // it can't `ip link set down`. Known C limitation we share.
-    if let Err(e) = drop_privs(args.switchuser.as_deref(), args.do_chroot, &args.confbase) {
-        log::error!(target: "tincd", "{e}");
-        // Hard exit: don't unwind Daemon::Drop with privs in an
-        // unknown state.
-        process::exit(1);
-    }
-
-    // sandbox after drop_privs. The Linux device path is hard-coded
-    // /dev/net/tun (re-open mid-run is theoretical; upstream unveils
-    // it, we match); dummy/fd device types pass None.
-    let sandbox_level = match resolve_sandbox_level(&args.confbase, &args.cmdline_conf) {
-        Ok(l) => l,
-        Err(e) => {
-            log::error!(target: "tincd", "{e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let sandbox_paths = sandbox::Paths {
-        confbase: args.confbase.clone(),
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        device: Some("/dev/net/tun".into()),
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        device: None,
-        logfile: args.logfile.clone(),
-        pidfile: args.pidfile.clone(),
-        unixsocket: args.socket.clone(),
-    };
-    if let Err(e) = sandbox::enter(sandbox_level, &sandbox_paths, args.do_chroot) {
-        log::error!(target: "tincd", "{e}");
-        return ExitCode::FAILURE;
-    }
-
-    // READY=1 gates dependent systemd units on a packet-forwarding
-    // daemon, not just a started process.
-    sd_notify::notify_ready();
-
-    // `tinc start` blocks reading the umbilical fd; nul byte +
-    // close lets it exit 0. No-op outside the `tinc start` path.
-    cut_umbilical();
-
-    // WATCHDOG pings come from `TimerWhat::Watchdog` inside the
-    // event loop, so a wedged loop stops pinging and systemd
-    // actually restarts us — a detached pinger would defeat that.
-
-    // catch_unwind so a panic in the hot path (slotmap invariant
-    // expects, poisoned mutexes) still routes through STOPPING=1.
-    // Daemon::Drop (tinc-down, pidfile/socket unlink) already ran
-    // during the unwind; this just adds the systemd notify + log.
-    let outcome =
-        panic::catch_unwind(AssertUnwindSafe(|| daemon.run())).unwrap_or_else(|payload| {
-            let msg = payload
-                .downcast_ref::<&'static str>()
-                .copied()
-                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                .unwrap_or("<non-string panic payload>");
-            log::error!(target: "tincd", "Panic in event loop: {msg}");
-            RunOutcome::PollError
-        });
-
-    // STOPPING=1 extends systemd's stop timeout for tinc-down +
-    // Daemon::Drop cleanup.
-    sd_notify::notify_stopping();
-
-    match outcome {
-        RunOutcome::Clean => ExitCode::SUCCESS,
-        RunOutcome::PollError => ExitCode::FAILURE,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::env;
     use std::ffi::OsString;
     use std::fs;
-    use std::process;
 
     fn argv(v: &[&str]) -> Vec<OsString> {
         v.iter().map(OsString::from).collect()
@@ -1166,63 +686,5 @@ mod tests {
         fs::write(t.0.join("tinc.conf"), "LogLevel = -2\n").unwrap();
         let a = args_at(t.0.clone());
         assert_eq!(resolve_debug_level(&a), None);
-    }
-
-    // check_socket_activation.
-
-    /// PID matching ours + `LISTEN_FDS=2` → Some(2). The happy path.
-    #[test]
-    fn socket_activation_our_pid_with_fds() {
-        let our = process::id().to_string();
-        assert_eq!(
-            check_socket_activation(Some(our), Some("2".into())),
-            Some(2)
-        );
-    }
-
-    /// Wrong PID → None even with valid `LISTEN_FDS`. THE security
-    /// gate — inheritance from a wrapper that happened to have the
-    /// vars set must not make us adopt random fds.
-    #[test]
-    fn socket_activation_wrong_pid_ignored() {
-        // Our PID + 1 is guaranteed not-us (PIDs are unique).
-        let wrong = (process::id() + 1).to_string();
-        assert_eq!(check_socket_activation(Some(wrong), Some("2".into())), None);
-    }
-
-    /// Right PID but no `LISTEN_FDS` → None. Upstream
-    /// gates on `listen_fds` non-null too.
-    #[test]
-    fn socket_activation_no_fds() {
-        let our = process::id().to_string();
-        assert_eq!(check_socket_activation(Some(our), None), None);
-    }
-
-    /// `LISTEN_FDS=0` → None. Zero sockets is not activation.
-    #[test]
-    fn socket_activation_zero_fds() {
-        let our = process::id().to_string();
-        assert_eq!(check_socket_activation(Some(our), Some("0".into())), None);
-    }
-
-    /// Garbage in either var → None. C uses `atoi` (returns 0 on
-    /// garbage); 0 != `getpid()` and 0 fds is filtered. Same outcome.
-    #[test]
-    fn socket_activation_garbage() {
-        let our = process::id().to_string();
-        assert_eq!(
-            check_socket_activation(Some("garbage".into()), Some("2".into())),
-            None
-        );
-        assert_eq!(
-            check_socket_activation(Some(our), Some("garbage".into())),
-            None
-        );
-    }
-
-    /// Neither var set → None. The common case (not socket-activated).
-    #[test]
-    fn socket_activation_absent() {
-        assert_eq!(check_socket_activation(None, None), None);
     }
 }
