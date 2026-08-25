@@ -8,9 +8,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::AsRawFd;
 use std::time::Duration;
 
-use super::common::node::*;
-use super::common::*;
-use super::fd_tunnel::*;
+use super::common::{Node, poll_until};
+use super::fd_tunnel::{mk_ipv4_pkt, read_fd_nb, sockpair_datagram, write_fd};
 
 // RFC 1035 helpers; the lib's copies are `#[cfg(test)]`-private.
 const TYPE_A: u16 = 1;

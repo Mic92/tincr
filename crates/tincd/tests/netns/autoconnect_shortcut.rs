@@ -6,8 +6,8 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::common::*;
-use super::rig::*;
+use super::common::{KillOnDrop, TmpGuard, node_status, poll_until, try_poll};
+use super::rig::{NetNs, Node, TunPair, enter_netns};
 use super::tcp_fallback::iptables;
 
 struct Mesh {

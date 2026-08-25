@@ -284,6 +284,7 @@ pub(crate) enum BuildError {
 
 #[cfg(test)]
 mod tests {
+    use super::SocksResponse::{Granted, Malformed, Rejected};
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
@@ -426,7 +427,6 @@ mod tests {
 
     #[test]
     fn check_socks4_table() {
-        use SocksResponse::*;
         #[rustfmt::skip]
         let cases: &[(&str, &[u8], SocksResponse)] = &[
             ("granted",       &[0x00, 0x5a, 0, 0, 0, 0, 0, 0], Granted),
@@ -449,7 +449,6 @@ mod tests {
 
     #[test]
     fn check_socks5_table() {
-        use SocksResponse::*;
         #[rustfmt::skip]
         let v6_granted: &[u8] = &[
             0x05, 0x00, 0x05, 0x00, 0x00, 0x04, // choice + conn ok, atyp=ipv6

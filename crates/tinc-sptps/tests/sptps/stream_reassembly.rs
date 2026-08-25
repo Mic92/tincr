@@ -3,7 +3,7 @@
 //! `Output` sequence as feeding whole records.
 
 use crate::common::{SeedRng, feed, keypair, wires};
-use proptest::prelude::*;
+use proptest::prelude::{any, prop, prop_assert_eq, proptest};
 use tinc_sptps::{Framing, Output, Role, Sptps};
 
 /// Generate the canonical handshake byte streams (alice→bob, bob→alice)

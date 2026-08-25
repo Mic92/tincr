@@ -4,9 +4,9 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::common::linux::*;
-use super::common::*;
-use super::rig::*;
+use super::common::linux::run_ip;
+use super::common::{KillOnDrop, node_status, try_poll};
+use super::rig::{Netem, Node, TunPair, enter_netns, node_pmtu, ping, ping_received};
 
 fn count_fds(pid: nix::unistd::Pid) -> usize {
     std::fs::read_dir(format!("/proc/{pid}/fd")).map_or(0, Iterator::count)

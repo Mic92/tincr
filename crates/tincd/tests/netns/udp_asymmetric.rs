@@ -5,8 +5,8 @@
 
 use std::time::Duration;
 
-use super::common::*;
-use super::rig::*;
+use super::common::{node_status, try_poll};
+use super::rig::{TunPair, enter_netns, node_pmtu, ping_once};
 use super::tcp_fallback::iptables;
 
 #[test]

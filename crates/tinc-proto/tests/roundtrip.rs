@@ -1,7 +1,9 @@
 //! `parse(format(x)) == x` over valid values; the KATs in `src/` pin the
 //! grammar to C's and cover invalid input.
 
-use proptest::prelude::*;
+use proptest::prelude::{
+    ProptestConfig, Strategy, any, prop_assert, prop_assert_eq, prop_compose, prop_oneof, proptest,
+};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use tinc_proto::msg::{AddEdge, AnsKey, DelEdge, MtuInfo, ReqKey, ReqKeyExt, UdpInfo};
 use tinc_proto::{AddrStr, Subnet};

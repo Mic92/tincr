@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use super::common::KillOnDrop;
-use super::rig::*;
+use super::rig::{TunPair, enter_netns, ping, tun_node};
 
 #[test]
 fn real_tun_ping() {

@@ -4,8 +4,8 @@
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
-use super::common::*;
-use super::fd_tunnel::*;
+use super::common::poll_until;
+use super::fd_tunnel::{FdPair, mk_ipv4_pkt, read_fd_nb, write_fd};
 
 /// Scripts get a fixed PATH that lacks coreutils on NixOS.
 fn sleep_binary() -> std::path::PathBuf {

@@ -3,7 +3,7 @@ use std::net::UdpSocket;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use super::common::*;
+use super::common::{Node, poll_until, read_cookie, tincd_at, wait_for_file};
 use super::testnode;
 
 fn count_open_fds(pid: nix::unistd::Pid) -> usize {

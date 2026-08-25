@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::Signal;
 
-use super::common::*;
+use super::common::{poll_until, read_cookie, read_tcp_addr, read_to_eof, tincd_at};
 use super::testnode;
 
 /// Raw greeting: `0 ^COOKIE 0` → `0 testnode 17.7` + `4 0 PID`.

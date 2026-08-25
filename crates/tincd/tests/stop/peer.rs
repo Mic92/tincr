@@ -8,7 +8,9 @@ use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use super::common::*;
+use super::common::{
+    Node, PeerFixture, is_timeout, node_reachable, node_status, read_cookie, read_line_unbuffered,
+};
 
 /// Our ACK (`4 udp-port weight options`) followed by the edge a real
 /// peer would announce for its side of the connection. Without that

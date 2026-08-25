@@ -1,7 +1,10 @@
 use std::ffi::OsStr;
 use std::process::{Command, Output, Stdio};
 
-use super::common::*;
+use super::common::{
+    ChildWithLog, Node, read_cookie, read_tcp_addr, tincd_at, tincd_bin, tincd_cmd, wait_for_file,
+    write_ed25519_privkey,
+};
 use super::testnode;
 
 fn stderr_of(out: &Output) -> String {

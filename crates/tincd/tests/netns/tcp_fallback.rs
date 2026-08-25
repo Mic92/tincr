@@ -4,8 +4,8 @@
 
 use std::process::Command;
 
-use super::common::*;
-use super::rig::*;
+use super::common::node_status;
+use super::rig::{Node, TunPair, enter_netns, node_pmtu, ping};
 
 pub(crate) fn iptables(args: &[&str]) -> bool {
     let out = Command::new("iptables")

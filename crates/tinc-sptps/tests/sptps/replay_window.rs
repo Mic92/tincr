@@ -4,7 +4,7 @@
 //! construction; covering those needs a reference model.
 
 use crate::common::{Pair, SeedRng, wire};
-use proptest::prelude::*;
+use proptest::prelude::{any, prop, prop_assert, prop_assert_eq, proptest};
 use tinc_sptps::{Output, SptpsError};
 
 proptest! {
