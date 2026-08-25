@@ -10,6 +10,11 @@
     # The C side stays under astyle (upstream's choice); don't
     # fight it from here.
   };
+  settings.formatter.ast-grep = {
+    command = "${pkgs.ast-grep}/bin/ast-grep";
+    options = [ "scan" ];
+    includes = [ "*.rs" ];
+  };
   settings.global.excludes = [
     "src/**" # upstream C, not ours to reformat
     "Cargo.lock"
