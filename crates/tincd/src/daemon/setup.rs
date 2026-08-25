@@ -358,8 +358,7 @@ fn register_listeners(
 ) -> Result<Vec<ListenerSlot>, SetupError> {
     let mut listener_slots = Vec::with_capacity(listeners.len());
     for (i, l) in listeners.into_iter().enumerate() {
-        #[expect(clippy::cast_possible_truncation)] // MAXSOCKETS=8 fits in u8
-        let i = i as u8;
+        let i = u8::try_from(i).expect("MAXSOCKETS fits u8");
         ev.add(l.tcp_fd(), Io::Read, IoWhat::Tcp(i))
             .map_err(|e| SetupError::io("register TCP listener with event loop", e))?;
         ev.add(l.udp_fd(), Io::Read, IoWhat::Udp(i))

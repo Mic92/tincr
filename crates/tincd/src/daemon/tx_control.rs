@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use crate::dispatch::ConnOptions;
 use crate::graph::{NodeId, Route};
+use crate::packet::len_u16;
 use crate::pmtu::{PmtuAction, PmtuState};
 use crate::tunnel::{MTU, TunnelState};
 use crate::{local_addr, pmtu};
@@ -97,8 +98,7 @@ impl Daemon {
             log::debug!(target: "tincd::net",
                         "Got UDP probe request {} from {peer_name}",
                         body.len());
-            #[expect(clippy::cast_possible_truncation)] // body ≤ MTU
-            let body_len = body.len() as u16;
+            let body_len = len_u16(body.len());
             // Asymmetric-UDP meta-ack: remember the largest probe
             // request we've seen so `try_udp` can tell `peer` over
             // the meta connection. If `peer`'s inbound UDP is
@@ -113,11 +113,10 @@ impl Daemon {
         // reply (type 1 or 2).
         // type-2 carries probed length in bytes [1..3] (reply itself
         // is MIN_PROBE_SIZE on wire — saves bandwidth).
-        #[expect(clippy::cast_possible_truncation)] // body ≤ MTU
         let len: u16 = if body[0] == 2 && body.len() >= 3 {
             u16::from_be_bytes([body[1], body[2]])
         } else {
-            body.len() as u16
+            len_u16(body.len())
         };
         log::debug!(target: "tincd::net",
                     "Got type {} UDP probe reply {len} from {peer_name}",

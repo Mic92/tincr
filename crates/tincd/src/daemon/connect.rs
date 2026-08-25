@@ -10,6 +10,7 @@ use crate::outgoing::{
     ConnectAttempt, OutOrigin, OutgoingId, ProxyConfig, probe_connecting, try_connect,
     try_connect_via_proxy,
 };
+use crate::packet::len_u16;
 use crate::pmtu::PmtuState;
 use crate::tunnel::MTU;
 use crate::{local_addr, socks};
@@ -814,11 +815,7 @@ impl Daemon {
                     match socks::build_request(socks_type, target, creds.as_ref()) {
                         Ok((bytes, resp_len)) => {
                             needs_write |= conn.send_raw(&bytes);
-                            // SOCKS reply ≤ 26 bytes (SOCKS5 max), fits u16
-                            #[expect(clippy::cast_possible_truncation)]
-                            {
-                                conn.tcplen = resp_len as u16;
-                            }
+                            conn.tcplen = len_u16(resp_len);
                             log::debug!(target: "tincd::conn",
                                 "Queued {} SOCKS bytes for {}, expecting {} reply bytes",
                                 bytes.len(), conn.name, resp_len);

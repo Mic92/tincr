@@ -164,6 +164,15 @@ fn ipv4_write_csum(ip: &mut [u8], iphlen: usize) {
 /// Fold a 64-bit one's-complement accumulator to 16 bits (no
 /// complement). Four folds is enough for `u64` (each fold halves the
 /// bit width of the carry).
+/// Narrow a header/segment length to a 16-bit wire field; callers pass
+/// values bounded by the 64K IP length limit, asserted in debug builds.
+#[inline]
+#[expect(clippy::cast_possible_truncation)]
+fn len_u16(n: usize) -> u16 {
+    debug_assert!(u16::try_from(n).is_ok(), "length {n} exceeds u16");
+    n as u16
+}
+
 #[inline]
 #[expect(clippy::cast_possible_truncation)] // folded to 16 bits
 fn fold16(mut ac: u64) -> u16 {
@@ -408,8 +417,7 @@ pub fn tso_split(
             // RFC 8200 §3: "Length of the IPv6 payload, i.e., the
             // rest of the packet following this IPv6 header".
             // total_len - iphlen = tcp_hlen + seg_data_len.
-            #[expect(clippy::cast_possible_truncation)] // ≤ 65535
-            let plen = (total_len - iphlen) as u16;
+            let plen = len_u16(total_len - iphlen);
             ip[IPV6_PLEN_OFF..IPV6_PLEN_OFF + 2].copy_from_slice(&plen.to_be_bytes());
             // No IP checksum in v6. No ID. Ext headers: copied
             // verbatim above (they're part of `iphlen` since
@@ -417,11 +425,9 @@ pub fn tso_split(
             // headers are immutable in transit anyway.
         } else {
             // ID++, total_len, recompute csum.
-            #[expect(clippy::cast_possible_truncation)] // i ≤ 47 in practice
-            let id = first_id.wrapping_add(i as u16);
+            let id = first_id.wrapping_add(len_u16(i));
             ip[IPV4_ID_OFF..IPV4_ID_OFF + 2].copy_from_slice(&id.to_be_bytes());
-            #[expect(clippy::cast_possible_truncation)] // total_len ≤ hdr+gso_size ≤ MTU < 65536
-            let totlen = total_len as u16;
+            let totlen = len_u16(total_len);
             ip[IPV4_TOTLEN_OFF..IPV4_TOTLEN_OFF + 2].copy_from_slice(&totlen.to_be_bytes());
             ipv4_write_csum(ip, iphlen);
         }
@@ -447,8 +453,7 @@ pub fn tso_split(
         // TCP checksum: pseudo-header + TCP header + payload.
         // RFC 793 §3.1. The pseudo-header `tcp_len` is "TCP header
         // + data" — same as what we sum over.
-        #[expect(clippy::cast_possible_truncation)] // tcp_hlen+seg_data_len ≤ MTU < 65536
-        let len_for_pseudo = (tcp_hlen + seg_data_len) as u16;
+        let len_for_pseudo = len_u16(tcp_hlen + seg_data_len);
         let pseudo = pseudo_header_checksum_nofold(IPPROTO_TCP, addrs, len_for_pseudo);
         let tcp_csum = checksum(&ip[iphlen..total_len], pseudo);
         ip[csum_at..csum_at + 2].copy_from_slice(&tcp_csum.to_be_bytes());
@@ -641,8 +646,7 @@ impl GroBucket {
             u16::from(ip[1]) << 8 | u16::from(ip[6] >> 5) << 7 | u16::from(ip[8])
         };
 
-        #[expect(clippy::cast_possible_truncation)] // payload_len < 65535
-        let gso_size = payload_len as u16;
+        let gso_size = len_u16(payload_len);
 
         // Empty bucket: seed it.
         if self.len == 0 {
@@ -741,8 +745,7 @@ impl GroBucket {
 
         if self.num_merged > 1 {
             // Fix up the super-packet's IP header.
-            #[expect(clippy::cast_possible_truncation)] // capped at GRO_MAX_IP_LEN
-            let totlen = pkt.len() as u16;
+            let totlen = len_u16(pkt.len());
             if self.is_v6 {
                 pkt[IPV6_PLEN_OFF..IPV6_PLEN_OFF + 2].copy_from_slice(&(totlen - 40).to_be_bytes());
             } else {
@@ -757,8 +760,7 @@ impl GroBucket {
             // it (RFC 1071) with the TCP-hdr+payload sum. Same shape
             // `gso_none_checksum` reads on ingest.
             let (addr_off, addr_len) = ip_addr_span(self.is_v6);
-            #[expect(clippy::cast_possible_truncation)] // ≤ 65535-iphlen
-            let l4_len = (pkt.len() - iphlen) as u16;
+            let l4_len = len_u16(pkt.len() - iphlen);
             let pseudo = pseudo_header_checksum_nofold(
                 IPPROTO_TCP,
                 &pkt[addr_off..addr_off + addr_len],
