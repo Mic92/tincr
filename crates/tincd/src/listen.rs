@@ -336,9 +336,10 @@ pub(crate) fn adopt_listeners_from(
     // main.rs unset LISTEN_FDS so nobody else will close them).
     // Collecting into a Vec<OwnedFd> first means an early return
     // from the second loop drops every remaining fd.
-    let owned: Vec<OwnedFd> = (0..n)
-        .map(|i| {
-            let tcp_fd = start_fd + i as RawFd;
+    // n <= MAXSOCKETS, checked above.
+    let end_fd = start_fd + RawFd::try_from(n).expect("n <= MAXSOCKETS");
+    let owned: Vec<OwnedFd> = (start_fd..end_fd)
+        .map(|tcp_fd| {
             // SAFETY: fd `start_fd..start_fd+n` was passed by
             // systemd, is open. Taking ownership is correct: no
             // other code in this process will use these fds (we're
