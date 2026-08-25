@@ -47,14 +47,9 @@ macro_rules! cfg_int {
     };
 }
 
-/// `e.get_bool()` but a parse failure is *logged* before falling
-/// through to `None`. Previously the `&& let Ok(v) = e.get_bool()`
-/// pattern silently discarded the `ParseError` (which carries
-/// var/file/line), so `DecrementTTL = true` or `PingInterval = 60s`
-/// quietly became "unset" — the user's typo was indistinguishable
-/// from never having written the line. We still keep the default
-/// (reload should not hard-fail on a typo), but the operator now
-/// sees why.
+/// `e.get_bool()`, but a parse failure is logged (with var/file/line) before
+/// falling back to `None`, so `DecrementTTL = ture` is visibly a typo rather
+/// than silently unset. Reload still keeps the default instead of failing.
 fn get_bool(e: &tinc_conf::Entry) -> Option<bool> {
     e.get_bool()
         .inspect_err(|err| log::error!(target: "tincd", "{err}; using default"))
@@ -132,24 +127,14 @@ pub struct DaemonSettings {
     /// Seconds between probe sends when `udp_confirmed`. Default 10.
     /// Keeps NAT mappings alive.
     pub udp_discovery_keepalive_interval: u32,
-    /// Hub-mode: don't gossip indirect topology. Our direct peers
-    /// learn each other only by us telling them; they can't learn
-    /// each other's far-side neighbors. `ADD/DEL_EDGE/SUBNET` are
-    /// filtered (drop if neither endpoint is us or a direct peer)
-    /// and not forwarded.
-    ///
-    /// Implies `strictsubnets` (applied in `apply_reloadable_settings`
-    /// after both are parsed): a hub doesn't gossip indirect topology
-    /// and doesn't trust direct peers to claim arbitrary subnets.
+    /// Hub mode: don't gossip indirect topology. `ADD/DEL_EDGE/SUBNET` with neither
+    /// endpoint being us or a direct peer are dropped and not forwarded. Implies
+    /// `strictsubnets` (applied after both are parsed).
     pub tunnelserver: bool,
-    /// The operator's `hosts/NAME` files become the AUTHORITY for
-    /// which subnets each node owns. `ADD_SUBNET` gossip for subnets
-    /// not in the file is ignored (forwarded, not added locally).
-    /// `DEL_SUBNET` for subnets that are in the file is ignored.
-    ///
-    /// Implied by `tunnelserver`. `load_all_nodes` preloads the
-    /// authorized subnets at startup; lookup-first means authorized
-    /// gossip passes through silently (already-have-it noop).
+    /// `hosts/NAME` files are the authority for subnet ownership: `ADD_SUBNET` for
+    /// unlisted subnets is forwarded but not added, `DEL_SUBNET` for listed ones is
+    /// ignored. Implied by `tunnelserver`; `load_all_nodes` preloads the authorised
+    /// set so matching gossip is a silent no-op.
     pub strictsubnets: bool,
     /// Route-time gate: if `owner != via` (would relay), send ICMP
     /// `NET_ANO` instead. The relay path EXISTS and works; this knob
@@ -220,15 +205,10 @@ pub struct DaemonSettings {
     pub udp_info_interval: u32,
     /// Seconds. Separate debounce from `UDP_INFO`. Default 5.
     pub mtu_info_interval: u32,
-    /// Seconds. The `KeyExpire` timer fires at this interval and
-    /// forces an SPTPS rekey on every tunnel with `validkey`.
-    /// Default 3600.
-    ///
-    /// **Nonce-reuse guard.** SPTPS uses `outseqno: u32` as the
-    /// ChaCha20-Poly1305 nonce; nothing checks for wraparound. At
-    /// 1.5 Gbps / 1400-byte packets (≈134k pps), 2^32 packets is
-    /// ≈9 hours to nonce reuse - catastrophic for ChaCha20-Poly1305.
-    /// The 3600s timer caps any single key at ≈4.8e8 packets.
+    /// Seconds between forced SPTPS rekeys of every `validkey` tunnel; default
+    /// 3600. This is the nonce-reuse guard: `outseqno` is a u32 ChaCha20-Poly1305
+    /// nonce with no wrap check, ≈9 hours at 1.5 Gbps, so an hourly rekey caps a
+    /// key at ≈4.8e8 packets.
     pub keylifetime: u32,
     /// Per-listener sockopts. `UDPRcvBuf`/`UDPSndBuf`/`FWMark`/
     /// `BindToInterface` config keys. Non-reloadable: rebinding
@@ -304,17 +284,9 @@ pub enum ForwardingMode {
     Kernel,
 }
 
-/// Read once at setup, not reloadable (changing it mid-run would
-/// mean re-opening the device tun→tap).
-///
-/// | Variant | Device | Dispatch |
-/// |---|---|---|
-/// | `Router` | TUN | `route()` ethertype switch |
-/// | `Switch` | TAP | `route_mac()` |
-/// | `Hub` | TAP | always `Broadcast` |
-///
-/// Hub mode broadcasts everything. No MAC learning, no subnet
-/// table - pure flood. Niche; wired but untested.
+/// Read once at setup; changing it would mean reopening the device. `Router`:
+/// TUN, `route()` by ethertype. `Switch`: TAP, `route_mac()`. `Hub`: TAP,
+/// always broadcast (no MAC learning; wired but untested).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RoutingMode {
     /// IP-layer routing.

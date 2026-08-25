@@ -54,15 +54,10 @@ impl Daemon {
         };
         let tunnel = self.dp.tunnels.entry(to_nid).or_default();
 
-        // PACKET 17 short-circuit: direct meta-conn + doesn't fit
-        // MTU → single-encrypt via meta-SPTPS. Gated before
-        // validkey: with a direct conn, validkey doesn't matter;
-        // with TCPOnly, validkey stays false forever and this is
-        // the only way to send.
-        //
-        // Gate before compression: gating after means if compression
-        // helped, the eth-header bytes (offset 0..14) are
-        // uninitialized → garbage on the wire → receiver drops.
+        // PACKET 17 short-circuit: direct meta conn and too big for the MTU → send
+        // once via the meta SPTPS. Checked before validkey (with TCPOnly it never
+        // becomes true) and before compression (afterwards the eth header bytes would
+        // be uninitialised on the wire).
         let direct_conn = self.nodes.get(&to_nid).and_then(|ns| ns.conn);
         if let Some(conn_id) = direct_conn
             && data.len() > usize::from(tunnel.minmtu())
@@ -168,19 +163,11 @@ impl Daemon {
                 }
                 Output::HandshakeDone => {
                     let tunnel = self.dp.tunnels.entry(peer).or_default();
-                    // `prev_sptps` is intentionally not cleared here:
-                    // our `HandshakeDone` does not imply the peer has
-                    // switched their `outcipher` yet (initiator vs
-                    // responder finish at different times, plus
-                    // jitter). Old-key stragglers can still arrive
-                    // for ~RTT after this point; the slow-path retry
-                    // in `rx.rs` keeps catching them. RX-only — we
-                    // never seal with it — so no nonce-reuse risk,
-                    // and AEAD-tag-then-replay-window means an
-                    // attacker can't inject under the old key.
-                    // Reclaimed by `on_ping_tick` once `validkey &&
-                    // last_req_key + 2×PingInterval` (forward-
-                    // secrecy bound), the next salvage, or
+                    // `prev_sptps` is not cleared here: our HandshakeDone doesn't mean the peer
+                    // switched `outcipher` yet, so old-key stragglers keep arriving for ~RTT and
+                    // the `rx.rs` retry catches them. RX-only, so no nonce reuse, and
+                    // tag-then-replay stops injection under the old key. Reclaimed by
+                    // `on_ping_tick` after `2×PingInterval`, the next salvage, or
                     // `reset_unreachable`.
                     if !tunnel.status.validkey {
                         tunnel.status.validkey = true;
@@ -188,15 +175,10 @@ impl Daemon {
                         log::info!(target: "tincd::net",
                                    "SPTPS key exchange with {peer_name} successful");
                     }
-                    // Build the fast-path handles. The Sptps just
-                    // emitted HandshakeDone so both ciphers are
-                    // populated; the expects on outcipher_key/
-                    // incipher_key are post-handshake invariants.
-                    // outseqno_handle/replay_handle clone the existing
-                    // Arcs inside the Sptps — the fast path's
-                    // fetch_add/lock hits the same counter the
-                    // control-side seal_data_into would. Rekey: this
-                    // arm fires again, fresh Arc replaces; old drops.
+                    // Build the fast-path handles. HandshakeDone was just emitted, so both cipher
+                    // keys exist; `outseqno_handle`/`replay_handle` clone the Arcs inside the
+                    // Sptps so fast path and control side share one counter and window. On rekey
+                    // this arm runs again and the old handles drop.
                     if let Some(sptps) = tunnel.sptps.as_deref() {
                         let handles = Arc::new(TunnelHandles {
                             outseqno: sptps.outseqno_handle(),
@@ -333,15 +315,10 @@ impl Daemon {
             decompressed = None;
         }
 
-        // Build the frame. Three cases:
-        //  1. compressed: body in `decompressed`, build a fresh Vec.
-        //  2. has_mac (Switch): body at rx_scratch[14..] is the eth
-        //     frame. Route that slice directly.
-        //  3. !has_mac (Router, hot path): body at rx_scratch[14..],
-        //     headroom [0..14] is zeros. Stamp ethertype at [12..14],
-        //     route rx_scratch in full.
-        // mem::take swaps out rx_scratch for the &mut borrow during
-        // forward_packet; restored after.
+        // Build the frame: compressed → body in `decompressed`, fresh Vec; Switch →
+        // `rx_scratch[14..]` is the eth frame, route it; Router (hot) → stamp the
+        // ethertype into the zeroed headroom and route `rx_scratch` whole. `mem::take`
+        // around `forward_packet` for the borrow.
         let mut frame_vec: Vec<u8>;
         let mut scratch = mem::take(&mut self.dp.rx_scratch);
         let frame: &mut [u8] = if let Some(body) = &decompressed {
@@ -425,20 +402,12 @@ impl Daemon {
         self.send_sptps_data_relay(to_nid, self.myself, record_type, Some(ct))
     }
 
-    /// Relay decision: TCP vs UDP, `via` vs `nexthop`.
-    ///
-    /// `via`: the static relay — last DIRECT node on the SSSP path.
-    /// Prefer it (skip in-between hops) BUT only if the packet FITS
-    /// through its MTU; otherwise fall back to `nexthop` (immediate
-    /// neighbor, always TCP-reachable). PROBEs always prefer `via`
-    /// (tiny, and the point is to discover via's MTU).
-    ///
-    /// TCP if: `SPTPS_HANDSHAKE` (`ANS_KEY` also propagates reflexive
-    /// UDP addr); tcponly; relay too old (proto minor<4); or
-    /// TCP-transport slow path for [`Self::send_sptps_data_relay`].
-    /// Two sub-paths: `SPTPS_PACKET` (binary) for proto minor≥7;
-    /// `ANS_KEY`/`REQ_KEY` (b64) otherwise. Queues to the relay's
-    /// metaconn.
+    /// Relay decision. Prefer `via` (last direct node on the path) if the packet
+    /// fits its MTU, else `nexthop`; probes always use `via`. TCP when the record
+    /// is `SPTPS_HANDSHAKE` (so `ANS_KEY` can carry the reflexive addr), tcponly,
+    /// the relay is too old (minor < 4), or as [`Self::send_sptps_data_relay`]'s
+    /// fallback: binary `SPTPS_PACKET` for minor ≥ 7, else b64 `REQ_KEY`/`ANS_KEY`,
+    /// queued on the relay's metaconn.
     fn send_sptps_tcp(
         &mut self,
         to_nid: NodeId,

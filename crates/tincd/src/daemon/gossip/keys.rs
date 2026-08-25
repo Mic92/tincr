@@ -109,25 +109,12 @@ impl Daemon {
         nw
     }
 
-    /// `send_req_key`, but only if the session is plausibly stuck.
-    ///
-    /// Called from per-packet decode-error paths (`rx.rs` UDP,
-    /// `metaconn.rs` binary `SPTPS_PACKET`, `gossip.rs` b64
-    /// `SPTPS_PACKET`). C tinc fires `send_req_key` on every
-    /// `sptps_receive_data` failure once `last_req_key+10` has passed.
-    /// We additionally gate on `!validkey`: a
-    /// session that is currently delivering data must not be torn
-    /// down by a single bad datagram. UDP is unauthenticated up to
-    /// the AEAD tag check, so anyone who can spoof the peer's source
-    /// address (or any on-path corruption) would otherwise reset a
-    /// healthy tunnel and blackhole RTT×2 worth of traffic - the
-    /// production `seqno != 0` bursts.
-    ///
-    /// If the session really is broken (peer rebooted, key mismatch),
-    /// recovery still happens via the meta-conn: the peer's own
-    /// `try_tx`/`send_req_key` reaches our `on_req_key` and we
-    /// restart as responder. The UDP decode-error path was never the
-    /// load-bearing recovery mechanism.
+    /// `send_req_key`, but only if the session is plausibly stuck: called from the
+    /// per-packet decode-error paths, rate-limited to `last_req_key+10` like C and
+    /// additionally gated on `!validkey`. UDP is unauthenticated up to the tag
+    /// check, so without that gate a spoofed or corrupted datagram would reset a
+    /// healthy tunnel and blackhole ~2 RTT of traffic. A really broken session
+    /// still recovers via the peer's own `REQ_KEY` over the meta connection.
     pub(in crate::daemon) fn maybe_restart_stuck_tunnel(&mut self, from_nid: NodeId) -> bool {
         let now = self.timers.now();
         let restart = self.dp.tunnels.get(&from_nid).is_none_or(|t| {
@@ -142,14 +129,11 @@ impl Daemon {
         }
     }
 
-    /// Relay leg of `on_req_key`: `to_nid != self.myself`. Returns
-    /// `None` if the message is for us (caller handles locally),
-    /// `Some(nw)` once forwarded or dropped.
-    ///
-    /// Two relay shapes: `SPTPS_PACKET` goes via `send_sptps_data_relay`
-    /// (may shortcut to UDP); everything else forwards verbatim over
-    /// the meta nexthop, optionally appending `from`'s reflexive UDP
-    /// addr for the punch hint (see body comment).
+    /// Relay leg of `on_req_key` (`to != myself`): `None` if the message is for us,
+    /// `Some(nw)` once forwarded or dropped. `SPTPS_PACKET` goes via
+    /// `send_sptps_data_relay` (may use UDP); everything else is forwarded verbatim
+    /// over the meta nexthop, optionally with `from`'s reflexive UDP addr appended
+    /// as a punch hint.
     fn relay_req_key(
         &mut self,
         from_conn: ConnId,
@@ -197,36 +181,13 @@ impl Daemon {
             nw |= self.try_tx(to_nid, true);
             return Some(nw);
         }
-        // Forward verbatim.
-        //
-        // Tier-0 punch coordination: append `from`'s observed UDP
-        // addr, mirroring the ANS_KEY append below. The ANS_KEY
-        // append teaches the *initiator* where to punch the
-        // *responder*; this teaches the responder where to punch
-        // the initiator. Both legs of one handshake → both sides
-        // punch within ~1 RTT → simultaneous open.
-        //
-        // Gates (same shape as ANS_KEY's):
-        // - `msg.udp_addr.is_none()`: first relay only (no double-append
-        //   over multi-hop - each hop sees a different src addr; only
-        //   the first one is what `from` actually mapped through)
-        // - `ext.reqno == REQ_KEY`: SPTPS-init only (the message that
-        //   has a payload to anchor against; SPTPS_PACKET goes via
-        //   send_sptps_data above and doesn't reach here)
-        // - `from`'s tunnel has a `udp_addr`: we've actually seen UDP
-        //   from them (set by recvfrom in net.rs or by ADD_EDGE/UDP_INFO)
-        //
-        // Dropped from the ANS_KEY recipe: `to->minmtu > 0` ("is `to`
-        // already using UDP"). For REQ_KEY the responder hasn't started
-        // yet - minmtu is always 0 here. The append is *speculative*:
-        // worst case the responder probes a closed port. Same risk as
-        // ADD_EDGE's port guess.
-        //
-        // Wire compat: legacy peers parse the payload with `%s`,
-        // which stops at whitespace; trailing tokens are silently
-        // dropped. Relays forward verbatim including the append.
-        // So a Rust→C→Rust path works; a C endpoint just doesn't
-        // see the hint.
+        // Forward verbatim, appending `from`'s observed UDP addr as the request-leg
+        // counterpart of the ANS_KEY append: the responder learns where to punch the
+        // initiator, so both sides punch within ~1 RTT. Only on the first relay hop
+        // (`udp_addr` not yet set), only for `REQ_KEY` proper, and only if we've seen
+        // UDP from `from`. Unlike ANS_KEY there is no `minmtu > 0` gate; the hint is
+        // speculative. Legacy peers' `%s` parse drops the extra tokens and legacy
+        // relays forward them verbatim.
         let appended = if msg.udp_addr.is_none()
             && msg
                 .ext
@@ -391,14 +352,11 @@ impl Daemon {
             return Ok(false);
         };
 
-        // Crossed-REQ_KEY tie-break. If both sides initiated
-        // simultaneously, an unconditional reset (as C tinc does)
-        // leaves both as Responder → stall → both retry as
-        // Initiator → livelock (no jitter on our `last_req_key`).
-        // Greater name keeps Initiator and drops the REQ_KEY; lesser
-        // resets to Responder below. Only when handshake is still in
-        // flight (`!validkey` + Initiator) — otherwise peer is
-        // legitimately re-initiating. See
+        // Crossed-REQ_KEY tie-break: if both sides initiated at once, C's
+        // unconditional reset leaves both as Responder and, without jitter on
+        // `last_req_key`, they livelock. The greater name keeps Initiator and drops
+        // this REQ_KEY; the lesser resets to Responder below. Only while our handshake
+        // is in flight (`!validkey`), else the peer is legitimately re-initiating. See
         // `tests/two_daemons/reqkey_race.rs`.
         if let Some(t) = self.dp.tunnels.get(&from_nid)
             && let Some(sptps) = t.sptps.as_deref()
@@ -469,17 +427,11 @@ impl Daemon {
         let mut hint_nw = self.send_mtu_info(from_nid, &msg.from, i32::from(MTU), true);
         hint_nw |= self.send_udp_info(from_nid, &msg.from, true);
 
-        // Tier-0 punch coordination, responder side: a relay between us and
-        // `from` may have appended `from`'s NAT-reflexive UDP address. Stash
-        // it now (REQ_KEY arrives *before* validkey - unlike ANS_KEY's
-        // gate). The threat: a relay could lie. But the relay is already
-        // in the meta path (it's relaying our SPTPS handshake) so it can
-        // already drop packets to deny the punch. Worst case we send one
-        // probe to a relay-chosen address; the SPTPS data plane never goes
-        // there (`udp_confirmed` is set only by an *authenticated* probe
-        // reply, see `udp_probe_h`). Same risk envelope as ADD_EDGE's
-        // unauthenticated `addr` field, which we already trust for the same
-        // purpose.
+        // Punch coordination, responder side: stash the reflexive address a relay may
+        // have appended (REQ_KEY arrives before validkey, unlike ANS_KEY). A lying
+        // relay can already drop our handshake; worst case here is one probe to a
+        // wrong address, since `udp_confirmed` needs an authenticated reply. Same
+        // trust as ADD_EDGE's unauthenticated address.
         if let Some((addr_s, port_s)) = &msg.udp_addr
             && let Some(addr) = local_addr::parse_addr_port(addr_s.as_str(), port_s.as_str())
         {
@@ -671,15 +623,11 @@ impl Daemon {
                 t.udp_addr = Some(addr);
                 t.udp_addr_cached = None; // stale: reflexive addr supersedes
 
-                // Tier-0 punch coordination, initiator side: validkey just
-                // went true (HandshakeDone in dispatch_tunnel_outputs above)
-                // and we have a fresh relay-observed address. Probe NOW -
-                // don't wait for the next periodic try_tx tick (up to 1s
-                // away). The responder fired their probe ~1⁄2 RTT ago when
-                // *their* HandshakeDone landed (REQ_KEY's append + the
-                // try_tx call after dispatch). Both probes in flight
-                // simultaneously is the difference between "NAT sees
-                // reply-to-my-outbound" and "NAT sees unsolicited inbound".
+                // Punch coordination, initiator side: validkey just went true and we hold a
+                // fresh relay-observed address, so probe now rather than on the next `try_tx`
+                // tick (up to 1s). The responder probed ~½ RTT ago on their HandshakeDone;
+                // overlapping probes are what makes NATs see reply traffic instead of
+                // unsolicited inbound.
                 let now = self.timers.now();
                 nw |= self.try_udp(from_nid, &msg.from, now);
             }

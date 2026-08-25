@@ -29,18 +29,11 @@ use nix::sys::socket::{
 use std::mem;
 use std::sync::atomic;
 
-/// Ask the kernel for its PMTU cache entry to this peer; subtract
-/// our encapsulation overhead to get the tinc-layer MTU. Makes PMTU
-/// converge in 1 RTT instead of ~10 probes × 333ms — the very first
-/// probe is sent at the (likely correct) maxmtu, the reply confirms
-/// it, `try_fix_mtu` fires immediately.
-///
-/// Without this the ~3.3s convergence window leaves `via.mtu == 0`,
-/// during which the frag-needed check fires at MTU 576. The kernel
-/// caches that per-dst for 10 minutes; any TCP flow that starts in
-/// that window is stuck at MSS 536.
-///
-/// Falls back to `MTU` on every error.
+/// Ask the kernel's PMTU cache for this peer and subtract our encapsulation
+/// overhead, so the first probe goes out at the likely-correct maxmtu and PMTU
+/// converges in one RTT instead of ~3s of probing. That window matters: with
+/// `via.mtu == 0` the frag-needed check would claim 576 and the kernel pins TCP
+/// flows to MSS 536 for 10 minutes. Falls back to `MTU` on any error.
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn choose_initial_maxmtu(_peer: SocketAddr) -> u16 {
     // macOS has no IP_MTU sockopt to query the kernel's PMTU cache.
@@ -223,18 +216,11 @@ impl Daemon {
         self.dispatch_tunnel_outputs(peer, peer_name, outs)
     }
 
-    /// The "improve the tunnel" tick. Called from two places:
-    ///
-    /// 1. `on_ping_tick`: once per active conn, `mtu=false`. Keeps
-    ///    UDP alive (NAT timeouts).
-    /// 2. `forward_packet` Forward arm: once per forwarded packet,
-    ///    `mtu=true`. Drives PMTU discovery.
-    ///
-    /// Chain: `REQ_KEY` if needed → via deref → `try_udp` (probe send)
-    /// → `try_mtu` (PMTU tick).
-    ///
-    /// Via-recursion: recurse on relay if `via != target`. Finite:
-    /// via-chain is the sssp tree (acyclic).
+    /// The improve-the-tunnel tick: from `on_ping_tick` per active conn with
+    /// `mtu=false` (UDP keepalive against NAT timeouts) and from `forward_packet`
+    /// per packet with `mtu=true` (PMTU discovery). `REQ_KEY` if needed → via deref
+    /// → `try_udp` → `try_mtu`. Recurses on the relay when `via != target`; finite
+    /// because the via chain follows the acyclic sssp tree.
     pub(super) fn try_tx(&mut self, target: NodeId, mtu: bool) -> bool {
         // TCPONLY + direct meta conn ⇒ skip UDP.
         {

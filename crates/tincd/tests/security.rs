@@ -118,15 +118,11 @@ fn stalled_handshake_is_reaped_after_ping_timeout() {
     assert!(log.contains("Timeout"), "log:\n{log}");
 }
 
-/// `splice.py`: a relay connects to alice claiming to be bob and to
-/// bob claiming to be alice, then pipes bytes between them. Both ends
-/// hold the right keys, so if SPTPS did not bind the session to
-/// (initiator, responder) roles and names this would authenticate.
-///
-/// It must not: both daemons are responders and wait for an initiator
-/// SIG that never comes, and even if one did, the key-derivation
-/// labels name the parties in opposite order. Neither side may end up
-/// with a reachable peer.
+/// `splice.py`: a relay connects to alice as bob and to bob as alice and pipes
+/// bytes between them. Both hold valid keys, so this would authenticate if
+/// SPTPS didn't bind sessions to roles and names. It must not: both daemons are
+/// responders waiting for an initiator SIG, and the key-derivation labels name
+/// the parties in opposite order. Neither may see a reachable peer.
 #[test]
 fn spliced_responders_never_authenticate() {
     let tmp = tmp!("splice");

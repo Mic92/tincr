@@ -121,18 +121,11 @@ impl Daemon {
             log::debug!(target: "tincd::conn",
                                 "Established a second connection with {name}, \
                                  closing old connection");
-            // Move the dropped conn's `outgoing` onto the survivor
-            // before terminating, so `terminate()`'s tail
-            // `do_outgoing_connection` doesn't
-            // redial. C always keeps the new conn; under mutual
-            // `ConnectTo` with symmetric latency that makes each
-            // end keep the stream the other end just dropped, so we
-            // additionally pick by name: the side with the smaller
-            // name keeps its OUTGOING conn. Both ends evaluate this
-            // with swapped operands and agree on one TCP stream.
-            // Without it every dedup round del-edges →
-            // `BecameUnreachable` → `reset_unreachable()` and the
-            // tunnel never settles (`tests/reqkey_simultaneous.rs`).
+            // Move the dropped conn's `outgoing` onto the survivor so `terminate()`
+            // doesn't redial. C always keeps the new conn; under mutual `ConnectTo` with
+            // symmetric latency both ends then keep the stream the other just dropped, so
+            // we pick by name instead: the smaller name keeps its outgoing conn. Both ends
+            // agree on one stream and the tunnel settles (`tests/reqkey_simultaneous.rs`).
             let new_is_outgoing = conn_outgoing.is_some();
             let old_is_outgoing = self
                 .conns
@@ -417,14 +410,10 @@ impl Daemon {
             self.maybe_set_write_any();
         }
 
-        // Outgoing retry. C tinc retries UNCONDITIONALLY on `c->
-        // outgoing`. The previous `was_active` gate here
-        // wedged a pre-ACK timeout from the ping sweep forever:
-        // `on_ping_tick` calls `terminate()` directly (not via
-        // `on_connecting`), so nothing else re-drives the outgoing.
-        // Exposed by `stress_link_flap`: lo-down during connect →
-        // "Timeout while connecting" → conn dropped, no retry ever
-        // scheduled → reconnect never happens after lo-up.
+        // Outgoing retry, unconditionally on `outgoing` as in C. Gating on
+        // `was_active` wedged a pre-ACK ping-sweep timeout forever: `on_ping_tick`
+        // terminates directly, nothing re-drove the outgoing, and `stress_link_flap`
+        // never reconnected after lo-up.
         if let Some(oid) = conn_outgoing.filter(|oid| self.outgoings.contains_key(*oid)) {
             // Reset backoff only if the conn got to ACK (proven-good
             // addr). Pre-ACK → keep the bumped backoff.
@@ -435,15 +424,11 @@ impl Daemon {
         }
     }
 
-    // outgoing connections.
-
-    /// Non-blocking drain of the off-thread resolver into
-    /// `dns_hints` / `proxy_addrs`, plus an `extend_resolved` push
-    /// into any live `AddressCache` for the same node so a result
-    /// that lands mid-round is usable without waiting for the next
-    /// `reset`. Called from `on_periodic_tick` and at the top of
-    /// `setup_outgoing_connection` (timer ordering between
-    /// `RetryOutgoing` and `Periodic` isn't guaranteed).
+    /// Non-blocking drain of the off-thread resolver into `dns_hints` /
+    /// `proxy_addrs`, also pushing results into any live `AddressCache` for that
+    /// node so they are usable mid-round. Called from `on_periodic_tick` and from
+    /// `setup_outgoing_connection`, since `RetryOutgoing` vs `Periodic` timer order
+    /// isn't guaranteed.
     pub(super) fn drain_dns_worker(&mut self) {
         for DnsRes { tag, addrs } in self.dns_worker.drain() {
             match tag {
@@ -485,15 +470,9 @@ impl Daemon {
     }
 
     pub(super) fn setup_outgoing_connection(&mut self, oid: OutgoingId) {
-        // No timer del: the timer can't fire mid-connect (we don't
-        // return to run() until exit); next `retry_outgoing` `set`
-        // overwrites anyway.
-
-        // Drain DNS results first: this fn is reached from the
-        // `RetryOutgoing` timer at the same +5s cadence as
-        // `Periodic`, and timer ordering isn't guaranteed. A drain
-        // here makes worker results visible to *this* retry instead
-        // of the next one. Non-blocking; near-free when empty.
+        // No timer del: it can't fire mid-connect and the next `retry_outgoing`
+        // overwrites it. Drain DNS results first so worker results are visible to this
+        // retry rather than the next; near-free when empty.
         self.drain_dns_worker();
 
         let Some(outgoing) = self.outgoings.get(oid) else {
@@ -513,14 +492,10 @@ impl Daemon {
             return;
         }
 
-        // Edge-walk for known addresses. Walk eagerly here (still
-        // per-retry: `RetryOutgoing` timer → this fn → fresh graph
-        // snapshot). Walk bob's OUTgoing edges and read the reverse's
-        // address: the reverse of bob→alice is alice→bob, whose
-        // address field is what alice's `ADD_EDGE` reported for bob
-        // ("I see bob at 10.0.0.5:655"). Skip reverseless edges
-        // (gossip half-arrived). If bob was never gossiped (no
-        // `node_ids` entry), `nid` is `None` and tier 2 stays empty.
+        // Edge-walk for known addresses, per retry on a fresh graph snapshot: for each
+        // of bob's outgoing edges, the reverse edge's address is what that neighbour
+        // reported seeing bob at. Reverseless edges (half-arrived gossip) are skipped;
+        // an ungossiped bob leaves tier 2 empty.
         let known: Vec<SocketAddr> = nid
             .into_iter()
             .flat_map(|n| self.graph.node_edges(n).iter().copied())

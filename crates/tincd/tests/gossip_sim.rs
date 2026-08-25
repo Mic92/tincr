@@ -367,15 +367,9 @@ impl Simulation {
 
                     peer.run_sssp();
 
-                    // No purge-on-del-edge. This is the fix for
-                    // issue #4: C tinc never auto-purges here, and
-                    // doing so caused a contradiction storm that
-                    // made the mesh oscillate. Purge is only
-                    // triggered by explicit `tinc purge` (REQ_PURGE).
-
-                    // Reverse-broadcast amplifier (issue #8); see
-                    // field doc. Conditional so tests can compare
-                    // cascade size with amplifier on vs off.
+                    // No purge on DEL_EDGE (issue #4): C never auto-purges here and doing so made
+                    // the mesh oscillate; only `REQ_PURGE` purges. The reverse-broadcast amplifier
+                    // (issue #8, see field doc) is conditional so tests can compare cascade sizes.
                     if self.reverse_broadcast_amplifier
                         && !peer.graph.node(to_id).is_some_and(|n| n.reachable)
                         && peer.graph.lookup_edge(to_id, peer.myself).is_some()
@@ -412,20 +406,11 @@ impl Simulation {
     }
 }
 
-/// Timing-gap scenario that triggered issue #4.
-///
-/// ```text
-///           ┌── hub2 ──────────────┐
-///  node1 ───┤                      carol ── dave
-///           └── hub1 ── hub3 ──────┘
-/// ```
-///
-/// `hub2` disconnects from carol; carol reconnects to `hub3` 1 tick
-/// later. The `DEL_EDGE hub2→carol` reaches `node1` before the
-/// `ADD_EDGE hub3→carol`. During the gap, SSSP says carol is
-/// unreachable. Previously tincr called `purge()` here, broadcasting
-/// `DEL_EDGE` for carol's outgoing edges; carol contradicted. With
-/// the fix: zero contradictions.
+/// Timing gap behind issue #4: node1 reaches carol via hub2 and via hub1→hub3.
+/// hub2 drops carol; carol reconnects to hub3 a tick later, so node1 sees
+/// `DEL_EDGE hub2→carol` before `ADD_EDGE hub3→carol` and briefly finds carol
+/// unreachable. tincr used to purge then, broadcasting `DEL_EDGE`s carol
+/// contradicted. Now: zero contradictions.
 #[test]
 fn timing_gap_zero_contradictions() {
     let mut sim = Simulation::new(1);

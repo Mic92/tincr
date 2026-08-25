@@ -46,17 +46,10 @@ use tinc_proto::msg::{DelEdge, SubnetMsg};
 use tinc_proto::{Request, Subnet};
 
 impl Daemon {
-    /// See module doc.
-    ///
-    /// Called from the `REQ_PURGE` ctl arm only. Previously also
-    /// called from `on_del_edge` after a `DEL_EDGE` made `to`
-    /// unreachable, but that caused a contradiction storm in mixed
-    /// meshes (issue #4): pass 1 broadcast `DEL_EDGE` for valid
-    /// edges of transiently-unreachable nodes, owning nodes
-    /// contradicted, and the cycle repeated.
-    ///
-    /// Returns `needs_write` from the gossip broadcasts (pass 1) so
-    /// the metaconn arm can `maybe_set_write_any` once.
+    /// See module doc. Only from the `REQ_PURGE` ctl arm: auto-purging from
+    /// `on_del_edge` broadcast `DEL_EDGE`s for transiently unreachable nodes, their
+    /// owners contradicted, and mixed meshes oscillated (issue #4). Returns pass
+    /// 1's `needs_write` so the caller sets write interest once.
     pub(super) fn purge(&mut self) -> bool {
         log::debug!(target: "tincd::proto", "Purging unreachable nodes");
 
@@ -125,18 +118,9 @@ impl Daemon {
             }
         }
 
-        // pass 2: delete orphan nodes.
-        // Re-snapshot unreachables: pass 1 didn't change reachability
-        // (it only deleted edges FROM unreachable nodes, which by
-        // definition weren't on any path from myself), but re-check
-        // anyway.
-        //
-        // The early return below aborts ALL deletions, not just this
-        // node's — see module doc for why that's intentional.
-        //
-        // Hoist the edge-target scan out of the per-node loop: build
-        // the set of all `e.to` values once. O(edges + unreachable)
-        // instead of O(unreachable × edges).
+        // Pass 2: delete orphan nodes. Reachability is re-snapshotted although pass 1
+        // can't have changed it. The early return aborts all deletions on purpose
+        // (module doc). The set of edge targets is built once: O(edges + unreachable).
         let edge_targets: HashSet<NodeId> = self.graph.edge_iter().map(|(_, e)| e.to).collect();
 
         for (nid, name) in unreachable {

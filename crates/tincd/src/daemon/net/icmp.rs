@@ -218,15 +218,10 @@ impl Daemon {
     }
 }
 
-/// For ICMP `TIME_EXCEEDED`: find our local IP facing the original
-/// sender so traceroute shows us correctly. UDP `connect()` then
-/// `getsockname()` — no packets sent (UDP connect is a route lookup
-/// plus dst association). Same trick `choose_initial_maxmtu` uses
-/// (`9e2540ab`).
-///
-/// Port is irrelevant (route lookup); use 1 (some kernels reject 0
-/// for connect). All errors fall through to the default via `?` →
-/// `None`.
+/// For ICMP `TIME_EXCEEDED`: our local IP facing the original sender, so
+/// traceroute shows us correctly. UDP `connect()` + `getsockname()` is a route
+/// lookup that sends nothing (as `choose_initial_maxmtu` does). Port 1 because
+/// some kernels reject 0; any error yields `None` and the default.
 fn local_ip_facing(orig_src: IpAddr) -> Option<IpAddr> {
     let af = match orig_src {
         IpAddr::V4(_) => AddressFamily::Inet,

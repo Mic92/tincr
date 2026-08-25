@@ -63,14 +63,10 @@ impl Daemon {
             return nw | self.handle_arp(data, from);
         }
 
-        // DNS stub intercept (Rust-only). Tailscale's trick: no
-        // socket bind, just match `dst==magic && dport==53` on TUN
-        // ingress (`wgengine/netstack/netstack.go:847-858`). ROUTER-
-        // mode + device-read only — `from.is_some()` means a peer
-        // sent us a DNS query, which is either misconfig (their
-        // resolved is pointed at our magic IP) or weird; let it hit
-        // route() and Forward/Unreachable normally. The `is_some()`
-        // gate is the cheap path: feature off = one branch.
+        // DNS stub intercept (Rust-only): match `dst == magic && dport == 53` on TUN
+        // ingress, no socket bind (as Tailscale's netstack does). Router mode, device
+        // reads only; a peer sending us DNS is misconfig and takes the normal route.
+        // Feature off costs one `is_some()` branch.
         if from.is_none() && self.dns.is_some() && self.try_dns_intercept(data) {
             return nw;
         }
@@ -89,24 +85,11 @@ impl Daemon {
         nw | self.dispatch_route_result(result, data, from)
     }
 
-    /// Walk pcap subscribers, emit `"18 14 LEN\n"` + raw packet
-    /// body to each. The body is the FULL eth frame.
-    ///
-    /// Recomputes `any_pcap` as it walks: clears the flag at the
-    /// top, then sets it for each live subscriber. If a subscriber
-    /// dropped, the NEXT packet's walk finds zero and clears the
-    /// gate — `terminate()` stays ignorant. One wasted walk per
-    /// disconnect; cheap (conns is ~5).
-    ///
-    /// Wire shape (control conns are plaintext, no SPTPS):
-    ///   `send_request`: `"18 14 LEN\n"` (`send` appends `\n`)
-    ///   `send_meta`:    raw `data[..LEN]` bytes, no terminator
-    /// The CLI's `recv_line()` reads to `\n`, then `recv_data(LEN)`
-    /// reads exactly LEN bytes (`stream.rs:556-571`). The packet body
-    /// MAY contain `\n`; the length-prefixed framing makes that safe.
-    ///
-    /// Hot path WHEN armed (which is rare — debugging only). The
-    /// `any_pcap` gate keeps the unarmed cost at one branch.
+    /// Emit `18 14 LEN\n` plus the full eth frame to each pcap subscriber
+    /// (plaintext control conns; the CLI reads the line, then exactly LEN bytes, so
+    /// embedded newlines are fine). `any_pcap` is recomputed during the walk, so a
+    /// dropped subscriber clears the gate on the next packet without `terminate()`
+    /// knowing. Debug-only hot path; unarmed cost is one branch.
     fn send_pcap(&mut self, data: &[u8]) -> bool {
         let now = self.timers.now();
         let mut nw = false;
@@ -383,14 +366,9 @@ impl Daemon {
             return false;
         }
 
-        // FMODE_OFF — operator says "I am an endpoint, not a
-        // relay". Gate is `source != myself && owner !=
-        // myself`: `from.is_some()` is the first; this match
-        // arm (not the `to == self.myself` arm above) is the
-        // second. v4 → NET_ANO, v6 → ADMIN; MAC (Switch) →
-        // silent drop. Gap audit `bcc5c3e3`: parsed in
-        // `parse_settings`, never read — the security knob
-        // silently no-op'd.
+        // FMODE_OFF: we are an endpoint, not a relay. `from.is_some()` is `source !=
+        // myself`; this arm is `owner != myself`. v4 → NET_ANO, v6 → ADMIN, MAC →
+        // silent drop. The setting used to be parsed and never read (`bcc5c3e3`).
         if self.settings.forwarding_mode == ForwardingMode::Off && from.is_some() {
             log::debug!(target: "tincd::net",
                         "Forwarding=off: dropping transit packet \
@@ -468,19 +446,11 @@ impl Daemon {
                 from,
             );
         }
-        // Packet too big for next hop's PMTU. Only when
-        // relaying (clamp_mss + kernel PMTU handle our own
-        // outbound). Floors: 590=576+14 (RFC 791),
-        // 1294=1280+14 (RFC 8200) — don't claim MTU < 576
-        // even if discovery hasn't run.
-        //
-        // `via_mtu != 0`: don't claim a path MTU before
-        // discovery has measured one. `try_fix_mtu` only
-        // sets `mtu` once `minmtu >= maxmtu`; until then
-        // it's 0, `MAX(0,590)` claims 576, and the kernel
-        // caches that per-dst for 10 minutes — any TCP flow
-        // in that window is stuck at MSS 536 forever. 3×
-        // packets/crypto/syscalls for the same bytes.
+        // Too big for the next hop's PMTU, relaying only (clamp_mss and kernel PMTU
+        // cover our own traffic). Floors 590/1294 = RFC 791/8200 minimum + 14. Skip
+        // while `via_mtu == 0`: before discovery finishes `mtu` is 0, we'd claim 576,
+        // and the kernel caches that per destination for 10 minutes, pinning every TCP
+        // flow in that window to MSS 536.
         if via_nid != self.myself && via_mtu != 0 {
             let ethertype = u16::from_be_bytes([data[12], data[13]]);
             let floor: u16 = if ethertype == ETH_P_IP { 590 } else { 1294 };
@@ -591,24 +561,12 @@ impl Daemon {
         nw
     }
 
-    /// DNS stub TUN intercept (Rust-only). Returns `true` if `data`
-    /// was a DNS query for the magic IP and we wrote a reply; the
-    /// caller skips `route()` entirely. `false` for non-match (wrong
-    /// dst, wrong port, not UDP, ihl!=5) — packet falls through to
-    /// normal routing. Ownership stays with the borrow; we read
-    /// `data` and write a fresh reply frame.
-    ///
-    /// Hot-path cost: when the feature is on but the packet isn't
-    /// for us, this is ~5 byte compares (`match_v4` early-outs on
-    /// the first non-matching field). When off (`self.dns == None`),
-    /// the caller's `is_some()` gate skips this call entirely.
-    ///
-    /// Caller pre-checks `self.dns.is_some()`; the `take()` here
-    /// always succeeds. The take/put-back dance avoids the borrow
-    /// conflict between `&self.dns` and `device.write(&mut self)`
-    /// — same pattern as `device_arena` in `on_device_read`.
-    /// `DnsConfig` is two `Option<IpAddr>` + a `String`; the move
-    /// is cheap (no realloc, the String's heap buffer stays put).
+    /// DNS stub TUN intercept (Rust-only): `true` if `data` was a DNS query to the
+    /// magic IP and a reply was written, so the caller skips `route()`; `false`
+    /// after ~5 byte compares otherwise. The caller has checked
+    /// `self.dns.is_some()`; the take/put-back avoids the borrow conflict with
+    /// `device.write(&mut self)` and moves only two `Option<IpAddr>` and a
+    /// `String`.
     fn try_dns_intercept(&mut self, data: &[u8]) -> bool {
         let cfg = self.dns.take().expect("caller gated on is_some()");
         // v4 path. `match_v4` does the full eth+IP+UDP+port check;
