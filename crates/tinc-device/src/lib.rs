@@ -97,50 +97,31 @@ impl Default for Mode {
 /// The read/write vtable. Setup/close are constructor + `Drop`, not
 /// trait methods. `Send` but not `Sync`: `read`/`write` take `&mut self`.
 pub trait Device: Send {
-    /// Read a packet. Returns the length.
-    ///
-    /// `buf` is the daemon's `data[offset..]` slice (≥ `MTU`). Linux
-    /// TUN doesn't go through here (`drain()` overrides and reads
-    /// `vnet_hdr` layout directly). BSD `Utun` writes at `buf[10..]`
-    /// then zeroes `buf[0..12]`; TAP/raw writes at `buf[0..]`.
-    /// Kernel `read() <= 0` → `Err`.
+    /// Read one packet into `buf` (the daemon's `data[offset..]`, ≥ `MTU`),
+    /// returning its length. BSD `Utun` writes at `buf[10..]` and zeroes
+    /// `buf[0..12]`; TAP/raw write at `buf[0..]`; Linux TUN overrides `drain()`
+    /// instead.
     ///
     /// # Errors
-    /// `io::Error` from `read(2)`. `EAGAIN` if `O_NONBLOCK` with
-    /// no packet ready. `EBADFD` if the TUN device went away
-    /// (commit `d73cdee5`: network restart).
+    /// `read(2)`: `EAGAIN` when empty, `EBADFD` if the TUN device went away.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
 
-    /// Write a packet.
-    ///
-    /// `buf` is `data[offset..offset+len]`. Linux TUN zeroes
-    /// `buf[12..14]` (the synthetic ethertype) and writes `buf[4..]`
-    /// = `[vnet_hdr=0][IP]`; BSD `Utun` zeroes `buf[10..12]` and
-    /// writes `buf[10..]`; TAP writes `buf` directly. The zero
-    /// MUTATES `buf`; `&mut` is honest about the mutation.
+    /// Write one packet from `buf` (`data[offset..offset+len]`). Linux TUN zeroes
+    /// `buf[12..14]` and writes `buf[4..]` as `[vnet_hdr=0][IP]`; BSD `Utun` zeroes
+    /// `buf[10..12]` and writes `buf[10..]`; TAP writes `buf` as is — hence `&mut`.
     ///
     /// # Errors
-    /// `io::Error` from `write(2)`. `ENOBUFS` if the kernel TX
-    /// queue is full (TAP only, TUN doesn't queue at the device
-    /// layer). The C logs and returns false; daemon drops the
-    /// packet. We return `Err`; daemon does the same.
+    /// `write(2)` errors, e.g. `ENOBUFS` on a full TAP TX queue; the daemon drops
+    /// the packet.
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize>;
 
-    /// GRO super write: pass `[vnet_hdr(10)][IP super]` straight to
-    /// the TUN fd. Unlike [`write`], no eth-header munging — the
-    /// GRO bucket already builds the kernel's `tun_get_user` shape.
-    ///
-    /// Default = unsupported. Only the Linux `Tun` backend overrides
-    /// (it's the only one with `IFF_VNET_HDR`). The daemon gates on
-    /// `Mode::Tun` so it never calls this on TAP/BSD/FdTun. The
-    /// `Err(Unsupported)` here is the unreachable-but-don't-panic
-    /// guard — if it fires, the gate is wrong, but the daemon falls
-    /// back to per-packet `write()` and the inner TCP just sees a
-    /// retransmit.
+    /// GRO super write: pass `[vnet_hdr(10)][IP super]` straight to the TUN fd, no
+    /// eth-header munging. Only Linux `Tun` (the one `IFF_VNET_HDR` backend)
+    /// overrides; the daemon gates on `Mode::Tun`, so the default `Unsupported` is
+    /// a don't-panic guard that degrades to per-packet `write()`.
     ///
     /// # Errors
-    /// `io::Error` from `write(2)`. `Unsupported` for backends
-    /// without `vnet_hdr`.
+    /// `write(2)` errors, or `Unsupported` for backends without `vnet_hdr`.
     fn write_super(&mut self, _buf: &[u8]) -> io::Result<usize> {
         Err(io::ErrorKind::Unsupported.into())
     }
@@ -161,40 +142,24 @@ pub trait Device: Send {
     /// `&self` so callers cannot outlive the backing `OwnedFd`.
     fn fd(&self) -> Option<BorrowedFd<'_>>;
 
-    /// Drain available frames into the arena. The 10G ingest seam.
-    ///
-    /// Default: loop `self.read()` into arena slots until EAGAIN or
-    /// `cap`. Never returns `Super` — that's the Linux `vnet_hdr`
-    /// override. The default is the BSD/macOS/mock path: their
-    /// existing byte-pipe `read()` is the building block.
-    ///
-    /// `cap` clamps to `arena.cap()`. Typically `DEVICE_DRAIN_CAP=64`
-    /// (`daemon/net.rs` — over-draining starves TUN of TX time, see
-    /// commit `0f120b11`).
+    /// Drain available frames into the arena. Default: loop `self.read()` into
+    /// slots until EAGAIN or `cap` (clamped to `arena.cap()`, typically
+    /// `DEVICE_DRAIN_CAP`; over-draining starves TUN TX). Never returns `Super`;
+    /// that is the Linux `vnet_hdr` override.
     ///
     /// # Errors
-    /// `io::Error` from the underlying `read(2)`. EAGAIN is consumed
-    /// (it's the loop terminator, not an error). EBADFD etc. surface
-    /// to the daemon.
+    /// `read(2)` errors other than EAGAIN, which just ends the loop.
     fn drain(&mut self, arena: &mut DeviceArena, cap: usize) -> io::Result<DrainResult> {
         drain_via_read(self, arena, cap)
     }
 
-    /// Stage one frame for a later [`write_flush`]. Backends that can
-    /// batch-inject (Darwin utun via `sendmsg_x`) override this to
-    /// copy into an internal ring; everyone else gets the default,
-    /// which is just [`write`] — i.e. "staging" is a no-op and
-    /// `write_flush` has nothing to do.
-    ///
-    /// Callers must pair every burst of `write_stage` with one
-    /// `write_flush` before yielding (the daemon does so at the end
-    /// of each UDP recv batch). Ordering between `write_stage` and a
-    /// direct `write` on the same device is **not** preserved across a
-    /// pending stage; flush first if interleaving.
+    /// Stage one frame for a later [`write_flush`]. Batch backends (Darwin utun
+    /// `sendmsg_x`) copy into a ring; the default is plain [`write`]. Flush every
+    /// burst before yielding; ordering against a direct `write` isn't kept across a
+    /// pending stage.
     ///
     /// # Errors
-    /// Same as [`write`] for the default impl. Batching backends may
-    /// defer errors to [`write_flush`].
+    /// As [`write`]; batching backends may defer errors to [`write_flush`].
     fn write_stage(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.write(buf)
     }
@@ -348,16 +313,9 @@ mod tests {
     use std::os::fd::BorrowedFd;
     use std::vec::IntoIter;
 
-    // default drain()
-    //
-    // The default impl is the BSD/macOS path. Test it with a mock that
-    // returns a scripted sequence of read() outcomes; the trait body
-    // does the rest. This is the seam — if the default is right,
-    // every byte-pipe backend is right.
-
-    /// Mock device: returns scripted `read()` outcomes. Each `Ok(bytes)`
-    /// writes the byte pattern at `buf[0..]` and returns its length;
-    /// `Err(kind)` returns the error. Exhausted → `WouldBlock`.
+    /// Mock for the default `drain()` (the BSD/macOS path): returns scripted
+    /// `read()` outcomes. `Ok(bytes)` writes the pattern at `buf[0..]`, `Err(kind)`
+    /// returns the error, exhausted → `WouldBlock`.
     struct ScriptedDev {
         script: IntoIter<Result<Vec<u8>, io::ErrorKind>>,
     }

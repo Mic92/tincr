@@ -75,20 +75,13 @@ pub struct Tun {
 }
 
 impl Tun {
-    /// Open `/dev/net/tun`, `TUNSETIFF` to instantiate, optionally
-    /// `SIOCGIFHWADDR` to read the TAP MAC.
+    /// Open `/dev/net/tun`, `TUNSETIFF` to instantiate, optionally `SIOCGIFHWADDR`
+    /// for the TAP MAC.
     ///
     /// # Errors
-    /// `io::Error`:
-    ///   - `PermissionDenied` (EACCES/EPERM) on open: missing
-    ///     `CAP_NET_ADMIN`. Most common error in CI.
-    ///   - `NotFound` on open: `/dev/net/tun` doesn't exist (kernel
-    ///     built without `CONFIG_TUN`, or container without it
-    ///     mounted).
-    ///   - `InvalidInput` (EINVAL) on TUNSETIFF: bad flags, bad
-    ///     ifname. Shouldn't happen with our construction.
-    ///   - `AlreadyExists` (EBUSY) on TUNSETIFF: interface name
-    ///     taken by another process.
+    /// `PermissionDenied` (no `CAP_NET_ADMIN`, the common CI case), `NotFound` (no
+    /// `/dev/net/tun`), `InvalidInput` on TUNSETIFF (bad flags/name),
+    /// `AlreadyExists` (name taken).
     pub fn open(cfg: &DeviceConfig) -> io::Result<Self> {
         let device = cfg.device.as_deref().unwrap_or(DEFAULT_DEVICE);
 
@@ -97,18 +90,11 @@ impl Tun {
         // path without root.
         let ifr_name = pack_ifr_name(cfg.iface.as_deref())?;
 
-        // TUN: `IFF_VNET_HDR | IFF_NO_PI`. Reads are
-        // `[vnet_hdr(10)][raw IP]`; eth header synthesized in
-        // `drain()` or by `tso_split`.
-        //
-        // TAP: `IFF_NO_PI` only. vnet_hdr would need `tso_split`
-        // to preserve the real eth header instead of synthesizing
-        // one. Widen when switch-mode throughput matters.
-        //
-        // Set on the first TUNSETIFF: the kernel's flag-update
-        // path on a second TUNSETIFF (`tun.c:2744`) requires
-        // re-attach (`:2729`) which fails on an already-attached
-        // fd — there's no "change flags only" ioctl.
+        // TUN: `IFF_VNET_HDR | IFF_NO_PI`, reads are `[vnet_hdr(10)][raw IP]` and the
+        // eth header is synthesized in `drain()`/`tso_split`. TAP: `IFF_NO_PI` only
+        // (vnet_hdr would need `tso_split` to keep the real eth header). Must be set
+        // on the first TUNSETIFF: the kernel's flag-update path (`tun.c:2744`)
+        // re-attaches, which fails on an attached fd.
         #[expect(clippy::cast_possible_truncation)] // IFF_* flags fit i16 (max 0x5001)
         let flags = match cfg.mode {
             Mode::Tun => libc::IFF_TUN | libc::IFF_NO_PI | libc::IFF_VNET_HDR,
@@ -141,15 +127,10 @@ impl Tun {
             Mode::Tun => None,
         };
 
-        // TUNSETOFFLOAD (TUN only)
-        // Feature-detect: `TUNSETOFFLOAD` returns `EINVAL` for
-        // unknown flags (`tun.c:2886` "gives the user a way to test
-        // for new features"). `TUN_F_TSO4/6` is kernel 2.6.27 —
-        // never fails in practice. If it did (custom kernel without
-        // `CONFIG_TUN` offload), IFF_VNET_HDR is already set so
-        // reads HAVE the 10-byte prefix, just always gso_type=NONE.
-        // drain() handles that: strip header, single frame. Degrades
-        // gracefully.
+        // TUNSETOFFLOAD (TUN only). `EINVAL` for unknown flags is the kernel's feature
+        // test (`tun.c:2886`); `TUN_F_TSO4/6` dates from 2.6.27. Should it fail
+        // anyway, IFF_VNET_HDR is already set so reads carry the 10-byte prefix with
+        // gso_type=NONE and drain() degrades to single frames.
         if cfg.mode == Mode::Tun {
             match tunsetoffload(fd.as_fd()) {
                 Ok(()) => {
@@ -172,45 +153,20 @@ impl Tun {
         })
     }
 
-    /// `IFF_MULTI_QUEUE` open: N fds attached to one TUN device.
-    ///
-    /// Kernel `tun_automq_select_queue` (`tun.c:474`) hashes the inner
-    /// flow's 4-tuple to pick a queue. One TCP connection → one queue →
-    /// one reader thread, no eBPF prog needed. The kernel's flow learning
-    /// is the steering: 1024 distinct flows across 2 queues showed a
-    /// 354k/402k split (1.1× balance ratio) in the prototype.
-    ///
-    /// `n=1` → calls `Tun::open` (no `IFF_MULTI_QUEUE` flag, exact same
-    /// fd as today). The flag forces the kernel to alloc 256 tx queues
-    /// even at n=1 (`MAX_TAP_QUEUES`); waste it doesn't need.
-    ///
-    /// `n>1` requirements:
-    ///   - `cfg.iface` set: the second `TUNSETIFF` finds the device by
-    ///     name. Auto-pick (`tun%d`) would create N independent devices.
-    ///   - `Mode::Tun`: TAP has no `IFF_VNET_HDR` here, and sharding is
-    ///     router-mode only (switch mode's `mac_table` is shared mutable
-    ///     on the data path — MAC learning).
-    ///
-    /// `TUNSETIFF` flags = `IFF_TUN | IFF_NO_PI | IFF_MULTI_QUEUE |
-    /// IFF_VNET_HDR` = `0x5101`. The `IFF_MULTI_QUEUE` bit must be set
-    /// on every call; `tun.c:2719` rejects the second call if the bit
-    /// doesn't match the first (`EINVAL`).
-    ///
-    /// `TUNSETOFFLOAD` once on fd[0]: offload bits live on the netdev
-    /// (`tun_struct.features`), not per-`tun_file`. One call arms TSO
-    /// for all queues.
+    /// `IFF_MULTI_QUEUE` open: `n` fds on one TUN device. The kernel hashes the
+    /// inner flow to a queue (`tun_automq_select_queue`, `tun.c:474`), so one flow
+    /// → one reader thread. `n == 1` is plain `Tun::open`.
     ///
     /// # Errors
-    /// `InvalidInput`: `n>1` with `Mode::Tap`, or iface name ≥ 16
-    /// bytes. `PermissionDenied`/`NotFound`: same as
-    /// `open`. `EINVAL` on `TUNSETIFF`: kernel rejected the flag combo
-    /// (kernel <3.8 — ancient; `IFF_MULTI_QUEUE`+`IFF_VNET_HDR` proven
-    /// to compose on 6.19.9).
-    ///
-    /// # Panics
-    /// `n == 0` or `n > 256` (kernel `MAX_TAP_QUEUES`).
+    /// `InvalidInput` for `n` outside `1..=256` (`MAX_TAP_QUEUES`), `n>1` with TAP,
+    /// or a ≥16-byte name; otherwise as `open`.
     pub fn open_mq(cfg: &DeviceConfig, n: usize) -> io::Result<Vec<Tun>> {
-        assert!(n > 0 && n <= 256, "queue count {n} out of [1, 256]");
+        if n == 0 || n > 256 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("queue count {n} out of [1, 256]"),
+            ));
+        }
 
         if n == 1 {
             // One queue: no MQ flag. Exact same fd shape as before
@@ -269,20 +225,13 @@ impl Tun {
     }
 }
 
-// ifr_name packing — the testable seam
-
-/// `[c_char; IFNAMSIZ]` from `Option<&str>`. Called before
-/// `open(/dev/net/tun)` so length validation fires without
-/// `CAP_NET_ADMIN`.
-///
-/// `None` → zeros → kernel picks. `len >= 16` → `Err` rather than
-/// silent truncation (which would only surface later as `ENODEV` in
-/// the user's `ip addr add`). `c_char` sign varies by arch; the cast
-/// is sound (kernel reads bytes).
+/// `[c_char; IFNAMSIZ]` from `Option<&str>`, validated before
+/// `open(/dev/net/tun)` so it needs no `CAP_NET_ADMIN`. `None` → zeros → kernel
+/// picks; `len >= 16` is an error rather than a truncation that surfaces later
+/// as `ENODEV`.
 ///
 /// # Errors
-/// `InvalidInput` for too-long name. The error message includes
-/// the name and the limit.
+/// `InvalidInput` naming the interface and the limit.
 fn pack_ifr_name(iface: Option<&str>) -> io::Result<[libc::c_char; libc::IFNAMSIZ]> {
     let mut buf = [0; libc::IFNAMSIZ];
     let Some(name) = iface else {
@@ -309,26 +258,14 @@ fn pack_ifr_name(iface: Option<&str>) -> io::Result<[libc::c_char; libc::IFNAMSI
     Ok(buf)
 }
 
-// ioctls — the third-instance unsafe shims
-//
-// One `libc::ioctl(fd, req, *mut ifreq)` shim shared by `TUNSETIFF`
-// and `SIOCGIFHWADDR`. The nix `ioctl_*!` macros still emit `unsafe
-// fn`s (no reduction in unsafe sites) and the `_bad` variants need
-// the `ioctl` feature for what is a three-line errno wrapper, so
-// the shim is hand-rolled but kept to a single audited call site.
+// One hand-rolled `ioctl(fd, req, *mut ifreq)` shim serves `TUNSETIFF` and
+// `SIOCGIFHWADDR`; nix's `ioctl_*!` macros would not reduce the unsafe
+// surface.
 
-/// Zeroed `struct ifreq` with `ifr_name` set. Shared prefix of
-/// `tunsetiff` / `siocgifhwaddr`: one `unsafe` for the `mem::zeroed`,
-/// shared by both ioctl shims.
-///
-/// `libc::ifreq` has no `Default` (the union member blocks derive).
-/// Can't struct-literal (which union variant?). Zeroed-then-assign
-/// is the idiom.
-///
-/// SAFETY (zeroed): `ifreq` is `repr(C)` with no niche. All fields
-/// are integers, byte arrays, or pointers (the `ifru_data: *mut
-/// c_char` union arm — NULL is valid). All-bits-zero is a valid
-/// representation.
+/// Zeroed `struct ifreq` with `ifr_name` set, shared by both ioctl shims.
+/// `libc::ifreq` has no `Default` (union member), so zero-then-assign. SAFETY:
+/// `ifreq` is `repr(C)`, all integers/arrays/nullable pointers; all-zero is
+/// valid.
 #[expect(unsafe_code)]
 fn ifreq_with_name(ifr_name: [libc::c_char; libc::IFNAMSIZ]) -> libc::ifreq {
     // SAFETY: see fn comment.
@@ -342,16 +279,9 @@ fn ifreq_with_name(ifr_name: [libc::c_char; libc::IFNAMSIZ]) -> libc::ifreq {
 /// unsafe surface is one audited block, not one per ioctl.
 #[expect(unsafe_code)]
 fn ioctl_ifreq(fd: BorrowedFd<'_>, req: libc::Ioctl, ifr: &mut libc::ifreq) -> io::Result<()> {
-    // SAFETY:
-    //   - `fd` borrows an open fd; lifetime tied to the owning
-    //     `File`, so it cannot be closed underneath us.
-    //   - Both callers pass a request number whose third arg is
-    //     `struct ifreq *`. `ifr` is a live `&mut` to a fully
-    //     initialized 40-byte `ifreq` on our stack; `&raw mut`
-    //     yields a valid aligned `*mut ifreq` for the kernel's
-    //     `copy_from_user`/`copy_to_user`.
-    //   - The kernel may write any field of `ifr`; `&mut` gives
-    //     us exclusive access so the write is sound.
+    // SAFETY: `fd` is a live borrowed fd; both callers pass a request whose
+    // argument is `struct ifreq *`, and `ifr` is an initialized, aligned,
+    // exclusively borrowed `ifreq` the kernel may read and write.
     let ret = unsafe { libc::ioctl(fd.as_raw_fd(), req, &raw mut *ifr) };
     if ret < 0 {
         return Err(io::Error::last_os_error());
@@ -381,18 +311,10 @@ fn open_queue(
     Ok((fd, iface))
 }
 
-/// `TUNSETIFF` — instantiate a TUN/TAP device. Kernel reads `ifr_
-/// flags` and `ifr_name` (may be empty), writes `ifr_name` back
-/// (the actually-assigned name).
-///
-/// `libc::TUNSETIFF` = `0x400454ca` = `_IOW('T', 202, int)`. The
-/// `int` size encoding is a historical accident (the ioctl predates
-/// the size-in-ioctl-number convention); kernel treats the third
-/// arg as `struct ifreq *` regardless.
-///
-/// Returns the assigned interface name as a `String`. The kernel
-/// always NUL-terminates within `IFNAMSIZ` (it `strscpy`s); we
-/// `CStr::from_bytes_until_nul` and convert.
+/// `TUNSETIFF`: instantiate a TUN/TAP device. Kernel reads `ifr_flags` and
+/// `ifr_name` (may be empty) and writes back the assigned name, NUL-terminated
+/// within `IFNAMSIZ`. `libc::TUNSETIFF` is `_IOW('T', 202, int)`; the `int`
+/// size is historical, the argument is really `struct ifreq *`.
 fn tunsetiff(
     fd: BorrowedFd<'_>,
     flags: i16,
@@ -427,16 +349,9 @@ fn tunsetiff(
     Ok(name.to_string_lossy().into_owned())
 }
 
-/// `TUNSETOFFLOAD` — advertise offload capabilities to the kernel
-/// TCP stack. `tun.c:2842` `set_offload`: `TUN_F_TSO4|6` sets
-/// `NETIF_F_TSO|NETIF_F_TSO6` on the netdev → the TCP stack stops
-/// segmenting at MTU, hands us ≤64KB skbs.
-///
-/// `_IOW('T', 208, unsigned int)`. The arg is the flag word, passed
-/// BY VALUE (`tun.c:3213`: `set_offload(tun, arg)` — no pointer
-/// dereference). Unlike `TUNSETIFF`, the encoding is honest.
-///
-/// Not in the `libc` crate. Kernel ABI; can't change.
+/// `TUNSETOFFLOAD` (`_IOW('T', 208, unsigned int)`, not in libc):
+/// `TUN_F_TSO4|6` sets `NETIF_F_TSO*` on the netdev (`tun.c:2842`) so the TCP
+/// stack hands us ≤64KB skbs. The flag word is passed by value (`tun.c:3213`).
 const TUNSETOFFLOAD: libc::Ioctl = 0x4004_54d0;
 
 /// `TUN_F_*` flags for `TUNSETOFFLOAD`. `if_tun.h:88-90`.
@@ -449,17 +364,9 @@ const TUN_F_TSO6: libc::c_uint = 0x04;
 #[expect(unsafe_code)]
 fn tunsetoffload(fd: BorrowedFd<'_>) -> io::Result<()> {
     let flags = TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6;
-    // SAFETY:
-    //   - `fd` is the post-TUNSETIFF TUN fd. Valid.
-    //   - `TUNSETOFFLOAD` takes the flag word BY VALUE as the third
-    //     ioctl arg (`tun.c:3213`: `set_offload(tun, arg)`). Not a
-    //     pointer. The `_IOW(..., unsigned int)` size encoding is
-    //     for the value; the kernel reads it directly from the
-    //     varargs slot. Passing `flags as c_ulong` matches what
-    //     glibc's `ioctl(fd, req, ...)` expects.
-    //   - Kernel writes nothing back (no pointer to write to).
-    //   - `EINVAL` if any unknown flag bit is set (`tun.c:2886`).
-    //     Our three flags are kernel 2.6.27.
+    // SAFETY: `fd` is the post-TUNSETIFF TUN fd; the third argument is the flag
+    // word by value (`tun.c:3213`), so nothing is dereferenced or written back.
+    // `EINVAL` only for unknown bits (`tun.c:2886`); ours date from 2.6.27.
     let ret = unsafe { libc::ioctl(fd.as_raw_fd(), TUNSETOFFLOAD, libc::c_ulong::from(flags)) };
     if ret < 0 {
         return Err(io::Error::last_os_error());
@@ -473,28 +380,17 @@ fn tunsetoffload(fd: BorrowedFd<'_>) -> io::Result<()> {
 /// [0..6]` (the rest of `sockaddr` is unused/garbage for hwaddr).
 #[expect(unsafe_code)]
 fn siocgifhwaddr(fd: BorrowedFd<'_>) -> io::Result<Mac> {
-    // The kernel reads NOTHING from this ifreq — `SIOCGIFHWADDR`
-    // on a TUN/TAP fd
-    // ignores `ifr_name` (the fd already names the device). Zeroed
-    // is just hygiene.
-    //
-    // (On a regular socket, `SIOCGIFHWADDR` reads `ifr_name` to
-    // pick which interface. TUN/TAP fd is already bound to one
-    // interface post-TUNSETIFF; the name is implicit.)
+    // `SIOCGIFHWADDR` on a TUN/TAP fd ignores `ifr_name` (the fd is already bound
+    // to one interface post-TUNSETIFF); zeroing is hygiene.
     let mut ifr = ifreq_with_name([0; libc::IFNAMSIZ]);
 
     // Kernel reads NOTHING (TUN/TAP fd path; see above), WRITES
     // `ifr_ifru.ifru_hwaddr` (a `sockaddr`, 16 bytes at offset 16).
     ioctl_ifreq(fd, libc::SIOCGIFHWADDR as libc::Ioctl, &mut ifr)?;
 
-    // `sockaddr.sa_data` is `[c_char; 14]`. First 6 bytes are the
-    // MAC (ETH_ALEN=6).
-    //
-    // SAFETY (union read): the kernel wrote `ifru_hwaddr`. Reading
-    // it now is sound (it's the active variant from the kernel's
-    // write). The 14 bytes are: `[0..6]` MAC, `[6..14]` undefined
-    // (kernel only sets the first 6 for `ARPHRD_ETHER`). We only
-    // read `[0..6]`.
+    // SAFETY (union read): the kernel wrote `ifru_hwaddr`, so it is the active
+    // variant. `sa_data[0..6]` is the MAC (`ARPHRD_ETHER`); the remaining bytes
+    // are undefined and unread.
     let sa_data = unsafe { ifr.ifr_ifru.ifru_hwaddr }
         .sa_data
         .map(|c| c.to_ne_bytes()[0]);
@@ -530,27 +426,12 @@ impl Device for Tun {
 
     fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.mode {
-            // TUN (vnet_hdr).
-            // `IFF_NO_PI | IFF_VNET_HDR`: kernel expects
-            // `[vnet_hdr(10)][raw IP]` on write (`tun_get_user`
-            // at `tun.c:1731`). The daemon's `buf` is
-            // `[synthetic eth(14)][IP]` — the synth header is all
-            // zeros except ethertype at [12..14]. We need 10 zero
-            // bytes (a `gso_type=NONE` vnet_hdr means "just inject
-            // this skb, no offload") followed by the IP packet.
-            //
-            // Layout trick: `buf[4..14]` is the synth eth header
-            // tail (zeros + ethertype). Stomp it to all-zeros and
-            // write `buf[4..]` — that's `[10 zeros][IP]`. The
-            // ethertype at [12..14] is the only non-zero region
-            // we clobber, and it's `&mut` so allowed. The daemon
-            // never reads buf back after write (it's a synthesized
-            // ICMP reply or a forwarded inbound packet, both done
-            // after write returns).
-            //
-            // The GRO coalesce path fills a real vnet_hdr via
-            // `write_super`; this path (per-packet write) always
-            // sends gso_type=NONE.
+            // TUN with `IFF_NO_PI | IFF_VNET_HDR`: the kernel wants `[vnet_hdr(10)][raw
+            // IP]` (`tun_get_user`, `tun.c:1731`). `buf` is `[synthetic eth(14)][IP]`,
+            // zero except the ethertype at [12..14], so zero that and write `buf[4..]` —
+            // ten zero bytes are a gso_type=NONE header. The daemon never reads `buf` back
+            // after write. GRO-coalesced supers go through `write_super` with a real
+            // vnet_hdr instead.
             Mode::Tun => {
                 debug_assert!(buf.len() > ETH_HLEN, "vnet write buf too short");
                 // Ethertype → 0. Bytes [4..12] are already 0
@@ -567,15 +448,10 @@ impl Device for Tun {
         }
     }
 
-    /// GRO super write. `buf` is `[vnet_hdr(10)][IP
-    /// ≤65535]` from `GroBucket::flush` — already in `tun_get_user`'s
-    /// expected shape (`tun.c:1731`). Just `write()`.
-    ///
-    /// `IFF_VNET_HDR` is unconditionally on for `Mode::Tun` since
-    /// `5cf9b12d`; the daemon's `gro_enabled` gate checks mode
-    /// before calling, so the TAP arm is unreachable. Belt-and-
-    /// braces with the same "degrade not crash" guard as the trait
-    /// default.
+    /// GRO super write: `buf` is `[vnet_hdr(10)][IP ≤65535]` from
+    /// `GroBucket::flush`, already in `tun_get_user` shape (`tun.c:1731`). The
+    /// daemon only calls this in `Mode::Tun`, where `IFF_VNET_HDR` is always on;
+    /// the TAP arm degrades rather than panics.
     fn write_super(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self.mode {
             Mode::Tun => write_fd(self.fd.as_fd(), buf),
@@ -599,22 +475,12 @@ impl Device for Tun {
         Some(self.fd.as_fd())
     }
 
-    /// `vnet_hdr` drain. Overrides the default `read()`-loop only
-    /// when `IFF_VNET_HDR` is on; otherwise delegates.
-    ///
-    /// Read shape with `vnet_hdr` (`tun_put_user`, `tun.c:2064`):
-    /// `[virtio_net_hdr(10)][raw IP packet (≤65535)]`. No `tun_pi`
-    /// (`IFF_NO_PI` set), no eth header (TUN mode). One read = one
-    /// skb. For `gso_type==TCPV4/6`, the IP packet is a super-
-    /// segment (`totlen > MTU`).
-    ///
-    /// `gso_type==NONE` (the common case for non-TCP, ARP, ICMP,
-    /// short TCP): strip the `vnet_hdr`, complete partial csum if
-    /// `NEEDS_CSUM`, synthesize eth header, return as single
-    /// `Frames{count: 1}`. Same wire result as the non-vnet path.
-    ///
-    /// `gso_type==TCPV4/6`: strip `vnet_hdr`, return `Super{..}`.
-    /// The daemon calls `tso_split` on the contiguous buffer.
+    /// `vnet_hdr` drain; delegates to the default loop when `IFF_VNET_HDR` is off.
+    /// One read = one skb shaped `[virtio_net_hdr(10)][raw IP ≤65535]`
+    /// (`tun_put_user`, `tun.c:2064`). `gso_type == NONE`: strip the header,
+    /// complete a partial csum, synthesize the eth header, return `Frames{1}`.
+    /// `TCPV4/6`: strip the header and return `Super{..}` for the daemon to
+    /// `tso_split`.
     fn drain(&mut self, arena: &mut DeviceArena, cap: usize) -> io::Result<DrainResult> {
         if self.mode == Mode::Tap {
             // TAP has no vnet_hdr (see `Tun::open` flags) — use the
@@ -622,18 +488,10 @@ impl Device for Tun {
             return drain_via_read(self, arena, cap);
         }
 
-        // TUN: vnet_hdr path
-        // one read into the contiguous arena. A super-packet can be
-        // 65535 + 10 bytes; `as_contiguous_mut` is `cap*STRIDE` =
-        // 64*1600 = 102400 bytes. Fits.
-        //
-        // EPOLLET: returning while the queue is non-empty loses the
-        // wake. The daemon's `on_device_read` must call `drain` in a
-        // loop until `Empty`. The default `Frames` path doesn't need
-        // this because it loops INTERNALLY here; the Super path
-        // can't (one super-segment fills the output budget). The
-        // daemon side handles the loop — see the `Super` arm in
-        // `net.rs::on_device_read`.
+        // TUN vnet_hdr path: one read into the contiguous arena (65545 bytes max,
+        // `cap*STRIDE` fits). Under EPOLLET returning with a non-empty queue loses the
+        // wake, and a Super fills the whole output budget, so the daemon's
+        // `on_device_read` loops `drain` until `Empty`.
         let buf = arena.as_contiguous_mut();
         let n = match read_fd(self.fd.as_fd(), buf) {
             Ok(0) => {
@@ -666,16 +524,9 @@ impl Device for Tun {
 
         match hdr.gso() {
             Some(GsoType::None) | None => {
-                // Non-GSO frame: pass-through.
-                // Single IP packet. Complete partial csum, synth
-                // eth header, return as `Frames{1}`.
-                //
-                // Layout transform IN PLACE in slot 0:
-                //   before: [vnet_hdr(10)][IP pkt]
-                //   after:  [eth(14)][IP pkt]
-                // The IP packet shifts right by 4. Do the csum fix
-                // before the shift (csum_start is relative to IP
-                // start, currently at +10).
+                // Non-GSO frame: single IP packet. In slot 0, `[vnet_hdr(10)][IP]` becomes
+                // `[eth(14)][IP]` in place (IP shifts right by 4); fix the partial csum before
+                // the shift since csum_start is relative to the current IP start.
                 if hdr.needs_csum() {
                     gso_none_checksum(&mut buf[VNET_HDR_LEN..n], hdr.csum_start, hdr.csum_offset);
                 }
@@ -803,14 +654,9 @@ mod tests {
         // Not PermissionDenied (same). The validation fired.
     }
 
-    /// `Tun::open` with valid config but no `CAP_NET_ADMIN` → some
-    /// `Err` (EACCES on open, or ENOENT if /dev/net/tun missing).
-    /// Not `InvalidInput` — the validation passed, the syscall
-    /// failed.
-    ///
-    /// SKIP under root: open might actually succeed, and then
-    /// we've created a TUN device that lingers until process
-    /// exit. Don't.
+    /// `Tun::open` with valid config but no `CAP_NET_ADMIN` yields an `Err` from
+    /// the syscall (EACCES/ENOENT), not `InvalidInput`. Skipped under root, where
+    /// open would succeed and leave a TUN device behind.
     #[test]
     fn open_non_root_err() {
         if nix::unistd::geteuid().is_root() {

@@ -126,15 +126,10 @@ impl VirtioNetHdr {
     }
 }
 
-/// RFC 1071 internet checksum, no fold.
-///
-/// Deliberately unoptimized: the simple loop costs ~0.5µs/pkt while
-/// crypto costs ~4.6µs, so an unrolled carry-propagating variant would
-/// not move the bottleneck. Revisit if crypto ever stops dominating.
-///
-/// `initial` is BIG-endian-interpreted; we accumulate in BE space
-/// throughout, so the fold-and-complement in [`checksum`] yields a
-/// value that `to_be_bytes` puts correctly on the wire.
+/// RFC 1071 internet checksum, no fold. The plain loop is ~0.5µs/pkt against
+/// ~4.6µs of crypto, so not worth unrolling. `initial` is big-endian;
+/// accumulating in BE space lets [`checksum`]'s fold-and-complement go straight
+/// to `to_be_bytes`.
 #[inline]
 fn checksum_nofold(data: &[u8], initial: u64) -> u64 {
     let mut sum = initial;
@@ -285,30 +280,13 @@ pub fn gso_none_checksum(pkt: &mut [u8], csum_start: u16, csum_offset: u16) {
     pkt[csum_at..csum_at + 2].copy_from_slice(&sum.to_be_bytes());
 }
 
-/// Split a TCP super-segment into MTU-sized frames.
-///
-/// `pkt`: the IP packet from the device read, after stripping the
-/// 10-byte `vnet_hdr`. `[IP header][TCP header][≤64KB payload]`. No
-/// eth header (`vnet_hdr` device uses `IFF_NO_PI` and L3 mode).
-///
-/// `hdr`: the decoded `vnet_hdr`. `gso_type` must be `TcpV4` or `TcpV6`
-/// (caller checks; we `debug_assert`).
-///
-/// `out`: scratch buffer for the segments. Each segment is written
-/// at `out_stride * i`, length `ETH_HLEN + iphlen + tcphlen +
-/// chunk_len`. `out_stride` MUST be ≥ `ETH_HLEN + hdr_len + gso_size`
-/// (the largest segment). With `DeviceArena::STRIDE = 1600`, that's
-/// `1600 - 14 - 60 = 1526` bytes of payload room — fine for any
-/// `gso_size ≤ 1500`.
-///
-/// `lens`: per-segment length output. `lens[i]` is `out[i*stride..]`'s
-/// valid length.
-///
-/// Returns the number of segments written.
+/// Split a TCP super-segment `[IP][TCP][payload]` (`vnet_hdr` stripped, no eth
+/// header) into MTU-sized frames: segment `i` at `out[out_stride * i..]`,
+/// length `lens[i]`; returns the count. `out_stride` must fit the largest
+/// segment; `DeviceArena::STRIDE` does for `gso_size ≤ 1500`.
 ///
 /// # Errors
-/// See [`TsoError`]. All variants indicate a malformed input or
-/// undersized scratch — log + drop the super-segment.
+/// [`TsoError`]: malformed input or undersized scratch; log and drop.
 pub fn tso_split(
     pkt: &[u8],
     hdr: &VirtioNetHdr,
@@ -457,14 +435,9 @@ pub fn tso_split(
         let seq = first_seq.wrapping_add((gso_size * i) as u32);
         ip[iphlen + TCP_SEQ_OFF..iphlen + TCP_SEQ_OFF + 4].copy_from_slice(&seq.to_be_bytes());
 
-        // FIN + PSH only on the LAST segment.
-        // RFC 793: FIN consumes a seqno → must be on the final
-        // segment of the burst. PSH means "deliver now" → only
-        // meaningful on the last (the receiver buffers the others).
-        // The original super-packet has the right flags; we CLEAR
-        // them on non-last segments. Other flags (ACK, URG, RST,
-        // SYN) are preserved — ACK is on every segment of an
-        // established flow.
+        // FIN and PSH only on the last segment (FIN consumes a seqno; PSH means
+        // deliver-now), so clear them on the others. ACK/URG/RST/SYN are preserved on
+        // every segment.
         if seg_end != pkt.len() {
             ip[iphlen + TCP_FLAGS_OFF] &= !(TCP_FLAG_FIN | TCP_FLAG_PSH);
         }
@@ -510,27 +483,13 @@ pub enum GroVerdict {
     NotCandidate,
 }
 
-/// Single-slot TCP GRO accumulator. The inverse of [`tso_split`]:
-/// collect same-flow packets back into a super-
-/// segment + `virtio_net_hdr`, write once.
-///
-/// **Single-slot, append-only.** No flow hashmap or prepend support:
-/// under a bulk transfer the receiving daemon sees one flow's data
-/// packets in seq order per batch. A mismatch → flush → restart
-/// handles the rare interleaved-flow case correctly (it just doesn't
-/// coalesce across the gap).
-///
-/// **No csum verification.** A corrupt inner checksum could pollute
-/// the coalesced result (the kernel only re-verifies the SUPER's
-/// csum, which we recompute). But our inner packets are
-/// SPTPS-AEAD-authenticated bytes from a peer's `tso_split` (or
-/// kernel TCP for non-GSO peers) — a bad csum here is a sender-side
-/// bug, not tampering. The `netns::tso_ingest_stream_integrity`
-/// sha256 test catches it end-to-end.
-///
-/// Buffer layout: `[vnet_hdr(10)][IP super-packet]`. The slice
-/// returned by [`flush`] is fed directly to `Device::write_super`
-/// (raw TUN fd write, no eth munging).
+/// Single-slot, append-only TCP GRO accumulator, the inverse of [`tso_split`]:
+/// coalesce same-flow packets into `[vnet_hdr(10)][IP super]` and hand
+/// [`flush`]'s slice to `Device::write_super`. A flow mismatch flushes and
+/// restarts, which handles interleaving correctly if not optimally. Inner
+/// checksums are not verified: the bytes are AEAD-authenticated from the peer,
+/// so a bad csum is a sender bug, caught end-to-end by
+/// `netns::tso_ingest_stream_integrity`.
 pub struct GroBucket {
     /// `[vnet_hdr(10)][IP ≤65535]`.
     buf: Box<[u8]>,

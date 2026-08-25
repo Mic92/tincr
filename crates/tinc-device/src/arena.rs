@@ -24,18 +24,11 @@ pub enum DrainResult {
     /// is `arena.lens()[i]`.
     Frames { count: usize },
 
-    /// One TCP super-segment from a TSO-advertising device. The
-    /// `virtio_net_hdr` prefix is stripped by the device impl;
-    /// `gso_size`/`gso_type` extracted from it. The payload sits in
-    /// slot 0 as one IP packet with `total_len > MTU` (up to 65535).
-    /// Caller does the userspace TSO-split (portable header
-    /// arithmetic — see `tso.rs`).
-    ///
-    /// Producers: Linux `IFF_VNET_HDR` + `TUNSETOFFLOAD`. FreeBSD
-    /// `TAPSVNETHDR` (same `virtio_net_hdr` wire format).
-    /// Windows could synthesize from a `WinTun`
-    /// ring drain but doesn't today. macOS vmnet is `Frames` (batch,
-    /// not super-packet — see `bsd-perf-findings.md`).
+    /// One TCP super-segment from a TSO-advertising device: the `virtio_net_hdr`
+    /// prefix is stripped (`gso_size`/`gso_type` extracted) and slot 0 holds one IP
+    /// packet with `total_len > MTU` (up to 65535). The caller runs the userspace
+    /// TSO split (`tso.rs`). Produced by Linux `IFF_VNET_HDR` + `TUNSETOFFLOAD` and
+    /// FreeBSD `TAPSVNETHDR`; macOS vmnet yields `Frames` instead.
     Super {
         /// Length of the IP packet in `as_contiguous()[..len]`. The
         /// `vnet_hdr` prefix is already stripped by the device impl.
@@ -71,18 +64,11 @@ pub enum GsoType {
     TcpV6,
 }
 
-/// Fixed-stride slot arena. See module doc for the design.
-///
-/// `STRIDE` = the largest frame the device hands us at MTU 1518.
-/// Rounded to 64 (cacheline) so consecutive slots don't false-share
-/// if adjacent slots are ever written concurrently.
-///
-/// Slot 0 doubles as the super-packet buffer for `DrainResult::Super`:
-/// a 64KB TSO segment fits because `cap × STRIDE ≥ 65535` for any
-/// reasonable `cap` (64 × 1536 = 96KB). The `slot_mut(0)` accessor
-/// returns the full STRIDE; the device impl that returns `Super`
-/// writes past STRIDE into what would be slots 1..N. That's fine —
-/// `Super` and `Frames` are exclusive per drain call.
+/// Fixed-stride slot arena; see module doc. `STRIDE` is the largest frame at
+/// MTU 1518 rounded to a cacheline. Slot 0 doubles as the super-packet buffer
+/// for `DrainResult::Super`: a 64KB segment fits because `cap × STRIDE ≥
+/// 65535`, and writing past STRIDE into slots 1..N is fine since `Super` and
+/// `Frames` are exclusive per drain.
 pub struct DeviceArena {
     /// Page-aligned, `cap * STRIDE` bytes, zero-initialized.
     /// `NonNull` not `*mut` so the struct is `Send` without an
@@ -115,18 +101,10 @@ unsafe impl Send for DeviceArena {}
 const PAGE: usize = 4096;
 
 impl DeviceArena {
-    /// Slot stride: `MTU` rounded up to a cacheline. `MTU=1518`
-    /// → 1536. The 18 bytes of slack are the SPTPS overhead margin
-    /// for in-place encrypt (body+33 fits because body ≤ MTU−14 and
-    /// 1518−14+33 = 1537 — one byte over. We round UP to cacheline,
-    /// so 1536 < 1537 by one. Bump to 1600 for headroom; still
-    /// cacheline-aligned).
-    ///
-    /// (The "+33" is `mt-kernel-findings.md`'s on-wire overhead:
-    /// 12 ids + 4 seqno + 1 type + 16 tag. The encrypt path
-    /// currently goes through `tx_scratch`, not the arena — but
-    /// rebuilding the arena to change STRIDE means re-auditing
-    /// every slot accessor, so the headroom is reserved now.)
+    /// Slot stride: MTU 1518 plus the 33-byte SPTPS in-place-encrypt overhead (12
+    /// ids + 4 seqno + 1 type + 16 tag) is 1537, rounded up to a cacheline multiple
+    /// with headroom. The encrypt path currently uses `tx_scratch` rather than the
+    /// arena, but the room is reserved so STRIDE never has to change.
     pub const STRIDE: usize = {
         let need = MTU + 33; // 1518 + 33 = 1551
         // Round up to cacheline (64). 1551 → 1600.
