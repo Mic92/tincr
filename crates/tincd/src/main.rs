@@ -11,7 +11,7 @@
 //! Cmdline` so it beats file values.
 
 // New unsafe in the entrypoint should trip the lint; remaining
-// per-site uses carry an explicit `#[allow(unsafe_code)]`.
+// per-site uses carry an explicit `#[expect(unsafe_code)]`.
 #![deny(unsafe_code)]
 
 use std::ffi::CString;
@@ -47,7 +47,7 @@ const fn debug_level_to_filter(d: u32) -> log::LevelFilter {
     }
 }
 
-#[allow(clippy::struct_excessive_bools)] // independent CLI switches
+#[expect(clippy::struct_excessive_bools)] // independent CLI switches
 struct Args {
     confbase: PathBuf,
     pidfile: PathBuf,
@@ -444,7 +444,7 @@ fn cut_umbilical() {
     // the ownership transfer protocol — spawner set it, no one else
     // in this process knows the number. Stale fd → F_GETFL fails →
     // we drop (close) harmlessly.
-    #[allow(unsafe_code)]
+    #[expect(unsafe_code)]
     let f = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
     if fcntl(&f, FcntlArg::F_GETFL).is_err() {
         return; // drop closes the fd
@@ -496,7 +496,7 @@ fn drop_privs(
         // tzset before chroot: load /etc/localtime so log timestamps
         // stay in local tz inside the jail.
         // SAFETY: tzset is non-reentrant; single-threaded here.
-        #[allow(unsafe_code)]
+        #[expect(unsafe_code)]
         {
             unsafe extern "C" {
                 fn tzset();
@@ -577,7 +577,7 @@ fn apply_process_priority(confbase: &std::path::Path, cmdline: &Config) {
     // SAFETY: setpriority(PRIO_PROCESS, 0, nice); who=0 = current process.
     // PRIO_PROCESS type varies (c_uint on gnu, c_int on musl/bsd) —
     // rely on the libc const's own type via `as _`.
-    #[allow(unsafe_code)]
+    #[expect(unsafe_code)]
     let r = unsafe { libc::setpriority(libc::PRIO_PROCESS as _, 0, nice) };
     if r != 0 {
         log::warn!(
@@ -759,7 +759,7 @@ fn main() -> ExitCode {
         std::env::var("LISTEN_FDS").ok(),
     );
     // SAFETY: single-threaded pre-detach, no concurrent getenv.
-    #[allow(unsafe_code)]
+    #[expect(unsafe_code)]
     unsafe {
         std::env::remove_var("LISTEN_PID");
         std::env::remove_var("LISTEN_FDS");

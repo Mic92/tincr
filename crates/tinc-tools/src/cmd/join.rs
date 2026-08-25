@@ -66,7 +66,7 @@ mod tests;
 pub use finalize::finalize_join;
 pub use url::{ParsedUrl, parse_url};
 
-#[cfg_attr(not(test), allow(unused_imports))]
+#[cfg_attr(not(test), expect(unused_imports))]
 pub(crate) use server_stub::server_receive_cookie;
 
 use std::io::{Read, Write};

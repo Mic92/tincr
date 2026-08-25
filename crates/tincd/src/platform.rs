@@ -88,7 +88,7 @@ fn set_int_sockopt(
     // whose address+len we pass for the duration of the call. The
     // syscall copies out before return.
     // truncation: size_of::<c_int>() == 4, fits socklen_t.
-    #[allow(unsafe_code, clippy::cast_possible_truncation)]
+    #[expect(unsafe_code, clippy::cast_possible_truncation)]
     let rc = unsafe {
         libc::setsockopt(
             fd.as_fd().as_raw_fd(),
@@ -229,7 +229,7 @@ pub fn daemonize() -> Result<(), String> {
     {
         // nix::unistd::daemon is Linux-only in nix 0.29.
         // Use libc::daemon directly.
-        #[allow(unsafe_code, deprecated)]
+        #[expect(unsafe_code, deprecated)]
         let rc = unsafe { libc::daemon(1, 0) };
         if rc < 0 {
             Err(format!(
@@ -251,8 +251,14 @@ pub fn daemonize() -> Result<(), String> {
 /// # Errors
 /// `last_os_error()` from `initgroups(3)`.
 pub fn initgroups(user: &CStr, gid: nix::unistd::Gid) -> io::Result<()> {
-    #[allow(unsafe_code, clippy::cast_possible_wrap)]
-    let rc = unsafe { libc::initgroups(user.as_ptr(), gid.as_raw() as _) };
+    // initgroups' gid param is gid_t on Linux but c_int on macOS.
+    #[cfg(target_os = "macos")]
+    let gid = libc::c_int::try_from(gid.as_raw())
+        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    #[cfg(not(target_os = "macos"))]
+    let gid = gid.as_raw();
+    #[expect(unsafe_code)]
+    let rc = unsafe { libc::initgroups(user.as_ptr(), gid) };
     if rc != 0 {
         Err(io::Error::last_os_error())
     } else {

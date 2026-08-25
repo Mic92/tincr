@@ -147,7 +147,7 @@ pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<
     //
     // SAFETY: closure only calls `fcntl` (async-signal-safe) on a
     // raw fd we own; no allocation, no locks.
-    #[allow(unsafe_code)]
+    #[expect(unsafe_code)]
     unsafe {
         cmd.pre_exec(move || {
             if libc::fcntl(theirs_fd, libc::F_SETFD, 0) == -1 {
@@ -286,7 +286,7 @@ mod tests {
     /// remove panics).
     struct EnvGuard(&'static str);
     impl EnvGuard {
-        #[allow(unsafe_code)]
+        #[expect(unsafe_code)]
         fn set(k: &'static str, v: impl AsRef<OsStr>) -> Self {
             // SAFETY: nextest runs each test in its own process; no
             // env-mutation race with parallel tests.
@@ -295,7 +295,7 @@ mod tests {
         }
     }
     impl Drop for EnvGuard {
-        #[allow(unsafe_code)]
+        #[expect(unsafe_code)]
         fn drop(&mut self) {
             // SAFETY: same as `set` — single-threaded test process.
             unsafe { std::env::remove_var(self.0) }

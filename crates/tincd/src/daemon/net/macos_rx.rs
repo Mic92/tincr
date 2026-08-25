@@ -11,7 +11,7 @@
 //! Falls back to the per-datagram `recvfrom` loop on `ENOSYS`; never
 //! observed on 10.10+ but the header says "subject to change".
 
-#![allow(unsafe_code)]
+#![expect(unsafe_code)]
 
 use std::net::SocketAddr;
 
@@ -74,7 +74,7 @@ pub(super) fn phase1(
         };
         x.hdrs[i] = MsghdrX {
             msg_name: (&raw mut x.addrs[i]).cast(),
-            #[allow(clippy::cast_possible_truncation)] // 128 fits socklen_t
+            #[expect(clippy::cast_possible_truncation)] // 128 fits socklen_t
             msg_namelen: size_of::<libc::sockaddr_storage>() as libc::socklen_t,
             msg_iov: &raw mut x.iovs[i],
             msg_iovlen: 1,
@@ -88,7 +88,7 @@ pub(super) fn phase1(
     }
 
     // UDP_RX_BATCH = 64; fits c_uint.
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(clippy::cast_possible_truncation)]
     let cnt = UDP_RX_BATCH as libc::c_uint;
     // SAFETY: `hdrs[..UDP_RX_BATCH]` fully initialised above; each
     // iovec/msg_name points into exclusively-borrowed `batch` memory.
@@ -109,10 +109,10 @@ pub(super) fn phase1(
         };
     }
     // `ret` ∈ [0, UDP_RX_BATCH]; non-negative checked above.
-    #[allow(clippy::cast_sign_loss)]
+    #[expect(clippy::cast_sign_loss)]
     let n = ret as usize;
     for (i, m) in meta.iter_mut().enumerate().take(n) {
-        #[allow(clippy::cast_possible_truncation)] // ≤ UDP_RX_BUFSZ = 2048
+        #[expect(clippy::cast_possible_truncation)] // ≤ UDP_RX_BUFSZ = 2048
         let len = x.hdrs[i].msg_datalen.min(UDP_RX_BUFSZ) as u16;
         let peer = ss_to_socketaddr(&x.addrs[i], x.hdrs[i].msg_namelen);
         *m = (len, peer.map(unmap));

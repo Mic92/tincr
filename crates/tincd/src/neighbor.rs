@@ -13,7 +13,7 @@
 //! (`handle_arp`/`handle_ndp`); this module stays pure.
 
 #![forbid(unsafe_code)]
-#![allow(clippy::cast_possible_truncation)] // header-size constants, max 32
+#![expect(clippy::cast_possible_truncation)] // header-size constants, max 32
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 

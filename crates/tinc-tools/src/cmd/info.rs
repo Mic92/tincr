@@ -33,7 +33,7 @@
 //!
 //! `nix` doesn't wrap `localtime_r` (library function, not a syscall) and
 //! `chrono` would cost several transitive deps for one strftime, so this
-//! module carries the crate's single `#[allow(unsafe_code)]` shim.
+//! module carries the crate's single `#[expect(unsafe_code)]` shim.
 
 #![cfg(unix)]
 
@@ -58,14 +58,15 @@ use crate::names::{Paths, check_id};
 ///      (null) even before that.
 ///   3. NULL return (EOVERFLOW for absurd years) maps to `"never"`.
 ///   4. Only `c_int` fields are read afterwards; no pointer deref.
-#[allow(unsafe_code, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+#[expect(unsafe_code)]
 fn fmt_localtime(t: i64) -> String {
     // 0 means "no state change recorded"; guard here so callers don't repeat it.
     if t == 0 {
         return "never".to_owned();
     }
 
-    let time = t as libc::time_t;
+    // time_t is i64 except on old 32-bit ABIs; saturate there.
+    let time = libc::time_t::try_from(t).unwrap_or(libc::time_t::MAX);
     let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
     // SAFETY:
     //   - `&time` is a valid aligned pointer to a live `time_t` for

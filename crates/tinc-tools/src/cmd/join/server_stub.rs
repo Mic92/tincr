@@ -26,7 +26,7 @@ use super::finalize::parse_name_line;
 /// yourself).
 ///
 /// `now` parameterized for tests (the expiry check).
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) fn server_receive_cookie(
     paths: &Paths,
     inv_key: &SigningKey,

@@ -1,6 +1,10 @@
 //! Shared fixtures for the tincd integration tests. Each `tests/*.rs`
 //! is its own crate and includes this via `mod common;`.
 
+#![allow(
+    clippy::allow_attributes,
+    reason = "shared by several test binaries, each uses a subset"
+)]
 #![allow(dead_code)] // not every test binary uses every helper
 
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};

@@ -170,15 +170,10 @@ pub struct Var {
 // `F` (saFe) = SAFE. Single-letter consts keep each row on one line
 // so the table stays diffable against C tinc's.
 
-#[allow(non_upper_case_globals)] // single-letter, scoped to this block
 const S: VarFlags = VarFlags::SERVER;
-#[allow(non_upper_case_globals)]
 const H: VarFlags = VarFlags::HOST;
-#[allow(non_upper_case_globals)]
 const M: VarFlags = VarFlags::MULTIPLE;
-#[allow(non_upper_case_globals)]
 const O: VarFlags = VarFlags::OBSOLETE;
-#[allow(non_upper_case_globals)]
 const F: VarFlags = VarFlags::SAFE;
 
 /// Shorthand. `v("Port", H)` reads better than `Var { name: "Port",

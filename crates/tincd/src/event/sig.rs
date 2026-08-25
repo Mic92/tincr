@@ -64,7 +64,7 @@ pub(crate) struct SelfPipe<W> {
     /// Write end. The handler writes here via `PIPE_WR` (the raw
     /// copy); we keep the `OwnedFd` so the pipe doesn't half-close
     /// and so tests can write through it without forging a fd.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(test), expect(dead_code))]
     wr: OwnedFd,
     /// Dispatch table, indexed by signum.
     table: [Option<W>; NSIG_TABLE],
@@ -89,7 +89,7 @@ extern "C" fn handler(signum: libc::c_int) {
     // Intentionally raw `libc::write`, not `nix::unistd::write`: this
     // is signal-handler context. nix's wrapper is thin, but staying
     // on the bare syscall keeps the async-signal-safety audit trivial.
-    #[allow(unsafe_code)]
+    #[expect(unsafe_code)]
     unsafe {
         libc::write(fd, std::ptr::addr_of!(byte).cast(), 1);
     }
@@ -189,7 +189,7 @@ impl<W: Copy> SelfPipe<W> {
         // SAFETY: installing a signal handler is inherently unsafe —
         // the handler must be async-signal-safe. Ours is (atomic load
         // + raw write(2)); see `handler` above.
-        #[allow(unsafe_code)]
+        #[expect(unsafe_code)]
         unsafe {
             sigaction(sig, &act)?;
         }

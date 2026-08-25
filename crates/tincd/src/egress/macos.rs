@@ -28,7 +28,7 @@
 
 // `sendmsg_x` is not in libc/nix; raw FFI is unavoidable. Parent
 // module is `deny(unsafe_code)`; scope the allow to this file.
-#![allow(unsafe_code)]
+#![expect(unsafe_code)]
 
 use std::io;
 use std::os::fd::AsRawFd;

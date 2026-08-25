@@ -12,7 +12,7 @@
 
 // `deny` (was `forbid`): linux stays safe via `nix::sendmsg`, but the
 // macOS `sendmsg_x` path is private API not wrapped by libc/nix and
-// needs a scoped `#[allow(unsafe_code)]` on its module.
+// needs a scoped `#[expect(unsafe_code)]` on its module.
 #![deny(unsafe_code)]
 
 use std::io;
@@ -314,7 +314,6 @@ impl TxBatch {
 /// `send_to` — `Portable::send_batch` with `count=1` is one `sendto`.
 // Linux uses `linux::Fast`; `Portable` stays for the wire-equivalence
 // test in `egress/linux.rs` and as the non-Linux backend.
-#[cfg_attr(any(target_os = "linux", target_os = "android"), allow(dead_code))]
 pub(crate) struct Portable {
     /// `dup(2)` of `Listener.udp`. Same file description, so
     /// `SO_BINDTODEVICE`/`IP_TOS`/etc. set on the listener apply
@@ -323,7 +322,10 @@ pub(crate) struct Portable {
     sock: Socket,
 }
 
-#[cfg_attr(any(target_os = "linux", target_os = "android"), allow(dead_code))]
+#[cfg_attr(
+    all(not(test), any(target_os = "linux", target_os = "android")),
+    expect(dead_code)
+)]
 impl Portable {
     /// Build from a dup of the listener's UDP socket.
     ///

@@ -22,7 +22,7 @@
 //! rather than shared because `tinc-device` sits below `tincd` in the
 //! dep graph and the type is 8 fields of libc primitives.
 
-#![allow(unsafe_code)]
+#![expect(unsafe_code)]
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -39,7 +39,7 @@ const READ_OFFSET: usize = ETH_HLEN - AF_PREFIX_LEN; // = 10
 /// matches the kernel user-ABI exactly. Field names verbatim from C
 /// for greppability.
 #[repr(C)]
-#[allow(clippy::struct_field_names)] // verbatim from C for greppability
+#[expect(clippy::struct_field_names)] // verbatim from C for greppability
 struct MsghdrX {
     msg_name: *mut libc::c_void,
     msg_namelen: libc::socklen_t,
@@ -170,7 +170,7 @@ impl UtunBatch {
         }
 
         // cap ≤ STRIDE = 64.
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(clippy::cast_possible_truncation)]
         let cnt = cap as libc::c_uint;
         // SAFETY: `hdrs[..cap]` fully initialised above; each iovec
         // points into the exclusively-borrowed arena. `MSG_DONTWAIT`
@@ -195,7 +195,7 @@ impl UtunBatch {
             };
         }
         // `ret` ≤ cap ≤ STRIDE ≤ usize::MAX. Non-negative checked above.
-        #[allow(clippy::cast_sign_loss)]
+        #[expect(clippy::cast_sign_loss)]
         let n = ret as usize;
         if n == 0 {
             return Some(Ok(crate::DrainResult::Empty));
@@ -256,7 +256,7 @@ impl UtunBatch {
         slot[..AF_PREFIX_LEN].copy_from_slice(&prefix);
         slot[AF_PREFIX_LEN..].copy_from_slice(ip);
         // len ≤ WRITE_SLOT = 1536.
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(clippy::cast_possible_truncation)]
         {
             self.wlens[self.wcount] = len as u16;
         }
@@ -310,7 +310,7 @@ impl UtunBatch {
             };
         }
         // n ≤ STRIDE = 64.
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(clippy::cast_possible_truncation)]
         let count = n as libc::c_uint;
         let first_unsent = match submit(
             fd.as_raw_fd(),

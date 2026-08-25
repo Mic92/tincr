@@ -7,6 +7,10 @@
 //! written. A restarted node pins its previous port so peers'
 //! `Address =` lines stay valid.
 
+#![allow(
+    clippy::allow_attributes,
+    reason = "shared by several test binaries, each uses a subset"
+)]
 #![allow(dead_code)]
 
 use std::fmt::Write as _;

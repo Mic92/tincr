@@ -107,7 +107,7 @@ fn umbilical_gets_nul_after_setup() {
         .stdin(Stdio::from(OwnedFd::from(daemon_end)))
         .stderr(Stdio::piped());
     // SAFETY: dup2 is async-signal-safe.
-    #[allow(unsafe_code)]
+    #[expect(unsafe_code)]
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {

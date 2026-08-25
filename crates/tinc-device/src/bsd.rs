@@ -352,7 +352,7 @@ mod utun {
             // SAFETY: standard setsockopt(2) shape; `depth` is a live
             // 4-byte stack value, `optlen` matches. The kernel only
             // reads through the pointer.
-            #[allow(unsafe_code)]
+            #[expect(unsafe_code)]
             let rc = unsafe {
                 libc::setsockopt(
                     fd.as_raw_fd(),

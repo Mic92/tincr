@@ -156,7 +156,7 @@ fn recv_one_fd(stream: &impl AsRawFd) -> io::Result<OwnedFd> {
     // fd table during recvmsg (before any of our checks ran). If we
     // error below, `Vec<OwnedFd>::drop` closes them — no leak.
     // SAFETY: SCM_RIGHTS dup; each fd is open and exclusively ours.
-    #[allow(unsafe_code)]
+    #[expect(unsafe_code)]
     let mut fds: Vec<OwnedFd> = fds
         .into_iter()
         .map(|fd| unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) })

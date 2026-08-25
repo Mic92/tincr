@@ -31,7 +31,7 @@ fn test_idp() -> Idp {
     Idp::new(config, test_key().clone())
 }
 
-#[allow(clippy::unnecessary_wraps)] // Whois is the API type
+#[expect(clippy::unnecessary_wraps)] // Whois is the API type
 fn alice() -> Whois {
     Ok(Some(Node {
         name: "alice-laptop".into(),

@@ -13,10 +13,6 @@
 //! program left over from a previous daemon crash.
 
 #![cfg(target_os = "linux")]
-// Not yet wired into the shard runtime — kernel steering landed ahead
-// of the shard-per-thread executor. Kept compiling so the cBPF prog
-// and ioctl shims don't bit-rot before `TINCD_SHARDS` ships.
-#![allow(dead_code, unreachable_pub)]
 
 mod cbpf;
 pub use cbpf::{ReuseportGroup, attach_reuseport_id6, open_reuseport_group};

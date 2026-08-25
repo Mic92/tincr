@@ -172,7 +172,7 @@ impl ControlSocket {
         // tighten umask so the inode is born 0700. Process-global, but
         // tightening only strips bits → fails safe for other threads.
         // SAFETY: umask(2) cannot fail.
-        #[allow(unsafe_code)]
+        #[expect(unsafe_code)]
         let listener = unsafe {
             let prev = libc::umask(0o077);
             let r = UnixListener::bind(path);

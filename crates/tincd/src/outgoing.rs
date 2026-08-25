@@ -596,7 +596,7 @@ pub(crate) fn do_outgoing_pipe(
 
     // SAFETY: see fn doc. The child does libc-only until exec.
     // Everything that allocates was done above, in the parent.
-    #[allow(unsafe_code)]
+    #[expect(unsafe_code)]
     unsafe {
         // `if(fork()) { ... parent ... return; }`. We check for
         // fork failure (`-1`).

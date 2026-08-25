@@ -9,14 +9,14 @@
 //! symbols are exported unconditionally from libSystem (verified via
 //! `libSystem.B.tbd`), so no `dlsym` dance.
 
-#![allow(unsafe_code)]
+#![expect(unsafe_code)]
 #![cfg(target_os = "macos")]
 
 /// `struct msghdr_x` (xnu `bsd/sys/socket_private.h`). Layout matches
 /// the LP64 user struct exactly. Field names verbatim from C for
 /// greppability.
 #[repr(C)]
-#[allow(clippy::struct_field_names)]
+#[expect(clippy::struct_field_names)]
 pub(crate) struct MsghdrX {
     pub msg_name: *mut libc::c_void,
     pub msg_namelen: libc::socklen_t,
