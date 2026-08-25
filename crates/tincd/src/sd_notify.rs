@@ -18,6 +18,8 @@
 #![cfg(unix)]
 
 use std::io;
+#[cfg(target_os = "linux")]
+use std::os::linux::net::SocketAddrExt;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
 use std::time::Duration;
@@ -65,7 +67,6 @@ fn notify_to(path: &std::ffi::OsStr, state: &str) -> io::Result<()> {
             // name *without* the leading NUL.
             #[cfg(target_os = "linux")]
             {
-                use std::os::linux::net::SocketAddrExt;
                 SocketAddr::from_abstract_name(&bytes[1..])?
             }
             #[cfg(not(target_os = "linux"))]
@@ -146,6 +147,8 @@ fn parse_watchdog_usec(raw: Option<&str>) -> Option<Duration> {
 mod tests {
     use super::*;
     use std::ffi::OsString;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::ffi::OsStringExt;
 
     /// Bind a datagram socket at a unique filesystem path and return both
     /// ends of the conversation. We don't use a tempdir crate (per the
@@ -201,9 +204,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn abstract_socket_at_prefix_maps_to_nul() {
-        use std::os::linux::net::SocketAddrExt;
-        use std::os::unix::ffi::OsStringExt;
-
         // Abstract namespace: no filesystem entry, no cleanup needed.
         // The receiving side binds with the raw name; the sending side
         // uses the '@'-prefixed env-var form. They must meet.

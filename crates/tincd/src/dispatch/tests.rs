@@ -1,7 +1,8 @@
+/// `/dev/null` fd; handlers don't touch the fd, just need a valid conn.
 use super::*;
+use GateExpect::{Ok, Unauthorized, UnknownRequest};
 use std::os::fd::OwnedFd;
 
-/// `/dev/null` fd; handlers don't touch the fd, just need a valid conn.
 fn nullfd() -> OwnedFd {
     OwnedFd::from(std::fs::File::open("/dev/null").unwrap())
 }
@@ -51,7 +52,6 @@ enum GateExpect {
 /// == '0'`, range check, gate.
 #[test]
 fn gate_cases() {
-    use GateExpect::{Ok, Unauthorized, UnknownRequest};
     #[rustfmt::skip]
     let cases: &[(Option<Request>, &[u8], GateExpect)] = &[
         // allows expected.

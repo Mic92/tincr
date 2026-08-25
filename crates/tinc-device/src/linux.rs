@@ -36,6 +36,7 @@ use crate::tso::{VNET_HDR_LEN, VirtioNetHdr, gso_none_checksum};
 use crate::{
     Device, DeviceArena, DeviceConfig, DrainResult, GsoType, MTU, Mac, Mode, read_fd, write_fd,
 };
+use std::os::unix::fs::OpenOptionsExt;
 
 /// The kernel's TUN/TAP multiplexer. Opening it doesn't give you a
 /// device; `TUNSETIFF` does. The fd is just a handle into the driver until then.
@@ -364,7 +365,6 @@ fn open_queue(
     ifr_name: [libc::c_char; libc::IFNAMSIZ],
     flags: i16,
 ) -> io::Result<(File, String)> {
-    use std::os::unix::fs::OpenOptionsExt;
     // CLOEXEC atomically in the open flags closes the open→fcntl
     // race window. `custom_flags` ORs into the underlying `open(2)`
     // flags; `OpenOptions` already sets `O_RDWR` from

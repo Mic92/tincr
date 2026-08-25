@@ -71,6 +71,7 @@ use crate::names::{self, Paths, check_id};
 // invitation file format reuses the same string, so the constant
 // lives in `cmd::invite`.
 use super::invite::SEPARATOR;
+use std::os::unix::fs::OpenOptionsExt;
 
 /// `get_my_name` — read `Name = X` from `tinc.conf`, expand `$HOST`.
 ///
@@ -302,7 +303,6 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
             opts.write(true);
             #[cfg(unix)]
             {
-                use std::os::unix::fs::OpenOptionsExt;
                 opts.custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
             }
             if force {

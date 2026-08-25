@@ -45,6 +45,7 @@ use crate::cmd::{CmdError, OpenKind, io_err, write_private_key};
 use crate::keypair;
 use crate::names::{Paths, check_id};
 
+use std::os::unix::fs::PermissionsExt;
 use tinc_crypto::b64;
 
 /// `cmd_init`. Takes the resolved `Paths` and the node name from argv.
@@ -146,7 +147,6 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
 pub(crate) fn write_tinc_up_placeholder(
     paths: &Paths,
 ) -> Result<Option<std::path::PathBuf>, CmdError> {
-    use std::os::unix::fs::PermissionsExt;
     let up_path = paths.tinc_up();
     // `try_exists` then `O_EXCL`: belt-and-suspenders, but lets us
     // silently skip instead of erroring on EEXIST.

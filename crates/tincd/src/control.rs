@@ -34,6 +34,7 @@
 //! `umask(0o077)` so the inode is never observable with group/other
 //! bits, then `chmod()` 0700 for good measure.
 
+use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
@@ -64,7 +65,6 @@ pub(crate) fn generate_cookie() -> String {
     os_rng().fill_bytes(&mut bytes);
     let mut hex = String::with_capacity(COOKIE_HEX_LEN);
     for b in bytes {
-        use std::fmt::Write;
         write!(hex, "{b:02x}").expect("String write infallible");
     }
     hex

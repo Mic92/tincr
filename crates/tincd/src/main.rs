@@ -19,6 +19,11 @@ use std::os::fd::FromRawFd;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+use nix::sys::mman::{MlockAllFlags, mlockall};
+use nix::unistd::{AccessFlags, access};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::OpenOptionsExt;
 use tinc_conf::{Config, Source, parse_line};
 use tincd::{Daemon, RunOutcome, sandbox, sd_notify};
 
@@ -362,7 +367,6 @@ where
     // pidfile: /var/run/tinc.NET.pid when /var is writable, else
     // {confbase}/pid (the non-root fallback).
     let pidfile = pidfile.unwrap_or_else(|| {
-        use nix::unistd::{AccessFlags, access};
         let var_writable = access(
             LOCALSTATEDIR,
             AccessFlags::R_OK | AccessFlags::W_OK | AccessFlags::X_OK,
@@ -383,7 +387,6 @@ where
     // Derive `socket` from `pidfile` so callers (NixOS module,
     // `tinc -n NET`) can pass only --pidfile.
     let socket = socket.unwrap_or_else(|| {
-        use std::os::unix::ffi::{OsStrExt, OsStringExt};
         let p = pidfile.as_os_str().as_bytes();
         let stem = p.strip_suffix(b".pid").unwrap_or(p);
         let mut s = Vec::with_capacity(stem.len() + 7);
@@ -419,8 +422,6 @@ where
 /// detach-without-logfile warning in `init_logging` covers that gap.
 /// No-op when `TINC_UMBILICAL` is unset.
 fn cut_umbilical() {
-    use nix::fcntl::{FcntlArg, FdFlag, fcntl};
-
     let Ok(spec) = std::env::var("TINC_UMBILICAL") else {
         return;
     };
@@ -604,7 +605,6 @@ fn init_logging(args: &Args) {
     }
 
     if let Some(path) = &args.logfile {
-        use std::os::unix::fs::OpenOptionsExt;
         match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -804,15 +804,11 @@ fn main() -> ExitCode {
     // mlockall after fork (parent is short-lived). Hard-fail on
     // EPERM: if `-L` was requested without CAP_IPC_LOCK, key pages
     // could swap — the user wants to know.
-    if args.do_mlock {
-        use nix::sys::mman::{MlockAllFlags, mlockall};
-        if let Err(e) = mlockall(MlockAllFlags::MCL_CURRENT | MlockAllFlags::MCL_FUTURE) {
-            log::error!(
-                target: "tincd",
-                "System call `mlockall' failed: {e}"
-            );
-            return ExitCode::FAILURE;
-        }
+    if args.do_mlock
+        && let Err(e) = mlockall(MlockAllFlags::MCL_CURRENT | MlockAllFlags::MCL_FUTURE)
+    {
+        log::error!(target: "tincd", "System call `mlockall' failed: {e}");
+        return ExitCode::FAILURE;
     }
 
     // ProcessPriority before setup: covers TUN open and tinc-up,

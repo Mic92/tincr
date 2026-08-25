@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use super::common::node::has_subnet;
 use super::common::{Node, node_reachable, node_status, node_traffic, poll_until};
 use super::fd_tunnel::{mk_ipv4_pkt, read_fd_nb, sockpair_datagram, write_fd};
+use std::io::Write;
 
 /// Write all three configs and start mid, bob, alice in that order.
 /// hosts/ tweaks must happen via `edit_hosts` because configs are
@@ -36,7 +37,6 @@ fn start_hub(
 }
 
 fn append_host_line(node: &Node, host: &str, line: &str) {
-    use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(node.confbase.join("hosts").join(host))

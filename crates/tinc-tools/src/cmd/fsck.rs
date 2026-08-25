@@ -13,6 +13,8 @@
 //! assert on variants instead of parsing stderr; fixes still apply
 //! during the scan because later checks may read the changed state.
 
+use Finding as F;
+
 mod conf;
 mod display;
 mod keys;
@@ -159,7 +161,6 @@ impl Finding {
     /// `ERROR:` / `WARNING:` / (nothing) prefix.
     #[must_use]
     pub const fn severity(&self) -> Severity {
-        use Finding as F;
         match self {
             F::TincConfMissing
             | F::TincConfDenied { .. }

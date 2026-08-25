@@ -18,6 +18,7 @@ use crate::script::{ScriptEnv, ScriptResult};
 use crate::{invitation_serve, reload, script};
 
 use crate::graph::NodeId;
+use crate::portmap::PortmapEvent;
 use tinc_proto::msg::SubnetMsg;
 use tinc_proto::{Request, Subnet};
 
@@ -276,7 +277,6 @@ impl Daemon {
         // already did the protocol work.
         #[cfg(feature = "upnp")]
         if let Some(pm) = self.portmapper.as_ref() {
-            use crate::portmap::PortmapEvent;
             for ev in pm.tick() {
                 match ev {
                     PortmapEvent::Mapped {

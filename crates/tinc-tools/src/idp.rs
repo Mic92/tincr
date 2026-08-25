@@ -26,6 +26,7 @@ use rsa::signature::{SignatureEncoding, Signer};
 use rsa::traits::PublicKeyParts;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use subtle::ConstantTimeEq;
 use tinc_crypto::os_rng;
 
 pub const DEFAULT_ID_TOKEN_TTL: Duration = Duration::from_mins(5);
@@ -180,7 +181,6 @@ fn random_token() -> String {
 }
 
 fn ct_eq(a: &str, b: &str) -> bool {
-    use subtle::ConstantTimeEq;
     let ha = Sha256::digest(a.as_bytes());
     let hb = Sha256::digest(b.as_bytes());
     ha.ct_eq(&hb).into()

@@ -26,6 +26,7 @@
 use crate::Request;
 use crate::addr::AddrStr;
 use crate::tok::{ParseError, Tok};
+use std::fmt::Write as _;
 
 /// Body of `ADD_EDGE`. The optional `local` pair is post-1.0.24.
 ///
@@ -96,7 +97,6 @@ impl AddEdge {
     /// on whether `e->local_address.sa.sa_family` is set. We mirror.
     #[must_use]
     pub fn format(&self, nonce: u32) -> String {
-        use std::fmt::Write as _;
         // %x lowercase, no `#`/`0x`. %d signed decimal.
         let mut s = format!(
             "{} {nonce:x} {} {} {} {} {:x} {}",

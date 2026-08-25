@@ -1,5 +1,4 @@
 use super::{ConnId, Daemon, IoWhat, NodeState};
-
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, OwnedFd};
 use std::time::Duration;
@@ -20,6 +19,7 @@ use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use tinc_proto::msg::DelEdge;
 use tinc_proto::{AddrStr, Request};
 
+use crate::bgresolve::{DnsRes, DnsTag};
 use crate::dispatch::ConnOptions;
 
 impl Daemon {
@@ -443,7 +443,6 @@ impl Daemon {
     /// `setup_outgoing_connection` (timer ordering between
     /// `RetryOutgoing` and `Periodic` isn't guaranteed).
     pub(super) fn drain_dns_worker(&mut self) {
-        use crate::bgresolve::{DnsRes, DnsTag};
         for DnsRes { tag, addrs } in self.dns_worker.drain() {
             match tag {
                 DnsTag::Outgoing(node) if !addrs.is_empty() => {

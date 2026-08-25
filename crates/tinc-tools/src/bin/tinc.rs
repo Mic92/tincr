@@ -42,6 +42,13 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use cmd::config::Action;
+use cmd::config::ConfigOutput;
+use cmd::dump::{Kind, dump, dump_invitations, parse_kind};
+use cmd::fsck::Severity;
+use cmd::info::{InfoOutput, info};
+use std::io::{IsTerminal, Read};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tinc_tools::cmd::{self, CmdError};
 use tinc_tools::names::{Paths, PathsInput};
 
@@ -405,7 +412,6 @@ fn no_args(args: &[String]) -> Result<(), CmdError> {
 /// `init`: name on argv or piped on stdin (so `echo NAME | tinc -c X
 /// init` scripts written for C tinc keep working). No tty prompt.
 fn cmd_init(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    use std::io::{IsTerminal, Read};
     match args {
         [name] => cmd::init::run(paths, name),
         [] => {
@@ -439,7 +445,6 @@ fn cmd_genkey_rsa_stub(_: &Paths, _: Option<&str>) -> Result<(), CmdError> {
 }
 
 fn cmd_sign(paths: &Paths, input: Option<&str>) -> Result<(), CmdError> {
-    use std::time::{SystemTime, UNIX_EPOCH};
     #[expect(clippy::cast_possible_wrap)] // unix time fits i64 until year 292e9
     let t = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -457,8 +462,6 @@ fn cmd_sign(paths: &Paths, input: Option<&str>) -> Result<(), CmdError> {
 /// propagate. `Report::ok` maps to exit code via an empty `BadInput`
 /// so the dispatch table keeps one `Result` shape.
 fn cmd_fsck(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
-    use cmd::fsck::Severity;
-
     no_args(args)?;
 
     // Reconstruct the `tinc -c CONFBASE` prefix for suggestion
@@ -590,8 +593,6 @@ fn cmd_config_with_action(
 /// Print the result. Factored out so the integration tests can see
 /// the contract: `Got` → stdout one-per-line, `Edited` → reload.
 fn config_output(paths: &Paths, out: cmd::config::ConfigOutput, warnings: &[cmd::config::Warning]) {
-    use cmd::config::ConfigOutput;
-
     for w in warnings {
         eprintln!("{w}");
     }
@@ -631,8 +632,6 @@ fn cmd_del(p: &Paths, g: &Globals, a: &[String]) -> Result<(), CmdError> {
 /// (no verb) → default GET. `replace`/`change` are aliases for `set`,
 /// only available here, not as toplevel commands.
 fn cmd_config_umbrella(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
-    use cmd::config::Action;
-
     let (action, rest) = match args.split_first() {
         Some((v, r)) if v.eq_ignore_ascii_case("get") => (Action::Get, r),
         Some((v, r)) if v.eq_ignore_ascii_case("add") => (Action::Add, r),
@@ -653,8 +652,6 @@ fn cmd_config_umbrella(paths: &Paths, g: &Globals, args: &[String]) -> Result<()
 
 /// Two-stage dispatch: argv → `Kind`, then `Kind` → connect-or-readdir.
 fn cmd_dump(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {
-    use cmd::dump::{Kind, dump, dump_invitations, parse_kind};
-
     let kind = parse_kind(args)?;
 
     // Invitations: pure readdir, no daemon. Works daemon-down.
@@ -681,8 +678,6 @@ fn cmd_dump(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
 /// Bimodal output: node → one big block; subnet → zero-to-many
 /// `Subnet:/Owner:` pairs.
 fn cmd_info(paths: &Paths, item: &str) -> Result<(), CmdError> {
-    use cmd::info::{InfoOutput, info};
-
     match info(paths, item)? {
         // `print!` not `println!` — NodeInfo::format ends every line
         // with `\n` already.
@@ -748,8 +743,6 @@ fn cmd_help(_: &Paths, _: &Globals, _: &[String]) -> Result<(), CmdError> {
 /// deviation as elsewhere). `--force` propagates to `finalize_join`'s
 /// `VAR_SAFE` override.
 fn cmd_join(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
-    use std::io::Read;
-
     let url_buf;
     let url: &str = match args {
         [u] => u,

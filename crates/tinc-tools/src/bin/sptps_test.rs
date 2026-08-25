@@ -38,6 +38,7 @@
     clippy::cast_possible_wrap
 )]
 
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::os::fd::{AsFd, BorrowedFd};
@@ -294,8 +295,6 @@ fn udp_accept(addr: SocketAddr) -> io::Result<Sock> {
 // readable) share six pieces of mutable state. The body is one
 // `loop` with two `if`s.
 fn run(args: &Args, mut sock: Sock, mut s: Sptps) -> io::Result<()> {
-    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-
     // Hold the `Stdin` handle for the loop's lifetime so `as_fd()`
     // borrows are valid. `io::stdin()` returns a fresh guard each call;
     // borrowing one and dropping it would dangle.

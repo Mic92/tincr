@@ -3,13 +3,13 @@
 use std::fmt;
 
 use super::Finding;
+use Finding as F;
 
 /// Phrasing matches C tinc for the same reason as `CmdError::Display` —
 /// users grep error strings, forum posts reference them. Minor deviations
 /// noted inline.
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use Finding as F;
         match self {
             // The suggestion (`tinc init`) is carried separately in
             // `Finding::suggestion()`.

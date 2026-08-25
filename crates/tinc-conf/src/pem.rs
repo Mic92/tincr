@@ -179,6 +179,7 @@ pub fn write_pem(mut w: impl Write, ty: &str, body: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tinc_crypto::sign::SigningKey;
 
     /// Round-trip at the canonical sizes. 32 bytes (public, one line),
     /// 96 bytes (private, two lines), and 48 bytes (exactly one full
@@ -355,8 +356,6 @@ AA
     /// per the struct-overlap trick (see module doc).
     #[test]
     fn signing_key_roundtrip() {
-        use tinc_crypto::sign::SigningKey;
-
         let sk = SigningKey::from_seed(&[7u8; 32]);
         let blob = sk.to_blob();
 
@@ -377,8 +376,6 @@ AA
     /// chars (32 bytes → 32*4/3 rounded up = 43).
     #[test]
     fn public_key_file_shape() {
-        use tinc_crypto::sign::SigningKey;
-
         let sk = SigningKey::from_seed(&[7u8; 32]);
         let pk = sk.public_key();
 

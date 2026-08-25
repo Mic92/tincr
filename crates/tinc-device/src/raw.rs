@@ -31,6 +31,7 @@ use std::io;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
 use crate::{Device, MTU, Mac, Mode, assert_read_buf, read_fd, write_fd};
+use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType, socket};
 
 // Constants — kernel ABI, sed-verified
 
@@ -67,8 +68,6 @@ impl RawSocket {
     /// - `NotFound`: no such interface (16+ byte names error here
     ///   rather than being silently truncated).
     pub fn open(iface: &str) -> io::Result<Self> {
-        use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType, socket};
-
         // `socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL))`. nix's
         // `EthAll` does the htons; `SOCK_CLOEXEC` is atomic.
         let fd = socket(
@@ -213,6 +212,7 @@ impl Device for RawSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use io::ErrorKind as K;
 
     /// `open()` on a bad interface name errors (EPERM/EACCES if no
     /// `CAP_NET_RAW`, else ENODEV/EINVAL from `if_nametoindex`)
@@ -224,7 +224,6 @@ mod tests {
     /// `if_nametoindex("")` sometimes returns EINVAL instead of ENODEV.
     #[test]
     fn open_bad_iface_errors() {
-        use io::ErrorKind as K;
         for (name, allowed) in [
             (
                 "nonexistent_iface_23chr",

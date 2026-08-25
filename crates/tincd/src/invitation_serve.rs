@@ -20,6 +20,7 @@ use std::time::{Duration, SystemTime};
 use tinc_conf::read_pem;
 use tinc_crypto::invite::cookie_filename;
 
+use std::os::unix::fs::OpenOptionsExt;
 pub(crate) use tinc_crypto::invite::COOKIE_LEN;
 use tinc_crypto::sign::SigningKey;
 use tinc_proto::check_id;
@@ -201,7 +202,6 @@ pub(crate) fn finalize(
     name: &str,
     pubkey_b64: &str,
 ) -> Result<PathBuf, ServeError> {
-    use std::os::unix::fs::OpenOptionsExt;
     // Ed25519 pubkey: 32 bytes → exactly 43 chars of unpadded tinc-
     // base64. `b64::decode` rejects anything outside the union
     // alphabet (incl. '\n', '=', whitespace).

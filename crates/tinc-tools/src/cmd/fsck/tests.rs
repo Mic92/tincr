@@ -2,6 +2,7 @@ use super::*;
 use crate::keypair;
 use crate::keypair::TY_PUBLIC;
 use crate::testutil::ConfDir;
+use Finding as F;
 use std::io::Write;
 use tinc_crypto::b64;
 
@@ -811,7 +812,6 @@ fn confd_checked() {
 /// that the messages contain the expected user-greppable bits.)
 #[test]
 fn display_exhaustive() {
-    use Finding as F;
     let p = PathBuf::from("/x/y");
     let s = Source::File {
         path: p.clone(),

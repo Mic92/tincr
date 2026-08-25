@@ -6,6 +6,8 @@
 //! poison the session.
 
 use crate::common::{Pair, SeedRng, feed, keypair, record, wire, wires};
+use tinc_crypto::chapoly::ChaPoly;
+use tinc_sptps::REC_HANDSHAKE;
 use tinc_sptps::{Framing, KEX_LEN_HYBRID, MAX_PREAUTH_RECLEN, Role, Sptps, SptpsError, SptpsKex};
 
 fn stream_responder() -> Sptps {
@@ -192,9 +194,6 @@ fn datagram_encrypted_garbage() {
 /// set and wedge the next legitimate rekey.
 #[test]
 fn datagram_rekey_survives_malformed_handshake_record() {
-    use tinc_crypto::chapoly::ChaPoly;
-    use tinc_sptps::REC_HANDSHAKE;
-
     let mut rng = SeedRng(0x00C0_FFEE);
     let (mut alice, mut bob) = Pair::datagram().handshake();
 

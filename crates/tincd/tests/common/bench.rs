@@ -6,6 +6,7 @@
 )]
 #![allow(dead_code)] // each bench uses a subset
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -68,7 +69,6 @@ pub fn bench_conf(ping_timeout: u32) -> String {
     let ping_timeout = if perf_enabled() { 5 } else { ping_timeout };
     let mut conf = format!("PingTimeout = {ping_timeout}\n");
     if let Ok(cipher) = std::env::var("TINCD_BENCH_SPTPS_CIPHER") {
-        use std::fmt::Write as _;
         writeln!(conf, "SPTPSCipher = {cipher}").unwrap();
     }
     conf

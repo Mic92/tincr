@@ -3,6 +3,8 @@
 //! `SetupError` lives in the parent so `settings.rs` and this file
 //! both reach it via `super::` without a sibling cycle.
 
+use crate::node_id::NodeId6;
+use nix::sys::signal::{SigHandler, Signal, signal};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -533,7 +535,6 @@ fn register_signals(
     signals: &mut SelfPipe<SignalWhat>,
     ev: &mut EventLoop<IoWhat>,
 ) -> Result<(), io::Error> {
-    use nix::sys::signal::Signal;
     signals.add(
         Signal::SIGTERM as i32,
         SignalWhat::Exit(Signal::SIGTERM as i32),
@@ -561,7 +562,6 @@ fn register_signals(
     // threaded at setup (called before the event loop runs).
     #[expect(unsafe_code)]
     unsafe {
-        use nix::sys::signal::{SigHandler, Signal, signal};
         let _ = signal(Signal::SIGUSR1, SigHandler::SigIgn);
         let _ = signal(Signal::SIGUSR2, SigHandler::SigIgn);
         let _ = signal(Signal::SIGWINCH, SigHandler::SigIgn);
@@ -1031,7 +1031,6 @@ impl Daemon {
         // happens on the first on_ack/ADD_EDGE (gossip.rs), well
         // before any TUN read can produce a Super.
         daemon.tx_snap = Some({
-            use crate::node_id::NodeId6;
             // id6 prefix: [NULL ‖ myself]. Direct send always (probe
             // gates on via==to, which makes relay==to, which makes
             // the slow-path equivalent set dst_id = nullid).
@@ -1092,6 +1091,8 @@ mod tests {
     use std::io::IoSlice;
     #[cfg(unix)]
     use std::os::fd::AsRawFd;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    use std::os::linux::net::SocketAddrExt;
     #[cfg(unix)]
     use std::os::unix::net::UnixListener;
 
@@ -1161,7 +1162,6 @@ mod tests {
     #[test]
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn device_fd_from_abstract_socket() {
-        use std::os::linux::net::SocketAddrExt;
         let name = format!("tincr-test-{}", std::process::id());
         let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
         let listener = UnixListener::bind_addr(&addr).unwrap();

@@ -5,8 +5,13 @@
 //! single signature. The cfg split lives INSIDE each function body
 //! (or as twin cfg-gated definitions with identical signatures).
 
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+use nix::sys::socket::{setsockopt, sockopt};
 use std::ffi::CStr;
 use std::io;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+use std::num::NonZeroU32;
 use std::os::fd::AsFd;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::AsRawFd;
@@ -46,7 +51,6 @@ pub(crate) fn set_nosigpipe(_fd: impl AsFd) {}
 /// platforms without `SOCK_CLOEXEC`.
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub(crate) fn set_cloexec(fd: impl AsFd) {
-    use nix::fcntl::{FcntlArg, FdFlag, fcntl};
     let _ = fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
 }
 
@@ -135,7 +139,6 @@ pub(crate) fn set_udp_tos(fd: impl AsFd, is_ipv6: bool, prio: u8) {
 /// `setsockopt(SO_BINDTODEVICE)` failure.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
-    use nix::sys::socket::{setsockopt, sockopt};
     let name = std::ffi::OsString::from(iface);
     setsockopt(&s.as_fd(), sockopt::BindToDevice, &name)
         .map_err(|e| io::Error::other(format!("Can't bind to interface {iface}: {e}")))
@@ -145,7 +148,6 @@ pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
 /// Unknown interface or `setsockopt` failure.
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
-    use std::num::NonZeroU32;
     // macOS equivalent of SO_BINDTODEVICE: IP_BOUND_IF /
     // IPV6_BOUND_IF bind a socket to a specific interface index.
     let ifindex = nix::net::if_::if_nametoindex(iface)
@@ -194,7 +196,6 @@ pub(crate) fn set_udp_dontfrag(s: &Socket, ipv6: bool) {
 /// macOS: `IP{,V6}_DONTFRAG` sets DF without the kernel PMTU cache.
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub(crate) fn set_udp_dontfrag(s: &Socket, ipv6: bool) {
-    use nix::sys::socket::{setsockopt, sockopt};
     let (label, result) = if ipv6 {
         (
             "IPV6_DONTFRAG",

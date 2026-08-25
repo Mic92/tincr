@@ -50,6 +50,7 @@ use crate::ctl::{CtlError, CtlRequest, CtlSocket};
 use crate::names::Paths;
 
 use super::CmdError;
+use std::io::IsTerminal;
 
 // Shared header parse + size limits
 
@@ -134,7 +135,6 @@ const DEBUG_UNSET: i32 = -1;
 /// `NO_COLOR` is not honored; force color via a PTY (`script -c "tinc
 /// log"`) if needed.
 fn use_ansi_escapes_stdout() -> bool {
-    use std::io::IsTerminal;
     if !std::io::stdout().is_terminal() {
         return false;
     }
@@ -465,6 +465,7 @@ pub fn run_pcap(paths: &Paths, snaplen: u32) -> Result<(), CmdError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use CtlRequest::{Log, Pcap};
     use std::cell::RefCell;
     use std::io::Cursor;
     use std::rc::Rc;
@@ -476,7 +477,6 @@ mod tests {
     /// pins; the rest are sscanf-style failure modes + bounds.
     #[test]
     fn parse_header_table() {
-        use CtlRequest::{Log, Pcap};
         #[rustfmt::skip]
         let cases: &[(&str, CtlRequest, usize, Option<usize>)] = &[
             //          (input,                req,   max,   expected)

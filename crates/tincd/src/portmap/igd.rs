@@ -17,6 +17,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, UdpSocket}
 use std::time::{Duration, Instant};
 
 use super::Proto;
+use std::io::ErrorKind::{TimedOut, WouldBlock};
 
 /// SSDP search request. `MX:2` = routers may delay reply ≤2s.
 const M_SEARCH: &[u8] = b"M-SEARCH * HTTP/1.1\r\n\
@@ -96,7 +97,6 @@ pub(super) fn discover(timeout: Duration, gw_v4: Option<Ipv4Addr>) -> Result<Gat
         let (n, src) = match sock.recv_from(&mut buf) {
             Ok(r) => r,
             Err(e) => {
-                use std::io::ErrorKind::{TimedOut, WouldBlock};
                 if matches!(e.kind(), WouldBlock | TimedOut) {
                     return Err("SSDP discover: no IGD reply within timeout".into());
                 }
@@ -377,6 +377,8 @@ fn extract_tag<'a>(hay: &'a str, tag: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn ssdp_reply_to_addr_and_path() {
@@ -439,9 +441,6 @@ mod tests {
     /// `HTTP_MAX_RESPONSE` nor block past `HTTP_DEADLINE`.
     #[test]
     fn http_roundtrip_bounded() {
-        use std::net::TcpListener;
-        use std::thread;
-
         // (a) size cap: 128 KiB body, sent fast.
         let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let addr = match l.local_addr().unwrap() {

@@ -116,6 +116,8 @@ pub(crate) fn route_mac<T, S: std::hash::BuildHasher>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use LearnAction::{New, NotOurs, Refresh};
+    use RouteResult::{Broadcast, Forward, Unsupported};
 
     fn frame(dst: Mac, src: Mac) -> Vec<u8> {
         let mut f = Vec::with_capacity(ETH_HDR_LEN);
@@ -152,8 +154,6 @@ mod tests {
             RouteResult<String>,
             LearnAction,
         );
-        use LearnAction::{New, NotOurs, Refresh};
-        use RouteResult::{Broadcast, Forward, Unsupported};
 
         // frame() always emits exactly ETH_HDR_LEN — boundary case is
         // every row (was route_mac_exactly_eth_hdr).

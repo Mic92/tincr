@@ -1,5 +1,4 @@
 use super::super::{Daemon, PKT_COMPRESSED, PKT_MAC, PKT_NORMAL, PKT_PROBE, RoutingMode};
-
 use std::io;
 use std::os::fd::AsFd;
 
@@ -11,6 +10,7 @@ use crate::tunnel::{MTU, TunnelState};
 use crate::graph::NodeId;
 use tinc_crypto::os_rng;
 use tinc_proto::Request;
+use tinc_sptps::Output;
 
 /// Per-send result: meta-socket write readiness + whether the local
 /// UDP socket accepted a datagram.
@@ -148,7 +148,6 @@ impl Daemon {
         peer_name: &str,
         outs: Vec<tinc_sptps::Output>,
     ) -> TunnelSendOutcome {
-        use tinc_sptps::Output;
         let mut outcome = TunnelSendOutcome::default();
         for o in outs {
             match o {

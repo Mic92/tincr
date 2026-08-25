@@ -15,6 +15,7 @@ use tinc_sptps::{Framing, Output, Role, Sptps, SptpsKex, SptpsLabel};
 
 use crate::conn::Connection;
 use crate::keys::read_ecdsa_public_key;
+use subtle::ConstantTimeEq;
 
 bitflags::bitflags! {
     /// Connection option wire bits (ACK `%x` field). The top byte
@@ -575,7 +576,6 @@ fn id_control(
     ctx: &IdCtx<'_>,
     now: Instant,
 ) -> Result<IdOk, DispatchError> {
-    use subtle::ConstantTimeEq;
     if cookie.ct_eq(ctx.cookie.as_bytes()).unwrap_u8() == 0 {
         return Err(DispatchError::BadId("cookie mismatch".into()));
     }

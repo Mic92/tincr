@@ -1,6 +1,7 @@
 use super::super::Daemon;
 use super::{UDP_RX_BATCH, UDP_RX_BUFSZ, UdpRxBatch, ss_to_std};
-
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+use nix::sys::socket::{SockaddrStorage as NixSS, recvfrom};
 use std::io;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use std::io::IoSliceMut;
@@ -208,7 +209,6 @@ impl Daemon {
         batch: &mut UdpRxBatch,
         meta: &mut [(u16, Option<SocketAddr>); UDP_RX_BATCH],
     ) -> usize {
-        use nix::sys::socket::{SockaddrStorage as NixSS, recvfrom};
         #[cfg(target_os = "macos")]
         if let Some(n) = super::macos_rx::phase1(fd, batch, meta) {
             return n;

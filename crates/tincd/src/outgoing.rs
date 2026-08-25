@@ -19,10 +19,14 @@
 use std::ffi::CString;
 use std::io;
 use std::net::SocketAddr;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsFd;
 use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 
 use nix::errno::Errno;
+#[cfg(target_os = "linux")]
+use nix::sys::socket::setsockopt;
 use nix::sys::socket::{MsgFlags, getsockopt, send, sockopt};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
@@ -106,13 +110,10 @@ pub(crate) enum ConnectAttempt {
 fn apply_dial_sockopts(sock: &Socket, sockopts: &SockOpts) {
     // `if(fwmark) setsockopt(SO_MARK)`. 0 = unset = skip.
     #[cfg(target_os = "linux")]
-    if sockopts.fwmark != 0 {
-        use nix::sys::socket::{setsockopt, sockopt};
-        use std::os::fd::AsFd;
-        if let Err(e) = setsockopt(&sock.as_fd(), sockopt::Mark, &sockopts.fwmark) {
-            log::warn!(target: "tincd::conn",
-                       "SO_MARK={}: {e}", sockopts.fwmark);
-        }
+    if sockopts.fwmark != 0
+        && let Err(e) = setsockopt(&sock.as_fd(), sockopt::Mark, &sockopts.fwmark)
+    {
+        log::warn!(target: "tincd::conn", "SO_MARK={}: {e}", sockopts.fwmark);
     }
     #[cfg(not(target_os = "linux"))]
     if sockopts.fwmark != 0 {
@@ -699,6 +700,7 @@ pub(crate) fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::os::fd::AsFd;
 
     /// `apply_dial_sockopts`: `SO_BINDTODEVICE` to `lo` reads back
@@ -708,7 +710,6 @@ mod tests {
     #[test]
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn dial_sockopts_bind_to_interface_lo() {
-        use nix::sys::socket::{getsockopt, sockopt};
         let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
         let opts = SockOpts {
             bind_to_interface: Some("lo".into()),
@@ -741,7 +742,6 @@ mod tests {
     #[test]
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn dial_sockopts_fwmark() {
-        use nix::sys::socket::{getsockopt, sockopt};
         let euid = nix::unistd::geteuid();
         if !euid.is_root() {
             eprintln!("SKIP dial_sockopts_fwmark: SO_MARK needs CAP_NET_ADMIN (euid={euid})");
@@ -951,8 +951,6 @@ mod tests {
     /// sees both directions on sock[0].
     #[test]
     fn proxy_exec_roundtrip() {
-        use std::io::{Read, Write};
-
         let fd = do_outgoing_pipe("cat", "127.0.0.1:655".parse().unwrap(), "bob", "alice")
             .expect("do_outgoing_pipe");
 
@@ -985,8 +983,6 @@ mod tests {
     /// that echoes them; we read them back through the pipe.
     #[test]
     fn proxy_exec_env() {
-        use std::io::{BufRead, BufReader};
-
         let fd = do_outgoing_pipe(
             "echo \"$NAME $NODE $REMOTEADDRESS $REMOTEPORT\"",
             "10.0.0.1:12345".parse().unwrap(),

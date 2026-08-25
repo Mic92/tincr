@@ -9,6 +9,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
+use tincd::daemon::MAX_PENDING_META;
 
 #[macro_use]
 mod common;
@@ -244,8 +245,6 @@ fn bad_request_drops_peer_not_daemon() {
 /// is tarpit-exempt, which lets one process fill it.
 #[test]
 fn unauthenticated_conn_cap_rejects_then_frees() {
-    use tincd::daemon::MAX_PENDING_META;
-
     // Long PingTimeout so the sweep doesn't free slots mid-test.
     let (_tmp, mut testnode) =
         start_testnode("pending-cap", "PingInterval = 120\nPingTimeout = 120");

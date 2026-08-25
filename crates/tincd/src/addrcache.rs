@@ -33,6 +33,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, SocketAddr};
@@ -259,7 +260,6 @@ impl AddressCache {
         let mut buf = String::from(HEADER);
         buf.push('\n');
         for a in self.recent.iter().take(MAX_PERSISTED) {
-            use std::fmt::Write as _;
             let _ = writeln!(buf, "{a}");
         }
         Some((path, buf.into_bytes()))

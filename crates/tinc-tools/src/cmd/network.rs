@@ -45,6 +45,7 @@ use std::path::Path;
 use crate::names::Paths;
 
 use super::CmdError;
+use super::io_err;
 
 // List
 
@@ -64,8 +65,6 @@ use super::CmdError;
 /// SIGPIPE if piped to `head` becomes EPIPE; we stop. Upstream
 /// keeps printing into the void; ours is stricter. Fine.
 pub(crate) fn list(confdir: &Path, out: &mut impl Write) -> Result<usize, CmdError> {
-    use super::io_err;
-
     // Collect first, sort, then print. The number of networks on a
     // host is single-digit; the buffer is negligible.
     let mut found: Vec<String> = Vec::new();
@@ -170,6 +169,7 @@ pub fn run(paths: &Paths, arg: Option<&str>) -> Result<(), CmdError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     /// Unique tempdir per test. Same idiom as the other modules:
@@ -297,8 +297,6 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn list_skip_unreadable() {
-        use std::os::unix::fs::PermissionsExt;
-
         // Root reads anything. Skip. (`nix::unistd::geteuid` is
         // always-on, no feature gate needed.)
         if nix::unistd::geteuid().is_root() {
