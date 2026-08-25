@@ -31,16 +31,13 @@ pub fn check_id(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-/// Expand `Name = ...` per the module doc.
-///
-/// `env(VAR)` returns the env var value or `None`. `gethostname()` is
-/// called only for `$HOST` when `env("HOST")` is `None`.
+/// Expand `Name = ...` per the module doc. `env(VAR)` returns the env var
+/// or `None`; `gethostname()` is consulted only for `$HOST` when
+/// `env("HOST")` is `None`.
 ///
 /// # Errors
-/// - Literal name fails [`check_id`] (including empty).
-/// - `$VAR` (not `$HOST`) and `env(VAR)` is `None`.
-/// - `$HOST`, `env("HOST")` is `None`, and `gethostname()` fails.
-/// - Expanded result is empty after truncate+squash.
+/// Literal fails [`check_id`]; `$VAR` unset; `$HOST` unset and
+/// `gethostname()` fails; or the expansion is empty after truncate+squash.
 pub fn expand_name(
     raw: &str,
     env: impl Fn(&str) -> Option<String>,

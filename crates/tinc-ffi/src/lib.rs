@@ -27,16 +27,11 @@ use std::slice;
 use std::sync::PoisonError;
 use std::sync::{Mutex, MutexGuard};
 
-/// Serialization lock for the process-global RNG.
-///
-/// `randomize()` in the shim is a single ChaCha20 stream — see crate docs
-/// for why per-session RNG would mean patching `ecdh.c`. Tests must hold
-/// this lock across `seed_rng` + `start` to keep the determinism contract.
-///
-/// We hand this out via [`serial_guard`] rather than baking it into
-/// `start()`: a test that runs *two* `start`s with different seeds (the
-/// normal case — alice and bob need distinct ephemerals) needs to hold
-/// the lock across both. `start()` can't know that.
+/// Serialization lock for the process-global RNG. `randomize()` in the shim
+/// is one ChaCha20 stream, so tests must hold this across `seed_rng` +
+/// `start` for determinism. Handed out via [`serial_guard`] rather than
+/// taken inside `start()` because the normal test runs two `start`s (alice
+/// and bob) under one lock.
 static RNG_LOCK: Mutex<()> = Mutex::new(());
 
 /// Take the serialization lock. Hold it for the duration of any test that
@@ -95,15 +90,10 @@ pub enum Role {
     Responder,
 }
 
-/// Stream vs datagram framing.
-///
-/// Stream mode prefixes each record with a 2-byte big-endian length and
-/// expects the receiver to reassemble across short reads (`sptps_receive_data`
-/// is a state machine for that). Datagram mode prefixes with a 4-byte
-/// big-endian seqno and assumes one record per call (UDP).
-///
-/// SPTPS over the meta-protocol uses stream; SPTPS over the data channel
-/// uses datagram. The differential tests cover both.
+/// Stream vs datagram framing. Stream prefixes each record with a 2-byte BE
+/// length and reassembles across short reads (meta-protocol); datagram
+/// prefixes a 4-byte BE seqno, one record per call (data channel). The
+/// differential tests cover both.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Framing {
     /// 2-byte length prefix, reassembly buffer.
@@ -144,29 +134,21 @@ pub enum Event {
     HandshakeDone,
 }
 
-/// A 96-byte tinc Ed25519 key (private or public-only) loaded into the C side.
-///
-/// Same layout as the on-disk `ed25519_key.priv` blob: 64 bytes of
-/// SHA512-expanded private key, 32 bytes public. For a verify-only key
-/// (the peer's), the private 64 bytes are unused — `ecdsa_verify` only
-/// reads `.public` — so just zero them.
-///
-/// **`sptps_start` borrows the key pointers, it doesn't copy.** The
-/// `ecdsa_t*` is dereferenced on every SIG send/verify. So `CKey` must
-/// outlive the `CSptps` it's passed to. Rust enforces that via lifetimes.
+/// A 96-byte tinc Ed25519 key loaded into the C side: 64 bytes expanded
+/// private key, 32 bytes public, same as the on-disk blob. For a
+/// verify-only peer key the private part is unused; zero it. `sptps_start`
+/// borrows the key pointers rather than copying, so `CKey` must outlive the
+/// `CSptps` — enforced via lifetimes.
 pub struct CKey {
     ptr: NonNull<c_void>,
 }
 
 impl CKey {
-    /// Load a 96-byte private key blob (`SHA512(seed)[64] ‖ pubkey[32]`).
-    ///
-    /// Matches `tinc_crypto::sign::SigningKey::from_blob` — same input
-    /// produces the same signing behaviour, modulo whatever bugs exist
-    /// on either side. That's the whole point.
+    /// Load a 96-byte private key blob (`SHA512(seed)[64] ‖ pubkey[32]`); the C
+    /// counterpart of `tinc_crypto::sign::SigningKey::from_blob`.
     ///
     /// # Panics
-    /// If C-side `xzalloc` returns NULL (i.e. OOM on a test box — won't happen).
+    /// If C-side `xzalloc` returns NULL.
     #[must_use]
     pub fn from_private_blob(blob: &[u8; 96]) -> Self {
         // SAFETY: `blob` is exactly 96 readable bytes; the shim
@@ -199,18 +181,11 @@ impl Drop for CKey {
     }
 }
 
-// CKey is Send (it's a malloc'd block, no thread-locals) but the harness
-// itself isn't, so don't bother marking it.
-
-/// One end of a C SPTPS session.
-///
-/// Create with [`CSptps::start`], pump bytes with [`receive`](Self::receive),
-/// send app data with [`send_record`](Self::send_record). Every call drains
-/// the event sink and returns whatever the C callbacks emitted.
-///
-/// The lifetime `'k` ties the session to the keys: `sptps_t` keeps raw
-/// `ecdsa_t*` pointers and dereferences them lazily (on SIG records).
-/// Drop the session before the keys, or the borrow checker yells.
+/// One end of a C SPTPS session. Create with [`CSptps::start`], pump bytes
+/// with [`receive`](Self::receive), send with
+/// [`send_record`](Self::send_record); every call drains the event sink.
+/// `'k` ties the session to the keys because `sptps_t` keeps raw `ecdsa_t*`
+/// pointers and dereferences them lazily.
 pub struct CSptps<'k> {
     h: NonNull<c_void>,
     /// `sptps.c`'s `mykey`/`hiskey` are non-owning. Tie our lifetime
@@ -219,18 +194,10 @@ pub struct CSptps<'k> {
 }
 
 impl<'k> CSptps<'k> {
-    /// Start a session and run the initial KEX send.
-    ///
-    /// **Precondition:** [`seed_rng`] called since the last `start`. The RNG
-    /// state is process-global; concurrent `start`s race on it. This is a
-    /// test harness — write serial tests.
-    ///
-    /// `label` is the binding context (a connection identifier in a
-    /// real daemon; tests use a fixed string). Both sides must agree
-    /// on it or the SIG transcript hash diverges and the handshake fails.
-    ///
-    /// The returned events include the first wire bytes — `sptps_start`
-    /// calls `send_kex` before returning.
+    /// Start a session and run the initial KEX send; the returned events
+    /// include those first wire bytes. `label` is the binding context both
+    /// sides must agree on. Precondition: [`seed_rng`] called since the last
+    /// `start` (process-global RNG; write serial tests).
     ///
     /// # Panics
     /// If C-side `calloc` for the harness arena returns NULL.
@@ -275,14 +242,10 @@ impl<'k> CSptps<'k> {
         (s, evs)
     }
 
-    /// Feed wire bytes. Stream mode reassembles partial records; datagram
-    /// mode expects one whole record per call.
-    ///
-    /// Returns `(consumed, events)`. In stream mode `consumed < data.len()`
-    /// is impossible-per-spec (the reassembly loop eats everything, the
-    /// only early return is `false`-on-error which becomes `consumed == 0`).
-    /// We return it anyway because the C signature does, and "this is what
-    /// C said" is the oracle contract.
+    /// Feed wire bytes; stream mode reassembles partial records, datagram mode
+    /// expects one record per call. Returns `(consumed, events)` — `consumed`
+    /// is whatever C said (in stream mode always all-or-0), since that is the
+    /// oracle contract.
     pub fn receive(&mut self, data: &[u8]) -> (usize, Vec<Event>) {
         // SAFETY: `h` is live and uniquely borrowed (`&mut self`);
         // `data` is `data.len()` readable bytes the shim only reads.
@@ -306,14 +269,12 @@ impl<'k> CSptps<'k> {
         self.drain()
     }
 
-    /// Trigger a rekey. Only valid in `SECONDARY_KEX` state (i.e. after
-    /// the first handshake completed). Exposed so the differential tests can
-    /// verify the Rust state machine handles re-KEX, which has different
-    /// transitions than the initial handshake (`SPTPS_ACK` only happens
-    /// on rekey — see `receive_handshake`'s switch).
+    /// Trigger a rekey; only valid after the first handshake completed. Lets
+    /// the differential tests exercise re-KEX, whose transitions differ from
+    /// the initial handshake (`SPTPS_ACK` only happens on rekey).
     ///
     /// # Panics
-    /// If `sptps_force_kex` returns false (not in `SECONDARY_KEX` state).
+    /// If `sptps_force_kex` returns false (not in `SECONDARY_KEX`).
     pub fn force_kex(&mut self) -> Vec<Event> {
         // SAFETY: `h` is live and uniquely borrowed.
         let ok = unsafe { ffi_force_kex(self.h.as_ptr()) };

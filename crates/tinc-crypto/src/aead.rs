@@ -76,25 +76,12 @@ impl SptpsAead {
         }
     }
 
-    /// Discriminator appended to the SPTPS `label` before it feeds
-    /// the SIG transcript and PRF seed.
-    ///
-    /// **Empty for the default** so a fresh config produces the exact
-    /// same handshake bytes as C tinc — that invariant is what the
-    /// `vs_c` differential tests pin. Any non-default value emits a
-    /// fixed-shape `[kex_byte, cipher_byte]` pair; a mismatch then
-    /// changes the SIG transcript, the peer's `ecdsa_verify` fails,
-    /// and the session aborts with `BadSig` before any record key is
-    /// derived.
-    ///
-    /// `kex_byte` is reserved for the post-quantum-KEX selector (a
-    /// sibling change) and is always `0` from this module. Emitting
-    /// both bytes whenever *either* knob is non-default means the two
-    /// features compose without re-deriving the suffix shape: a peer
-    /// with PQ-KEX + ChaCha sends `[kex, 0x00]`, one with X25519 +
-    /// AES sends `[0x00, 0x01]`, and the all-default peer sends
-    /// nothing — every pair of mismatched configs differs in at least
-    /// one signed byte.
+    /// Discriminator appended to the SPTPS `label` (SIG transcript and PRF
+    /// seed). Empty by default so a fresh config matches C tinc's handshake
+    /// bytes (pinned by `vs_c`); otherwise `[kex_byte, cipher_byte]`, and a
+    /// mismatch aborts the peer with `BadSig`. `kex_byte` is reserved for the
+    /// PQ-KEX selector (always `0` here); emitting both bytes when either is
+    /// non-default keeps the features composable.
     #[must_use]
     pub const fn label_suffix(self) -> &'static [u8] {
         match self {
@@ -135,14 +122,10 @@ pub fn hw_aes_available() -> bool {
     }
 }
 
-/// SPTPS record sealer, dispatching to ChaCha20-Poly1305 or
-/// AES-256-GCM by the configured [`SptpsAead`].
-///
-/// Drop-in for [`ChaPoly`]: same `seal`/`open`/`seal_into`/`open_into`
-/// signatures, same 64-byte key blob (AES consumes the first 32),
-/// same 16-byte tag, same "seqno-is-the-nonce" model. `new` is one
-/// 64-byte copy; the AES key schedule runs in the thread-local EVP
-/// context, cached across records of the same key.
+/// SPTPS record sealer, dispatching to ChaCha20-Poly1305 or AES-256-GCM by
+/// [`SptpsAead`]. Drop-in for [`ChaPoly`]: same signatures, 64-byte key
+/// blob (AES uses the first 32), 16-byte tag, seqno-as-nonce. The AES key
+/// schedule is cached in the thread-local EVP context.
 pub struct SptpsCipher {
     aead: SptpsAead,
     /// Always populated: holds and zeroizes the full 64-byte blob,
@@ -249,11 +232,9 @@ impl SptpsCipher {
         }
     }
 
-    /// In-place hot-path decrypt. See [`ChaPoly::open_into`] for the
-    /// buffer-layout contract — in particular, `out`'s length is
-    /// restored on `Err` (GCM decrypts before the tag verifies, so
-    /// the failed plaintext bytes linger in spare capacity, same as
-    /// the previous ring backend).
+    /// In-place hot-path decrypt; buffer contract as [`ChaPoly::open_into`].
+    /// `out`'s length is restored on `Err` (GCM decrypts before verifying, so
+    /// failed plaintext lingers in spare capacity).
     ///
     /// # Errors
     /// [`OpenError`] on short input or tag mismatch.

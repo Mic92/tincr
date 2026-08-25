@@ -67,20 +67,12 @@ impl fmt::Display for Source {
     }
 }
 
-/// Splits one config line into `(variable, value)`.
-///
-/// Grammar (kept compatible with existing config files): the variable
-/// is everything before the first `\t`, space, or `=`; an optional `=`
-/// and surrounding `\t`/space are skipped; the rest is the value with
-/// trailing `\t`/space stripped (ASCII only, not full Unicode
-/// whitespace). Lines of any length are accepted.
-///
-/// Returns `None` for lines that should be skipped (empty after
-/// trailing-strip), `Some(Err)` for "has a key but no value",
-/// `Some(Ok)` otherwise. The caller is expected to have already
-/// filtered `#` comments and PEM armor — those *would* parse here
-/// (e.g. `# foo` → variable=`#`, value=`foo`), the filtering is one
-/// layer up.
+/// Splits one config line into `(variable, value)`: variable is everything
+/// before the first `\t`, space or `=`; an optional `=` with surrounding
+/// blanks is skipped; the rest is the value with trailing blanks stripped
+/// (ASCII only). `None` for lines empty after stripping, `Some(Err)` for
+/// key-without-value. `#` comments and PEM armor are filtered one layer up,
+/// not here.
 #[must_use]
 pub fn parse_line(line: &str, source: Source) -> Option<Result<Entry, ParseError>> {
     // Trailing strip: `\t` and ` ` only. Empty-after-strip → skip.
@@ -111,17 +103,11 @@ pub fn parse_line(line: &str, source: Source) -> Option<Result<Entry, ParseError
     }))
 }
 
-/// The `strcspn(line, "\t =")` tokenizer used everywhere tinc reads a
-/// `key [= ]value` pair: split at first of tab/space/`=`, then skip
-/// `[\t ]*`, an optional `=`, then `[\t ]*` again.
-///
-/// `Port = 655` → ("Port", "655"). `Port=655` → ("Port", "655").
-/// `Port` → ("Port", ""). `=655` → ("", "655"). No trimming of either
-/// end — callers strip trailing newlines/whitespace and check for
-/// empty key/value as their context demands.
-///
-/// Safe to slice at the cut points because every separator is ASCII
-/// and ASCII bytes never appear inside multi-byte UTF-8 sequences.
+/// The `key [= ]value` tokenizer: split at the first tab/space/`=`, then
+/// skip `[\t ]*`, an optional `=`, and `[\t ]*` again. `Port = 655`,
+/// `Port=655` → ("Port", "655"); `Port` → ("Port", ""); `=655` → ("",
+/// "655"). No trimming; callers check for empty key/value as needed.
+/// Slicing is safe since all separators are ASCII.
 #[must_use]
 pub fn split_kv(line: &str) -> (&str, &str) {
     let key_end = line.find(['\t', ' ', '=']).unwrap_or(line.len());
@@ -139,23 +125,13 @@ fn ascii_fold(s: &str) -> String {
     s.to_ascii_lowercase()
 }
 
-// File reader
-
-/// `read_config_file`. Line loop with comment/blank/PEM-block skip.
-///
-/// The PEM skip (`-----BEGIN`..`-----END`) is what makes a `hosts/foo`
-/// file with key armor at the bottom Just Work — the parser steps over
-/// the base64 body without trying to interpret `IBazFoo+/...` as
-/// `key=value`.
-///
-/// The file is read as raw bytes and lossily decoded (so a stray
-/// Latin-1 byte in a comment doesn't hard-fail the whole file), a
-/// leading UTF-8 BOM is stripped, and `\r\n` is accepted — all inputs
-/// C tinc tolerates.
+/// Parse one config file: line loop skipping comments, blanks and
+/// `-----BEGIN`..`-----END` PEM blocks (so `hosts/foo` with key armor at
+/// the bottom parses). Read as raw bytes, lossily decoded, BOM stripped,
+/// `\r\n` accepted — everything C tinc tolerates.
 ///
 /// # Errors
-/// Returns the first I/O error or parse error encountered. Partial
-/// results are discarded (the caller gets nothing).
+/// First I/O or parse error; partial results are discarded.
 pub fn parse_file(path: impl AsRef<Path>) -> Result<Vec<Entry>, ReadError> {
     let path = path.as_ref();
     let f = File::open(path).map_err(|e| ReadError::Io {
@@ -314,12 +290,8 @@ impl Entry {
         }
     }
 
-    /// `get_config_int`. C uses `sscanf(value, "%d", ...)` — leading
-    /// whitespace OK, optional sign, decimal only, *trailing garbage
-    /// silently ignored* (`sscanf` returns 1 if it matched the `%d`
-    /// regardless of what follows). We tighten: trailing garbage is an
-    /// error. If `Port = 655x` is in someone's config, that's a typo,
-    /// not a valid 655.
+    /// Integer value. Stricter than C's `sscanf("%d")`: trailing garbage (`Port
+    /// = 655x`) is an error rather than silently 655.
     ///
     /// # Errors
     /// Non-integer or out-of-`i32`-range value.
@@ -350,22 +322,11 @@ impl Entry {
     }
 }
 
-/// The config tree, stored as a sorted `Vec`.
-///
-/// The compare function is a 4-tuple:
-///
-///   1. `strcasecmp(variable)` — same-key entries are contiguous
-///   2. `!b->file - !a->file` — cmdline (file=NULL) before file
-///   3. `a->line - b->line` — earlier line first
-///   4. `strcmp(a->file, b->file)` — file name tiebreak (only matters
-///      for `conf.d/` where multiple files hit the same line number)
-///
-/// `lookup_config` does `splay_search_closest_greater` with a probe
-/// `{variable=X, file=NULL, line=0}`, which sorts at the very start
-/// of X's run. So lookup returns the *first* entry for X — cmdline if
-/// present (cmdline sorts first), else the lowest-line file entry.
-///
-/// We sort once on construction, then iterate.
+/// The config tree as a sorted `Vec`. Order is (case-insensitive variable,
+/// cmdline-before-file, line, file name), so same-key entries are
+/// contiguous and lookup returns the *first* entry for a key: cmdline if
+/// present, else the lowest-line file entry. The file-name tiebreak only
+/// matters for `conf.d/`. Sorted once on construction.
 #[derive(Debug, Default, Clone)]
 pub struct Config {
     /// Sorted by `compare_entries`.
@@ -400,17 +361,10 @@ impl Config {
         self.entries.sort_by(compare_entries);
     }
 
-    /// `lookup_config` + `lookup_config_next`: all entries for `key`,
-    /// in priority order.
-    ///
-    /// The dominant call pattern is single-valued keys
-    /// (`.lookup("Port").next()`), but multi-valued keys (`Subnet`,
-    /// `ConnectTo`, `Address`, `BroadcastSubnet`) iterate the whole
-    /// run.
-    ///
-    /// Linear scan. Config files are tens of entries; `O(n)` here is
-    /// dwarfed by the `fopen` syscall that produced them. If we ever
-    /// hit a thousand-entry config we'll add `partition_point`.
+    /// All entries for `key`, in priority order. Single-valued keys use
+    /// `.lookup("Port").next()`; multi-valued ones (`Subnet`, `ConnectTo`,
+    /// `Address`, `BroadcastSubnet`) iterate the run. Linear scan: configs are
+    /// tens of entries.
     pub fn lookup(&self, key: &str) -> impl Iterator<Item = &Entry> + use<'_> {
         let folded = ascii_fold(key);
         self.entries.iter().filter(move |e| e.key_folded == folded)
@@ -424,52 +378,13 @@ impl Config {
     }
 }
 
-// read_server_config
-//
-// Command-line `-o Key=Value` overrides are not merged here; when the
-// caller has any, it merges them into the `Config` before calling.
-//
-// ## conf.d handling
-//
-// Behavior matches released tinc versions: conf.d absent for any
-// reason → soft skip; present → read every `*.conf` in it. (Recent
-// C tinc HEAD carries a regression — commit 40719189 — that makes a
-// *populated* conf.d fail; we deliberately implement the long-stable
-// behavior instead. See the `server_confd_head_bug_not_ported` test.)
-//
-// ## conf.d ordering
-//
-// Files are sorted before merging. Merge order is invisible to lookup
-// (the 4-tuple compare is total), but sorting makes the entries()
-// dump deterministic across filesystems and keeps tests stable.
-//
-// ## Why this lives in parse.rs not a new module
-//
-// It's the third caller of parse_file (after tinc-tools' get_my_name
-// and load_host_pubkey). parse_file + merge are this module's bread
-// and butter; this is just a directory loop on top. ~40 LOC of code,
-// ~20 of it the conf.d glob.
-
-/// `read_server_config` minus the cmdline merge.
-///
-/// Reads `<confbase>/tinc.conf`, then every `<confbase>/conf.d/*.conf`
-/// (sorted by name), merging into a fresh [`Config`]. The cmdline
-/// merge (`-o Port=655`) is not done here — caller owns that list and
-/// can `cfg.merge(it)` separately. fsck doesn't have one.
-///
-/// `read_host_config` is intentionally not a function. It's two lines:
-/// `cfg.merge(parse_file(confbase.join("hosts").join(name))?)`. Adding
-/// a wrapper would obscure that the host file is just another file.
+/// Read `<confbase>/tinc.conf` plus every `<confbase>/conf.d/*.conf`
+/// (sorted by name) into a fresh [`Config`]; `-o` overrides and host
+/// files are merged by the caller. A populated conf.d is read as in
+/// released tinc, not rejected as C HEAD (40719189) regressed to.
 ///
 /// # Errors
-///
-/// - `tinc.conf` absent or unparseable → error. A daemon without a
-///   tinc.conf has no Name.
-/// - `conf.d/` absent → fine. Expected case (most installs don't
-///   use it).
-/// - `conf.d/` present but `read_dir` fails after open → error — a
-///   transient I/O error during fsck shouldn't read as "no findings."
-/// - Any `*.conf` file in `conf.d/` unparseable → error.
+/// `tinc.conf` absent/unparseable, or `conf.d/` present but unreadable.
 pub fn read_server_config(confbase: impl AsRef<Path>) -> Result<Config, ReadError> {
     let confbase = confbase.as_ref();
     let mut cfg = Config::new();
@@ -488,17 +403,10 @@ pub fn read_server_config(confbase: impl AsRef<Path>) -> Result<Config, ReadErro
         return Ok(cfg);
     };
 
-    // Collect-then-sort: merge order is invisible to lookup because
-    // the 4-tuple compare is total; sorting just makes the entries()
-    // dump deterministic.
-    //
-    // The filter: C does `l > 5 && !strcmp(".conf", name+l-5)`. The
-    // strict `> 5` rejects a bare ".conf" (5 chars exactly) — you
-    // need at least one character before the extension. ends_with
-    // alone would accept it. The non-UTF-8 check is a side effect of
-    // working in &str-land: a filename with non-UTF-8 bytes can't
-    // pass strcmp(".conf", ...) in C either (the bytes wouldn't
-    // match), so the behavior aligns.
+    // Collect-then-sort: merge order is invisible to lookup since the compare
+    // is total; sorting only makes entries() deterministic. The `len > 5`
+    // filter matches C: a bare ".conf" needs at least one char before the
+    // extension. Non-UTF-8 names can't match in C either.
     let mut files: Vec<PathBuf> = Vec::new();
     for ent in rd {
         // STRICTER: surface readdir errors instead of treating them
@@ -915,14 +823,9 @@ more garbage
 
         let cfg = read_server_config(&td.0).unwrap();
         let connects: Vec<_> = cfg.lookup("ConnectTo").map(|e| e.value.as_str()).collect();
-        // Three values total. Order: tinc.conf:2 (bob), then conf.d
-        // files at line 1 each. Per the 4-tuple, line-before-file:
-        // both conf.d entries are line 1, so file name tiebreaks →
-        // 10-one before 20-two. Then tinc.conf line 2 (higher line).
-        //
-        // The compare is line-then-file, not file-then-line, so
-        // conf.d/*.conf:1 sorts before tinc.conf:2. Surprising but
-        // protocol-faithful; fsck can warn someday.
+        // Three values. Both conf.d entries are line 1, so file name tiebreaks
+        // (10-one before 20-two); tinc.conf:2 sorts after them because the compare
+        // is line-then-file. Surprising but protocol-faithful.
         assert_eq!(connects, ["carol", "dave", "bob"]);
     }
 

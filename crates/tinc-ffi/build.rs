@@ -61,15 +61,10 @@ fn main() {
         .define("TINC_RANDOM_H", None)
         .define("TINC_ECDSA_H", None) // we ship our own ecdsa_t in shim.c
         .define("TINC_LOGGER_H", None) // ecdh.c doesn't log, but ecdsa.c would
-        // ecdh.h is left UNSUPPRESSED: sptps.h needs ECDH_SIZE for the
-        // packed kex struct, and ecdh.c needs the prototype attrs to
-        // line up. The header itself is benign — just two #defines and
-        // three extern decls once system.h is no-opped.
-        //
-        // sptps.h is also unsuppressed: sizeof.c needs the struct body,
-        // and sptps.c needs SPTPS_* constants.
-        // Force-include the shim. Every TU gets it, including ones that
-        // don't need it — harmless, the guard prevents double-include.
+        // ecdh.h and sptps.h stay unsuppressed: sptps.h needs ECDH_SIZE and
+        // sizeof.c/sptps.c need the struct body and SPTPS_* constants; both are
+        // benign once system.h is no-opped. The shim is force-included into every
+        // TU; its guard makes that harmless.
         .flag("-include")
         .flag(csrc.join("shim.h").to_str().unwrap())
         // sptps.h does `#include "chacha-poly1305/chacha-poly1305.h"`;

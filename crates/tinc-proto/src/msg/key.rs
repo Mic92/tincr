@@ -58,19 +58,11 @@ impl KeyChanged {
     }
 }
 
-// REQ_KEY
-
-/// Extended `REQ_KEY` sub-request. The fourth field, when present.
-///
-/// The C re-uses `request_t` enum values for the sub-type — `reqno ==
-/// REQ_KEY` means "SPTPS handshake initiation", `reqno == REQ_PUBKEY`
-/// means "send me your pubkey", etc. We keep the wire `i32` plus the
-/// optional payload string; the daemon switches on the int.
-///
-/// Why not an enum here? `req_key_ext_h` has a `default:` case that
-/// logs and continues. Unknown `reqno` is *not* a parse error; it's a
-/// "log and ignore". An enum would force us to either reject (wrong) or
-/// add a `Unknown(i32)` variant (which is just `i32` with extra steps).
+/// Extended `REQ_KEY` sub-request, the optional fourth field. The wire
+/// reuses request numbers as sub-types (`REQ_KEY` = SPTPS init,
+/// `REQ_PUBKEY` = send pubkey, ...). Kept as `i32` plus optional payload
+/// rather than an enum because an unknown `reqno` is log-and-ignore, not a
+/// parse error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReqKeyExt {
     /// `reqno` — re-uses `request_t` values. `REQ_KEY`=15 (SPTPS init),
@@ -94,31 +86,20 @@ pub struct ReqKey {
     /// `None` for legacy (3-token) form. `Some` for extended (4+ token).
     pub ext: Option<ReqKeyExt>,
     /// Reflexive UDP address of `from`, appended by a relay during forward.
-    ///
-    /// **Rust extension** — not present in C tinc. Mirrors `AnsKey::udp_addr`
-    /// but on the *request* leg of the handshake, so the *responder* learns
-    /// the initiator's NAT-reflexive address (the existing `ANS_KEY` append
-    /// only teaches the *initiator* about the *responder*). With both legs
-    /// carrying a relay observation, both sides can punch within one RTT of
-    /// each other — the timing window for simultaneous open.
-    ///
-    /// Wire compat: legacy peers parse with `sscanf("%*d %*s %*s %*d
-    /// %s", buf)`. `%s` stops at whitespace; trailing addr/port tokens
-    /// are silently dropped. A legacy relay forwards verbatim (`send_request("%s",
-    /// request)`), so the append survives a multi-hop path with mixed nodes.
+    /// Rust extension mirroring `AnsKey::udp_addr` on the request leg, so the
+    /// responder also learns the initiator's NAT address and both sides can
+    /// punch within one RTT. Wire-compatible: legacy peers' `%s` parse drops
+    /// trailing tokens and legacy relays forward verbatim.
     pub udp_addr: Option<(AddrStr, AddrStr)>,
 }
 
 impl ReqKey {
-    /// Parse both the legacy and extended forms.
-    ///
-    /// `reqno` is optional on the wire; `Option` is used instead of a
-    /// 0-as-sentinel because 0 is `Request::Id`, which would be a
-    /// confusing accidental collision. If `reqno` is present, one more
-    /// optional payload token follows.
+    /// Parse both legacy and extended forms. `reqno` is `Option` rather than
+    /// 0-as-sentinel because 0 is `Request::Id`; if present, one more optional
+    /// payload token follows.
     ///
     /// # Errors
-    /// Too few tokens (< 2 names) or bad name.
+    /// Fewer than 2 names or bad name.
     pub fn parse(line: &str) -> Result<Self, ParseError> {
         let mut t = Tok::new(line);
         t.skip()?;
@@ -149,18 +130,10 @@ impl ReqKey {
         })
     }
 
-    /// `send_req_key` and friends. There are *four* `send_request` call
-    /// sites in `protocol_key.c` for `REQ_KEY`:
-    ///
-    /// - `"%d %s %s"` — legacy
-    /// - `"%d %s %s %d"` — extended, no payload (e.g. `REQ_PUBKEY`)
-    /// - `"%d %s %s %d %s"` — extended with payload
-    /// - `"%s"` — forwarding (the daemon re-emits the input verbatim;
-    ///   not our concern)
-    ///
-    /// We pick the format string from `ext`. `udp_addr` is appended
-    /// last (relay-only; only round-trips when `ext.payload` is Some,
-    /// which the relay path guarantees) — mirrors `AnsKey::format`.
+    /// Format as `%d %s %s`, `.. %d`, or `.. %d %s` depending on `ext` (the
+    /// forwarding case re-emits input verbatim and isn't ours). `udp_addr` goes
+    /// last, relay-only, and only round-trips when `ext.payload` is `Some` —
+    /// mirrors `AnsKey::format`.
     #[must_use]
     pub fn format(&self) -> String {
         let mut s = format!("{} {} {}", Request::ReqKey, self.from, self.to);
@@ -177,15 +150,10 @@ impl ReqKey {
     }
 }
 
-// ANS_KEY
-
-/// Body of `ANS_KEY`. The session-key reply. Seven mandatory fields,
-/// two optional (reflexive UDP addr/port — appended by relays, not the
-/// origin).
-///
-/// `key` is hex-encoded session key for legacy, or unused for SPTPS
-/// (the SPTPS path goes through `REQ_KEY` extension instead). We don't
-/// hex-decode here — opaque token, daemon's job.
+/// Body of `ANS_KEY`, the session-key reply: seven mandatory fields plus an
+/// optional reflexive UDP addr/port appended by relays. `key` is the hex
+/// session key for legacy peers and unused for SPTPS; kept as an opaque
+/// token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnsKey {
     pub from: String,
@@ -206,16 +174,12 @@ pub struct AnsKey {
 }
 
 impl AnsKey {
-    /// Parse `ANS_KEY`: 7 mandatory fields + optional trailing
-    /// addr/port pair.
-    ///
-    /// The trailing pair is treated as atomic (both or neither); a
-    /// well-formed peer never sends exactly one, and rejecting the
-    /// half-pair cleanly is safer than guessing.
+    /// Parse `ANS_KEY`: 7 mandatory fields plus an optional trailing addr/port
+    /// pair, treated atomically (both or neither).
     ///
     /// # Errors
-    /// Fewer than 7 fields, bad name, malformed int, or exactly one
-    /// trailing addr/port token.
+    /// Fewer than 7 fields, bad name, malformed int, or exactly one trailing
+    /// token.
     pub fn parse(line: &str) -> Result<Self, ParseError> {
         let mut t = Tok::new(line);
         t.skip()?;

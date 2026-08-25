@@ -50,20 +50,13 @@ pub enum PemError {
     Io(#[source] io::Error),
 }
 
-/// `read_pem`. Finds the first `-----BEGIN <type>-----` block, decodes
-/// the body, requires the result to be exactly `expected_len` bytes.
-///
-/// The `type` match is `strncmp` (prefix) — so a file with `-----BEGIN
-/// ED25519 PRIVATE KEY EXTRA STUFF-----` is accepted by a search for
-/// `ED25519 PRIVATE KEY`. Unlikely to matter (tinc only ever writes
-/// the exact strings) but preserved for fidelity.
-///
-/// Result is wrapped in `Zeroizing` because private keys flow through
-/// here; `Zeroizing` clears the buffer on every drop.
+/// Find the first `-----BEGIN <type>-----` block, decode the body, require
+/// exactly `expected_len` bytes. The type match is a prefix match, as in C.
+/// Wrapped in `Zeroizing` because private keys flow through here.
 ///
 /// # Errors
-/// See [`PemError`]. Notably, `NotFound` is the common no-key-in-file
-/// case; the caller may want to fall through to another source.
+/// See [`PemError`]; `NotFound` is the common no-key-in-file case and
+/// callers may fall through to another source.
 pub fn read_pem(
     r: impl Read,
     ty: &str,
@@ -156,11 +149,8 @@ fn finish(out: Zeroizing<Vec<u8>>, want: usize) -> Result<Zeroizing<Vec<u8>>, Pe
     }
 }
 
-/// `write_pem`. 48 raw bytes per line → 64 base64 chars, standard
-/// `+/` alphabet (`b64encode_tinc` not `b64encode_tinc_urlsafe`).
-///
-/// Output is the exact byte sequence `ecdsagen.c:write_pem` produces,
-/// modulo libc `fprintf` buffering (which doesn't affect bytes-on-disk).
+/// 48 raw bytes per line → 64 base64 chars, standard `+/` alphabet;
+/// byte-identical to what C tinc's `write_pem` produces.
 ///
 /// # Errors
 /// I/O on the writer.

@@ -94,15 +94,10 @@ impl Request {
         })
     }
 
-    /// `atoi(line)` then `from_id`. Doesn't consume — handlers re-scan
-    /// from the start with `%*d` (skip the request number) anyway.
-    ///
-    /// `atoi` semantics: leading whitespace, optional sign, digits, stop
-    /// at first non-digit. We're stricter — no leading whitespace
-    /// (`send_request` never emits any) and we require the digits to be
-    /// followed by either end-of-string or a space. This rejects
-    /// `0garbage`, which `atoi` would parse as `0`. The protocol doesn't
-    /// produce that, and accepting it would mask a corrupted-line bug.
+    /// Leading request number, without consuming (handlers re-scan with `%*d`).
+    /// Stricter than `atoi`: no leading whitespace and digits must be followed
+    /// by space or end, so `0garbage` is rejected rather than read as `0` and
+    /// masking a corrupted line.
     #[must_use]
     pub fn peek(line: &str) -> Option<Self> {
         let end = line

@@ -36,18 +36,10 @@ use crate::{MAX_STRING, check_id};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseError;
 
-/// Iterator over space-delimited tokens. `sscanf %s` semantics: any run
-/// of whitespace separates, leading/trailing whitespace ignored.
-///
-/// `split_ascii_whitespace` is *almost* right but treats `\n` as a
-/// separator, and protocol lines come with the `\n` already stripped (by
-/// `meta.c`). We use it anyway — if a stray `\n` shows up mid-string,
-/// `sscanf %s` would also stop there.
-///
-/// Public because `tinc-tools` parses dump rows with the same `sscanf`
-/// shape. The dump format is CLI↔daemon (not on the wire to peers) but
-/// the cross-impl seam (Rust CLI ↔ C daemon and vice versa) must keep
-/// working, so the dump-row parser lives next to the message parsers.
+/// Iterator over whitespace-delimited tokens with `sscanf %s` semantics.
+/// Public because `tinc-tools` parses dump rows of the same shape, and the
+/// Rust CLI ↔ C daemon seam must keep working, so that parser lives next to
+/// the message parsers.
 pub struct Tok<'a> {
     /// Unconsumed tail; `s_opt` peeks it for optional trailing fields.
     rest: &'a str,
@@ -105,26 +97,13 @@ impl<'a> Tok<'a> {
         u32::from_str_radix(self.s()?, 16).map_err(|_| ParseError)
     }
 
-    /// `%lu`. Only `ANS_KEY` uses it, for `digest_length` (a `size_t`
-    /// cast to `unsigned long`). Realistically always tiny, but the
-    /// printf width is `%lu` so we honor that.
-    ///
-    /// **glibc-permissive**: `sscanf("%lu", "-1")` succeeds and writes
-    /// `ULONG_MAX`. C99 7.20.1.4/5: `strtoul` on a string with a leading
-    /// `-` parses the digits, then "the value resulting from the
-    /// conversion is negated (in the return type)" — i.e. negated as
-    /// unsigned. `-1` → `0u64.wrapping_sub(1)` = `u64::MAX`.
-    ///
-    /// SPTPS-handshake-via-ANS_KEY mode exploits this: it sends the
-    /// literal string `"-1 -1 -1"` for cipher/digest/
-    /// maclen (the values are placeholders — SPTPS doesn't use legacy
-    /// crypto, so `ans_key_h` never reads them). The first two are `%d`
-    /// (i32, fine). The third is `%lu`. A strict `u64::parse` would
-    /// reject the line and drop the connection. Match glibc.
+    /// `%lu`, used only for `ANS_KEY`'s digest length. glibc-permissive: a
+    /// leading `-` parses and negates as unsigned (`-1` → `u64::MAX`, C99
+    /// 7.20.1.4/5). SPTPS mode sends the literal `-1 -1 -1` placeholders here,
+    /// so a strict `u64` parse would drop the connection.
     ///
     /// # Errors
-    /// `ParseError` if no tokens remain or the token parses as neither
-    /// `u64` nor `i64`.
+    /// No tokens remain, or the token is neither `u64` nor `i64`.
     #[expect(clippy::cast_sign_loss)] // intentional: strtoul "negate as unsigned"
     pub fn lu(&mut self) -> Result<u64, ParseError> {
         let s = self.s()?;
@@ -142,17 +121,12 @@ impl<'a> Tok<'a> {
         s.parse::<i64>().map(|i| i as u64).map_err(|_| ParseError)
     }
 
-    /// `%hd`. `tcppacket_h`/`sptps_tcppacket_h` parse a length as
-    /// `short int` then check `< 0`. The send side emits `%d`/`%lu`
-    /// (unsigned), so a negative parse means corruption — the C
-    /// detects it via the signed type. We do the same.
-    ///
-    /// `%hd` is also used for pmtu/minmtu/maxmtu in the node dump
-    /// (the daemon writes `%d`; those fields are `int` but they're
-    /// MTU values ≤ 9000ish so `i16` fits).
+    /// `%hd`. TCP packet lengths are parsed signed so corruption shows up as `<
+    /// 0`, as in C; also used for the MTU fields in the node dump (values ≤
+    /// ~9000 fit `i16`).
     ///
     /// # Errors
-    /// `ParseError` if no tokens remain or the token isn't a valid `i16`.
+    /// No tokens remain or not a valid `i16`.
     pub fn hd(&mut self) -> Result<i16, ParseError> {
         self.s()?.parse().map_err(|_| ParseError)
     }
@@ -166,22 +140,13 @@ impl<'a> Tok<'a> {
         self.s()?.parse().map_err(|_| ParseError)
     }
 
-    /// Literal token. `sscanf(line, "... port %s ...")` — the
-    /// bare word `port` consumes that exact token (after skipping
-    /// leading whitespace, like everything else in `sscanf`). If
-    /// the next token isn't `port`, `sscanf` returns the count up
-    /// to that point. We hard-fail.
-    ///
-    /// Used for the `" port "` separator in `sockaddr2hostname`
-    /// output — see module doc. The four dump formats use it 1-2
-    /// times each; the message protocol uses it zero times (it
-    /// uses `sockaddr2str`, not `sockaddr2hostname`).
+    /// Literal token, e.g. the `port` separator in `sockaddr2hostname`-style
+    /// dump rows (the peer protocol never uses it). Hard-fails where `sscanf`
+    /// would return a short count.
     ///
     /// # Errors
-    /// `ParseError` if the next token isn't exactly `expected`.
-    /// Case-sensitive: `sscanf` literal matching is `memcmp`, and
-    /// the daemon writes lowercase `"port"` always (string literal,
-    /// no `tolower` involved).
+    /// Next token isn't exactly `expected` (case-sensitive; the daemon always
+    /// writes lowercase `port`).
     pub fn lit(&mut self, expected: &str) -> Result<(), ParseError> {
         if self.s()? == expected {
             Ok(())
@@ -201,16 +166,12 @@ impl<'a> Tok<'a> {
         if check_id(s) { Ok(s) } else { Err(ParseError) }
     }
 
-    /// Next token if there is one; `Ok(None)` if exhausted.
-    ///
-    /// `ADD_EDGE` has 6 mandatory + 2 optional fields (`sscanf` returns
-    /// 6 or 8). `ANS_KEY` has 7 + 2 optional. `REQ_KEY` has 2 + 1
-    /// optional. The C handles all three with `sscanf(...) < N` instead
-    /// of `!= N` and leaves the trailing locals at their initial value.
-    /// This is the moral equivalent.
+    /// Next token if there is one; `Ok(None)` if exhausted. For the optional
+    /// trailing fields of `ADD_EDGE` (6+2), `ANS_KEY` (7+2) and `REQ_KEY`
+    /// (2+1), where C uses `sscanf(...) < N`.
     ///
     /// # Errors
-    /// `ParseError` if a token is present but exceeds `MAX_STRING`.
+    /// A token is present but exceeds `MAX_STRING`.
     pub fn s_opt(&mut self) -> Result<Option<&'a str>, ParseError> {
         match self.s() {
             Ok(tok) => Ok(Some(tok)),

@@ -33,16 +33,11 @@ type HmacSha512 = Hmac<Sha512>;
 /// SHA-512 output size, and therefore the chunk size of this PRF.
 const MD_LEN: usize = 64;
 
-/// Derive `out.len()` bytes of key material.
-///
-/// SPTPS calls this exactly once per handshake with the ECDH shared secret as
-/// `secret`, a label-plus-nonces blob as `seed`, and `out.len() == 128` (two
-/// 64-byte [`ChaPoly`](crate::chapoly::ChaPoly) keys). Other lengths are
-/// exercised only by the KAT suite.
-///
-/// `secret` may be any length, including zero and including values larger
-/// than the HMAC block size (128 bytes for SHA-512); the `hmac` crate handles
-/// the key-hashing fallback so we don't replicate `prf.c`'s manual version.
+/// Derive `out.len()` bytes of key material. SPTPS calls this once per
+/// handshake with the ECDH secret, a label-plus-nonces seed and `out.len()
+/// == 128` (two 64-byte cipher keys); other lengths only in KATs. `secret`
+/// may be any length — the `hmac` crate handles the over-block-size key
+/// hashing.
 pub fn prf(secret: &[u8], seed: &[u8], out: &mut [u8]) {
     // Buffer layout: [A(i) | seed]. Starting with A(0) = zeros is the
     // load-bearing tinc-specific quirk. Allocating per call is fine;
@@ -71,14 +66,9 @@ pub fn prf(secret: &[u8], seed: &[u8], out: &mut [u8]) {
     }
 }
 
-/// One-shot HMAC-SHA512.
-///
-/// `new_from_slice`'s `Result` is an artifact of the generic `Mac` trait
-/// (some MACs restrict key length); RFC 2104 HMAC accepts any length, so
-/// the unwrap is unreachable. The lint allow is preferable to bubbling a
-/// phantom error variant up through `prf()`.
-///
-/// Kept separate purely so the loop above reads as two distinct steps.
+/// One-shot HMAC-SHA512. `new_from_slice` can't fail for HMAC (any key
+/// length is valid), so the unwrap is unreachable; better than a phantom
+/// error variant in `prf()`.
 fn hmac(key: &[u8], msg: &[u8]) -> [u8; MD_LEN] {
     // `new_from_slice` accepts any key length and applies RFC 2104's
     // hash-if-too-long rule internally, which is what tinc's PRF expects.

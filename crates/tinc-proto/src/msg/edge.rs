@@ -51,14 +51,12 @@ pub struct AddEdge {
 }
 
 impl AddEdge {
-    /// `add_edge_h` parse step.
-    ///
-    /// `sscanf("%*d %*x %s %s %s %s %x %d %s %s", ...)`, accept 6 or 8,
-    /// then `check_id(from) && check_id(to) && from != to`.
+    /// `ADD_EDGE` parse: 6 or 8 tokens, then `check_id(from) && check_id(to) &&
+    /// from != to`.
     ///
     /// # Errors
-    /// Too few tokens, bad name, `from == to`, malformed hex/int, or
-    /// exactly one (not zero, not two) trailing addr/port token.
+    /// Too few tokens, bad name, `from == to`, malformed hex/int, or exactly
+    /// one trailing addr/port token.
     pub fn parse(line: &str) -> Result<Self, ParseError> {
         let mut t = Tok::new(line);
         t.skip()?; // %*d
