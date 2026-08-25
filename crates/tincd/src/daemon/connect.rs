@@ -54,11 +54,7 @@ impl Daemon {
         // peer's options. Peer asked for ClampMSS but our hosts/NAME
         // says no → we win (local config trumps wire).
         if let Some(clamp) = conn.host_clamp_mss {
-            if clamp {
-                conn.options.insert(ConnOptions::CLAMP_MSS);
-            } else {
-                conn.options.remove(ConnOptions::CLAMP_MSS);
-            }
+            conn.options.set(ConnOptions::CLAMP_MSS, clamp);
         }
 
         // Per-host and global PMTU clamp. We init `pmtu` lazily
