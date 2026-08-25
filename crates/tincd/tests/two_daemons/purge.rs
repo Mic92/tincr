@@ -1,11 +1,12 @@
 use std::time::Duration;
 
 use super::common::{Node, node_reachable, poll_until};
+use std::path::Path;
 
 /// alice → mid ← bob. Three nodes because with two, killing the only
 /// peer also kills the connection a `DEL_EDGE` would arrive on, and
 /// we want alice to learn of bob's death via gossip.
-fn chain_then_kill_bob(dir: &std::path::Path, alice_conf: &str) -> (Node, Node) {
+fn chain_then_kill_bob(dir: &Path, alice_conf: &str) -> (Node, Node) {
     let mut alice = Node::new(dir, "alice", 0xA9).with_conf(alice_conf);
     let mut mid = Node::new(dir, "mid", 0xC9).with_conf("AutoConnect = no\n");
     let mut bob = Node::new(dir, "bob", 0xB9).with_conf("AutoConnect = no\n");

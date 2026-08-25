@@ -28,8 +28,13 @@ use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 
 use super::AF_PREFIX_LEN;
+use super::to_af_prefix;
+use crate::DrainResult;
+use crate::MTU;
 use crate::arena::DeviceArena;
 use crate::ether::{ETH_HLEN, from_ip_nibble, set_etherheader};
+use std::mem;
+use std::ptr;
 
 /// utun read offset: kernel writes `[AF prefix][IP]`; we leave room
 /// for the synthetic ether header in front.
@@ -78,7 +83,7 @@ const STRIDE: usize = 64;
 
 /// Per-slot write buffer: AF prefix + max IP frame. Rounded to a
 /// cacheline so adjacent slots don't false-share.
-const WRITE_SLOT: usize = (AF_PREFIX_LEN + crate::MTU + 63) & !63; // 1536
+const WRITE_SLOT: usize = (AF_PREFIX_LEN + MTU + 63) & !63; // 1536
 
 /// Persistent scratch for utun batch I/O. Heap-once, reused warm.
 pub(super) struct UtunBatch {
@@ -109,8 +114,8 @@ impl UtunBatch {
     pub(super) fn new() -> Self {
         // SAFETY: zeroed `msghdr_x`/`iovec` are valid (null pointers,
         // zero lengths) and are fully overwritten before each syscall.
-        let hdrs = (0..STRIDE).map(|_| unsafe { std::mem::zeroed() }).collect();
-        let iovs = (0..STRIDE).map(|_| unsafe { std::mem::zeroed() }).collect();
+        let hdrs = (0..STRIDE).map(|_| unsafe { mem::zeroed() }).collect();
+        let iovs = (0..STRIDE).map(|_| unsafe { mem::zeroed() }).collect();
         Self {
             disabled: false,
             hdrs,
@@ -133,7 +138,7 @@ impl UtunBatch {
         fd: BorrowedFd<'_>,
         arena: &mut DeviceArena,
         cap: usize,
-    ) -> Option<io::Result<crate::DrainResult>> {
+    ) -> Option<io::Result<DrainResult>> {
         if self.disabled {
             return None;
         }
@@ -158,11 +163,11 @@ impl UtunBatch {
                 // back regardless. Passing null avoids the macOS
                 // 10.15 `msg_controllen` quirk entirely (we request
                 // no cmsgs).
-                msg_name: std::ptr::null_mut(),
+                msg_name: ptr::null_mut(),
                 msg_namelen: 0,
                 msg_iov: &raw mut self.iovs[i],
                 msg_iovlen: 1,
-                msg_control: std::ptr::null_mut(),
+                msg_control: ptr::null_mut(),
                 msg_controllen: 0,
                 msg_flags: 0,
                 msg_datalen: 0,
@@ -186,7 +191,7 @@ impl UtunBatch {
         if ret < 0 {
             let err = io::Error::last_os_error();
             return match err.raw_os_error() {
-                Some(libc::EAGAIN) => Some(Ok(crate::DrainResult::Empty)),
+                Some(libc::EAGAIN) => Some(Ok(DrainResult::Empty)),
                 Some(libc::ENOSYS) => {
                     self.disabled = true;
                     None
@@ -198,7 +203,7 @@ impl UtunBatch {
         #[expect(clippy::cast_sign_loss)]
         let n = ret as usize;
         if n == 0 {
-            return Some(Ok(crate::DrainResult::Empty));
+            return Some(Ok(DrainResult::Empty));
         }
 
         // Post-process exactly as `BsdTun::read` would: synthesize
@@ -230,7 +235,7 @@ impl UtunBatch {
             set_etherheader(slot, ethertype);
             arena.set_len(i, dlen + READ_OFFSET);
         }
-        Some(Ok(crate::DrainResult::Frames { count: n }))
+        Some(Ok(DrainResult::Frames { count: n }))
     }
 
     /// Stage one frame for `sendmsg_x`. `buf` is `[eth(14)][IP]` as
@@ -248,7 +253,7 @@ impl UtunBatch {
             return false;
         }
         let ethertype = u16::from_be_bytes([buf[12], buf[13]]);
-        let Some(prefix) = super::to_af_prefix(ethertype) else {
+        let Some(prefix) = to_af_prefix(ethertype) else {
             return false;
         };
         let len = AF_PREFIX_LEN + ip.len();
@@ -284,7 +289,7 @@ impl UtunBatch {
     where
         F: FnOnce(libc::c_int, *const MsghdrX, libc::c_uint, libc::c_int) -> io::Result<usize>,
     {
-        let n = std::mem::take(&mut self.wcount);
+        let n = mem::take(&mut self.wcount);
         if n == 0 {
             return Ok(());
         }
@@ -299,11 +304,11 @@ impl UtunBatch {
             };
             self.hdrs[i] = MsghdrX {
                 // Connected kctl: `sendit_x` fast path requires null.
-                msg_name: std::ptr::null_mut(),
+                msg_name: ptr::null_mut(),
                 msg_namelen: 0,
                 msg_iov: &raw mut self.iovs[i],
                 msg_iovlen: 1,
-                msg_control: std::ptr::null_mut(),
+                msg_control: ptr::null_mut(),
                 msg_controllen: 0,
                 msg_flags: 0,
                 msg_datalen: 0,

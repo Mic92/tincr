@@ -9,7 +9,11 @@ use std::path::PathBuf;
 
 use super::common::TmpGuard;
 use super::rig::{NetNs, Node, TunPair, enter_bwrap, ping};
+use std::env;
+use std::fs;
+use std::fs::OpenOptions;
 use std::io::Write as _;
+use std::path::Path;
 
 #[derive(Clone, Copy)]
 enum Impl {
@@ -19,7 +23,7 @@ enum Impl {
 
 /// SKIP unless `TINC_C_TINCD` is set, then the usual bwrap re-exec.
 fn enter(test_name: &str, tap: bool) -> Option<NetNs> {
-    if std::env::var_os("BWRAP_INNER").is_none() && std::env::var_os("TINC_C_TINCD").is_none() {
+    if env::var_os("BWRAP_INNER").is_none() && env::var_os("TINC_C_TINCD").is_none() {
         eprintln!("SKIP {test_name}: TINC_C_TINCD not set (nix develop sets it)");
         return None;
     }
@@ -29,7 +33,7 @@ fn enter(test_name: &str, tap: bool) -> Option<NetNs> {
 fn with_impl(node: Node, which: Impl) -> Node {
     match which {
         Impl::Rust => node.log_level("tincd=debug"),
-        Impl::C => node.c_tincd(PathBuf::from(std::env::var_os("TINC_C_TINCD").unwrap())),
+        Impl::C => node.c_tincd(PathBuf::from(env::var_os("TINC_C_TINCD").unwrap())),
     }
 }
 
@@ -90,7 +94,7 @@ fn rust_dials_c_bare_address_port() {
     pair.bob.write_config(&pair.alice, false);
     pair.bob.start();
     pair.alice.write_config(&pair.bob, true);
-    std::fs::write(
+    fs::write(
         pair.alice.confbase.join("hosts/bob"),
         format!(
             "Ed25519PublicKey = {}\nPort = {}\nAddress = 127.0.0.1\n",
@@ -124,8 +128,8 @@ fn tcponly(test_name: &str, alice: Impl, bob: Impl) {
     assert_ping(pair);
 }
 
-fn append(path: &std::path::Path, text: &str) {
-    std::fs::OpenOptions::new()
+fn append(path: &Path, text: &str) {
+    OpenOptions::new()
         .append(true)
         .open(path)
         .unwrap()

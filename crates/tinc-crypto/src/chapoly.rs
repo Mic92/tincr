@@ -138,6 +138,7 @@ mod backend {
     use super::TAG_LEN;
     use openssl_sys as ffi;
     use std::cell::RefCell;
+    use std::ptr;
     use std::sync::OnceLock;
     use zeroize::Zeroize;
 
@@ -151,9 +152,8 @@ mod backend {
         MAC.get_or_init(|| {
             ffi::init();
             // SAFETY: NUL-terminated name, default libctx/properties.
-            let p = unsafe {
-                ffi::EVP_MAC_fetch(std::ptr::null_mut(), c"POLY1305".as_ptr(), std::ptr::null())
-            };
+            let p =
+                unsafe { ffi::EVP_MAC_fetch(ptr::null_mut(), c"POLY1305".as_ptr(), ptr::null()) };
             assert!(!p.is_null(), "OpenSSL POLY1305 EVP_MAC missing");
             Mac(p)
         })
@@ -178,9 +178,9 @@ mod backend {
                 ffi::EVP_EncryptInit_ex(
                     cipher,
                     ffi::EVP_chacha20(),
-                    std::ptr::null_mut(),
-                    std::ptr::null(),
-                    std::ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null(),
+                    ptr::null(),
                 )
             };
             assert_eq!(ok, 1, "EVP_chacha20 bind");
@@ -285,7 +285,7 @@ mod backend {
             // SAFETY: ctx is valid; init re-keys, update/final read
             // only the stated lengths and write exactly TAG_LEN bytes.
             unsafe {
-                let ok = ffi::EVP_MAC_init(self.mac, key.as_ptr(), 32, std::ptr::null())
+                let ok = ffi::EVP_MAC_init(self.mac, key.as_ptr(), 32, ptr::null())
                     & ffi::EVP_MAC_update(self.mac, msg.as_ptr(), msg.len())
                     & ffi::EVP_MAC_final(self.mac, tag.as_mut_ptr(), &raw mut taglen, TAG_LEN);
                 assert_eq!(ok, 1, "EVP_MAC POLY1305 failed");
@@ -305,8 +305,8 @@ mod backend {
             let ok = unsafe {
                 ffi::EVP_EncryptInit_ex(
                     c.cipher,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
+                    ptr::null(),
+                    ptr::null_mut(),
                     key.as_ptr(),
                     iv.as_ptr(),
                 )

@@ -3,6 +3,7 @@
 //! and skip the filesystem half.
 
 use super::{Conf, tinc};
+use std::fs;
 
 #[test]
 fn pidfile_missing() {
@@ -15,7 +16,7 @@ fn pidfile_missing() {
 #[test]
 fn pidfile_malformed() {
     let conf = Conf::bare();
-    std::fs::write(conf.pidfile(), "1234 toolittle\n").unwrap();
+    fs::write(conf.pidfile(), "1234 toolittle\n").unwrap();
     conf.tinc(&["reload"])
         .fails_with("Could not parse pid file");
 }

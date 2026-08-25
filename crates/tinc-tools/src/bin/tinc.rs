@@ -47,7 +47,9 @@ use cmd::config::ConfigOutput;
 use cmd::dump::{Kind, dump, dump_invitations, parse_kind};
 use cmd::fsck::Severity;
 use cmd::info::{InfoOutput, info};
+use std::io;
 use std::io::{IsTerminal, Read};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tinc_tools::cmd::{self, CmdError};
 use tinc_tools::names::{Paths, PathsInput};
@@ -415,11 +417,11 @@ fn cmd_init(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError>
     match args {
         [name] => cmd::init::run(paths, name),
         [] => {
-            if std::io::stdin().is_terminal() {
+            if io::stdin().is_terminal() {
                 return Err(CmdError::MissingArg("Name"));
             }
             let mut buf = String::new();
-            std::io::stdin()
+            io::stdin()
                 .read_to_string(&mut buf)
                 .map_err(|e| CmdError::BadInput(format!("Error reading stdin: {e}")))?;
             // C reads one `fgets` line; take the first so trailing
@@ -450,12 +452,7 @@ fn cmd_sign(paths: &Paths, input: Option<&str>) -> Result<(), CmdError> {
         .duration_since(UNIX_EPOCH)
         .expect("system clock before 1970")
         .as_secs() as i64;
-    cmd::sign::sign(
-        paths,
-        input.map(std::path::Path::new),
-        t,
-        std::io::stdout().lock(),
-    )
+    cmd::sign::sign(paths, input.map(Path::new), t, io::stdout().lock())
 }
 
 /// `fsck` never `Err`s on findings — its job is to report, not
@@ -504,12 +501,7 @@ fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdErro
         });
     };
 
-    let r = cmd::invite::invite(
-        paths,
-        g.netname.as_deref(),
-        invitee,
-        std::time::SystemTime::now(),
-    )?;
+    let r = cmd::invite::invite(paths, g.netname.as_deref(), invitee, SystemTime::now())?;
 
     if r.key_is_new {
         // The daemon loads `invitations/ed25519_key.priv` at startup;
@@ -748,7 +740,7 @@ fn cmd_join(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError>
         [u] => u,
         [] => {
             let mut buf = String::new();
-            std::io::stdin()
+            io::stdin()
                 .read_to_string(&mut buf)
                 .map_err(|e| CmdError::BadInput(format!("Error reading stdin: {e}")))?;
             url_buf = buf;
@@ -764,25 +756,25 @@ fn cmd_verify(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdErro
     let (signer_arg, input) = match args {
         [] => return Err(CmdError::MissingArg("signer")),
         [s] => (s, None),
-        [s, file] => (s, Some(std::path::Path::new(file))),
+        [s, file] => (s, Some(Path::new(file))),
         [_, _, _, ..] => return Err(CmdError::TooManyArgs),
     };
     let signer = cmd::sign::Signer::parse(signer_arg, paths)?;
-    cmd::sign::verify_cmd(paths, &signer, input, std::io::stdout().lock())
+    cmd::sign::verify_cmd(paths, &signer, input, io::stdout().lock())
 }
 
 fn cmd_export(paths: &Paths) -> Result<(), CmdError> {
-    cmd::exchange::export(paths, std::io::stdout().lock())
+    cmd::exchange::export(paths, io::stdout().lock())
 }
 
 fn cmd_export_all(paths: &Paths) -> Result<(), CmdError> {
-    cmd::exchange::export_all(paths, std::io::stdout().lock())
+    cmd::exchange::export_all(paths, io::stdout().lock())
 }
 
 /// Maps count→exit-code: returns 1 if zero imported.
 fn cmd_import(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
     no_args(args)?;
-    let count = cmd::exchange::import(paths, std::io::stdin().lock(), g.force)?;
+    let count = cmd::exchange::import(paths, io::stdin().lock(), g.force)?;
     if count > 0 {
         eprintln!("Imported {count} host configuration files.");
         Ok(())

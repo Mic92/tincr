@@ -1,9 +1,10 @@
 //! Global options, help/version, dispatch errors.
 
+use super::Run;
 use super::{Conf, bin, tinc, tinc_with};
 use std::process::Command;
 
-fn tinc_env(env: &[(&str, &str)], args: &[&str]) -> super::Run {
+fn tinc_env(env: &[(&str, &str)], args: &[&str]) -> Run {
     tinc_with(args, b"", |cmd| {
         for (key, value) in env {
             cmd.env(key, value);

@@ -33,6 +33,7 @@ use crate::names::{Paths, check_id};
 // Row schemas are wire-level, shared with `info`/`top`/`tinc-auth`.
 // Re-exported so existing `cmd::dump::{NodeRow,…}` paths keep working.
 pub use crate::ctl::rows::{ConnRow, EdgeRow, NodeRow, StatusBit, SubnetRow, strip_weight};
+use std::io::ErrorKind;
 use tinc_crypto::invite::SLUG_PART_LEN;
 
 /// Which `dump` sub-verb.
@@ -143,7 +144,7 @@ pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
 
     let entries = match fs::read_dir(&dir) {
         Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(e) if e.kind() == ErrorKind::NotFound => {
             // Directory never created → no invites → not an error.
             return Ok(Vec::new());
         }

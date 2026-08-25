@@ -84,6 +84,7 @@ impl PuntQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ptr;
 
     fn addr() -> SocketAddr {
         "10.0.0.1:655".parse().unwrap()
@@ -115,7 +116,7 @@ mod tests {
         let q = PuntQueue::new();
         assert!(q.push(b"a", Some(addr())));
         let p = q.pop().unwrap();
-        let ptr = std::ptr::from_ref(&*p.buf) as usize;
+        let ptr = ptr::from_ref(&*p.buf) as usize;
         q.recycle(p.buf);
         assert!(q.push(b"b", Some(addr())));
         let p2 = q.pop().unwrap();

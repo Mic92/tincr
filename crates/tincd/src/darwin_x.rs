@@ -15,6 +15,8 @@
 /// `struct msghdr_x` (xnu `bsd/sys/socket_private.h`). Layout matches
 /// the LP64 user struct exactly. Field names verbatim from C for
 /// greppability.
+use std::mem;
+
 #[repr(C)]
 #[expect(clippy::struct_field_names)]
 pub(crate) struct MsghdrX {
@@ -59,7 +61,7 @@ unsafe extern "C" {
 /// `libc::iovec`, `libc::sockaddr_storage`).
 pub(crate) unsafe fn zeroed_boxed_array<T, const N: usize>() -> Box<[T; N]> {
     // SAFETY: caller guarantees zeroed `T` is valid.
-    let v: Box<[T]> = (0..N).map(|_| unsafe { std::mem::zeroed::<T>() }).collect();
+    let v: Box<[T]> = (0..N).map(|_| unsafe { mem::zeroed::<T>() }).collect();
     // map_err: raw-pointer `T` isn't `Debug`.
     v.try_into().map_err(|_| ()).expect("collected N elements")
 }

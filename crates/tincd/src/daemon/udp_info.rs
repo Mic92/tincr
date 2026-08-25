@@ -8,10 +8,14 @@ use super::{ConnId, Daemon};
 
 use std::time::Duration;
 
+use crate::dispatch;
 use crate::dispatch::{ConnOptions, DispatchError};
 use crate::graph::NodeId;
 use crate::tunnel::{MTU, TunnelState};
 use crate::udp_info::{self, FromMtuState, FromState, MtuInfoAction, PmtuSnapshot, UdpInfoAction};
+use std::fmt;
+use std::mem;
+use std::sync::atomic;
 use tinc_proto::AddrStr;
 use tinc_proto::msg::{MtuInfo, UdpInfo};
 
@@ -31,7 +35,7 @@ impl Daemon {
     /// Resolve `nid`'s nexthop conn and queue `msg` on it. Shared
     /// tail of the `UDP_INFO`/`MTU_INFO` senders; returns the
     /// `conn.send` needs-write flag, or `false` when no conn.
-    fn send_via_nexthop(&mut self, nid: NodeId, msg: impl std::fmt::Display) -> bool {
+    fn send_via_nexthop(&mut self, nid: NodeId, msg: impl fmt::Display) -> bool {
         let Some(conn_id) = self.conn_for_nexthop(nid) else {
             return false;
         };
@@ -306,7 +310,7 @@ impl Daemon {
             self.dp
                 .tunnels
                 .get_mut(&to_nid)
-                .map_or(0, |t| std::mem::take(&mut t.udp_rx_maxlen))
+                .map_or(0, |t| mem::take(&mut t.udp_rx_maxlen))
         } else {
             0
         };
@@ -326,7 +330,7 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let (_, parsed) = crate::dispatch::parse_key_msg(body, "UDP_INFO", UdpInfo::parse)?;
+        let (_, parsed) = dispatch::parse_key_msg(body, "UDP_INFO", UdpInfo::parse)?;
 
         let conn_name = self.conn(from_conn).name.clone();
 
@@ -384,7 +388,7 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let (_, parsed) = crate::dispatch::parse_key_msg(body, "MTU_INFO", MtuInfo::parse)?;
+        let (_, parsed) = dispatch::parse_key_msg(body, "MTU_INFO", MtuInfo::parse)?;
 
         let conn_name = self.conn(from_conn).name.clone();
 
@@ -509,7 +513,7 @@ impl Daemon {
         // reply arm; seconds-apart, not hot).
         if let Some(h) = self.tunnel_handles.get(&peer) {
             let m = self.dp.tunnels.get(&peer).map_or(0, TunnelState::minmtu);
-            h.minmtu.store(m, std::sync::atomic::Ordering::Relaxed);
+            h.minmtu.store(m, atomic::Ordering::Relaxed);
         }
     }
 }

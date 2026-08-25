@@ -25,6 +25,7 @@
 use core::fmt;
 use core::str::FromStr;
 
+use crate::ecdh::SHARED_LEN;
 use kem::{Decapsulate, Encapsulate, Kem, KeyExport};
 use ml_kem::MlKem768;
 use ml_kem::ml_kem_768::{DecapsulationKey, EncapsulationKey};
@@ -176,7 +177,7 @@ const _: () = {
 };
 
 /// Hybrid PRF secret: `X25519_ss(32) ‖ ss_i2r(32) ‖ ss_r2i(32)`.
-pub const HYBRID_SHARED_LEN: usize = crate::ecdh::SHARED_LEN + 2 * SS_LEN;
+pub const HYBRID_SHARED_LEN: usize = SHARED_LEN + 2 * SS_LEN;
 
 /// `SHA-512(ek_i ‖ ek_r ‖ ct_i2r ‖ ct_r2i)`: X-Wing–style binding of
 /// all public KEM material into the PRF seed. Hashed (4544 B → 64 B)

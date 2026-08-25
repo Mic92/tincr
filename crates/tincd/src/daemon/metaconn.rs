@@ -19,7 +19,24 @@ use crate::script::ScriptEnv;
 use crate::tunnel::MTU;
 use crate::{invitation_serve, script, socks};
 
+use crate::addrcache::AddressCache;
+use crate::dispatch::REQ_DISCONNECT;
+use crate::dispatch::REQ_DUMP_CONNECTIONS;
+use crate::dispatch::REQ_DUMP_EDGES;
+use crate::dispatch::REQ_DUMP_NODES;
+use crate::dispatch::REQ_DUMP_SUBNETS;
+use crate::dispatch::REQ_DUMP_TRAFFIC;
+use crate::dispatch::REQ_PURGE;
+use crate::dispatch::REQ_RELOAD;
+use crate::dispatch::REQ_RETRY;
+use crate::dispatch::REQ_SET_DEBUG;
 use crate::event::Io;
+use crate::log_tap;
+use crate::scriptworker::Job;
+use crate::tcp_tunnel;
+use std::fs;
+use std::str;
+use std::time::Instant;
 use tinc_crypto::os_rng;
 use tinc_proto::Request;
 use tinc_sptps::Output;
@@ -341,7 +358,7 @@ impl Daemon {
         let now = self.timers.now();
         let conn = self.conn_mut(id);
         // Refresh idle-reap window on any client activity.
-        conn.last_ping_time = now + std::time::Duration::from_hours(1);
+        conn.last_ping_time = now + Duration::from_hours(1);
         let (r, nw) = handle_control(conn, line);
         match r {
             DispatchResult::DumpSubnets => {
@@ -358,15 +375,15 @@ impl Daemon {
                         )
                     })
                     .collect();
-                self.ctl_send_dump(id, rows, crate::dispatch::REQ_DUMP_SUBNETS)
+                self.ctl_send_dump(id, rows, REQ_DUMP_SUBNETS)
             }
             DispatchResult::DumpNodes => {
                 let rows = self.dump_nodes_rows();
-                self.ctl_send_dump(id, rows, crate::dispatch::REQ_DUMP_NODES)
+                self.ctl_send_dump(id, rows, REQ_DUMP_NODES)
             }
             DispatchResult::DumpEdges => {
                 let rows = self.dump_edges_rows();
-                self.ctl_send_dump(id, rows, crate::dispatch::REQ_DUMP_EDGES)
+                self.ctl_send_dump(id, rows, REQ_DUMP_EDGES)
             }
             DispatchResult::DumpConnections => {
                 let rows: Vec<String> = self
@@ -386,20 +403,20 @@ impl Daemon {
                         )
                     })
                     .collect();
-                self.ctl_send_dump(id, rows, crate::dispatch::REQ_DUMP_CONNECTIONS)
+                self.ctl_send_dump(id, rows, REQ_DUMP_CONNECTIONS)
             }
             DispatchResult::Reload => {
                 // CLI only checks zero/nonzero.
                 let result = i32::from(!self.reload_configuration());
-                self.ctl_ack(id, crate::dispatch::REQ_RELOAD, result)
+                self.ctl_ack(id, REQ_RELOAD, result)
             }
             DispatchResult::Retry => {
                 self.on_retry();
-                self.ctl_ack(id, crate::dispatch::REQ_RETRY, 0)
+                self.ctl_ack(id, REQ_RETRY, 0)
             }
             DispatchResult::Purge => {
                 let nw_purge = self.purge();
-                let (r, nw2) = self.ctl_ack(id, crate::dispatch::REQ_PURGE, 0);
+                let (r, nw2) = self.ctl_ack(id, REQ_PURGE, 0);
                 (r, nw_purge | nw2)
             }
             DispatchResult::SetDebug(level) => {
@@ -410,12 +427,12 @@ impl Daemon {
                 let Some(level) = level else {
                     return (DispatchResult::Drop, false);
                 };
-                let prev = crate::log_tap::set_debug_level(level);
+                let prev = log_tap::set_debug_level(level);
                 if level >= 0 {
                     // Remember the first prev so close restores the original.
                     self.conn_mut(id).prev_debug_level.get_or_insert(prev);
                 }
-                self.ctl_ack(id, crate::dispatch::REQ_SET_DEBUG, prev)
+                self.ctl_ack(id, REQ_SET_DEBUG, prev)
             }
             DispatchResult::Disconnect(name) => {
                 // Walk conns, terminate by name. `terminate()` keys
@@ -440,11 +457,11 @@ impl Daemon {
                 };
                 // `terminate()` only touches the matched conn;
                 // the ctl conn `id` is still here.
-                self.ctl_ack(id, crate::dispatch::REQ_DISCONNECT, result)
+                self.ctl_ack(id, REQ_DISCONNECT, result)
             }
             DispatchResult::DumpTraffic => {
                 let rows = self.dump_traffic_rows();
-                self.ctl_send_dump(id, rows, crate::dispatch::REQ_DUMP_TRAFFIC)
+                self.ctl_send_dump(id, rows, REQ_DUMP_TRAFFIC)
             }
             DispatchResult::Log(level) => {
                 // No reply. The conn now passively receives log records
@@ -463,7 +480,7 @@ impl Daemon {
                     1 | 2 => log::Level::Debug,
                     _ => log::Level::Trace,
                 });
-                crate::log_tap::set_active(true);
+                log_tap::set_active(true);
                 (DispatchResult::Ok, false)
             }
             DispatchResult::Pcap(snaplen) => {
@@ -637,7 +654,7 @@ impl Daemon {
                         }
                         conn.tcplen = 0;
                         // oversize → drop packet, KEEP conn.
-                        if bytes.len() > usize::from(crate::tunnel::MTU) {
+                        if bytes.len() > usize::from(MTU) {
                             log::warn!(target: "tincd::proto",
                                 "Oversized PACKET 17 from {} ({} > MTU {})",
                                 conn.name, bytes.len(), crate::tunnel::MTU);
@@ -691,7 +708,7 @@ impl Daemon {
                             // wakeup interval and under-reads RTT by
                             // exactly the latency of whichever OTHER
                             // conn's PONG woke epoll first.
-                            let now = std::time::Instant::now();
+                            let now = Instant::now();
                             let conn = self.conn_mut(id);
                             conn.pinged = false;
                             if let Some(sent) = conn.last_ping_sent.take() {
@@ -712,7 +729,7 @@ impl Daemon {
                         Request::Packet => {
                             // set tcplen; NEXT record is the blob.
                             let conn = self.conn_mut(id);
-                            std::str::from_utf8(body)
+                            str::from_utf8(body)
                                 .ok()
                                 .and_then(|s| tinc_proto::msg::TcpPacket::parse(s).ok())
                                 .map_or_else(
@@ -790,7 +807,7 @@ impl Daemon {
     /// reverse lookup.
     pub(super) fn on_sptps_blob(&mut self, id: ConnId, blob: &[u8]) -> bool {
         // len < 12 → hard error.
-        let Some((dst_id, src_id, ct)) = crate::tcp_tunnel::parse_frame(blob) else {
+        let Some((dst_id, src_id, ct)) = tcp_tunnel::parse_frame(blob) else {
             log::error!(target: "tincd::net",
                         "Got too short SPTPS_PACKET ({} bytes)", blob.len());
             self.terminate(id);
@@ -960,7 +977,7 @@ impl Daemon {
 
                             // Unlink before the type-1 reply arrives; the
                             // rename already enforced single-use.
-                            if let Err(e) = std::fs::remove_file(&used_path) {
+                            if let Err(e) = fs::remove_file(&used_path) {
                                 log::warn!(target: "tincd::auth",
                                             "Failed to unlink {}: {e}",
                                             used_path.display());
@@ -976,7 +993,7 @@ impl Daemon {
 
                         (1, Some(InvitePhase::WaitingPubkey { name })) => {
                             // newline check happens inside finalize().
-                            let Ok(pubkey_b64) = std::str::from_utf8(&bytes) else {
+                            let Ok(pubkey_b64) = str::from_utf8(&bytes) else {
                                 log::error!(target: "tincd::auth",
                                             "Invalid pubkey from {name} ({hostname}): non-UTF-8");
                                 self.terminate(id);
@@ -1003,16 +1020,11 @@ impl Daemon {
                             // file anyway so a future ConnectTo finds
                             // it.
                             if let Some(addr) = conn_addr {
-                                let mut cache = crate::addrcache::AddressCache::open(
-                                    &self.confbase,
-                                    &name,
-                                    Vec::new(),
-                                );
+                                let mut cache =
+                                    AddressCache::open(&self.confbase, &name, Vec::new());
                                 cache.add_recent(addr);
                                 if let Some((path, bytes)) = cache.serialize() {
-                                    self.script_worker.submit(
-                                        crate::scriptworker::Job::WriteFile { path, bytes },
-                                    );
+                                    self.script_worker.submit(Job::WriteFile { path, bytes });
                                 }
                                 cache.disarm();
                             }
@@ -1091,7 +1103,7 @@ impl Daemon {
     /// raw body bytes (no `\n`). CLI does `recvline()` for the
     /// header, `recvdata(len)` for the body.
     pub(super) fn flush_log_tap(&mut self) {
-        let drained = crate::log_tap::drain();
+        let drained = log_tap::drain();
         if drained.is_empty() {
             return;
         }

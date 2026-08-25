@@ -137,6 +137,7 @@ impl UdpEgress for Fast {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Portable;
     use super::*;
     use socket2::SockAddr;
     use std::net::UdpSocket;
@@ -262,7 +263,7 @@ mod tests {
         let rx_p = UdpSocket::bind("127.0.0.1:0").unwrap();
         let tx: Socket = UdpSocket::bind("127.0.0.1:0").unwrap().into();
         let mut fast = Fast::new(&tx).unwrap();
-        let mut portable = super::super::Portable::new(&tx).unwrap();
+        let mut portable = Portable::new(&tx).unwrap();
 
         // 4 frames, stride=13, last short at 5. Non-power-of-2
         // stride to catch any alignment assumption.

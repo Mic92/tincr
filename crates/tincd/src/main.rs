@@ -22,8 +22,19 @@ use std::process::ExitCode;
 use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 use nix::sys::mman::{MlockAllFlags, mlockall};
 use nix::unistd::{AccessFlags, access};
+use std::env;
+use std::ffi::OsString;
+use std::fs::OpenOptions;
+use std::iter;
+use std::iter::Peekable;
+use std::os::fd::OwnedFd;
+use std::os::fd::RawFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::OpenOptionsExt;
+use std::panic;
+use std::panic::AssertUnwindSafe;
+use std::path::Path;
+use std::process;
 use tinc_conf::{Config, Source, parse_line};
 use tincd::{Daemon, RunOutcome, sandbox, sd_notify};
 
@@ -101,9 +112,9 @@ fn parse_o_arg(v: &str, o_lineno: u32) -> Result<tinc_conf::Entry, String> {
 /// Increment is from 0 (first bare `-d` → 1) rather than C's
 /// `-1`-init; differs only for `-d -d`, which folds into the same
 /// `LevelFilter` bucket.
-fn parse_debug_arg<I>(current: Option<u32>, args: &mut std::iter::Peekable<I>) -> u32
+fn parse_debug_arg<I>(current: Option<u32>, args: &mut Peekable<I>) -> u32
 where
-    I: Iterator<Item = std::ffi::OsString>,
+    I: Iterator<Item = OsString>,
 {
     if let Some(next) = args.peek()
         && let Some(s) = next.to_str()
@@ -119,10 +130,7 @@ where
 
 /// Pull the next argv element as the value for `flag`, decoding to
 /// UTF-8.
-fn next_str(
-    args: &mut impl Iterator<Item = std::ffi::OsString>,
-    flag: &str,
-) -> Result<String, String> {
+fn next_str(args: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<String, String> {
     args.next()
         .ok_or_else(|| format!("{flag} requires an argument"))?
         .into_string()
@@ -132,7 +140,7 @@ fn next_str(
 #[expect(clippy::too_many_lines)] // flat getopt-style match
 fn parse_args<I>(args: I) -> Result<Args, String>
 where
-    I: IntoIterator<Item = std::ffi::OsString>,
+    I: IntoIterator<Item = OsString>,
 {
     let mut confbase: Option<PathBuf> = None;
     let mut netname: Option<String> = None;
@@ -243,17 +251,17 @@ where
             "-o" | "--option" => {
                 let v = next_str(&mut args, "-o")?;
                 o_lineno += 1;
-                cmdline_conf.merge(std::iter::once(parse_o_arg(&v, o_lineno)?));
+                cmdline_conf.merge(iter::once(parse_o_arg(&v, o_lineno)?));
             }
             // Glued `--option=K=V` and `-oK=V` (the man page form).
             _ if arg.starts_with("--option=") => {
                 o_lineno += 1;
                 let v = &arg["--option=".len()..];
-                cmdline_conf.merge(std::iter::once(parse_o_arg(v, o_lineno)?));
+                cmdline_conf.merge(iter::once(parse_o_arg(v, o_lineno)?));
             }
             _ if arg.starts_with("-o") && arg.len() > 2 => {
                 o_lineno += 1;
-                cmdline_conf.merge(std::iter::once(parse_o_arg(&arg[2..], o_lineno)?));
+                cmdline_conf.merge(iter::once(parse_o_arg(&arg[2..], o_lineno)?));
             }
             "--pidfile" => {
                 pidfile = Some(PathBuf::from(next_str(&mut args, "--pidfile")?));
@@ -289,7 +297,7 @@ where
                 println!("      --version           Output version information and exit.");
                 println!();
                 println!("Report bugs to https://github.com/Mic92/tincr/issues.");
-                std::process::exit(0);
+                process::exit(0);
             }
             "--version" => {
                 // "(Rust)" suffix disambiguates from the C build in bug reports.
@@ -299,7 +307,7 @@ where
                     tinc_proto::request::PROT_MAJOR,
                     tinc_proto::request::PROT_MINOR,
                 );
-                std::process::exit(0);
+                process::exit(0);
             }
             // C accepts this; we don't implement it (would disable auth).
             // Warn rather than reject so old wiki/forum scripts produce
@@ -317,7 +325,7 @@ where
 
     // NETNAME env fallback when `-n` not given.
     if netname.is_none()
-        && let Ok(env_net) = std::env::var("NETNAME")
+        && let Ok(env_net) = env::var("NETNAME")
     {
         netname = Some(env_net);
     }
@@ -392,11 +400,11 @@ where
         let mut s = Vec::with_capacity(stem.len() + 7);
         s.extend_from_slice(stem);
         s.extend_from_slice(b".socket");
-        PathBuf::from(std::ffi::OsString::from_vec(s))
+        PathBuf::from(OsString::from_vec(s))
     });
 
     // Env alternative for wrappers that can't inject argv.
-    if std::env::var_os("TINCR_ALLOW_COREDUMP").is_some() {
+    if env::var_os("TINCR_ALLOW_COREDUMP").is_some() {
         allow_coredump = true;
     }
 
@@ -422,14 +430,14 @@ where
 /// detach-without-logfile warning in `init_logging` covers that gap.
 /// No-op when `TINC_UMBILICAL` is unset.
 fn cut_umbilical() {
-    let Ok(spec) = std::env::var("TINC_UMBILICAL") else {
+    let Ok(spec) = env::var("TINC_UMBILICAL") else {
         return;
     };
     // First token is the fd; second (`colorize`) is ignored — we don't tee.
     let Some(fd) = spec
         .split_whitespace()
         .next()
-        .and_then(|s| s.parse::<std::os::fd::RawFd>().ok())
+        .and_then(|s| s.parse::<RawFd>().ok())
     else {
         return;
     };
@@ -446,7 +454,7 @@ fn cut_umbilical() {
     // in this process knows the number. Stale fd → F_GETFL fails →
     // we drop (close) harmlessly.
     #[expect(unsafe_code)]
-    let f = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+    let f = unsafe { OwnedFd::from_raw_fd(fd) };
     if fcntl(&f, FcntlArg::F_GETFL).is_err() {
         return; // drop closes the fd
     }
@@ -467,11 +475,7 @@ fn detach() -> Result<(), String> {
 /// run after initgroups (which reads `/etc/group`, outside the jail)
 /// and before setuid (chroot needs root); setuid is last so it can't
 /// be undone.
-fn drop_privs(
-    switchuser: Option<&str>,
-    do_chroot: bool,
-    confbase: &std::path::Path,
-) -> Result<(), String> {
+fn drop_privs(switchuser: Option<&str>, do_chroot: bool, confbase: &Path) -> Result<(), String> {
     let uid_gid = if let Some(user) = switchuser {
         let pw = nix::unistd::User::from_name(user)
             .map_err(|e| format!("getpwnam_r `{user}': {e}"))?
@@ -507,7 +511,7 @@ fn drop_privs(
 
         nix::unistd::chroot(confbase).map_err(|e| format!("System call `chroot' failed: {e}"))?;
         // Don't leave a cwd handle pointing outside the jail.
-        std::env::set_current_dir("/").map_err(|e| format!("chdir / after chroot: {e}"))?;
+        env::set_current_dir("/").map_err(|e| format!("chdir / after chroot: {e}"))?;
     }
 
     // setresuid last (real/effective/saved); after this we can't undo.
@@ -547,7 +551,7 @@ fn drop_privs(
 /// `ProcessPriority` config key. Best-effort: a daemon that can't
 /// nice itself can still tunnel packets. Re-reads tinc.conf rather
 /// than threading the merged config out of `Daemon::setup`.
-fn apply_process_priority(confbase: &std::path::Path, cmdline: &Config) {
+fn apply_process_priority(confbase: &Path, cmdline: &Config) {
     let mut config = match tinc_conf::read_server_config(confbase) {
         Ok(c) => c,
         // Daemon::setup already validated this read; failure here is
@@ -605,7 +609,7 @@ fn init_logging(args: &Args) {
     }
 
     if let Some(path) = &args.logfile {
-        match std::fs::OpenOptions::new()
+        match OpenOptions::new()
             .create(true)
             .append(true)
             .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
@@ -662,10 +666,7 @@ fn resolve_debug_level(args: &Args) -> Option<u32> {
 /// `Sandbox` config key; `-o` overrides tinc.conf. Default `none`
 /// (Landlock is always compiled in but unconfigured daemons keep
 /// pre-sandbox behaviour).
-fn resolve_sandbox_level(
-    confbase: &std::path::Path,
-    cmdline: &Config,
-) -> Result<sandbox::Level, String> {
+fn resolve_sandbox_level(confbase: &Path, cmdline: &Config) -> Result<sandbox::Level, String> {
     fn lookup(c: &Config) -> Option<Result<sandbox::Level, String>> {
         c.lookup("Sandbox").next().map(|e| {
             sandbox::Level::parse(e.get_str()).map_err(|v| format!("Bad sandbox value {v}!"))
@@ -697,7 +698,7 @@ fn check_socket_activation(
     listen_pid: Option<String>,
     listen_fds: Option<String>,
 ) -> Option<usize> {
-    let pid_ok = listen_pid.and_then(|s| s.parse::<u32>().ok()) == Some(std::process::id());
+    let pid_ok = listen_pid.and_then(|s| s.parse::<u32>().ok()) == Some(process::id());
     if !pid_ok {
         return None;
     }
@@ -726,7 +727,7 @@ fn harden_process(allow_coredump: bool) {
 }
 
 fn main() -> ExitCode {
-    let mut args = match parse_args(std::env::args_os().skip(1)) {
+    let mut args = match parse_args(env::args_os().skip(1)) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("tincd: {e}");
@@ -743,7 +744,7 @@ fn main() -> ExitCode {
     // rely on cwd == confbase to resolve `hosts/$NODE`. The chroot
     // path overrides cwd to "/" in drop_privs, which still resolves
     // inside the jail.
-    if let Err(e) = std::env::set_current_dir(&args.confbase) {
+    if let Err(e) = env::set_current_dir(&args.confbase) {
         eprintln!(
             "Could not change to configuration directory {}: {e}",
             args.confbase.display()
@@ -754,15 +755,13 @@ fn main() -> ExitCode {
     // Socket activation before detach: a forked child has a new PID
     // so LISTEN_PID would no longer match — we'd lose the inherited
     // fds. So clear `do_detach` here when activated.
-    let socket_activation = check_socket_activation(
-        std::env::var("LISTEN_PID").ok(),
-        std::env::var("LISTEN_FDS").ok(),
-    );
+    let socket_activation =
+        check_socket_activation(env::var("LISTEN_PID").ok(), env::var("LISTEN_FDS").ok());
     // SAFETY: single-threaded pre-detach, no concurrent getenv.
     #[expect(unsafe_code)]
     unsafe {
-        std::env::remove_var("LISTEN_PID");
-        std::env::remove_var("LISTEN_FDS");
+        env::remove_var("LISTEN_PID");
+        env::remove_var("LISTEN_FDS");
     }
     if socket_activation.is_some() {
         args.do_detach = false;
@@ -839,7 +838,7 @@ fn main() -> ExitCode {
         log::error!(target: "tincd", "{e}");
         // Hard exit: don't unwind Daemon::Drop with privs in an
         // unknown state.
-        std::process::exit(1);
+        process::exit(1);
     }
 
     // sandbox after drop_privs. The Linux device path is hard-coded
@@ -883,8 +882,8 @@ fn main() -> ExitCode {
     // expects, poisoned mutexes) still routes through STOPPING=1.
     // Daemon::Drop (tinc-down, pidfile/socket unlink) already ran
     // during the unwind; this just adds the systemd notify + log.
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| daemon.run()))
-        .unwrap_or_else(|payload| {
+    let outcome =
+        panic::catch_unwind(AssertUnwindSafe(|| daemon.run())).unwrap_or_else(|payload| {
             let msg = payload
                 .downcast_ref::<&'static str>()
                 .copied()
@@ -907,7 +906,10 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
     use std::ffi::OsString;
+    use std::fs;
+    use std::process;
 
     fn argv(v: &[&str]) -> Vec<OsString> {
         v.iter().map(OsString::from).collect()
@@ -1091,19 +1093,19 @@ mod tests {
     struct Tmp(PathBuf);
     impl Tmp {
         fn new(tag: &str) -> Self {
-            let d = std::env::temp_dir().join(format!(
+            let d = env::temp_dir().join(format!(
                 "tincd-loglevel-{tag}-{}-{:?}",
                 std::process::id(),
                 std::thread::current().id()
             ));
-            let _ = std::fs::remove_dir_all(&d);
-            std::fs::create_dir_all(&d).unwrap();
+            let _ = fs::remove_dir_all(&d);
+            fs::create_dir_all(&d).unwrap();
             Self(d)
         }
     }
     impl Drop for Tmp {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            let _ = fs::remove_dir_all(&self.0);
         }
     }
 
@@ -1117,7 +1119,7 @@ mod tests {
     #[test]
     fn loglevel_d_flag_wins() {
         let t = Tmp::new("d-wins");
-        std::fs::write(t.0.join("tinc.conf"), "LogLevel = 3\n").unwrap();
+        fs::write(t.0.join("tinc.conf"), "LogLevel = 3\n").unwrap();
         let mut a = args_at(t.0.clone());
         a.debug_level = Some(5);
         assert_eq!(resolve_debug_level(&a), Some(5));
@@ -1142,7 +1144,7 @@ mod tests {
     #[test]
     fn loglevel_from_tinc_conf() {
         let t = Tmp::new("from-conf");
-        std::fs::write(t.0.join("tinc.conf"), "LogLevel = 4\n").unwrap();
+        fs::write(t.0.join("tinc.conf"), "LogLevel = 4\n").unwrap();
         let a = args_at(t.0.clone());
         assert_eq!(resolve_debug_level(&a), Some(4));
     }
@@ -1150,7 +1152,7 @@ mod tests {
     #[test]
     fn loglevel_absent_everywhere() {
         let t = Tmp::new("absent");
-        std::fs::write(t.0.join("tinc.conf"), "Name = foo\n").unwrap();
+        fs::write(t.0.join("tinc.conf"), "Name = foo\n").unwrap();
         let a = args_at(t.0.clone());
         assert_eq!(resolve_debug_level(&a), None);
     }
@@ -1167,7 +1169,7 @@ mod tests {
         // route through u32::try_from → None → default Info. Stricter
         // than C; nonsense input gets nonsense (default) output.
         let t = Tmp::new("neg");
-        std::fs::write(t.0.join("tinc.conf"), "LogLevel = -2\n").unwrap();
+        fs::write(t.0.join("tinc.conf"), "LogLevel = -2\n").unwrap();
         let a = args_at(t.0.clone());
         assert_eq!(resolve_debug_level(&a), None);
     }
@@ -1177,7 +1179,7 @@ mod tests {
     /// PID matching ours + `LISTEN_FDS=2` → Some(2). The happy path.
     #[test]
     fn socket_activation_our_pid_with_fds() {
-        let our = std::process::id().to_string();
+        let our = process::id().to_string();
         assert_eq!(
             check_socket_activation(Some(our), Some("2".into())),
             Some(2)
@@ -1190,7 +1192,7 @@ mod tests {
     #[test]
     fn socket_activation_wrong_pid_ignored() {
         // Our PID + 1 is guaranteed not-us (PIDs are unique).
-        let wrong = (std::process::id() + 1).to_string();
+        let wrong = (process::id() + 1).to_string();
         assert_eq!(check_socket_activation(Some(wrong), Some("2".into())), None);
     }
 
@@ -1198,14 +1200,14 @@ mod tests {
     /// gates on `listen_fds` non-null too.
     #[test]
     fn socket_activation_no_fds() {
-        let our = std::process::id().to_string();
+        let our = process::id().to_string();
         assert_eq!(check_socket_activation(Some(our), None), None);
     }
 
     /// `LISTEN_FDS=0` → None. Zero sockets is not activation.
     #[test]
     fn socket_activation_zero_fds() {
-        let our = std::process::id().to_string();
+        let our = process::id().to_string();
         assert_eq!(check_socket_activation(Some(our), Some("0".into())), None);
     }
 
@@ -1213,7 +1215,7 @@ mod tests {
     /// garbage); 0 != `getpid()` and 0 fds is filtered. Same outcome.
     #[test]
     fn socket_activation_garbage() {
-        let our = std::process::id().to_string();
+        let our = process::id().to_string();
         assert_eq!(
             check_socket_activation(Some("garbage".into()), Some("2".into())),
             None

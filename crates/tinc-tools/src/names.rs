@@ -27,7 +27,10 @@
 //! fails with EACCES on `/etc/tinc` mkdir, a known papercut. We
 //! don't fix it here.
 
+use std::env;
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::path::PathBuf;
 
 /// `CONFDIR` from `config.h`. Baked at compile time.
@@ -229,7 +232,7 @@ impl Paths {
     /// point — a 4a command calling this is a bug we want to find
     /// in tests, not paper over with a default.
     #[must_use]
-    pub fn pidfile(&self) -> &std::path::Path {
+    pub fn pidfile(&self) -> &Path {
         self.pidfile
             .as_deref()
             .expect("pidfile() called before resolve_runtime()")
@@ -279,7 +282,7 @@ impl Paths {
             // instead. On Unix, `OsStr::from_bytes` is the safe path.
             #[cfg(unix)]
             {
-                let mut s = std::ffi::OsStr::from_bytes(stem).to_owned();
+                let mut s = OsStr::from_bytes(stem).to_owned();
                 s.push(".socket");
                 PathBuf::from(s)
             }
@@ -421,7 +424,7 @@ pub use tinc_conf::name::check_id;
 /// - Result fails `check_id` (empty after squashing)
 #[cfg(unix)]
 pub fn replace_name(raw: &str) -> Result<String, String> {
-    replace_name_with(raw, |k| std::env::var(k).ok())
+    replace_name_with(raw, |k| env::var(k).ok())
 }
 
 /// Core of `replace_name`, parameterized over env lookup so tests don't
@@ -445,6 +448,8 @@ fn replace_name_with(raw: &str, env: impl Fn(&str) -> Option<String>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::fs;
 
     #[test]
     fn confbase_from_netname() {
@@ -615,13 +620,13 @@ mod tests {
     /// constraint. Parallel-safe.
     #[test]
     fn resolve_runtime_confbase_fallback() {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = env::temp_dir().join(format!(
             "tinc_test_resolve_{:?}",
             std::thread::current().id()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&dir).unwrap();
         // Touch confbase/pid so the fallback fires.
-        std::fs::write(dir.join("pid"), "").unwrap();
+        fs::write(dir.join("pid"), "").unwrap();
 
         let mut p = Paths::for_cli(&PathsInput {
             confbase: Some(dir.clone()),
@@ -644,7 +649,7 @@ mod tests {
         // Don't fail — just don't assert. The string-surgery tests
         // above cover the derivation; this one is for the probe order.
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Forgetting `resolve_runtime()` panics. The panic is the

@@ -2,6 +2,7 @@
 //! and deterministically under `seed_rng`, which `tinc-sptps/tests/vs_c.rs`
 //! depends on.
 
+use std::slice;
 use tinc_ffi::{CKey, CSptps, Event, Framing, Role, seed_rng, serial_guard};
 
 const HANDSHAKE: u8 = 128;
@@ -67,7 +68,7 @@ fn receive_whole(peer: &mut CSptps, data: &[u8]) -> Vec<Event> {
 /// One byte per call: reassembly boundaries, and no lost events.
 fn receive_bytewise(peer: &mut CSptps, data: &[u8]) -> Vec<Event> {
     data.iter()
-        .flat_map(|byte| receive_whole(peer, std::slice::from_ref(byte)))
+        .flat_map(|byte| receive_whole(peer, slice::from_ref(byte)))
         .collect()
 }
 

@@ -20,7 +20,10 @@ use std::time::{Duration, SystemTime};
 use tinc_conf::read_pem;
 use tinc_crypto::invite::cookie_filename;
 
+use std::io;
+use std::io::ErrorKind;
 use std::os::unix::fs::OpenOptionsExt;
+use std::str;
 pub(crate) use tinc_crypto::invite::COOKIE_LEN;
 use tinc_crypto::sign::SigningKey;
 use tinc_proto::check_id;
@@ -63,11 +66,11 @@ pub(crate) enum ServeError {
     Io {
         path: PathBuf,
         #[source]
-        err: std::io::Error,
+        err: io::Error,
     },
 }
 
-fn io_err(path: &Path) -> impl Fn(std::io::Error) -> ServeError + '_ {
+fn io_err(path: &Path) -> impl Fn(io::Error) -> ServeError + '_ {
     move |err| ServeError::Io {
         path: path.to_owned(),
         err,
@@ -87,7 +90,7 @@ pub(crate) fn read_invitation_key(confbase: &Path) -> Result<Option<SigningKey>,
     let path = confbase.join("invitations").join("ed25519_key.priv");
     let f = match File::open(&path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(ServeError::Io { path, err }),
     };
     let blob = read_pem(f, TY_PRIVATE, PRIVATE_BLOB_LEN)
@@ -149,7 +152,7 @@ pub(crate) fn serve_cookie(
     // Crash between rename and :305 unlink leaves .used as evidence
     // (`tinc invite` expiry sweep skips it: 29 chars ≠ 24-char filter).
     fs::rename(&inv_path, &used_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
+        if e.kind() == ErrorKind::NotFound {
             ServeError::NonExisting
         } else {
             ServeError::Io {
@@ -175,7 +178,7 @@ pub(crate) fn serve_cookie(
         .iter()
         .position(|&b| b == b'\n')
         .map_or(&contents[..], |i| &contents[..i]);
-    let first_line = std::str::from_utf8(first_line)
+    let first_line = str::from_utf8(first_line)
         .map_err(|_| ServeError::BadInvitationFile("first line not UTF-8".into()))?;
 
     // :277: five checks (Name, check_id, != myname) → one error
@@ -221,7 +224,7 @@ pub(crate) fn finalize(
         .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
         .open(&host_path)
         .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
+            if e.kind() == ErrorKind::AlreadyExists {
                 ServeError::HostFileExists(host_path.clone())
             } else {
                 ServeError::Io {

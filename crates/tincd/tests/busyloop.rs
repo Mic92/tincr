@@ -3,6 +3,8 @@
 //! saturated accept queue so the connect hangs (TEST-NET-1 gets ICMP
 //! unreachable on many networks).
 
+use std::thread;
+
 #[path = "common/mod.rs"]
 #[macro_use]
 mod common;
@@ -50,9 +52,9 @@ fn outgoing_timeout_no_busy_loop() {
             "no connect timeout:\n{}",
             node.log()
         );
-        std::thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(50));
     }
-    std::thread::sleep(Duration::from_secs(3));
+    thread::sleep(Duration::from_secs(3));
     node.signal(nix::sys::signal::Signal::SIGTERM);
     assert!(node.wait_exit().success(), "{}", node.log());
     // The daemon is this process's only reaped child (nextest runs a

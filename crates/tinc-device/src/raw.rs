@@ -32,6 +32,7 @@ use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
 use crate::{Device, MTU, Mac, Mode, assert_read_buf, read_fd, write_fd};
 use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType, socket};
+use std::mem;
 
 // Constants — kernel ABI, sed-verified
 
@@ -120,7 +121,7 @@ fn bind_packet(fd: BorrowedFd<'_>, ifindex: libc::c_uint) -> io::Result<()> {
     // reads exactly `addrlen` (= 20) bytes from a valid stack
     // pointer; the cast is standard sockaddr type-erasure.
     #[expect(clippy::cast_possible_truncation)]
-    let addrlen = std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+    let addrlen = mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
     let ret = unsafe {
         libc::bind(
             fd.as_raw_fd(),
@@ -145,7 +146,7 @@ fn bind_packet(fd: BorrowedFd<'_>, ifindex: libc::c_uint) -> io::Result<()> {
 #[expect(unsafe_code)]
 fn sockaddr_ll_packet(ifindex: libc::c_uint) -> libc::sockaddr_ll {
     // SAFETY: see fn comment.
-    let mut sa: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
+    let mut sa: libc::sockaddr_ll = unsafe { mem::zeroed() };
 
     sa.sll_family = libc::AF_PACKET as libc::c_ushort;
     // Kernel reads `sll_protocol` as `__be16`.

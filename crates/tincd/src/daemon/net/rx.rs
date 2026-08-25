@@ -19,9 +19,18 @@ use crate::graph::NodeId;
 use tinc_crypto::os_rng;
 use tinc_device::{Device, GroBucket};
 
+use super::helpers;
+#[cfg(target_os = "macos")]
+use super::macos_rx;
+use crate::set_nosigpipe;
+use crate::shard;
+use crate::shard::RxDstMemo;
 use nix::errno::Errno;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use nix::sys::socket::{MsgFlags, recvmmsg};
+use std::mem;
+use std::net::Ipv4Addr;
+use std::os::fd::RawFd;
 
 /// Cap on inbound pre-auth meta conns. `Tarpit` is per-IP; a
 /// many-source slowloris walks past it. 64 ≫ any legit cold-start
@@ -37,7 +46,7 @@ impl Daemon {
         // children for free.
         let (sock, peer_sockaddr) = match listener.tcp.accept() {
             Ok(pair) => {
-                crate::set_nosigpipe(&pair.0);
+                set_nosigpipe(&pair.0);
                 pair
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -63,7 +72,7 @@ impl Daemon {
             log::error!(target: "tincd::conn",
                         "accept returned non-IP family {:?}",
                         peer_sockaddr.family());
-            (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+            (Ipv4Addr::UNSPECIFIED, 0).into()
         };
 
         // Checked after accept: refusing to accept would busy-loop
@@ -130,7 +139,7 @@ impl Daemon {
     /// `gro = None` (`gro_enabled` false, or count == 1): immediate
     /// device write, no coalesce attempt.
     fn rx_fast_sink(device: &mut Box<dyn Device>, gro: &mut Option<GroBucket>, data: &mut [u8]) {
-        super::helpers::gro_offer_or_write(device.as_mut(), gro, data);
+        helpers::gro_offer_or_write(device.as_mut(), gro, data);
     }
 
     /// Wire layout: `[dst_id:6][src_id:6][sptps...]`. The 12-byte
@@ -167,7 +176,7 @@ impl Daemon {
     /// Linux: one recvmmsg(64). macOS: recvfrom loop.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn udp_recv_phase1(
-        fd: std::os::fd::RawFd,
+        fd: RawFd,
         batch: &mut UdpRxBatch,
         meta: &mut [(u16, Option<SocketAddr>); UDP_RX_BATCH],
     ) -> usize {
@@ -205,12 +214,12 @@ impl Daemon {
     /// and as the macOS `ENOSYS` fallback.
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     fn udp_recv_phase1(
-        fd: std::os::fd::RawFd,
+        fd: RawFd,
         batch: &mut UdpRxBatch,
         meta: &mut [(u16, Option<SocketAddr>); UDP_RX_BATCH],
     ) -> usize {
         #[cfg(target_os = "macos")]
-        if let Some(n) = super::macos_rx::phase1(fd, batch, meta) {
+        if let Some(n) = macos_rx::phase1(fd, batch, meta) {
             return n;
         }
         let mut count = 0;
@@ -282,8 +291,8 @@ impl Daemon {
         } else {
             self.tx_snap.take()
         };
-        let mut rx_fast_scratch = std::mem::take(&mut self.dp.rx_fast_scratch);
-        let mut dst_memo = crate::shard::RxDstMemo::default();
+        let mut rx_fast_scratch = mem::take(&mut self.dp.rx_fast_scratch);
+        let mut dst_memo = RxDstMemo::default();
         for (idx, &(n, peer)) in meta.iter().enumerate().take(count) {
             let n = usize::from(n);
             if n == 0 {
@@ -306,9 +315,8 @@ impl Daemon {
             // and either coalesces into it or flushes-first. Same
             // bucket, same handoff, no reordering.
             if let Some(snap) = snap.as_ref()
-                && let Some(target) = crate::shard::rx_probe(snap, pkt)
-                && let Ok(len) =
-                    crate::shard::rx_open(&target, snap, &mut rx_fast_scratch, &mut dst_memo)
+                && let Some(target) = shard::rx_probe(snap, pkt)
+                && let Ok(len) = shard::rx_open(&target, snap, &mut rx_fast_scratch, &mut dst_memo)
             {
                 target.handles.stats.add_in(1, len as u64);
                 // Consumed. Replay window is advanced — the slow
@@ -485,7 +493,7 @@ impl Daemon {
                 // relayed-to-us would cache the relay's addr.
                 let direct = dst_id.is_null();
                 if let Some(peer_addr) = peer.filter(|_| direct) {
-                    super::helpers::confirm_udp_addr(
+                    helpers::confirm_udp_addr(
                         &mut self.dp.tunnels,
                         &self.listeners,
                         &self.tunnel_handles,
@@ -562,7 +570,7 @@ impl Daemon {
         // relay forever (bug audit `deef1268`).
         let direct = dst_id.is_null();
         if let Some(peer_addr) = peer.filter(|_| direct) {
-            super::helpers::confirm_udp_addr(
+            helpers::confirm_udp_addr(
                 &mut self.dp.tunnels,
                 &self.listeners,
                 &self.tunnel_handles,

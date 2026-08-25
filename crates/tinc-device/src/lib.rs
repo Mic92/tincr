@@ -18,6 +18,7 @@
 #![cfg_attr(not(target_os = "linux"), expect(unused_imports))]
 
 use std::io;
+use std::os::fd::BorrowedFd;
 
 // Types
 
@@ -158,7 +159,7 @@ pub trait Device: Send {
     /// Borrowed fd for `EventLoop::add`. `Dummy` returns `None`;
     /// daemon skips the register. `BorrowedFd` ties the lifetime to
     /// `&self` so callers cannot outlive the backing `OwnedFd`.
-    fn fd(&self) -> Option<std::os::fd::BorrowedFd<'_>>;
+    fn fd(&self) -> Option<BorrowedFd<'_>>;
 
     /// Drain available frames into the arena. The 10G ingest seam.
     ///
@@ -272,7 +273,7 @@ impl Device for Dummy {
     }
 
     /// No fd. C leaves `device_fd = -1`; `None` here.
-    fn fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+    fn fd(&self) -> Option<BorrowedFd<'_>> {
         None
     }
 }
@@ -295,14 +296,14 @@ pub(crate) fn assert_read_buf(buf: &[u8], who: &str) {
 /// `read(2)`. Datagram semantics: one call = one packet.
 #[inline]
 #[cfg(unix)]
-pub(crate) fn read_fd(fd: std::os::fd::BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<usize> {
+pub(crate) fn read_fd(fd: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<usize> {
     nix::unistd::read(fd, buf).map_err(Into::into)
 }
 
 /// `write(2)`. Datagram semantics: one call = one packet.
 #[inline]
 #[cfg(unix)]
-pub(crate) fn write_fd(fd: std::os::fd::BorrowedFd<'_>, buf: &[u8]) -> io::Result<usize> {
+pub(crate) fn write_fd(fd: BorrowedFd<'_>, buf: &[u8]) -> io::Result<usize> {
     nix::unistd::write(fd, buf).map_err(Into::into)
 }
 
@@ -344,6 +345,8 @@ pub use bsd::{BsdTun, BsdVariant};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::BorrowedFd;
+    use std::vec::IntoIter;
 
     // default drain()
     //
@@ -356,7 +359,7 @@ mod tests {
     /// writes the byte pattern at `buf[0..]` and returns its length;
     /// `Err(kind)` returns the error. Exhausted → `WouldBlock`.
     struct ScriptedDev {
-        script: std::vec::IntoIter<Result<Vec<u8>, io::ErrorKind>>,
+        script: IntoIter<Result<Vec<u8>, io::ErrorKind>>,
     }
     impl ScriptedDev {
         fn new(s: Vec<Result<Vec<u8>, io::ErrorKind>>) -> Self {
@@ -389,7 +392,7 @@ mod tests {
         fn mac(&self) -> Option<Mac> {
             None
         }
-        fn fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+        fn fd(&self) -> Option<BorrowedFd<'_>> {
             None
         }
     }

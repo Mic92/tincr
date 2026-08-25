@@ -299,8 +299,10 @@ impl<W: Copy> EventLoop<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::io::{Read, Write};
     use std::os::fd::AsFd;
+    use std::os::unix::net::UnixStream;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum What {
@@ -312,7 +314,7 @@ mod tests {
     /// Pins kqueue to no-`EV_CLEAR` / epoll to no-`EPOLLET`.
     #[test]
     fn partial_drain_refires_next_turn() {
-        let (mut a, mut b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let (mut a, mut b) = UnixStream::pair().expect("socketpair");
         let mut ev = EventLoop::new().unwrap();
         let id = ev.add(b.as_fd(), Io::Read, What::Conn(1)).unwrap();
 
@@ -342,9 +344,9 @@ mod tests {
     }
 
     /// `pipe()` pair — read end registered for READABLE.
-    fn mkpipe() -> (std::fs::File, std::fs::File) {
+    fn mkpipe() -> (File, File) {
         let (r, w) = nix::unistd::pipe().expect("pipe()");
-        (std::fs::File::from(r), std::fs::File::from(w))
+        (File::from(r), File::from(w))
     }
 
     /// `io_add` + `event_loop` happy path. Write to pipe, `turn()`
@@ -467,7 +469,7 @@ mod tests {
     /// Socketpair, not pipe — a pipe fd is never both.
     #[test]
     fn write_before_read_same_fd() {
-        let (mut a, b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let (mut a, b) = UnixStream::pair().expect("socketpair");
 
         let mut ev = EventLoop::new().unwrap();
         // Register `b` for both. It's immediately writable (empty

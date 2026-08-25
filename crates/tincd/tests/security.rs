@@ -8,6 +8,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
+use std::thread;
 use std::time::{Duration, Instant};
 use tincd::daemon::MAX_PENDING_META;
 
@@ -154,7 +155,7 @@ fn spliced_responders_never_authenticate() {
         source
             .set_read_timeout(Some(Duration::from_millis(100)))
             .unwrap();
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             let mut buf = [0u8; 4096];
             while Instant::now() < deadline {
                 match (&source).read(&mut buf) {
@@ -262,7 +263,7 @@ fn unauthenticated_conn_cap_rejects_then_frees() {
     let mut held = Vec::with_capacity(MAX_PENDING_META);
     loop {
         let stream = connect(&testnode, Duration::from_millis(300));
-        std::thread::sleep(Duration::from_millis(30));
+        thread::sleep(Duration::from_millis(30));
         if !is_admitted(&stream) {
             break;
         }
@@ -278,7 +279,7 @@ fn unauthenticated_conn_cap_rejects_then_frees() {
     assert!(is_admitted(held.last().unwrap()), "last slot dropped");
 
     drop(held.pop());
-    std::thread::sleep(Duration::from_millis(300));
+    thread::sleep(Duration::from_millis(300));
     let again = connect(&testnode, Duration::from_millis(500));
     assert!(is_admitted(&again), "not admitted after freeing a slot");
 

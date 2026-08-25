@@ -54,9 +54,12 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::ctl_simple;
 use crate::cmd::CmdError;
 use crate::ctl::CtlSocket;
 use crate::names::Paths;
+use std::env;
+use std::io;
 
 /// `cmd_start`. Spawn tincd, wait for the umbilical nul-byte ready
 /// signal.
@@ -151,7 +154,7 @@ pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<
     unsafe {
         cmd.pre_exec(move || {
             if libc::fcntl(theirs_fd, libc::F_SETFD, 0) == -1 {
-                return Err(std::io::Error::last_os_error());
+                return Err(io::Error::last_os_error());
             }
             Ok(())
         });
@@ -184,7 +187,7 @@ pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<
                 if !failure {
                     n -= 1;
                 }
-                let _ = std::io::stderr().write_all(&buf[..n]);
+                let _ = io::stderr().write_all(&buf[..n]);
             }
             Err(_) => {
                 failure = true;
@@ -223,7 +226,7 @@ pub fn start_with(paths: &Paths, extra_args: &[String], tincd: &Path) -> Result<
 pub fn restart(paths: &Paths, extra_args: &[String]) -> Result<(), CmdError> {
     // Best-effort stop. `ctl_simple::stop` errors if the daemon
     // isn't running (connect fails); that's the no-op case.
-    let _ = super::ctl_simple::stop(paths);
+    let _ = ctl_simple::stop(paths);
     start(paths, extra_args)
 }
 
@@ -238,10 +241,10 @@ pub fn restart(paths: &Paths, extra_args: &[String]) -> Result<(), CmdError> {
 /// (`/proc/self/exe` readlink) and macOS (`_NSGetExecutablePath`).
 /// More reliable than argv[0].
 fn find_tincd() -> PathBuf {
-    if let Ok(p) = std::env::var("TINCD_PATH") {
+    if let Ok(p) = env::var("TINCD_PATH") {
         return PathBuf::from(p);
     }
-    if let Ok(exe) = std::env::current_exe()
+    if let Ok(exe) = env::current_exe()
         && let Some(dir) = exe.parent()
     {
         let sibling = dir.join("tincd");
@@ -257,10 +260,10 @@ fn find_tincd() -> PathBuf {
 /// on fd 2. The umbilical's teed log lines go to *our* stderr, so
 /// colorize iff our stderr is a colour-capable tty.
 fn use_ansi_escapes_stderr() -> bool {
-    if !std::io::stderr().is_terminal() {
+    if !io::stderr().is_terminal() {
         return false;
     }
-    match std::env::var("TERM") {
+    match env::var("TERM") {
         Ok(term) => term != "dumb",
         Err(_) => false,
     }
@@ -277,7 +280,11 @@ fn use_ansi_escapes_stderr() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::names::Paths;
+    use crate::names::PathsInput;
+    use std::env;
     use std::ffi::OsStr;
+    use std::fs;
 
     /// RAII env-var setter. `set_var`/`remove_var` are unsafe in
     /// edition 2024 (multi-threaded env-mutation race). Consolidate
@@ -290,7 +297,7 @@ mod tests {
         fn set(k: &'static str, v: impl AsRef<OsStr>) -> Self {
             // SAFETY: nextest runs each test in its own process; no
             // env-mutation race with parallel tests.
-            unsafe { std::env::set_var(k, v) };
+            unsafe { env::set_var(k, v) };
             Self(k)
         }
     }
@@ -298,7 +305,7 @@ mod tests {
         #[expect(unsafe_code)]
         fn drop(&mut self) {
             // SAFETY: same as `set` — single-threaded test process.
-            unsafe { std::env::remove_var(self.0) }
+            unsafe { env::remove_var(self.0) }
         }
     }
 
@@ -318,11 +325,11 @@ mod tests {
     #[test]
     fn start_proceeds_past_missing_pidfile() {
         let dir = tempfile::tempdir().unwrap();
-        let mut paths = crate::names::Paths::for_cli(&crate::names::PathsInput {
+        let mut paths = Paths::for_cli(&PathsInput {
             confbase: Some(dir.path().to_owned()),
             ..Default::default()
         });
-        paths.resolve_runtime(&crate::names::PathsInput {
+        paths.resolve_runtime(&PathsInput {
             confbase: Some(dir.path().to_owned()),
             pidfile: Some(dir.path().join("nope.pid")),
             ..Default::default()
@@ -343,13 +350,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pf = dir.path().join("tinc.pid");
         // Garbage. Pidfile::read returns CtlError::PidfileMalformed.
-        std::fs::write(&pf, "not a pidfile\n").unwrap();
+        fs::write(&pf, "not a pidfile\n").unwrap();
 
-        let mut paths = crate::names::Paths::for_cli(&crate::names::PathsInput {
+        let mut paths = Paths::for_cli(&PathsInput {
             confbase: Some(dir.path().to_owned()),
             ..Default::default()
         });
-        paths.resolve_runtime(&crate::names::PathsInput {
+        paths.resolve_runtime(&PathsInput {
             confbase: Some(dir.path().to_owned()),
             pidfile: Some(pf),
             ..Default::default()

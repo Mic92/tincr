@@ -70,6 +70,9 @@ use crate::keypair;
 use crate::names::{Paths, check_id};
 
 use std::fmt::Write as _;
+use std::fs::File;
+use std::io;
+use std::str;
 use tinc_crypto::b64;
 use tinc_crypto::sign::{PUBLIC_LEN, SIG_LEN, verify};
 
@@ -89,12 +92,12 @@ fn slurp(path: Option<&Path>) -> Result<Vec<u8>, CmdError> {
     let mut buf = Vec::new();
     match path {
         Some(p) => {
-            std::fs::File::open(p)
+            File::open(p)
                 .and_then(|mut f| f.read_to_end(&mut buf))
                 .map_err(io_err(p))?;
         }
         None => {
-            std::io::stdin()
+            io::stdin()
                 .read_to_end(&mut buf)
                 .map_err(io_err("<stdin>"))?;
         }
@@ -259,8 +262,7 @@ pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verifi
     // Split on single spaces, expect exactly 5 fields:
     // `["Signature", "=", name, t, sig]`. Sign always emits this
     // canonical form; non-canonical spacing only comes from hand-editing.
-    let header =
-        std::str::from_utf8(header).map_err(|_| CmdError::BadInput("Invalid input".into()))?;
+    let header = str::from_utf8(header).map_err(|_| CmdError::BadInput("Invalid input".into()))?;
     let mut fields = header.split(' ');
     let (Some("Signature"), Some("="), Some(signer_name), Some(t_str), Some(sig_b64), None) = (
         fields.next(),

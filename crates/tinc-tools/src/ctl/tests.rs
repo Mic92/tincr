@@ -1,5 +1,8 @@
 use super::*;
+use std::fs;
+use std::io::Cursor;
 use std::io::Write;
+use std::path::Path;
 use std::thread;
 
 /// Round-trip through `from_i32`. Unknown → None.
@@ -20,7 +23,7 @@ fn pidfile_parse() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pid");
     let cookie = "a".repeat(64);
-    std::fs::write(&path, format!("12345 {cookie} 127.0.0.1 port 655\n")).unwrap();
+    fs::write(&path, format!("12345 {cookie} 127.0.0.1 port 655\n")).unwrap();
 
     let pf = Pidfile::read(&path).unwrap();
     assert_eq!(pf.pid, 12345);
@@ -35,7 +38,7 @@ fn pidfile_cookie_validated() {
     let path = dir.path().join("pid");
 
     // Too short.
-    std::fs::write(&path, "1 abc 127.0.0.1 port 655\n").unwrap();
+    fs::write(&path, "1 abc 127.0.0.1 port 655\n").unwrap();
     assert!(matches!(
         Pidfile::read(&path),
         Err(CtlError::PidfileMalformed)
@@ -43,7 +46,7 @@ fn pidfile_cookie_validated() {
 
     // Non-hex.
     let bad = "z".repeat(64);
-    std::fs::write(&path, format!("1 {bad} 127.0.0.1 port 655\n")).unwrap();
+    fs::write(&path, format!("1 {bad} 127.0.0.1 port 655\n")).unwrap();
     assert!(matches!(
         Pidfile::read(&path),
         Err(CtlError::PidfileMalformed)
@@ -51,7 +54,7 @@ fn pidfile_cookie_validated() {
 
     // Exactly right (lowercase hex, 64 chars).
     let good = "0123456789abcdef".repeat(4);
-    std::fs::write(&path, format!("1 {good} 127.0.0.1 port 655\n")).unwrap();
+    fs::write(&path, format!("1 {good} 127.0.0.1 port 655\n")).unwrap();
     assert!(Pidfile::read(&path).is_ok());
 
     // Uppercase hex also passes — `is_ascii_hexdigit` accepts
@@ -60,7 +63,7 @@ fn pidfile_cookie_validated() {
     // is case-sensitive, so uppercase would *fail auth* — but
     // that's a different, more useful error.
     let upper = "0123456789ABCDEF".repeat(4);
-    std::fs::write(&path, format!("1 {upper} 127.0.0.1 port 655\n")).unwrap();
+    fs::write(&path, format!("1 {upper} 127.0.0.1 port 655\n")).unwrap();
     assert!(Pidfile::read(&path).is_ok());
 }
 
@@ -72,21 +75,21 @@ fn pidfile_shape_enforced() {
     let cookie = "f".repeat(64);
 
     // Missing port: only 3 tokens after pid.
-    std::fs::write(&path, format!("1 {cookie} 127.0.0.1\n")).unwrap();
+    fs::write(&path, format!("1 {cookie} 127.0.0.1\n")).unwrap();
     assert!(matches!(
         Pidfile::read(&path),
         Err(CtlError::PidfileMalformed)
     ));
 
     // `port` literal wrong.
-    std::fs::write(&path, format!("1 {cookie} 127.0.0.1 prt 655\n")).unwrap();
+    fs::write(&path, format!("1 {cookie} 127.0.0.1 prt 655\n")).unwrap();
     assert!(matches!(
         Pidfile::read(&path),
         Err(CtlError::PidfileMalformed)
     ));
 
     // pid not a number.
-    std::fs::write(&path, format!("notapid {cookie} 127.0.0.1 port 655\n")).unwrap();
+    fs::write(&path, format!("notapid {cookie} 127.0.0.1 port 655\n")).unwrap();
     assert!(matches!(
         Pidfile::read(&path),
         Err(CtlError::PidfileMalformed)
@@ -96,7 +99,7 @@ fn pidfile_shape_enforced() {
 /// Pidfile missing → distinct error.
 #[test]
 fn pidfile_missing() {
-    let err = Pidfile::read(std::path::Path::new("/nonexistent/pidfile")).unwrap_err();
+    let err = Pidfile::read(Path::new("/nonexistent/pidfile")).unwrap_err();
     assert!(matches!(err, CtlError::PidfileMissing { .. }));
     assert!(err.to_string().contains("Could not open pid file"));
 }
@@ -636,7 +639,7 @@ fn recv_data_after_recv_line_shared_buffer() {
     // Cursor is Read+Write but we only read. Direct CtlSocket
     // construction (bypass connect/handshake). The greeting
     // exchange isn't under test; the buffer behavior is.
-    let stream = std::io::Cursor::new(wire);
+    let stream = Cursor::new(wire);
     let shared = Rc::new(RefCell::new(stream));
     let mut ctl = CtlSocket {
         reader: BufReader::new(ReadHalf(Rc::clone(&shared))),
@@ -677,7 +680,7 @@ fn recv_data_after_recv_line_shared_buffer() {
 #[test]
 fn recv_data_short_is_error() {
     let wire = b"18 15 100\nshort".to_vec();
-    let stream = std::io::Cursor::new(wire);
+    let stream = Cursor::new(wire);
     let shared = Rc::new(RefCell::new(stream));
     let mut ctl = CtlSocket {
         reader: BufReader::new(ReadHalf(Rc::clone(&shared))),
@@ -706,7 +709,7 @@ fn recv_data_short_is_error() {
 #[test]
 fn send_int2_wire() {
     let buf: Vec<u8> = Vec::new();
-    let stream = std::io::Cursor::new(buf);
+    let stream = Cursor::new(buf);
     let shared = Rc::new(RefCell::new(stream));
     let mut ctl = CtlSocket {
         reader: BufReader::new(ReadHalf(Rc::clone(&shared))),

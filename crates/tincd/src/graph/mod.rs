@@ -13,6 +13,7 @@
 //! the `via` hint used for UDP hole-punching always points at the last
 //! real relay.
 
+use crate::dispatch::ConnOptions;
 use std::collections::{BTreeMap, VecDeque};
 
 // IDs
@@ -27,7 +28,7 @@ pub struct EdgeId(pub u32);
 
 /// The one option bit BFS reads. Sourced from [`crate::dispatch::ConnOptions::INDIRECT`] so the bit
 /// value lives in exactly one place.
-pub const OPTION_INDIRECT: u32 = crate::dispatch::ConnOptions::INDIRECT.bits();
+pub const OPTION_INDIRECT: u32 = ConnOptions::INDIRECT.bits();
 
 /// Stickiness band for [`Graph::sssp_sticky`]: keep the previous
 /// nexthop if its path cost is within this percent of the new best.

@@ -1,8 +1,13 @@
 use super::*;
+use crate::cmd::init;
 use crate::cmd::invite;
 use crate::names::PathsInput;
+use crate::testutil::ConfDir;
 use std::fs;
+#[cfg(not(target_os = "macos"))]
+use std::os::unix::fs::PermissionsExt;
 use std::thread;
+use std::time::SystemTime;
 
 // Kind parsing: argv → Kind. The `reachable nodes` shift must happen
 // before the arity check.
@@ -613,11 +618,7 @@ fn inv_dir_perms() {
     let (d, paths) = setup_inv();
     let inv_dir = d.path().join("vpn/invitations");
     // chmod 0 — readdir fails.
-    fs::set_permissions(
-        &inv_dir,
-        std::os::unix::fs::PermissionsExt::from_mode(0o000),
-    )
-    .unwrap();
+    fs::set_permissions(&inv_dir, PermissionsExt::from_mode(0o000)).unwrap();
 
     let err = dump_invitations(&paths).unwrap_err();
     // Error, not Ok(empty). ENOENT would be Ok(empty); EACCES
@@ -625,11 +626,7 @@ fn inv_dir_perms() {
     assert!(matches!(err, CmdError::Io { .. }));
 
     // Restore so tempdir cleanup works.
-    fs::set_permissions(
-        &inv_dir,
-        std::os::unix::fs::PermissionsExt::from_mode(0o755),
-    )
-    .unwrap();
+    fs::set_permissions(&inv_dir, PermissionsExt::from_mode(0o755)).unwrap();
 }
 
 /// Per-file permission denied → SKIP, not error. The other files
@@ -643,7 +640,7 @@ fn inv_file_perms_skip() {
     // One bad-perms, one good.
     let bad = inv_dir.join(mk_filename(0));
     fs::write(&bad, "Name = unreadable\n").unwrap();
-    fs::set_permissions(&bad, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    fs::set_permissions(&bad, PermissionsExt::from_mode(0o000)).unwrap();
 
     fs::write(inv_dir.join(mk_filename(1)), "Name = good\n").unwrap();
 
@@ -653,7 +650,7 @@ fn inv_file_perms_skip() {
     assert_eq!(rows[0].invitee, "good");
 
     // Restore so cleanup works.
-    fs::set_permissions(&bad, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    fs::set_permissions(&bad, PermissionsExt::from_mode(0o600)).unwrap();
 }
 
 // Contract test: `tinc invite bob` writes a file → `tinc dump
@@ -664,10 +661,10 @@ fn inv_file_perms_skip() {
 /// `build_invitation_file`.
 #[test]
 fn inv_roundtrip_with_invite() {
-    let cd = crate::testutil::ConfDir::bare();
+    let cd = ConfDir::bare();
     let paths = cd.paths().clone();
     let cb = cd.confbase();
-    crate::cmd::init::run(&paths, "alice").unwrap();
+    init::run(&paths, "alice").unwrap();
     // invite requires an Address line in the host file.
     fs::write(
         cb.join("hosts/alice"),
@@ -679,7 +676,7 @@ fn inv_roundtrip_with_invite() {
     .unwrap();
 
     // `now` is parameterized for sweep_expired tests; pass real time.
-    let now = std::time::SystemTime::now();
+    let now = SystemTime::now();
     let result = invite::invite(&paths, None, "bob", now).unwrap();
     // Only the written file matters here, not the returned URL.
     let _ = result;

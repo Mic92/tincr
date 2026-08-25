@@ -7,7 +7,11 @@ use std::path::PathBuf;
 use tinc_conf::vars::{self, VarFlags};
 
 use super::{CmdError, TmpGuard, exchange, io_err};
+use crate::ctl::Pidfile;
 use crate::names::{self, Paths};
+use std::fmt;
+use std::io;
+use std::path::Path;
 use std::str::FromStr;
 
 /// The four operations after argv normalization; `get` with a value has
@@ -58,8 +62,8 @@ pub enum Warning {
     Removing { variable: String, old_value: String },
 }
 
-impl std::fmt::Display for Warning {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Warning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Warning::Obsolete(v) => {
                 write!(f, "Warning: {v} is an obsolete variable!")
@@ -287,7 +291,7 @@ fn validate_subnet(value: &str) -> Result<(), CmdError> {
 ///
 /// # Errors
 /// File doesn't exist or read error.
-pub fn run_get(path: &std::path::Path, variable: &str) -> Result<Vec<String>, CmdError> {
+pub fn run_get(path: &Path, variable: &str) -> Result<Vec<String>, CmdError> {
     let contents = fs::read_to_string(path).map_err(io_err(path))?;
 
     let mut found = Vec::new();
@@ -317,7 +321,7 @@ pub fn run_get(path: &std::path::Path, variable: &str) -> Result<Vec<String>, Cm
 /// exists, they append.
 ///
 /// Returns the per-line `Removing` warnings.
-pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<Vec<Warning>, CmdError> {
+pub fn run_edit(path: &Path, intent: &Intent) -> Result<Vec<Warning>, CmdError> {
     debug_assert_ne!(intent.action, Action::Get, "use run_get for Get");
 
     let contents = fs::read_to_string(path).map_err(io_err(path))?;
@@ -428,7 +432,7 @@ pub fn run_edit(path: &std::path::Path, intent: &Intent) -> Result<Vec<Warning>,
 ///
 /// `clippy::needless_pass_by_value`: `.map_err(tmpfile_werr)` passes by
 /// value; closure is uglier.
-fn tmpfile_werr(e: std::io::Error) -> CmdError {
+fn tmpfile_werr(e: io::Error) -> CmdError {
     CmdError::Io {
         path: PathBuf::from("<tmpfile>"),
         err: e,
@@ -504,7 +508,7 @@ pub fn run(
         // resolve_runtime must have run for pidfile() to be populated;
         // panicking here indicates a binary bug, not user error.
         let pidfile_path = paths.pidfile();
-        if let Ok(pf) = crate::ctl::Pidfile::read(pidfile_path) {
+        if let Ok(pf) = Pidfile::read(pidfile_path) {
             return Ok((ConfigOutput::Got(vec![pf.port]), Vec::new()));
         }
         // Pidfile missing means the daemon is down and the configured

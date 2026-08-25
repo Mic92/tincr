@@ -21,10 +21,13 @@ use rand_core::Rng;
 use tinc_crypto::os_rng;
 use tinc_proto::msg::MtuInfo;
 
+use super::intervals::REQ_KEY_RETRY;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use nix::sys::socket::{
     AddressFamily, SockFlag, SockType, SockaddrStorage, connect, getsockopt, socket, sockopt,
 };
+use std::mem;
+use std::sync::atomic;
 
 /// Ask the kernel for its PMTU cache entry to this peer; subtract
 /// our encapsulation overhead to get the tinc-layer MTU. Makes PMTU
@@ -157,7 +160,7 @@ impl Daemon {
         // first HandshakeDone (probes start after the SPTPS dance).
         if let Some(h) = self.tunnel_handles.get(&peer) {
             let m = self.dp.tunnels.get(&peer).map_or(0, TunnelState::minmtu);
-            h.minmtu.store(m, std::sync::atomic::Ordering::Relaxed);
+            h.minmtu.store(m, atomic::Ordering::Relaxed);
         }
         false
     }
@@ -259,7 +262,7 @@ impl Daemon {
                 // REQ_KEY_RETRY debounce.
                 if tunnel
                     .last_req_key
-                    .is_some_and(|l| now.duration_since(l) >= super::intervals::REQ_KEY_RETRY)
+                    .is_some_and(|l| now.duration_since(l) >= REQ_KEY_RETRY)
                 {
                     log::debug!(target: "tincd::net",
                                 "No key after 10 seconds, restarting SPTPS");
@@ -413,7 +416,7 @@ impl Daemon {
             tunnel.status.udp_confirmed = false;
             tunnel.udp_addr_cached = None;
             if let Some(h) = self.tunnel_handles.get(&target) {
-                h.minmtu.store(0, std::sync::atomic::Ordering::Relaxed);
+                h.minmtu.store(0, atomic::Ordering::Relaxed);
             }
             // Fall through: discovery starts immediately, while data
             // uses the existing TCP path until UDP is authenticated.
@@ -436,7 +439,7 @@ impl Daemon {
                 let maxrecentlen = tunnel
                     .pmtu
                     .as_mut()
-                    .map_or(0, |p| std::mem::take(&mut p.maxrecentlen));
+                    .map_or(0, |p| mem::take(&mut p.maxrecentlen));
                 if maxrecentlen > 0 {
                     nw |= self.send_udp_probe_reply(target, target_name, maxrecentlen);
                 }
@@ -520,7 +523,7 @@ impl Daemon {
         {
             return false;
         }
-        let udp_rx_len = std::mem::take(&mut tunnel.udp_rx_maxlen);
+        let udp_rx_len = mem::take(&mut tunnel.udp_rx_maxlen);
         tunnel.mtu_info_sent = Some(now);
 
         let Some(conn_id) = self.conn_for_nexthop(target) else {

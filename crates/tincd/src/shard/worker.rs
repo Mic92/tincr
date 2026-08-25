@@ -20,6 +20,12 @@ use super::{RxDstMemo, TxSnapshot, rx_open, rx_probe, seal_super, tx_probe};
 use crate::daemon::net::helpers::gro_offer_or_write;
 use crate::egress::{TxBatch, UdpEgress};
 use crate::listen::unmap;
+use std::io::IoSliceMut;
+use std::mem;
+use std::net::SocketAddrV4;
+use std::net::SocketAddrV6;
+use std::thread::Builder;
+use std::thread::JoinHandle;
 use tinc_device::{Device, DeviceArena, DrainResult, GroBucket, VirtioNetHdr, tso_split};
 
 const RX_BATCH: usize = 64;
@@ -59,7 +65,7 @@ pub(crate) struct WorkerHandle {
     pub punt_efd: Arc<OwnedFd>,
     pub mailbox: Arc<SnapMailbox>,
     stop: Arc<AtomicBool>,
-    join: Option<std::thread::JoinHandle<()>>,
+    join: Option<JoinHandle<()>>,
 }
 
 impl WorkerHandle {
@@ -101,7 +107,7 @@ pub(crate) fn spawn(
         let punt_efd = Arc::clone(&punt_efd);
         let mailbox = Arc::clone(&mailbox);
         let stop = Arc::clone(&stop);
-        std::thread::Builder::new()
+        Builder::new()
             .name(format!("tinc-shard{idx}"))
             .spawn(move || run(&udp, egress, tun, &punt, &punt_efd, &mailbox, &stop))
             .expect("spawn shard worker")
@@ -174,7 +180,7 @@ fn run(
         }
 
         let mut punted = false;
-        let mut gro = Some(std::mem::take(&mut gro_spare));
+        let mut gro = Some(mem::take(&mut gro_spare));
         for fd in udp {
             punted |= rx_batch(
                 fd,
@@ -302,9 +308,9 @@ fn rx_batch(
     scratch: &mut Vec<u8>,
 ) -> bool {
     let metas: Vec<(usize, Option<SocketAddr>)> = {
-        let mut iovs: Vec<[std::io::IoSliceMut<'_>; 1]> = bufs
+        let mut iovs: Vec<[IoSliceMut<'_>; 1]> = bufs
             .iter_mut()
-            .map(|b| [std::io::IoSliceMut::new(&mut b[..])])
+            .map(|b| [IoSliceMut::new(&mut b[..])])
             .collect();
         let mut data =
             nix::sys::socket::MultiHeaders::<SockaddrStorage>::preallocate(RX_BATCH, None);
@@ -348,13 +354,10 @@ fn rx_batch(
 
 fn sockaddr_to_std(ss: &SockaddrStorage) -> Option<SocketAddr> {
     if let Some(sin) = ss.as_sockaddr_in() {
-        return Some(SocketAddr::V4(std::net::SocketAddrV4::new(
-            sin.ip(),
-            sin.port(),
-        )));
+        return Some(SocketAddr::V4(SocketAddrV4::new(sin.ip(), sin.port())));
     }
     ss.as_sockaddr_in6().map(|sin6| {
-        SocketAddr::V6(std::net::SocketAddrV6::new(
+        SocketAddr::V6(SocketAddrV6::new(
             sin6.ip(),
             sin6.port(),
             sin6.flowinfo(),

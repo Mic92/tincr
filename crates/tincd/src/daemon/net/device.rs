@@ -7,8 +7,16 @@ use std::time::Instant;
 
 use crate::tunnel::TunnelState;
 
+use super::ListenerSlot;
+use super::helpers;
+use crate::egress::TxBatch;
+use crate::graph::Graph;
 use crate::graph::NodeId;
+use crate::inthash::IntHashMap;
+use crate::shard;
 use crate::shard::TunnelHandles;
+use crate::shard::TxSnapshot;
+use std::mem;
 
 impl Daemon {
     /// Drain loop. LT epoll re-fires next turn if we leave bytes
@@ -164,8 +172,8 @@ impl Daemon {
                     // Same `mem::take` dance as `device_arena`:
                     // `forward_packet` borrows `&mut self`, the slice
                     // borrow conflicts.
-                    let mut scratch = std::mem::take(scratch);
-                    let mut tso_lens = std::mem::take(&mut self.dp.tso_lens);
+                    let mut scratch = mem::take(scratch);
+                    let mut tso_lens = mem::take(&mut self.dp.tso_lens);
 
                     let hdr = tinc_device::VirtioNetHdr {
                         flags: 0,    // unused by tso_split (it always csums)
@@ -307,11 +315,11 @@ impl Daemon {
     /// path; the wire result is identical to `count` immediate
     /// sends, so the error handling is too.
     pub(super) fn ship_tx_batch(
-        batch: &mut crate::egress::TxBatch,
-        listeners: &mut [super::ListenerSlot],
-        tunnels: &mut crate::inthash::IntHashMap<NodeId, TunnelState>,
-        graph: &crate::graph::Graph,
-        tunnel_handles: &crate::inthash::IntHashMap<NodeId, Arc<TunnelHandles>>,
+        batch: &mut TxBatch,
+        listeners: &mut [ListenerSlot],
+        tunnels: &mut IntHashMap<NodeId, TunnelState>,
+        graph: &Graph,
+        tunnel_handles: &IntHashMap<NodeId, Arc<TunnelHandles>>,
         now: Instant,
     ) {
         let Some((b, sock, relay_nid, origlen)) = batch.take() else {
@@ -344,13 +352,13 @@ impl Daemon {
                 // PMTU shrank under us; frames in this batch are
                 // lost (kernel rejected the whole sendmsg) — same
                 // outcome as the per-frame path, just `count×`.
-                super::helpers::handle_udp_emsgsize(tunnels, graph, relay_nid, origlen);
-            } else if super::helpers::is_udp_unreachable_errno(&e) {
+                helpers::handle_udp_emsgsize(tunnels, graph, relay_nid, origlen);
+            } else if helpers::is_udp_unreachable_errno(&e) {
                 let relay_name = graph
                     .node(relay_nid)
                     .map_or("<gone>", |n| n.name.as_str())
                     .to_owned();
-                super::helpers::handle_udp_unreachable(
+                helpers::handle_udp_unreachable(
                     tunnels,
                     tunnel_handles,
                     relay_nid,
@@ -396,7 +404,7 @@ impl Daemon {
         // `gro_bucket = None` and fall through to the immediate
         // write. `data` is `[synth eth(14)][IP]`; the helper skips
         // the eth header.
-        super::helpers::gro_offer_or_write(self.device.as_mut(), &mut self.dp.gro_bucket, data);
+        helpers::gro_offer_or_write(self.device.as_mut(), &mut self.dp.gro_bucket, data);
     }
 
     /// Ship the GRO bucket. `bucket.flush()` finalizes `vnet_hdr` +
@@ -426,7 +434,7 @@ impl Daemon {
     /// value would force the restore inside this fn for both arms.
     fn tx_fast_super(
         &mut self,
-        snap: Option<&crate::shard::TxSnapshot>,
+        snap: Option<&TxSnapshot>,
         count: usize,
         scratch: &[u8],
         lens: &[usize],
@@ -441,7 +449,7 @@ impl Daemon {
         if alloc < 2 {
             return false;
         }
-        let Some(target) = crate::shard::tx_probe(snap, &scratch[..lens[0]], alloc) else {
+        let Some(target) = shard::tx_probe(snap, &scratch[..lens[0]], alloc) else {
             return false;
         };
         // target.sock is the listener index from udp_addr.1 — same
@@ -455,7 +463,7 @@ impl Daemon {
         // Disjoint dp fields (tx_batch / tx_scratch / tunnels);
         // destructure once instead of take+restore.
         let dp = &mut self.dp;
-        let r = crate::shard::seal_super(
+        let r = shard::seal_super(
             &target,
             tinc_device::DeviceArena::STRIDE,
             lens,
@@ -473,12 +481,7 @@ impl Daemon {
             Err((relay, origlen)) => {
                 // PMTU shrank under us; frames lost, inner-TCP
                 // retransmits. Cap maxmtu for the next super.
-                super::helpers::handle_udp_emsgsize(
-                    &mut self.dp.tunnels,
-                    &self.graph,
-                    relay,
-                    origlen,
-                );
+                helpers::handle_udp_emsgsize(&mut self.dp.tunnels, &self.graph, relay, origlen);
             }
         }
         // Batch already shipped inside seal_super.

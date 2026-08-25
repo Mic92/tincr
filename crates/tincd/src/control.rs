@@ -42,6 +42,12 @@ use std::os::unix::net::UnixListener;
 use std::path::Path;
 
 use rand_core::Rng;
+use std::fs;
+use std::fs::Permissions;
+use std::os::fd::AsFd;
+use std::os::fd::BorrowedFd;
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use tinc_crypto::os_rng;
 
 /// 32 random bytes → 64 hex chars.
@@ -127,7 +133,7 @@ pub(crate) struct ControlSocket {
     /// pidfile and socket; our drop does just the socket (pidfile
     /// is the daemon's responsibility, see
     /// `Daemon::drop`).
-    path: std::path::PathBuf,
+    path: PathBuf,
 }
 
 /// The `EADDRINUSE` distinguishing case for `bind()`. We've already
@@ -155,7 +161,7 @@ impl ControlSocket {
         // `UnixStream::connect`: if it succeeds, something's
         // there. If `ECONNREFUSED` (or `ENOENT` — no socket file
         // at all), good, proceed.
-        if std::os::unix::net::UnixStream::connect(path).is_ok() {
+        if UnixStream::connect(path).is_ok() {
             return Err(BindError::AlreadyRunning);
         }
         // The error case is the happy path. We don't inspect WHICH
@@ -163,8 +169,8 @@ impl ControlSocket {
         // is healthily listening there", which is what we want.
 
         // unlink stale (only if it's actually a socket).
-        if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
-            let _ = std::fs::remove_file(path);
+        if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket()) {
+            let _ = fs::remove_file(path);
         }
 
         // bind under umask 0077.
@@ -180,8 +186,7 @@ impl ControlSocket {
             r.map_err(BindError::Io)?
         };
         // Backstop in case the umask bracket is ever refactored away.
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-            .map_err(BindError::Io)?;
+        fs::set_permissions(path, Permissions::from_mode(0o700)).map_err(BindError::Io)?;
 
         // listen.
         // `UnixListener::bind` already calls `listen()` internally
@@ -219,7 +224,7 @@ impl ControlSocket {
     /// `io::Error` from `accept()`. `WouldBlock` is normal (spurious
     /// wakeup or another thread raced us — but we're single-threaded).
     /// Anything else is an actual problem.
-    pub(crate) fn accept(&self) -> io::Result<std::os::unix::net::UnixStream> {
+    pub(crate) fn accept(&self) -> io::Result<UnixStream> {
         let (stream, _addr) = self.listener.accept()?;
         // O_NONBLOCK on the new fd. accept4(SOCK_NONBLOCK) would
         // do this atomically, but std's accept() doesn't expose
@@ -230,9 +235,9 @@ impl ControlSocket {
     }
 }
 
-impl std::os::fd::AsFd for ControlSocket {
-    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
-        std::os::fd::AsFd::as_fd(&self.listener)
+impl AsFd for ControlSocket {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        AsFd::as_fd(&self.listener)
     }
 }
 
@@ -242,7 +247,7 @@ impl Drop for ControlSocket {
     /// also unlinks the pidfile;
     /// we let `Daemon` own that (it created it).
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -250,9 +255,16 @@ impl Drop for ControlSocket {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     use crate::testutil::tmpdir;
+    use std::fs;
+    use std::fs::Permissions;
+    use std::os::unix::net::UnixListener;
+    use std::os::unix::net::UnixStream;
+    use std::process;
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn cookie_is_64_lowercase_hex() {
@@ -279,13 +291,13 @@ mod tests {
         let cookie = "a".repeat(64);
         write_pidfile(&path, &cookie, "127.0.0.1 port 655").unwrap();
 
-        let content = std::fs::read_to_string(&path).unwrap();
-        let our_pid = std::process::id();
+        let content = fs::read_to_string(&path).unwrap();
+        let our_pid = process::id();
         assert_eq!(content, format!("{our_pid} {cookie} 127.0.0.1 port 655\n"));
 
         // Mode 0600. The C umask dance produces this; our
         // OpenOptions::mode does too (see module doc for why).
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
     }
 
@@ -293,12 +305,12 @@ mod tests {
     fn pidfile_fchmod_on_existing() {
         let dir = tmpdir("pidfile-chmod");
         let path = dir.join("tinc.pid");
-        std::fs::write(&path, "stale").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+        fs::write(&path, "stale").unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o666)).unwrap();
 
         write_pidfile(&path, &"a".repeat(64), "127.0.0.1 port 0").unwrap();
 
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
 
@@ -307,8 +319,8 @@ mod tests {
         let dir = tmpdir("pidfile-symlink");
         let target = dir.join("target");
         let path = dir.join("tinc.pid");
-        std::fs::write(&target, "x").unwrap();
-        std::os::unix::fs::symlink(&target, &path).unwrap();
+        fs::write(&target, "x").unwrap();
+        symlink(&target, &path).unwrap();
 
         let err = write_pidfile(&path, "c", "a").unwrap_err();
         assert_eq!(err.raw_os_error(), Some(nix::Error::ELOOP as i32));
@@ -347,7 +359,7 @@ mod tests {
         let path = dir.join("tinc.socket");
 
         // Stale: std bind + drop. fd closed, file stays.
-        let stale = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let stale = UnixListener::bind(&path).unwrap();
         drop(stale);
         assert!(path.exists(), "std UnixListener leaves file on drop");
 
@@ -361,7 +373,7 @@ mod tests {
     fn bind_preserves_non_socket() {
         let dir = tmpdir("nonsock");
         let path = dir.join("tinc.socket");
-        std::fs::write(&path, b"not a socket").unwrap();
+        fs::write(&path, b"not a socket").unwrap();
         assert!(matches!(ControlSocket::bind(&path), Err(BindError::Io(_))));
         assert_eq!(std::fs::read(&path).unwrap(), b"not a socket");
     }
@@ -375,7 +387,7 @@ mod tests {
 
         let cs = ControlSocket::bind(&path).unwrap();
 
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
         // `0o777 & ~0o077 = 0o700`. The S_IFSOCK bits are in the
         // high bits; mask to perm bits.
         assert_eq!(
@@ -399,7 +411,7 @@ mod tests {
         // Client connect from another thread? No — single-threaded
         // is fine: connect, then accept (the kernel queues the
         // pending connection).
-        let client = std::os::unix::net::UnixStream::connect(&path).unwrap();
+        let client = UnixStream::connect(&path).unwrap();
         let server = cs.accept().unwrap();
 
         // Non-blocking is set: read with no data returns WouldBlock.
@@ -419,7 +431,7 @@ mod tests {
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     tries -= 1;
                     assert!(tries > 0, "timed out");
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    thread::sleep(Duration::from_millis(1));
                 }
                 Err(e) => panic!("{e}"),
             }

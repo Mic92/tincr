@@ -18,6 +18,12 @@ use super::common::ChildWithLog;
 use super::common::linux::run_ip;
 use super::common::{tincd_bin, wait_for_file_with, write_ed25519_privkey};
 use super::rig::{ChildNetNs, enter_bwrap, veth_pair};
+use std::env;
+use std::fs;
+use std::net::Shutdown;
+use std::path::Path;
+use std::thread;
+use std::thread::JoinHandle;
 
 /// The daemon's own port. Not 655: no `CAP_NET_BIND_SERVICE` in the
 /// userns.
@@ -40,8 +46,8 @@ fn nsexec(ns: &str, argv: &[&str]) -> String {
 
 /// `nft -f` in `ns`; `false` (logged as SKIP) when nfnetlink is not
 /// usable from this userns.
-fn load_nft(ns: &str, test_name: &str, path: &std::path::Path, rules: &str) -> bool {
-    std::fs::write(path, rules).unwrap();
+fn load_nft(ns: &str, test_name: &str, path: &Path, rules: &str) -> bool {
+    fs::write(path, rules).unwrap();
     let out = Command::new("ip")
         .args(["netns", "exec", ns, "nft", "-f"])
         .arg(path)
@@ -57,7 +63,7 @@ fn load_nft(ns: &str, test_name: &str, path: &std::path::Path, rules: &str) -> b
 }
 
 fn which(bin: &str) -> Option<String> {
-    std::env::split_paths(&std::env::var_os("PATH")?)
+    env::split_paths(&env::var_os("PATH")?)
         .map(|dir| dir.join(bin))
         .find(|path| path.is_file())
         .map(|path| path.to_string_lossy().into_owned())
@@ -66,7 +72,7 @@ fn which(bin: &str) -> Option<String> {
 /// Feature-detect before the bwrap re-exec (PATH lookups are cheaper
 /// to report out here), then enter it. Returns the miniupnpd path.
 fn enter_bwrap_with_miniupnpd(test_name: &str) -> Option<String> {
-    if std::env::var_os("BWRAP_INNER").is_none() {
+    if env::var_os("BWRAP_INNER").is_none() {
         let Some(bin) = which("miniupnpd") else {
             eprintln!("SKIP {test_name}: miniupnpd not on PATH");
             return None;
@@ -78,10 +84,10 @@ fn enter_bwrap_with_miniupnpd(test_name: &str) -> Option<String> {
         // SAFETY: nextest runs one test per process.
         #[expect(unsafe_code)]
         unsafe {
-            std::env::set_var("MINIUPNPD_BIN", bin);
+            env::set_var("MINIUPNPD_BIN", bin);
         }
     }
-    enter_bwrap(test_name).then(|| std::env::var("MINIUPNPD_BIN").unwrap())
+    enter_bwrap(test_name).then(|| env::var("MINIUPNPD_BIN").unwrap())
 }
 
 /// alice-ns and gw-ns wired as in the module doc, alice with a
@@ -99,12 +105,7 @@ impl Drop for Gateway {
 }
 
 impl Gateway {
-    fn start(
-        test_name: &str,
-        tmp: &std::path::Path,
-        miniupnpd_bin: &str,
-        natpmp: bool,
-    ) -> Option<Self> {
+    fn start(test_name: &str, tmp: &Path, miniupnpd_bin: &str, natpmp: bool) -> Option<Self> {
         let netns = [ChildNetNs::new("alice"), ChildNetNs::new("gw")];
         veth_pair(
             ("alice", "veth-a", "192.168.77.2/24"),
@@ -169,7 +170,7 @@ impl Gateway {
         // refuses mappings unless allowed, and reports an empty
         // external address unless `ext_ip` pins it.
         let conf = tmp.join("miniupnpd.conf");
-        std::fs::write(
+        fs::write(
             &conf,
             format!(
                 "ext_ifname=veth-wan\n\
@@ -212,7 +213,7 @@ impl Gateway {
                 Instant::now() < deadline,
                 "miniupnpd didn't bind {ready_port}"
             );
-            std::thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(100));
         }
         Some(Self {
             upnpd,
@@ -236,10 +237,10 @@ impl Gateway {
 }
 
 /// Peerless dummy-device daemon in alice-ns with `UPnP = yes`.
-fn start_alice(tmp: &std::path::Path, refresh_period: u32) -> ChildWithLog {
+fn start_alice(tmp: &Path, refresh_period: u32) -> ChildWithLog {
     let confbase = tmp.join("alice");
-    std::fs::create_dir_all(confbase.join("hosts")).unwrap();
-    std::fs::write(
+    fs::create_dir_all(confbase.join("hosts")).unwrap();
+    fs::write(
         confbase.join("tinc.conf"),
         format!(
             "Name = alice\nDeviceType = dummy\nAddressFamily = ipv4\n\
@@ -247,7 +248,7 @@ fn start_alice(tmp: &std::path::Path, refresh_period: u32) -> ChildWithLog {
         ),
     )
     .unwrap();
-    std::fs::write(
+    fs::write(
         confbase.join("hosts").join("alice"),
         format!("Port = {ALICE_PORT}\n"),
     )
@@ -296,7 +297,7 @@ fn wait_log(
             assert!(!log.contains(needle), "`{needle}` in:\n{log}");
         }
         assert!(Instant::now() < deadline, "timed out; alice:\n{log}");
-        std::thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(200));
     }
 }
 
@@ -405,13 +406,13 @@ fn upnp_gateway_ip_change() {
 fn serve_udp(
     port: u16,
     reply: impl Fn(&[u8]) -> Vec<Vec<u8>> + Send + 'static,
-) -> (mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+) -> (mpsc::Sender<()>, JoinHandle<()>) {
     let socket = UdpSocket::bind(("192.168.77.1", port)).expect("bind udp");
     socket
         .set_read_timeout(Some(Duration::from_millis(200)))
         .unwrap();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
-    let thread = std::thread::spawn(move || {
+    let thread = thread::spawn(move || {
         let mut buf = [0u8; 1500];
         while stop_rx.try_recv() != Err(mpsc::TryRecvError::Disconnected) {
             if let Ok((len, src)) = socket.recv_from(&mut buf) {
@@ -479,7 +480,7 @@ fn upnp_rogue_gateway_ext_addr_rejected() {
     let real = ssdp_reply(format!("http://192.168.77.1:{http_port}/rootDesc.xml"));
     let (ssdp_stop, ssdp_thread) = serve_udp(1900, move |_| vec![ssrf.clone(), real.clone()]);
 
-    let http_thread = std::thread::spawn(move || {
+    let http_thread = thread::spawn(move || {
         let soap = |body: &str| {
             format!(
                 "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/xml\r\n\r\n\
@@ -515,7 +516,7 @@ fn upnp_rogue_gateway_ext_addr_rejected() {
                 "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".to_owned()
             };
             let _ = stream.write_all(response.as_bytes());
-            let _ = stream.shutdown(std::net::Shutdown::Both);
+            let _ = stream.shutdown(Shutdown::Both);
         }
     });
 

@@ -35,6 +35,7 @@ use std::os::android::net::SocketAddrExt;
 #[cfg(target_os = "linux")]
 use std::os::linux::net::SocketAddrExt;
 use std::os::unix::net::SocketAddr;
+use std::path::PathBuf;
 
 // FdSource — the union type the config-string dispatch implies
 
@@ -50,7 +51,7 @@ pub enum FdSource {
 
     /// `Device = /path` mode (2020). Java side listens; we connect;
     /// fd arrives via `SCM_RIGHTS`. `@` prefix → abstract namespace.
-    UnixSocket(std::path::PathBuf),
+    UnixSocket(PathBuf),
 }
 
 // FdTun — the Device impl

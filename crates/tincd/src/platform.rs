@@ -18,6 +18,10 @@ use std::os::fd::AsRawFd;
 
 use nix::sys::socket::SockFlag;
 use socket2::Socket;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::ffi::OsString;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::mem;
 
 /// `SOCK_CLOEXEC` on Linux, empty on macOS (caller should
 /// `fcntl(FD_CLOEXEC)` separately if needed, but for
@@ -99,7 +103,7 @@ fn set_int_sockopt(
             level,
             optname,
             (&raw const val).cast::<libc::c_void>(),
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            mem::size_of::<libc::c_int>() as libc::socklen_t,
         )
     };
     if rc == 0 {
@@ -139,7 +143,7 @@ pub(crate) fn set_udp_tos(fd: impl AsFd, is_ipv6: bool, prio: u8) {
 /// `setsockopt(SO_BINDTODEVICE)` failure.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
-    let name = std::ffi::OsString::from(iface);
+    let name = OsString::from(iface);
     setsockopt(&s.as_fd(), sockopt::BindToDevice, &name)
         .map_err(|e| io::Error::other(format!("Can't bind to interface {iface}: {e}")))
 }

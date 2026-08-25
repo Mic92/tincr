@@ -1,7 +1,10 @@
 //! `retry()` (SIGALRM / `REQ_RETRY`) cuts an outgoing's backoff short,
 //! plus the `REQ_DISCONNECT` reply codes.
 
+use std::path::Path;
+use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 
 #[macro_use]
 mod common;
@@ -13,7 +16,7 @@ const BACKOFF_5S: &str = "re-establish outgoing connection in 5 seconds";
 /// testnode dialing a dead peer, already in its first 5s backoff. The
 /// socket keeps the dead port reserved. Linux refuses the connect at
 /// once; macOS drops the SYN, so there each dial takes `PingTimeout`.
-fn node_in_backoff(dir: &std::path::Path) -> (Node, socket2::Socket) {
+fn node_in_backoff(dir: &Path) -> (Node, socket2::Socket) {
     let (dead_socket, dead_port) = refusing_port();
     let mut deadpeer = Node::new(dir, "deadpeer", 0xDE);
     deadpeer.port = dead_port;
@@ -28,10 +31,10 @@ fn node_in_backoff(dir: &std::path::Path) -> (Node, socket2::Socket) {
 
 /// Fails with the daemon log.
 fn wait_log(node: &Node, timeout: Duration, done: impl Fn(&str) -> bool) {
-    let deadline = std::time::Instant::now() + timeout;
+    let deadline = Instant::now() + timeout;
     while !done(&node.log()) {
         assert!(std::time::Instant::now() < deadline, "{}", node.log());
-        std::thread::sleep(Duration::from_millis(20));
+        thread::sleep(Duration::from_millis(20));
     }
 }
 

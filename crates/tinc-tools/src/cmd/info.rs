@@ -45,6 +45,8 @@ use crate::cmd::CmdError;
 use crate::ctl::rows::{NodeRow, StatusBit, SubnetRow, strip_weight};
 use crate::ctl::{CtlRequest, CtlSocket, DumpRow};
 use crate::names::{Paths, check_id};
+use std::io;
+use std::mem::MaybeUninit;
 
 /// Format a Unix timestamp as `"%Y-%m-%d %H:%M:%S"` in local time.
 ///
@@ -67,7 +69,7 @@ fn fmt_localtime(t: i64) -> String {
 
     // time_t is i64 except on old 32-bit ABIs; saturate there.
     let time = libc::time_t::try_from(t).unwrap_or(libc::time_t::MAX);
-    let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
+    let mut tm = MaybeUninit::<libc::tm>::zeroed();
     // SAFETY:
     //   - `&time` is a valid aligned pointer to a live `time_t` for
     //     the call duration. `localtime_r` reads it once.
@@ -356,7 +358,7 @@ fn parse_err(what: &str, body: &str) -> CmdError {
 ///
 /// Generic over the socket type so unit tests can pass a
 /// `UnixStream::pair()` half without `connect()`.
-fn find_node<S: std::io::Read + std::io::Write>(
+fn find_node<S: io::Read + io::Write>(
     ctl: &mut CtlSocket<S>,
     name: &str,
 ) -> Result<Option<NodeRow>, CmdError> {
@@ -385,7 +387,7 @@ fn find_node<S: std::io::Read + std::io::Write>(
 ///
 /// Partial parse: only `from` + `to`; the remaining fields are ignored
 /// (see module doc on parse slack).
-fn collect_edges<S: std::io::Read + std::io::Write>(
+fn collect_edges<S: io::Read + io::Write>(
     ctl: &mut CtlSocket<S>,
     name: &str,
 ) -> Result<Vec<String>, CmdError> {
@@ -408,7 +410,7 @@ fn collect_edges<S: std::io::Read + std::io::Write>(
 }
 
 /// Collect subnets owned by `name`, with `strip_weight` applied.
-fn collect_subnets<S: std::io::Read + std::io::Write>(
+fn collect_subnets<S: io::Read + io::Write>(
     ctl: &mut CtlSocket<S>,
     name: &str,
 ) -> Result<Vec<String>, CmdError> {

@@ -22,6 +22,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
+use std::env;
+use std::fs;
+use std::io;
+use std::io::ErrorKind;
+use std::sync::Once;
 use tinc_conf::{Config, read_pem};
 use tinc_crypto::aead::{SptpsAead, hw_aes_available};
 use tinc_crypto::b64;
@@ -37,7 +42,7 @@ static HOST_CACHE: OnceLock<HostCache> = OnceLock::new();
 pub(crate) fn read_host_config(confbase: &Path, name: &str) -> Arc<Config> {
     let path = confbase.join("hosts").join(name);
     let mut cache = HOST_CACHE.get_or_init(Default::default).lock().unwrap();
-    let Ok(meta) = std::fs::metadata(&path) else {
+    let Ok(meta) = fs::metadata(&path) else {
         cache.remove(&path);
         return Arc::default();
     };
@@ -85,7 +90,7 @@ pub(crate) fn read_sptps_cipher(host_config: &Config, name: &str) -> Option<Sptp
 /// One-shot CPU-feature warning. `Once` so the per-handshake host-file
 /// read in [`read_sptps_cipher`] doesn't spam the log.
 pub(crate) fn warn_aes_no_hw_once() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
+    static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         if !hw_aes_available() {
             log::warn!(target: "tincd::keys",
@@ -155,7 +160,7 @@ pub(crate) enum PrivKeyError {
     Missing(PathBuf),
     /// Any other I/O error on `fopen`.
     #[error("Error reading Ed25519 private key file `{}': {}", .0.display(), .1)]
-    Io(PathBuf, #[source] std::io::Error),
+    Io(PathBuf, #[source] io::Error),
     /// `read_pem` failed: bad armor, wrong type string, wrong size.
     #[error("Ed25519 private key in `{}' malformed: {}", .0.display(), .1)]
     Pem(PathBuf, #[source] tinc_conf::PemError),
@@ -189,7 +194,7 @@ pub(crate) fn read_ecdsa_private_key(
 ) -> Result<SigningKey, PrivKeyError> {
     // env override so service managers can inject the key without touching tinc.conf
     // (e.g. systemd LoadCredential=).
-    let path = std::env::var_os("TINCR_ED25519_PRIVATE_KEY_FILE").map_or_else(
+    let path = env::var_os("TINCR_ED25519_PRIVATE_KEY_FILE").map_or_else(
         || {
             config.lookup("Ed25519PrivateKeyFile").next().map_or_else(
                 || confbase.join("ed25519_key.priv"),
@@ -200,7 +205,7 @@ pub(crate) fn read_ecdsa_private_key(
     );
 
     let f = File::open(&path).map_err(|err| {
-        if err.kind() == std::io::ErrorKind::NotFound {
+        if err.kind() == ErrorKind::NotFound {
             PrivKeyError::Missing(path.clone())
         } else {
             PrivKeyError::Io(path.clone(), err)
@@ -209,7 +214,7 @@ pub(crate) fn read_ecdsa_private_key(
 
     if let Ok(meta) = f.metadata() {
         let mode = meta.permissions().mode();
-        let credentials_directory = std::env::var_os("CREDENTIALS_DIRECTORY").map(PathBuf::from);
+        let credentials_directory = env::var_os("CREDENTIALS_DIRECTORY").map(PathBuf::from);
         if private_key_permissions_insecure(&path, mode, credentials_directory.as_deref()) {
             log::warn!(target: "tincd::keys",
                        "Warning: insecure file permissions for Ed25519 private key file `{}'!",
@@ -311,7 +316,12 @@ mod tests {
     use tinc_crypto::b64::encode;
 
     use crate::testutil::TmpDir;
+    use std::fs;
+    use std::fs::OpenOptions;
+    use std::io::BufWriter;
+    use std::iter;
     use std::os::unix::fs::OpenOptionsExt;
+    use std::str;
 
     /// Generate a deterministic keypair for tests. Seeded from a tag.
     fn det_key(tag: u8) -> SigningKey {
@@ -320,14 +330,14 @@ mod tests {
 
     /// Write a private key PEM file with given mode.
     fn write_priv(path: &Path, sk: &SigningKey, mode: u32) {
-        let f = std::fs::OpenOptions::new()
+        let f = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(mode)
             .open(path)
             .unwrap();
-        let mut w = std::io::BufWriter::new(f);
+        let mut w = BufWriter::new(f);
         tinc_conf::write_pem(&mut w, TY_PRIVATE, &sk.to_blob()).unwrap();
     }
 
@@ -359,7 +369,7 @@ mod tests {
     #[test]
     fn b64_bad_char() {
         // `!` isn't in tinc's b64 alphabet (neither standard nor URL-safe).
-        let bad: String = std::iter::repeat_n('A', 42).chain(['!']).collect();
+        let bad: String = iter::repeat_n('A', 42).chain(['!']).collect();
         assert_eq!(bad.len(), 43);
         assert!(pubkey_from_b64(&bad).is_none());
     }
@@ -507,7 +517,7 @@ mod tests {
     #[test]
     fn priv_malformed() {
         let tmp = TmpDir::new("priv-mal");
-        std::fs::write(
+        fs::write(
             tmp.path().join("ed25519_key.priv"),
             "not a PEM file at all\n",
         )
@@ -527,7 +537,7 @@ mod tests {
     #[test]
     fn pub_source1_inline_b64() {
         let tmp = TmpDir::new("pub-s1");
-        std::fs::create_dir_all(tmp.path().join("hosts")).unwrap();
+        fs::create_dir_all(tmp.path().join("hosts")).unwrap();
 
         let pk = *det_key(5).public_key();
         let b64 = encode(&pk);
@@ -537,7 +547,7 @@ mod tests {
         // an already-loaded config; it's not loading the file itself
         // for source 1.
         let host_file = tmp.path().join("hosts").join("peer");
-        std::fs::write(&host_file, format!("Ed25519PublicKey = {b64}\n")).unwrap();
+        fs::write(&host_file, format!("Ed25519PublicKey = {b64}\n")).unwrap();
         let mut cfg = Config::default();
         cfg.merge(tinc_conf::parse_file(&host_file).unwrap());
 
@@ -554,7 +564,7 @@ mod tests {
     #[test]
     fn pub_source1_bad_no_fallthrough() {
         let tmp = TmpDir::new("pub-s1bad");
-        std::fs::create_dir_all(tmp.path().join("hosts")).unwrap();
+        fs::create_dir_all(tmp.path().join("hosts")).unwrap();
 
         // 42 chars — wrong length for inline.
         let host_file = tmp.path().join("hosts").join("peer");
@@ -564,8 +574,8 @@ mod tests {
         // fallthrough happened.
         let mut pem = Vec::new();
         tinc_conf::write_pem(&mut pem, TY_PUBLIC, &pk).unwrap();
-        content.push_str(std::str::from_utf8(&pem).unwrap());
-        std::fs::write(&host_file, &content).unwrap();
+        content.push_str(str::from_utf8(&pem).unwrap());
+        fs::write(&host_file, &content).unwrap();
 
         let mut cfg = Config::default();
         cfg.merge(tinc_conf::parse_file(&host_file).unwrap());
@@ -581,7 +591,7 @@ mod tests {
     #[test]
     fn pub_source3_pem_in_hosts() {
         let tmp = TmpDir::new("pub-s3");
-        std::fs::create_dir_all(tmp.path().join("hosts")).unwrap();
+        fs::create_dir_all(tmp.path().join("hosts")).unwrap();
 
         let pk = *det_key(7).public_key();
         let host_file = tmp.path().join("hosts").join("peer");
@@ -589,8 +599,8 @@ mod tests {
         let mut content = String::from("Port = 655\nSubnet = 10.0.0.0/24\n");
         let mut pem = Vec::new();
         tinc_conf::write_pem(&mut pem, TY_PUBLIC, &pk).unwrap();
-        content.push_str(std::str::from_utf8(&pem).unwrap());
-        std::fs::write(&host_file, &content).unwrap();
+        content.push_str(str::from_utf8(&pem).unwrap());
+        fs::write(&host_file, &content).unwrap();
 
         // Config has Port + Subnet but NO Ed25519PublicKey var.
         // Source 1 misses → source 2 misses (no file var) → source
@@ -608,18 +618,18 @@ mod tests {
     #[test]
     fn pub_source2_explicit_file() {
         let tmp = TmpDir::new("pub-s2");
-        std::fs::create_dir_all(tmp.path().join("hosts")).unwrap();
+        fs::create_dir_all(tmp.path().join("hosts")).unwrap();
 
         let pk = *det_key(8).public_key();
         let key_file = tmp.path().join("peer.pub");
         let mut pem = Vec::new();
         tinc_conf::write_pem(&mut pem, TY_PUBLIC, &pk).unwrap();
-        std::fs::write(&key_file, &pem).unwrap();
+        fs::write(&key_file, &pem).unwrap();
 
         // hosts/peer has the file pointer. NO inline var, NO PEM
         // in hosts/peer itself.
         let host_file = tmp.path().join("hosts").join("peer");
-        std::fs::write(
+        fs::write(
             &host_file,
             format!("Ed25519PublicKeyFile = {}\n", key_file.display()),
         )
@@ -644,10 +654,10 @@ mod tests {
     #[test]
     fn pub_no_key_silent_none() {
         let tmp = TmpDir::new("pub-nokey");
-        std::fs::create_dir_all(tmp.path().join("hosts")).unwrap();
+        fs::create_dir_all(tmp.path().join("hosts")).unwrap();
 
         let host_file = tmp.path().join("hosts").join("peer");
-        std::fs::write(&host_file, "Port = 655\n").unwrap();
+        fs::write(&host_file, "Port = 655\n").unwrap();
 
         let mut cfg = Config::default();
         cfg.merge(tinc_conf::parse_file(&host_file).unwrap());
@@ -677,7 +687,7 @@ mod tests {
     #[test]
     fn pub_inline_wins_over_pem() {
         let tmp = TmpDir::new("pub-order");
-        std::fs::create_dir_all(tmp.path().join("hosts")).unwrap();
+        fs::create_dir_all(tmp.path().join("hosts")).unwrap();
 
         let pk_inline = *det_key(10).public_key();
         let pk_pem = *det_key(11).public_key();
@@ -688,8 +698,8 @@ mod tests {
         let mut content = format!("Ed25519PublicKey = {}\n", encode(&pk_inline));
         let mut pem = Vec::new();
         tinc_conf::write_pem(&mut pem, TY_PUBLIC, &pk_pem).unwrap();
-        content.push_str(std::str::from_utf8(&pem).unwrap());
-        std::fs::write(&host_file, &content).unwrap();
+        content.push_str(str::from_utf8(&pem).unwrap());
+        fs::write(&host_file, &content).unwrap();
 
         let mut cfg = Config::default();
         cfg.merge(tinc_conf::parse_file(&host_file).unwrap());

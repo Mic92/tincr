@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use super::{TunnelHandles, TxSnapshot};
+use crate::dispatch::OPTION_TCPONLY;
 use crate::graph::NodeId;
+use crate::packet::ETH_P_ARP;
 use crate::route_decide::{RouteResult, route};
 
 /// Per-super seal-send target. Everything is a COPY — no borrows into
@@ -79,9 +81,7 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
     // ARP gate (`forward_packet:1009`). `route()` returns `Unsupported`
     // for ARP anyway, but checking it explicitly skips the trie probe.
     // `chunk0.len() < 14` falls through `route()`'s `TooShort`.
-    if chunk0.len() >= 14
-        && u16::from_be_bytes([chunk0[12], chunk0[13]]) == crate::packet::ETH_P_ARP
-    {
+    if chunk0.len() >= 14 && u16::from_be_bytes([chunk0[12], chunk0[13]]) == ETH_P_ARP {
         return None;
     }
 
@@ -111,7 +111,7 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
         return None;
     }
     // TCPONLY. Direct ⇒ relay==to ⇒ relay_options == route.options.
-    if (snap.myself_options | route.options) & crate::dispatch::OPTION_TCPONLY != 0 {
+    if (snap.myself_options | route.options) & OPTION_TCPONLY != 0 {
         return None;
     }
 
@@ -168,10 +168,16 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatch::OPTION_CLAMP_MSS;
+    use crate::dispatch::OPTION_TCPONLY;
+    use crate::graph::Graph;
     use crate::graph::Route;
     use crate::inthash::IntHashMap;
+    use crate::packet::ETH_P_IP;
     use crate::shard::NodeView;
     use crate::subnet_tree::SubnetTree;
+    use std::collections::HashMap;
+    use std::net;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64};
     use tinc_sptps::ReplayWindow;
@@ -180,7 +186,7 @@ mod tests {
     /// Ethertype at [12..14], `ip_dst` at [14+16..14+20] = [30..34].
     fn v4_frame(dst: [u8; 4]) -> Vec<u8> {
         let mut frame = vec![0u8; 100];
-        frame[12..14].copy_from_slice(&crate::packet::ETH_P_IP.to_be_bytes());
+        frame[12..14].copy_from_slice(&ETH_P_IP.to_be_bytes());
         frame[30..34].copy_from_slice(&dst);
         frame
     }
@@ -214,10 +220,10 @@ mod tests {
         // NodeView: route()'s resolve closure does name→nid +
         // reachability gate. add_node defaults reachable=true.
         let ns = {
-            let mut g = crate::graph::Graph::new();
+            let mut g = Graph::new();
             let _a = g.add_node("alice");
             let _b = g.add_node("bob");
-            let mut ni = std::collections::HashMap::new();
+            let mut ni = HashMap::new();
             ni.insert("alice".to_owned(), alice);
             ni.insert("bob".to_owned(), bob);
             Arc::new(NodeView::build(&g, &ni, &IntHashMap::default(), 2))
@@ -240,7 +246,7 @@ mod tests {
                 &[0u8; 64],
             ),
             udp_addr: Mutex::new(Some((
-                socket2::SockAddr::from("10.0.0.2:655".parse::<std::net::SocketAddr>().unwrap()),
+                socket2::SockAddr::from("10.0.0.2:655".parse::<net::SocketAddr>().unwrap()),
                 0,
             ))),
             validkey: AtomicBool::new(true),
@@ -272,7 +278,7 @@ mod tests {
     /// and `CLAMP_MSS` gate (default-on, blocks every real peer).
     #[test]
     fn direct_peer_default_options_is_some() {
-        let (snap, bob) = fixture(crate::dispatch::OPTION_CLAMP_MSS | 0x0004);
+        let (snap, bob) = fixture(OPTION_CLAMP_MSS | 0x0004);
         let frame = v4_frame([10, 0, 0, 5]);
 
         let target = tx_probe(&snap, &frame, 4).expect("direct peer must pass");
@@ -285,7 +291,7 @@ mod tests {
     /// Negative: TCPONLY rejects (we're sending UDP).
     #[test]
     fn tcponly_is_none() {
-        let (snap, bob) = fixture(crate::dispatch::OPTION_TCPONLY);
+        let (snap, bob) = fixture(OPTION_TCPONLY);
         let frame = v4_frame([10, 0, 0, 5]);
 
         assert!(tx_probe(&snap, &frame, 1).is_none());

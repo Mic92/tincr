@@ -45,7 +45,13 @@ use crate::cmd::{CmdError, OpenKind, io_err, write_private_key};
 use crate::keypair;
 use crate::names::{Paths, check_id};
 
+use super::create_nofollow;
+use super::open_nofollow;
+use std::io;
+use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::path::PathBuf;
 use tinc_crypto::b64;
 
 /// `cmd_init`. Takes the resolved `Paths` and the node name from argv.
@@ -73,7 +79,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
         // (e.g. `/etc/tinc` mode 0700 root). The raw errno is
         // correct but unhelpful; add the `-c DIR` hint so
         // first-run-as-user isn't a dead end.
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => {
             return Err(eacces_hint(&tinc_conf, &e));
         }
         Err(e) => return Err(io_err(&tinc_conf)(e)),
@@ -102,7 +108,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     // overwrite), but the threat model doesn't include hostile
     // concurrent `tinc init`s.
     {
-        let mut f = super::create_nofollow(&tinc_conf)?;
+        let mut f = create_nofollow(&tinc_conf)?;
         writeln!(f, "Name = {name}").map_err(io_err(&tinc_conf))?;
     }
 
@@ -126,7 +132,7 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
     // (when we add it) appends `Port = N` to the same file.
     {
         let host_path = paths.host_file(name);
-        let mut f = super::open_nofollow(&host_path, super::OpenKind::Append, 0o666)?;
+        let mut f = open_nofollow(&host_path, OpenKind::Append, 0o666)?;
         let pubkey_b64 = b64::encode(sk.public_key());
         writeln!(f, "Ed25519PublicKey = {pubkey_b64}").map_err(io_err(&host_path))?;
     }
@@ -144,16 +150,14 @@ pub fn run(paths: &Paths, name: &str) -> Result<(), CmdError> {
 /// Upstream's stub suggests `ifconfig`; we suggest iproute2 so a user
 /// who uncomments the example doesn't hit `command not found`.
 #[cfg(unix)]
-pub(crate) fn write_tinc_up_placeholder(
-    paths: &Paths,
-) -> Result<Option<std::path::PathBuf>, CmdError> {
+pub(crate) fn write_tinc_up_placeholder(paths: &Paths) -> Result<Option<PathBuf>, CmdError> {
     let up_path = paths.tinc_up();
     // `try_exists` then `O_EXCL`: belt-and-suspenders, but lets us
     // silently skip instead of erroring on EEXIST.
     if up_path.try_exists().map_err(io_err(&up_path))? {
         return Ok(None);
     }
-    let mut f = super::open_nofollow(&up_path, OpenKind::CreateExcl, 0o755)?;
+    let mut f = open_nofollow(&up_path, OpenKind::CreateExcl, 0o755)?;
     f.write_all(
         b"#!/bin/sh\n\
           \n\
@@ -171,16 +175,16 @@ pub(crate) fn write_tinc_up_placeholder(
 /// Wrap an EACCES from confbase creation with a hint pointing at
 /// `-c DIR`. The bare "Could not access /etc/tinc: Permission denied"
 /// is correct but a dead end for someone evaluating tinc unprivileged.
-fn eacces_hint(path: &std::path::Path, err: &std::io::Error) -> CmdError {
+fn eacces_hint(path: &Path, err: &io::Error) -> CmdError {
     CmdError::BadInput(format!(
         "Could not access {}: {err}\n  hint: use `-c DIR` for an unprivileged config directory",
         path.display()
     ))
 }
 
-fn hint_on_eacces(path: &std::path::Path, e: CmdError) -> CmdError {
+fn hint_on_eacces(path: &Path, e: CmdError) -> CmdError {
     match &e {
-        CmdError::Io { err, .. } if err.kind() == std::io::ErrorKind::PermissionDenied => {
+        CmdError::Io { err, .. } if err.kind() == ErrorKind::PermissionDenied => {
             eacces_hint(path, err)
         }
         _ => e,

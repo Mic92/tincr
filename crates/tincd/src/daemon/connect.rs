@@ -19,24 +19,26 @@ use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use tinc_proto::msg::DelEdge;
 use tinc_proto::{AddrStr, Request};
 
+use crate::addr;
 use crate::bgresolve::{DnsRes, DnsTag};
 use crate::dispatch::ConnOptions;
+use crate::dispatch::DispatchError;
+use crate::log_tap;
+use crate::outgoing;
+use std::mem;
+use std::net::IpAddr;
 
 impl Daemon {
     /// ACK handler, mutation half. Parse done by `proto::parse_ack`;
     /// this does the world-model edits.
-    pub(super) fn on_ack(
-        &mut self,
-        id: ConnId,
-        body: &[u8],
-    ) -> Result<bool, crate::dispatch::DispatchError> {
+    pub(super) fn on_ack(&mut self, id: ConnId, body: &[u8]) -> Result<bool, DispatchError> {
         let parsed = parse_ack(body)?;
         let conn = self.conn_mut(id);
 
         // `ack_h:237`: replayed ACK after `allow_request=None` would
         // re-run add_edge + send_everything.
         if conn.active {
-            return Err(crate::dispatch::DispatchError::Unauthorized);
+            return Err(DispatchError::Unauthorized);
         }
 
         // PMTU only sticks if both sides set it.
@@ -232,7 +234,7 @@ impl Daemon {
         if let Some(conn) = self.conns.get_mut(id) {
             conn.active = true;
             conn.activated_at = Some(self.timers.now());
-            if std::mem::take(&mut conn.counted_pending) {
+            if mem::take(&mut conn.counted_pending) {
                 // Auth done: release the pre-auth accept slot.
                 self.pending_meta = self.pending_meta.saturating_sub(1);
             }
@@ -344,10 +346,10 @@ impl Daemon {
         // on EOF) covers all teardown paths (REQ_DISCONNECT, ping
         // timeout, error).
         if was_log && !self.conns.values().any(|c| c.log_level.is_some()) {
-            crate::log_tap::set_active(false);
+            log_tap::set_active(false);
         }
         if let Some(prev) = restore_debug {
-            crate::log_tap::set_debug_level(prev);
+            log_tap::set_debug_level(prev);
         }
 
         // Clear the back-ref (node outlives conn).
@@ -474,13 +476,11 @@ impl Daemon {
         else {
             return;
         };
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if let Ok(ip) = host.parse::<IpAddr>() {
             self.proxy_addrs = vec![SocketAddr::new(ip, port)];
         } else {
-            self.dns_worker.request(
-                crate::bgresolve::DnsTag::Proxy,
-                vec![(host.to_owned(), port)],
-            );
+            self.dns_worker
+                .request(DnsTag::Proxy, vec![(host.to_owned(), port)]);
         }
     }
 
@@ -531,7 +531,7 @@ impl Daemon {
             })
             // ADD_EDGE addrs are peer-authored gossip; don't let them
             // steer us at loopback/link-local.
-            .filter(|sa| !crate::addr::is_unwanted_dial_addr(sa))
+            .filter(|sa| !addr::is_unwanted_dial_addr(sa))
             // Off-thread getaddrinfo results for `Address=` hostnames
             // are operator-authored config, not peer input — chain
             // them *after* the unwanted-addr gate so e.g.
@@ -548,8 +548,7 @@ impl Daemon {
             // every retry re-enters via this fn.
             let hosts = o.addr_cache.unresolved_hosts();
             if !hosts.is_empty() {
-                self.dns_worker
-                    .request(crate::bgresolve::DnsTag::Outgoing(name), hosts);
+                self.dns_worker.request(DnsTag::Outgoing(name), hosts);
             }
         }
 
@@ -562,7 +561,7 @@ impl Daemon {
     /// accept); on `ev.add` failure the slot is rolled back so the
     /// caller sees `None` and can clean up / try the next address
     /// without leaking a half-registered conn.
-    pub(super) fn register_conn(&mut self, conn: Connection, io_mode: Io) -> Option<super::ConnId> {
+    pub(super) fn register_conn(&mut self, conn: Connection, io_mode: Io) -> Option<ConnId> {
         let id = self.conns.insert(conn);
         match self
             .ev
@@ -606,7 +605,7 @@ impl Daemon {
                 };
                 log::info!(target: "tincd::conn",
                             "Trying to connect to {name} ({addr}) via proxy exec");
-                let fd = match crate::outgoing::do_outgoing_pipe(cmd, addr, &name, &self.name) {
+                let fd = match outgoing::do_outgoing_pipe(cmd, addr, &name, &self.name) {
                     Ok(fd) => fd,
                     Err(e) => {
                         log::error!(target: "tincd::conn",

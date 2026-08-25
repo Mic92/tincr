@@ -33,7 +33,20 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use crate::addrcache::AddressCache;
 use crate::listen::SockOpts;
 
+use crate::bind_to_interface;
 pub(crate) use crate::ids::OutgoingId;
+use crate::keys;
+use crate::script;
+use crate::set_cloexec;
+use crate::set_nosigpipe;
+use crate::sock_cloexec_flag;
+use crate::socks::Creds;
+use crate::socks::ProxyType;
+use core::ptr;
+use std::env;
+use std::fmt;
+use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
 
 /// One outgoing-connection slot: the node name (not a `NodeId` —
 /// outgoings are config-derived, the node might not exist in the graph
@@ -122,7 +135,7 @@ fn apply_dial_sockopts(sock: &Socket, sockopts: &SockOpts) {
     }
     // `bind_to_interface(c->socket)`. Return discarded.
     if let Some(iface) = &sockopts.bind_to_interface
-        && let Err(e) = crate::bind_to_interface(sock, iface)
+        && let Err(e) = bind_to_interface(sock, iface)
     {
         log::warn!(target: "tincd::conn", "{e}");
     }
@@ -139,7 +152,7 @@ fn dial_nonblocking(
     target: SocketAddr,
     bind_to: Option<SocketAddr>,
     sockopts: &SockOpts,
-    desc: &dyn std::fmt::Display,
+    desc: &dyn fmt::Display,
 ) -> Option<Socket> {
     let domain = match target {
         SocketAddr::V4(_) => Domain::IPV4,
@@ -147,7 +160,7 @@ fn dial_nonblocking(
     };
     let sock = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
         Ok(s) => {
-            crate::set_nosigpipe(&s);
+            set_nosigpipe(&s);
             s
         }
         Err(e) => {
@@ -199,8 +212,8 @@ pub(crate) struct PunchSock {
 /// `SO_REUSEPORT` would break the port-clash safety net.
 pub(crate) fn punch_bind(domain: Domain, sockopts: &SockOpts) -> Option<PunchSock> {
     let local: SocketAddr = match domain {
-        Domain::IPV4 => (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
-        Domain::IPV6 => (std::net::Ipv6Addr::UNSPECIFIED, 0).into(),
+        Domain::IPV4 => (Ipv4Addr::UNSPECIFIED, 0).into(),
+        Domain::IPV6 => (Ipv6Addr::UNSPECIFIED, 0).into(),
         _ => return None,
     };
     punch_bind_at(local, sockopts)
@@ -220,7 +233,7 @@ fn punch_bind_at(local: SocketAddr, sockopts: &SockOpts) -> Option<PunchSock> {
     let sock = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))
         .map_err(|e| log::debug!(target: "tincd::punch", "socket(): {e}"))
         .ok()?;
-    crate::set_nosigpipe(&sock);
+    set_nosigpipe(&sock);
     sock.set_nonblocking(true).ok()?;
     let _ = sock.set_reuse_address(true);
     let _ = sock.set_tcp_nodelay(true);
@@ -401,10 +414,10 @@ impl ProxyConfig {
     /// `None` for non-SOCKS variants (Exec has no handshake; HTTP is
     /// line-based).
     #[must_use]
-    pub const fn socks_type(&self) -> Option<crate::socks::ProxyType> {
+    pub const fn socks_type(&self) -> Option<ProxyType> {
         match self {
-            Self::Socks4 { .. } => Some(crate::socks::ProxyType::Socks4),
-            Self::Socks5 { .. } => Some(crate::socks::ProxyType::Socks5),
+            Self::Socks4 { .. } => Some(ProxyType::Socks4),
+            Self::Socks5 { .. } => Some(ProxyType::Socks5),
             Self::Exec { .. } | Self::Http { .. } => None,
         }
     }
@@ -413,13 +426,13 @@ impl ProxyConfig {
     /// (the userid string). SOCKS5 uses both for password auth; if
     /// either is missing, anonymous.
     #[must_use]
-    pub fn socks_creds(&self) -> Option<crate::socks::Creds> {
+    pub fn socks_creds(&self) -> Option<Creds> {
         match self {
-            Self::Socks4 { user, .. } => user.clone().map(|u| crate::socks::Creds {
+            Self::Socks4 { user, .. } => user.clone().map(|u| Creds {
                 user: u,
                 pass: None,
             }),
-            Self::Socks5 { user, pass, .. } => user.clone().map(|u| crate::socks::Creds {
+            Self::Socks5 { user, pass, .. } => user.clone().map(|u| Creds {
                 user: u,
                 pass: pass.clone(),
             }),
@@ -537,12 +550,7 @@ pub(crate) fn do_outgoing_pipe(
     let dash_c = c"-c";
     let nul_err = |s: &str| io::Error::new(io::ErrorKind::InvalidInput, s);
     let cmd_c = CString::new(cmd).map_err(|_| nul_err("proxy cmd has interior NUL"))?;
-    let argv = [
-        sh.as_ptr(),
-        dash_c.as_ptr(),
-        cmd_c.as_ptr(),
-        core::ptr::null(),
-    ];
+    let argv = [sh.as_ptr(), dash_c.as_ptr(), cmd_c.as_ptr(), ptr::null()];
 
     // Build the full envp before fork (setenv post-fork is not
     // async-signal-safe). Inherit parent env, override our four keys.
@@ -562,7 +570,7 @@ pub(crate) fn do_outgoing_pipe(
             kv.starts_with(k)
         })
     };
-    let mut env_strs: Vec<CString> = std::env::vars_os()
+    let mut env_strs: Vec<CString> = env::vars_os()
         .filter_map(|(k, v)| {
             let mut kv = k.into_encoded_bytes();
             kv.push(b'=');
@@ -576,7 +584,7 @@ pub(crate) fn do_outgoing_pipe(
         .collect();
     env_strs.extend(ours);
     let mut envp: Vec<*const libc::c_char> = env_strs.iter().map(|s| s.as_ptr()).collect();
-    envp.push(core::ptr::null());
+    envp.push(ptr::null());
 
     // `socketpair(AF_UNIX, SOCK_STREAM, 0, fd)`. nix returns the
     // pair already wrapped in `OwnedFd`, so the fork-failure path
@@ -586,10 +594,10 @@ pub(crate) fn do_outgoing_pipe(
         nix::sys::socket::SockType::Stream,
         None,
         // CLOEXEC: child dup2's what it needs to 0/1; originals shouldn't leak past exec.
-        crate::sock_cloexec_flag(),
+        sock_cloexec_flag(),
     )?;
-    crate::set_cloexec(&parent_fd);
-    crate::set_cloexec(&child_fd);
+    set_cloexec(&parent_fd);
+    set_cloexec(&child_fd);
     // Snapshot the raw ints before fork: the child path below is
     // libc-only (see fn doc) and must not call into std, even for a
     // trivial `.as_raw_fd()` getter — keep it on plain integers.
@@ -639,7 +647,7 @@ pub(crate) fn do_outgoing_pipe(
                 // the periodic `reap_children()` sweep instead of
                 // lingering as a zombie until process exit.
                 drop(child_fd);
-                crate::script::register_child(nix::unistd::Pid::from_raw(pid));
+                script::register_child(nix::unistd::Pid::from_raw(pid));
                 Ok(parent_fd)
             }
         }
@@ -665,7 +673,7 @@ pub(crate) fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(Str
                    "hosts/{node_name} not readable; no Address config");
         return Vec::new();
     }
-    let cfg = crate::keys::read_host_config(confbase, node_name);
+    let cfg = keys::read_host_config(confbase, node_name);
 
     // A bare `Address` (no port) falls back to the host's `Port`
     // before the 655 default.
@@ -700,8 +708,14 @@ pub(crate) fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::fs;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::fd::AsFd;
+    use std::os::unix::net::UnixStream;
+    use std::thread;
+    use std::time::Duration;
+    use std::time::Instant;
 
     /// `apply_dial_sockopts`: `SO_BINDTODEVICE` to `lo` reads back
     /// correctly. Mirror of `listen.rs::open_bind_to_interface_lo`
@@ -795,37 +809,37 @@ mod tests {
             ),
         ];
         for (i, (body, want)) in cases.iter().enumerate() {
-            let tmp = std::env::temp_dir().join(format!(
+            let tmp = env::temp_dir().join(format!(
                 "tincd-outgoing-resolve-{:?}-{i}",
                 std::thread::current().id()
             ));
-            let _ = std::fs::remove_dir_all(&tmp);
-            std::fs::create_dir_all(tmp.join("hosts")).unwrap();
-            std::fs::write(tmp.join("hosts").join("bob"), body).unwrap();
+            let _ = fs::remove_dir_all(&tmp);
+            fs::create_dir_all(tmp.join("hosts")).unwrap();
+            fs::write(tmp.join("hosts").join("bob"), body).unwrap();
 
             let got = resolve_config_addrs(&tmp, "bob");
             let want: Vec<_> = want.iter().map(|(h, p)| (h.to_string(), *p)).collect();
             assert_eq!(got, want, "case {i}: {body:?}");
 
-            let _ = std::fs::remove_dir_all(&tmp);
+            let _ = fs::remove_dir_all(&tmp);
         }
     }
 
     /// Missing `hosts/NAME` → empty; the config phase yields nothing.
     #[test]
     fn resolve_missing_file() {
-        let tmp = std::env::temp_dir().join(format!(
+        let tmp = env::temp_dir().join(format!(
             "tincd-outgoing-missing-{:?}",
             std::thread::current().id()
         ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
         // No hosts/ dir at all.
 
         let addrs = resolve_config_addrs(&tmp, "bob");
         assert!(addrs.is_empty());
 
-        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     /// `probe_connecting` on a freshly-connected loopback socket
@@ -957,12 +971,12 @@ mod tests {
         // Wrap in a UnixStream for ergonomic read/write. fd is a
         // valid AF_UNIX SOCK_STREAM; `From<OwnedFd>` consumes it
         // (no double-close, no unsafe).
-        let mut stream = std::os::unix::net::UnixStream::from(fd);
+        let mut stream = UnixStream::from(fd);
 
         // Write → cat echoes → read back. Set a timeout so a hung
         // child (exec failed, fd half-open) doesn't wedge the test.
         stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
 
         let payload = b"hello proxy exec\n";
@@ -991,7 +1005,7 @@ mod tests {
         )
         .expect("do_outgoing_pipe");
 
-        let stream = std::os::unix::net::UnixStream::from(fd);
+        let stream = UnixStream::from(fd);
         let mut r = BufReader::new(stream);
         let mut line = String::new();
         r.read_line(&mut line).expect("read env line");
@@ -1022,7 +1036,7 @@ mod tests {
 
         // Spin: the RST might not have landed yet. Poll the probe
         // until it returns Err or we time out (rare on loopback).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             match probe_connecting(client.as_fd()) {
                 Ok(false) => {
@@ -1031,7 +1045,7 @@ mod tests {
                         std::time::Instant::now() <= deadline,
                         "probe never resolved"
                     );
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    thread::sleep(Duration::from_millis(10));
                 }
                 Ok(true) => panic!("connected to a closed port?"),
                 Err(e) => {

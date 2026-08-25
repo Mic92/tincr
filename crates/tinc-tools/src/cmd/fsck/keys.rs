@@ -17,6 +17,8 @@ use crate::keypair::{self, TY_PUBLIC};
 use crate::names::Paths;
 
 use super::Finding;
+use std::io;
+use std::io::BufWriter;
 
 /// Full keypair-coherence check.
 ///
@@ -154,7 +156,7 @@ fn fix_public_key(
     // one; the create-mode is moot.
     //
     // The PEM-not-config-line choice: see module doc.
-    let result = (|| -> std::io::Result<()> {
+    let result = (|| -> io::Result<()> {
         let mut o = fs::OpenOptions::new();
         o.append(true).create(true);
         #[cfg(unix)]
@@ -162,7 +164,7 @@ fn fix_public_key(
             o.custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
         }
         let f = o.open(host_file)?;
-        let mut w = std::io::BufWriter::new(f);
+        let mut w = BufWriter::new(f);
         tinc_conf::pem::write_pem(&mut w, TY_PUBLIC, pubkey)?;
         w.flush()
     })();

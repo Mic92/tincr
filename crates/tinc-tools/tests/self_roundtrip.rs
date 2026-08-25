@@ -6,16 +6,20 @@
 
 #![forbid(unsafe_code)]
 
+use std::env;
+use std::fs;
+use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 fn cargo_bin(name: &str) -> PathBuf {
-    std::env::var_os(format!("CARGO_BIN_EXE_{name}")).map_or_else(
+    env::var_os(format!("CARGO_BIN_EXE_{name}")).map_or_else(
         // target/{profile}/deps/<test> → target/{profile}/<name>
         || {
-            let exe = std::env::current_exe().unwrap();
+            let exe = env::current_exe().unwrap();
             exe.parent().unwrap().parent().unwrap().join(name)
         },
         PathBuf::from,
@@ -32,14 +36,14 @@ impl Impl {
     fn sptps_test(self) -> Option<PathBuf> {
         match self {
             Self::Rust => Some(cargo_bin("sptps_test")),
-            Self::C => std::env::var_os("TINC_C_SPTPS_TEST").map(PathBuf::from),
+            Self::C => env::var_os("TINC_C_SPTPS_TEST").map(PathBuf::from),
         }
     }
 
     fn sptps_keypair(self) -> Option<PathBuf> {
         match self {
             Self::Rust => Some(cargo_bin("sptps_keypair")),
-            Self::C => std::env::var_os("TINC_C_SPTPS_KEYPAIR").map(PathBuf::from),
+            Self::C => env::var_os("TINC_C_SPTPS_KEYPAIR").map(PathBuf::from),
         }
     }
 
@@ -136,7 +140,7 @@ fn reap(mut child: Child, must_exit: bool) {
             assert!(!must_exit, "stream server did not exit on EOF");
             return;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -185,7 +189,7 @@ fn roundtrip(
         client_out.status,
         String::from_utf8_lossy(&client_out.stderr)
     );
-    let drain = std::thread::spawn(move || {
+    let drain = thread::spawn(move || {
         let mut sink = Vec::new();
         let _ = server_stderr.read_to_end(&mut sink);
     });
@@ -312,14 +316,14 @@ fn init_keys_load_in_c() {
             .status()
             .unwrap();
         assert!(status.success());
-        let host = std::fs::read_to_string(confbase.join("hosts").join(name)).unwrap();
+        let host = fs::read_to_string(confbase.join("hosts").join(name)).unwrap();
         let b64 = host
             .lines()
             .find_map(|line| line.strip_prefix("Ed25519PublicKey = "))
             .unwrap();
         let public = dir.path().join(format!("{name}.pub"));
         tinc_conf::pem::write_pem(
-            &mut std::fs::File::create(&public).unwrap(),
+            &mut File::create(&public).unwrap(),
             "ED25519 PUBLIC KEY",
             &tinc_crypto::b64::decode(b64).unwrap(),
         )

@@ -13,6 +13,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use std::env;
 use tinc_tools::keypair;
 
 fn usage(prog: &str) {
@@ -20,7 +21,7 @@ fn usage(prog: &str) {
 }
 
 fn main() -> ExitCode {
-    let mut args: Vec<String> = std::env::args().collect();
+    let mut args: Vec<String> = env::args().collect();
     let prog = args.remove(0);
 
     if args.iter().any(|a| a == "--help" || a == "-h") {

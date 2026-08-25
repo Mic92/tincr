@@ -139,6 +139,7 @@ pub(crate) fn conns_to_terminate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::hash::Hash;
     use std::net::Ipv4Addr;
     use std::time::Duration;
 
@@ -150,7 +151,7 @@ mod tests {
         }
     }
 
-    fn set<T: std::hash::Hash + Eq>(xs: impl IntoIterator<Item = T>) -> HashSet<T> {
+    fn set<T: Hash + Eq>(xs: impl IntoIterator<Item = T>) -> HashSet<T> {
         xs.into_iter().collect()
     }
 

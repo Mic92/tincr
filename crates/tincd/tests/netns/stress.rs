@@ -7,9 +7,11 @@ use std::time::{Duration, Instant};
 use super::common::linux::run_ip;
 use super::common::{KillOnDrop, node_status, try_poll};
 use super::rig::{Netem, Node, TunPair, enter_netns, node_pmtu, ping, ping_received};
+use std::fs;
+use std::thread;
 
 fn count_fds(pid: nix::unistd::Pid) -> usize {
-    std::fs::read_dir(format!("/proc/{pid}/fd")).map_or(0, Iterator::count)
+    fs::read_dir(format!("/proc/{pid}/fd")).map_or(0, Iterator::count)
 }
 
 fn flood_ping() -> KillOnDrop {
@@ -53,7 +55,7 @@ fn stress_link_flap() {
 
     run_ip(&["link", "set", "lo", "down"]);
     let dropped = alice_sees_bob(&pair, false, Duration::from_secs(8));
-    std::thread::sleep(Duration::from_secs(3));
+    thread::sleep(Duration::from_secs(3));
     run_ip(&["link", "set", "lo", "up"]);
     if !dropped {
         let (alice_log, bob_log) = pair.finish();
@@ -191,14 +193,14 @@ fn stress_rapid_reconnect_storm() {
     for churn in 0..10 {
         pair.bob.stop();
         // SIGKILL → RST → alice terminates the connection at once.
-        std::thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(200));
         pair.bob.start();
         if !alice_sees_bob(&pair, true, Duration::from_secs(10)) {
             let (alice_log, bob_log) = pair.finish();
             panic!("churn {churn}\n=== alice ===\n{alice_log}\n=== bob ===\n{bob_log}");
         }
     }
-    std::thread::sleep(Duration::from_millis(500));
+    thread::sleep(Duration::from_millis(500));
     let edges = pair.alice.ctl().dump(4).len();
     let fds = count_fds(pair.alice.pid());
     let (alice_log, bob_log) = pair.finish();
@@ -296,7 +298,7 @@ fn stress_idle_pmtu_convergence() {
     while Instant::now() < deadline {
         udp_confirmed |=
             node_status(&pair.alice.ctl().dump(3), "bob").is_some_and(|s| s & 0x80 != 0);
-        std::thread::sleep(Duration::from_secs(1));
+        thread::sleep(Duration::from_secs(1));
     }
     let (mtu, _, _) = node_pmtu(&pair.alice.ctl().dump(3), "bob").unwrap();
     let (alice_log, bob_log) = pair.finish();

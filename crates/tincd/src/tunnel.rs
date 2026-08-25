@@ -13,6 +13,7 @@ use std::time::Instant;
 use tinc_sptps::Sptps;
 
 use crate::pmtu::PmtuState;
+use std::time::Duration;
 
 /// Atomic so the shard RX fast-path can
 /// bump through `&TunnelHandles` without `&mut Daemon`. `Relaxed`
@@ -217,8 +218,8 @@ pub(crate) fn should_reap_prev_sptps(
     last_req_key: Option<Instant>,
     installed_at: Option<Instant>,
     now: Instant,
-    twice_pinginterval: std::time::Duration,
-    keylifetime: std::time::Duration,
+    twice_pinginterval: Duration,
+    keylifetime: Duration,
 ) -> bool {
     let healthy = validkey
         && last_req_key.is_none_or(|lrk| now.saturating_duration_since(lrk) > twice_pinginterval);
@@ -239,7 +240,7 @@ pub(crate) fn periodic_rekey_due(
     rekey_due: bool,
     last_req_key: Option<Instant>,
     now: Instant,
-    pinginterval: std::time::Duration,
+    pinginterval: Duration,
 ) -> bool {
     if validkey && !waitingforkey && rekey_due {
         return true;
@@ -356,6 +357,7 @@ pub(crate) fn make_udp_label(initiator: &str, responder: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pmtu::PmtuPhase;
     use std::time::Duration;
 
     #[test]
@@ -380,7 +382,7 @@ mod tests {
                 p.mtu = 1400;
                 p.minmtu = 1200;
                 p.maxmtu = 1450;
-                p.phase = crate::pmtu::PmtuPhase::Discovery { sent: 7 };
+                p.phase = PmtuPhase::Discovery { sent: 7 };
                 p.udp_confirmed = true;
                 p
             }),

@@ -19,6 +19,7 @@ use super::probe::TxTarget;
 use crate::daemon::PKT_NORMAL;
 use crate::egress::{TxBatch, UdpEgress};
 use crate::graph::NodeId;
+use std::io::ErrorKind;
 
 /// Stats for the daemon's `myself_tunnel.out_{packets,bytes}` and the
 /// per-dst tunnel counters. `bytes` is sum of BODY lengths (the inner
@@ -136,7 +137,7 @@ fn ship(batch: &mut TxBatch, egress: &mut dyn UdpEgress) -> Result<(), SealErr> 
         Err(e) if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) => Err((relay, origlen)),
         // sndbuf full. GSO send is all-or-nothing (`udp_send_skb`);
         // no partial-accept to recover. Same as `ship_tx_batch`.
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+        Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(()),
         Err(e) => {
             log::warn!(target: "tincd::net", "fast-path sendmsg: {e}");
             Ok(())

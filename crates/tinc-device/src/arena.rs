@@ -9,8 +9,10 @@
 //! `MSG_ZEROCOPY` page-pin accounting should that land. Unsafe is
 //! scoped to constructor + Drop; slot accessors are safe.
 
-use std::alloc::{Layout, alloc_zeroed, dealloc};
+use super::MTU;
+use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
 use std::ptr::NonNull;
+use std::slice;
 
 /// One drain pass result. The daemon dispatches per-RESULT, not
 /// per-device — `Linux+vnet_hdr` can yield EITHER on consecutive
@@ -126,7 +128,7 @@ impl DeviceArena {
     /// rebuilding the arena to change STRIDE means re-auditing
     /// every slot accessor, so the headroom is reserved now.)
     pub const STRIDE: usize = {
-        let need = super::MTU + 33; // 1518 + 33 = 1551
+        let need = MTU + 33; // 1518 + 33 = 1551
         // Round up to cacheline (64). 1551 → 1600.
         (need + 63) & !63
     };
@@ -157,7 +159,7 @@ impl DeviceArena {
         let buf = unsafe { alloc_zeroed(layout) };
         let buf = NonNull::new(buf).unwrap_or_else(|| {
             // Match `Box`'s OOM behavior: abort via the std handler.
-            std::alloc::handle_alloc_error(layout)
+            handle_alloc_error(layout)
         });
         Self {
             buf,
@@ -209,7 +211,7 @@ impl DeviceArena {
         // alloc'd; ≥ cap*STRIDE.
         #[expect(unsafe_code)]
         unsafe {
-            std::slice::from_raw_parts(self.buf.as_ptr(), self.cap * Self::STRIDE)
+            slice::from_raw_parts(self.buf.as_ptr(), self.cap * Self::STRIDE)
         }
     }
 
@@ -222,7 +224,7 @@ impl DeviceArena {
         // SAFETY: same as `as_contiguous`; `&mut self` excludes.
         #[expect(unsafe_code)]
         unsafe {
-            std::slice::from_raw_parts_mut(self.buf.as_ptr(), self.cap * Self::STRIDE)
+            slice::from_raw_parts_mut(self.buf.as_ptr(), self.cap * Self::STRIDE)
         }
     }
 

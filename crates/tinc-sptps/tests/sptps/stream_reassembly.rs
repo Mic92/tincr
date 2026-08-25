@@ -4,6 +4,7 @@
 
 use crate::common::{SeedRng, feed, keypair, wires};
 use proptest::prelude::{any, prop, prop_assert_eq, proptest};
+use std::iter;
 use tinc_sptps::{Framing, Output, Role, Sptps};
 
 /// Generate the canonical handshake byte streams (alice→bob, bob→alice)
@@ -90,7 +91,7 @@ fn feed_chopped(role: Role, seed: u64, bytes: &[u8], cuts: &[usize]) -> Vec<Outp
 
     let mut obs = Vec::new();
     let mut prev = 0;
-    for &c in cuts.iter().chain(std::iter::once(&bytes.len())) {
+    for &c in cuts.iter().chain(iter::once(&bytes.len())) {
         obs.extend(feed(&mut sptps, &bytes[prev..c]).unwrap());
         prev = c;
     }

@@ -20,7 +20,11 @@
 #![warn(missing_docs)]
 
 use std::ffi::c_void;
+use std::marker::PhantomData;
+use std::ptr;
 use std::ptr::NonNull;
+use std::slice;
+use std::sync::PoisonError;
 use std::sync::{Mutex, MutexGuard};
 
 /// Serialization lock for the process-global RNG.
@@ -43,9 +47,7 @@ static RNG_LOCK: Mutex<()> = Mutex::new(());
 /// `harness_t`s and re-seeds, the only shared state is the RNG context,
 /// which the next `seed_rng` overwrites unconditionally.
 pub fn serial_guard() -> MutexGuard<'static, ()> {
-    RNG_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    RNG_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 // Raw FFI surface. Hand-declared — see build.rs for why no bindgen.
@@ -213,7 +215,7 @@ pub struct CSptps<'k> {
     h: NonNull<c_void>,
     /// `sptps.c`'s `mykey`/`hiskey` are non-owning. Tie our lifetime
     /// to the keys so they can't be freed out from under it.
-    _keys: std::marker::PhantomData<&'k CKey>,
+    _keys: PhantomData<&'k CKey>,
 }
 
 impl<'k> CSptps<'k> {
@@ -267,7 +269,7 @@ impl<'k> CSptps<'k> {
         );
         let s = Self {
             h,
-            _keys: std::marker::PhantomData,
+            _keys: PhantomData,
         };
         let evs = s.drain();
         (s, evs)
@@ -324,7 +326,7 @@ impl<'k> CSptps<'k> {
     /// Format per shim.c: `[kind:u8][type:u8][len:u32 host-endian][payload]`
     /// repeated. Host endian is fine — we're in the same process.
     fn drain(&self) -> Vec<Event> {
-        let mut buf_ptr: *const u8 = std::ptr::null();
+        let mut buf_ptr: *const u8 = ptr::null();
         let mut overflow = false;
         // SAFETY: `h` is live; both out-pointers are valid, aligned,
         // and writable for their types. The shim writes them
@@ -343,7 +345,7 @@ impl<'k> CSptps<'k> {
         // aligned, initialized). `len <= 64K` is the fill mark; the
         // harness outlives this borrow (we hold `&self`) and nothing
         // else writes the sink until the next FFI call.
-        let raw = unsafe { std::slice::from_raw_parts(buf_ptr, len) };
+        let raw = unsafe { slice::from_raw_parts(buf_ptr, len) };
         let mut out = Vec::new();
         let mut p = 0;
         while p < raw.len() {

@@ -1,6 +1,7 @@
 use super::*;
 use crate::testutil::ConfDir;
 use std::fs;
+use std::str;
 
 /// **The contract test.** Sign, then verify. Body round-trips
 /// byte-exact. This is what `tinc sign | tinc verify .` does.
@@ -20,7 +21,7 @@ fn sign_verify_roundtrip() {
     // Shape check on the output
     // First line is the header, rest is the body byte-exact.
     let nl = signed.iter().position(|&b| b == b'\n').unwrap();
-    let header = std::str::from_utf8(&signed[..nl]).unwrap();
+    let header = str::from_utf8(&signed[..nl]).unwrap();
     assert!(header.starts_with("Signature = alice 1700000000 "));
     // Sig is the 5th space-separated field.
     let sig_b64 = header.rsplit(' ').next().unwrap();
@@ -115,7 +116,7 @@ fn verify_tampered_time() {
     sign(&paths, Some(&input), 1_700_000_000, &mut signed).unwrap();
 
     // Swap `1700000000` → `1700000001` in the header.
-    let s = std::str::from_utf8(&signed).unwrap();
+    let s = str::from_utf8(&signed).unwrap();
     let tampered = s.replace("1700000000", "1700000001");
 
     let err = verify_blob(&paths, &Signer::Any, tampered.as_bytes()).unwrap_err();
@@ -149,7 +150,7 @@ fn verify_tampered_signer_name() {
 
     // Tamper: header says bob now. We verify from bob's confbase
     // (which has hosts/bob, with bob's real pubkey).
-    let s = std::str::from_utf8(&signed).unwrap();
+    let s = str::from_utf8(&signed).unwrap();
     let tampered = s.replace("= alice ", "= bob ");
 
     // Bob's confbase. `Signer::Any` so it uses the header's name

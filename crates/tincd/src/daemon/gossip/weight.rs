@@ -1,6 +1,8 @@
 //! PONG-driven edge-weight EWMA + hysteresis-gated re-gossip.
 
 use crate::daemon::{ConnId, Daemon};
+use std::time::Duration;
+use std::time::Instant;
 
 impl Daemon {
     /// EWMA + asymmetric-hysteresis weight update (§3.C of
@@ -13,7 +15,7 @@ impl Daemon {
     /// delay) so jitter alone can't push the weight up.
     ///
     /// Returns `needs_write` for the broadcast it queues.
-    pub(in crate::daemon) fn on_pong_rtt(&mut self, id: ConnId, now: std::time::Instant) -> bool {
+    pub(in crate::daemon) fn on_pong_rtt(&mut self, id: ConnId, now: Instant) -> bool {
         let pinginterval = u64::from(self.settings.pinginterval);
         let Some(conn) = self.conns.get_mut(id) else {
             return false;
@@ -66,7 +68,7 @@ impl Daemon {
         // the first re-gossip (`last_weight_gossip == None`) so the
         // connect-time outlier is corrected at t≈PingInterval, same
         // latency as the one-shot outlier-reject scheme.
-        let floor = std::time::Duration::from_secs(5 * pinginterval);
+        let floor = Duration::from_secs(5 * pinginterval);
         if let Some(t) = conn.last_weight_gossip
             && now.saturating_duration_since(t) < floor
         {

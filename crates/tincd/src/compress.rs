@@ -264,6 +264,7 @@ fn decompress_zlib(src: &[u8], max_len: usize) -> Option<Vec<u8>> {
 mod lzo {
     use std::ffi::{c_int, c_long, c_short, c_uint};
     use std::mem::size_of;
+    use std::ptr;
     use std::sync::Once;
 
     /// `minilzo.h:76`: `16384L * lzo_sizeof_dict_t` where
@@ -402,7 +403,7 @@ mod lzo {
                 src.len(),
                 out.as_mut_ptr(),
                 &raw mut out_len,
-                std::ptr::null_mut(),
+                ptr::null_mut(),
             )
         };
         if r == LZO_E_OK && out_len <= max_len {

@@ -1,9 +1,10 @@
 //! `tinc edit` with `EDITOR` set to `true`/`false`/`echo` instead of a
 //! real editor. `VISUAL` is removed because it takes precedence.
 
+use super::Run;
 use super::{Conf, tinc, tinc_with};
 
-fn edit(conf: &Conf, editor: &str, target: &str) -> super::Run {
+fn edit(conf: &Conf, editor: &str, target: &str) -> Run {
     tinc_with(&["-c", &conf.arg(), "edit", target], b"", |cmd| {
         cmd.env_remove("VISUAL")
             .env("EDITOR", editor)

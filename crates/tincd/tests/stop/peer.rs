@@ -11,6 +11,7 @@ use std::time::Duration;
 use super::common::{
     Node, PeerFixture, is_timeout, node_reachable, node_status, read_cookie, read_line_unbuffered,
 };
+use std::str;
 use tinc_crypto::sign::SigningKey;
 use tinc_sptps::{Framing, Output, Role, Sptps};
 
@@ -43,7 +44,7 @@ fn assert_no_reply(peer: &mut PeerFixture, what: &str) {
 fn ack_activates_connection_and_subnet_gossip_applies() {
     let mut peer = PeerFixture::spawn("ack-subnets");
 
-    let ack = std::str::from_utf8(&peer.daemon_ack)
+    let ack = str::from_utf8(&peer.daemon_ack)
         .expect("ACK is ASCII")
         .trim_end();
     let fields: Vec<&str> = ack.split_whitespace().collect();
@@ -64,7 +65,7 @@ fn ack_activates_connection_and_subnet_gossip_applies() {
     let announced = peer.drain_records(500);
     assert!(!announced.is_empty(), "no ADD_EDGE after activation");
     for record in &announced {
-        let line = std::str::from_utf8(record).unwrap();
+        let line = str::from_utf8(record).unwrap();
         assert!(
             line.starts_with("12 ") && line.contains(" testnode testpeer 127.0.0.1 0 "),
             "unexpected post-ACK record: {line:?}"

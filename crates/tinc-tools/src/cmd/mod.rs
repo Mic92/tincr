@@ -13,11 +13,20 @@
 //! actually helps here: `cmd/init.rs` is self-contained, you can read
 //! it without paging through `cmd_dump`.
 
+use crate::ctl::CtlError;
+use crate::keypair::LoadError;
+use crate::keypair::TY_PRIVATE;
 use std::fs;
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io;
+use std::io::BufWriter;
+use std::io::ErrorKind;
 use std::io::Write;
+use std::mem;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::Path;
 use std::path::PathBuf;
 
 pub mod config;
@@ -77,16 +86,16 @@ pub enum CmdError {
 /// `CtlError` → `CmdError::BadInput` via `Display`. No separate
 /// `Daemon` variant: every consumer is print-and-exit-1, so a new
 /// variant would route to the same place.
-impl From<crate::ctl::CtlError> for CmdError {
-    fn from(e: crate::ctl::CtlError) -> Self {
+impl From<CtlError> for CmdError {
+    fn from(e: CtlError) -> Self {
         CmdError::BadInput(e.to_string())
     }
 }
 
 /// Same erasure for key-load errors: `LoadError`'s Display already
 /// carries the path, and every caller is print-and-exit-1.
-impl From<crate::keypair::LoadError> for CmdError {
-    fn from(e: crate::keypair::LoadError) -> Self {
+impl From<LoadError> for CmdError {
+    fn from(e: LoadError) -> Self {
         CmdError::BadInput(e.to_string())
     }
 }
@@ -106,12 +115,12 @@ impl From<crate::keypair::LoadError> for CmdError {
 /// Lifted from init.rs when invite landed; the test
 /// (`init::tests::makedir_clamps_mode`) stayed where it was — it tests
 /// a property init depends on.
-pub(crate) fn makedir(path: &std::path::Path, mode: u32) -> Result<(), CmdError> {
+pub(crate) fn makedir(path: &Path, mode: u32) -> Result<(), CmdError> {
     #[cfg(unix)]
     {
         match fs::DirBuilder::new().mode(mode).create(path) {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                 fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(io_err(path))
             }
             Err(e) => Err(io_err(path)(e)),
@@ -120,9 +129,9 @@ pub(crate) fn makedir(path: &std::path::Path, mode: u32) -> Result<(), CmdError>
     #[cfg(not(unix))]
     {
         let _ = mode;
-        match std::fs::create_dir(path) {
+        match fs::create_dir(path) {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
             Err(e) => Err(io_err(path)(e)),
         }
     }
@@ -146,12 +155,8 @@ pub(crate) enum OpenKind {
 ///
 /// Centralises the `OpenOptions` + `cfg(unix)` + `OpenOptionsExt`
 /// dance that used to be open-coded at every key/host-file write site.
-pub(crate) fn open_nofollow(
-    path: &std::path::Path,
-    kind: OpenKind,
-    mode: u32,
-) -> Result<std::fs::File, CmdError> {
-    let mut o = std::fs::OpenOptions::new();
+pub(crate) fn open_nofollow(path: &Path, kind: OpenKind, mode: u32) -> Result<File, CmdError> {
+    let mut o = OpenOptions::new();
     match kind {
         OpenKind::CreateTrunc => {
             o.write(true).create(true).truncate(true);
@@ -177,19 +182,18 @@ pub(crate) fn open_nofollow(
 /// `O_NOFOLLOW`. The four key-generating commands differ only in the
 /// open `kind` (excl on init/join, append on genkey, trunc on invite).
 pub(crate) fn write_private_key(
-    path: &std::path::Path,
+    path: &Path,
     sk: &tinc_crypto::sign::SigningKey,
     kind: OpenKind,
 ) -> Result<(), CmdError> {
     let f = open_nofollow(path, kind, 0o600)?;
-    let mut w = std::io::BufWriter::new(f);
-    tinc_conf::pem::write_pem(&mut w, crate::keypair::TY_PRIVATE, &sk.to_blob())
-        .map_err(io_err(path))?;
+    let mut w = BufWriter::new(f);
+    tinc_conf::pem::write_pem(&mut w, TY_PRIVATE, &sk.to_blob()).map_err(io_err(path))?;
     w.flush().map_err(io_err(path))
 }
 
 /// `File::create` + `O_NOFOLLOW` (truncate, create, no symlink follow).
-pub(crate) fn create_nofollow(path: &std::path::Path) -> Result<std::fs::File, CmdError> {
+pub(crate) fn create_nofollow(path: &Path) -> Result<File, CmdError> {
     open_nofollow(path, OpenKind::CreateTrunc, 0o666)
 }
 
@@ -211,17 +215,14 @@ impl TmpGuard {
     /// Open `<target><suffix>` for writing (`O_CREAT | O_TRUNC`).
     /// A leftover scratch file from a crashed previous run is simply
     /// overwritten.
-    pub(crate) fn open(
-        target: &std::path::Path,
-        suffix: &str,
-    ) -> Result<(Self, std::fs::File), CmdError> {
+    pub(crate) fn open(target: &Path, suffix: &str) -> Result<(Self, File), CmdError> {
         // Manual OsString concat, not `with_extension` — that would
         // *replace* an existing extension instead of appending.
         let mut tmp = target.as_os_str().to_owned();
         tmp.push(suffix);
         let tmp = PathBuf::from(tmp);
 
-        let f = std::fs::File::create(&tmp).map_err(io_err(&tmp))?;
+        let f = File::create(&tmp).map_err(io_err(&tmp))?;
 
         Ok((
             Self {
@@ -234,7 +235,7 @@ impl TmpGuard {
 
     /// Path to the scratch file, for callers that need to `chmod`
     /// before committing.
-    pub(crate) fn tmp_path(&self) -> &std::path::Path {
+    pub(crate) fn tmp_path(&self) -> &Path {
         &self.tmp
     }
 
@@ -245,10 +246,10 @@ impl TmpGuard {
     /// at scope end is `remove_file("")` → ENOENT → ignored. If the
     /// rename FAILS we still best-effort unlink the scratch file.
     pub(crate) fn commit(mut self) -> Result<(), CmdError> {
-        let tmp = std::mem::take(&mut self.tmp);
-        let target = std::mem::take(&mut self.target);
-        std::fs::rename(&tmp, &target).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
+        let tmp = mem::take(&mut self.tmp);
+        let target = mem::take(&mut self.target);
+        fs::rename(&tmp, &target).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
             CmdError::Io {
                 path: target,
                 err: e,
@@ -259,7 +260,7 @@ impl TmpGuard {
 
 impl Drop for TmpGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.tmp);
+        let _ = fs::remove_file(&self.tmp);
     }
 }
 

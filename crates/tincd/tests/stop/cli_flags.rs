@@ -6,6 +6,11 @@ use super::common::{
     write_ed25519_privkey,
 };
 use super::testnode;
+use std::fs;
+use std::io;
+use std::io::BufRead;
+use std::io::BufReader;
+use std::os::unix::net::UnixStream;
 
 fn stderr_of(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
@@ -77,7 +82,7 @@ fn bypass_security_is_accepted_with_warning() {
 fn missing_tinc_conf_fails_without_leaving_files() {
     let tmp = tmp!("noconfig");
     let node = Node::new(tmp.path(), "testnode", 0x42);
-    std::fs::create_dir_all(&node.confbase).unwrap();
+    fs::create_dir_all(&node.confbase).unwrap();
     let stderr = run_failing(&node, &[]);
     assert!(stderr.contains("tinc.conf"), "{stderr}");
     assert!(!node.pidfile.exists() && !node.socket.exists());
@@ -87,8 +92,8 @@ fn missing_tinc_conf_fails_without_leaving_files() {
 fn missing_name_fails() {
     let tmp = tmp!("noname");
     let node = Node::new(tmp.path(), "testnode", 0x42);
-    std::fs::create_dir_all(&node.confbase).unwrap();
-    std::fs::write(node.confbase.join("tinc.conf"), "DeviceType = dummy\n").unwrap();
+    fs::create_dir_all(&node.confbase).unwrap();
+    fs::write(node.confbase.join("tinc.conf"), "DeviceType = dummy\n").unwrap();
     let stderr = run_failing(&node, &[]);
     assert!(
         stderr.contains("Name") && stderr.contains("required"),
@@ -101,14 +106,14 @@ fn missing_name_fails() {
 fn dash_o_overrides_tinc_conf() {
     let tmp = tmp!("dash-o");
     let mut node = testnode(tmp.path());
-    std::fs::write(node.confbase.join("hosts").join("override"), "Port = 0\n").unwrap();
+    fs::write(node.confbase.join("hosts").join("override"), "Port = 0\n").unwrap();
     start_with(&mut node, ["-o", "Name = override"], |_| {});
 
     let cookie = read_cookie(&node.pidfile);
-    let socket = std::os::unix::net::UnixStream::connect(&node.socket).unwrap();
-    std::io::Write::write_all(&mut &socket, format!("0 ^{cookie} 0\n").as_bytes()).unwrap();
+    let socket = UnixStream::connect(&node.socket).unwrap();
+    io::Write::write_all(&mut &socket, format!("0 ^{cookie} 0\n").as_bytes()).unwrap();
     let mut id_line = String::new();
-    std::io::BufRead::read_line(&mut std::io::BufReader::new(&socket), &mut id_line).unwrap();
+    BufRead::read_line(&mut BufReader::new(&socket), &mut id_line).unwrap();
     assert_eq!(id_line, "0 override 17.7\n");
 }
 
@@ -155,8 +160,8 @@ fn netname_selects_confbase() {
 fn starts_without_hosts_dir() {
     let tmp = tmp!("nohosts");
     let mut node = Node::new(tmp.path(), "testnode", 0x42).log_level("tincd=warn");
-    std::fs::create_dir_all(&node.confbase).unwrap();
-    std::fs::write(
+    fs::create_dir_all(&node.confbase).unwrap();
+    fs::write(
         node.confbase.join("tinc.conf"),
         "Name = testnode\nDeviceType = dummy\nAddressFamily = ipv4\nPort = 0\n",
     )
@@ -175,7 +180,7 @@ fn no_detach_keeps_pid() {
     let tmp = tmp!("dash-D");
     let mut node = testnode(tmp.path());
     node.start();
-    let pidfile_pid: i32 = std::fs::read_to_string(&node.pidfile)
+    let pidfile_pid: i32 = fs::read_to_string(&node.pidfile)
         .unwrap()
         .split_whitespace()
         .next()
@@ -209,7 +214,7 @@ fn logfile_replaces_stderr() {
         },
     );
     let stderr = node.stop();
-    let logged = std::fs::read_to_string(&logfile).unwrap();
+    let logged = fs::read_to_string(&logfile).unwrap();
     assert!(logged.contains("starting"), "logfile:\n{logged}");
     assert!(!stderr.contains("starting"), "stderr:\n{stderr}");
 }

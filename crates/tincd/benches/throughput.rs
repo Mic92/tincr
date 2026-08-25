@@ -36,12 +36,18 @@ mod bench {
         wait_for_carrier,
     };
     use super::common::{Node, TmpGuard, node_status, poll_until};
+    use std::env;
+    use std::fs;
+    use std::panic;
+    use std::panic::AssertUnwindSafe;
+    use std::process;
+    use std::thread;
 
     const BOB_IP: &str = "10.44.0.2";
 
     /// Outer pass re-execs inside bwrap and exits; inner pass returns.
     fn enter_netns() -> Option<ChildNetNs> {
-        if std::env::var_os("BWRAP_INNER").is_some() {
+        if env::var_os("BWRAP_INNER").is_some() {
             bwrap_inner_init();
             return Some(ChildNetNs::new("bobside"));
         }
@@ -60,10 +66,10 @@ mod bench {
             return None;
         }
         let status = bwrap_reexec()
-            .args(std::env::args_os().skip(1))
+            .args(env::args_os().skip(1))
             .status()
             .expect("spawn bwrap");
-        std::process::exit(status.code().unwrap_or(1));
+        process::exit(status.code().unwrap_or(1));
     }
 
     /// C tincd cannot attach to a `multi_queue` TUN. Deleted on drop.
@@ -166,7 +172,7 @@ mod bench {
                 .stderr(Stdio::null())
                 .spawn()
                 .expect("spawn iperf3 server");
-            std::thread::sleep(Duration::from_millis(200));
+            thread::sleep(Duration::from_millis(200));
             Self(child)
         }
     }
@@ -196,7 +202,7 @@ mod bench {
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn iperf3 client");
-        std::thread::sleep(Duration::from_millis(500));
+        thread::sleep(Duration::from_millis(500));
         let ping = ping_rtts();
         let out = client.wait_with_output().expect("wait iperf3 client");
         assert!(
@@ -246,7 +252,7 @@ mod bench {
 
         /// Needs root or `CAP_PERFMON`.
         fn trace(pid: nix::unistd::Pid, out: &Path) -> Self {
-            if std::env::var_os("TINCD_TRACE").is_none() {
+            if env::var_os("TINCD_TRACE").is_none() {
                 return Self {
                     child: None,
                     summary: None,
@@ -281,7 +287,7 @@ mod bench {
             );
             let _ = child.wait();
             if let Some(path) = &self.summary
-                && let Ok(text) = std::fs::read_to_string(path)
+                && let Ok(text) = fs::read_to_string(path)
             {
                 eprintln!("--- syscall trace ({}) ---", path.display());
                 for line in text.lines() {
@@ -419,7 +425,7 @@ mod bench {
 
         for (k, bob) in bobs.iter().enumerate() {
             let ip = format!("10.44.{}.1", k + 1);
-            let ready = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let ready = panic::catch_unwind(AssertUnwindSafe(|| {
                 poll_until(Duration::from_secs(15), || {
                     ping_once(&ip);
                     let nodes = alice.ctl().dump(3);
@@ -488,7 +494,7 @@ mod bench {
     }
 
     pub fn main() {
-        let filters: Vec<String> = std::env::args()
+        let filters: Vec<String> = env::args()
             .skip(1)
             .filter(|a| !a.starts_with('-'))
             .collect();
@@ -499,10 +505,10 @@ mod bench {
             return;
         };
         let c_bin = c_tincd_bin().expect("checked in enter_netns");
-        let perf_out = std::env::var_os("TINCD_PERF_DIR")
+        let perf_out = env::var_os("TINCD_PERF_DIR")
             .map_or_else(|| PathBuf::from("/tmp/tincd-perf"), PathBuf::from);
-        if perf_enabled() || std::env::var_os("TINCD_TRACE").is_some() {
-            std::fs::create_dir_all(&perf_out).unwrap();
+        if perf_enabled() || env::var_os("TINCD_TRACE").is_some() {
+            fs::create_dir_all(&perf_out).unwrap();
         } else {
             eprintln!("(set TINCD_PERF=1 for sampling profile, TINCD_TRACE=1 for syscall counts)");
         }
@@ -554,7 +560,7 @@ mod bench {
                 "no pairing matched {filters:?}; available: c_c, rust_rust, rust_c, \
                  latency_{{idle,load}}_<pairing>, mesh"
             );
-            std::process::exit(1);
+            process::exit(1);
         }
 
         let [c, rust, mixed] = throughput;

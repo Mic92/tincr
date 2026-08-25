@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 use rand_core::{Infallible, TryCryptoRng, TryRng};
+use std::mem;
 use tinc_crypto::sign::SigningKey;
 use tinc_sptps::{Framing, Output, Role, Sptps, SptpsAead, SptpsError, SptpsKex, SptpsLabel};
 
@@ -117,12 +118,12 @@ pub fn pump(
 ) -> Result<(), SptpsError> {
     let (mut alice_done, mut bob_done) = (false, false);
     for _ in 0..16 {
-        for bytes in std::mem::take(&mut to_bob) {
+        for bytes in mem::take(&mut to_bob) {
             let outs = feed(bob, &bytes)?;
             bob_done |= outs.contains(&Output::HandshakeDone);
             to_alice.extend(wires(outs));
         }
-        for bytes in std::mem::take(&mut to_alice) {
+        for bytes in mem::take(&mut to_alice) {
             let outs = feed(alice, &bytes)?;
             alice_done |= outs.contains(&Output::HandshakeDone);
             to_bob.extend(wires(outs));

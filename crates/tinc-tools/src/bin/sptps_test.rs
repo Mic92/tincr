@@ -47,6 +47,10 @@ use std::process::ExitCode;
 
 use tinc_crypto::os_rng;
 
+use std::env;
+use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
+use std::process;
 use tinc_sptps::{Framing, Output, Role, Sptps};
 use tinc_tools::keypair;
 
@@ -95,7 +99,7 @@ fn usage(prog: &str) {
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut argv: Vec<String> = std::env::args().collect();
+    let mut argv: Vec<String> = env::args().collect();
     let prog = argv.remove(0);
 
     let mut datagram = false;
@@ -113,7 +117,7 @@ fn parse_args() -> Result<Args, String> {
         if let Some(chars) = a.strip_prefix('-') {
             if chars == "-help" || chars == "h" {
                 usage(&prog);
-                std::process::exit(0);
+                process::exit(0);
             }
             for c in chars.chars() {
                 match c {
@@ -227,10 +231,8 @@ fn listen_addr(port: &str, family: AddrFamily) -> io::Result<SocketAddr> {
     Ok(match family {
         // Any → V6 wildcard (dual-stack on Linux). Doesn't matter
         // for the integration test (it passes -4).
-        AddrFamily::Any | AddrFamily::V6 => {
-            SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), port)
-        }
-        AddrFamily::V4 => SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), port),
+        AddrFamily::Any | AddrFamily::V6 => SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), port),
+        AddrFamily::V4 => SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), port),
     })
 }
 

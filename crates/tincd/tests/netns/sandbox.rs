@@ -1,10 +1,13 @@
 use std::os::unix::fs::PermissionsExt;
 
 use super::rig::{TunPair, enter_netns, ping, tun_node};
+use std::fs;
+use std::fs::Permissions;
+use std::path::Path;
 
-fn write_script(path: &std::path::Path, body: &str) {
-    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+fn write_script(path: &Path, body: &str) {
+    fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    fs::set_permissions(path, Permissions::from_mode(0o755)).unwrap();
 }
 
 /// `Sandbox = normal`: the daemon boots and pings under Landlock,
@@ -17,7 +20,7 @@ fn sandbox_normal_ping() {
     };
     let tmp = tmp!("sboxping");
     let mut pair = TunPair::new(netns, &tmp, "Sandbox = normal");
-    std::fs::create_dir_all(&pair.alice.confbase).unwrap();
+    fs::create_dir_all(&pair.alice.confbase).unwrap();
     write_script(&pair.alice.confbase.join("host-up"), "exit 0");
     pair.start_direct();
     pair.wait_validkey();

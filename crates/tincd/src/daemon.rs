@@ -52,8 +52,22 @@ pub use settings::{DaemonSettings, ForwardingMode, RoutingMode};
 // (settings.rs stores it unconditionally) but only `No` is reachable
 // — `load_settings` warns and ignores the config line, like a C tinc
 // built with `--disable-miniupnpc`.
+use crate::bgresolve::DnsWorker;
+use crate::dispatch::ConnOptions;
+use crate::dns::DnsConfig;
+use crate::event::MAX_EVENTS_PER_TURN;
+use crate::outgoing::PunchSock;
+use crate::portmap::Portmapper;
 #[cfg(feature = "upnp")]
 pub use crate::portmap::UpnpMode;
+use crate::scriptworker::ScriptWorker;
+use crate::sd_notify;
+use crate::shard::NodeView;
+use crate::shard::TunnelHandles;
+use crate::shard::TxSnapshot;
+use crate::shard::runtime::ShardRuntime;
+use std::fs;
+use std::io;
 #[cfg(not(feature = "upnp"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UpnpMode {
@@ -101,7 +115,7 @@ pub struct NodeState {
     /// Avg of RTTs, ms.
     pub edge_weight: i32,
     /// Top byte = peer's `PROT_MINOR`.
-    pub edge_options: crate::dispatch::ConnOptions,
+    pub edge_options: ConnOptions,
 }
 
 /// Six variants = six io callbacks the event loop dispatches.
@@ -257,7 +271,7 @@ pub struct Daemon {
     /// Our options bitfield (`PROT_MINOR` in top byte). Built from
     /// global `IndirectData`/`TCPOnly`/`PMTUDiscovery`/`ClampMSS` at
     /// `setup()`.
-    pub(crate) myself_options: crate::dispatch::ConnOptions,
+    pub(crate) myself_options: ConnOptions,
 
     /// Read back from `listeners[0].udp_port()` after bind.
     /// `bind_reusing_port` makes UDP follow TCP's ephemeral with
@@ -295,7 +309,7 @@ pub struct Daemon {
     /// magic IP has to be added to the TUN in `tinc-up`, and
     /// re-running that mid-daemon is the same can-of-worms as
     /// `DeviceType` reload.
-    pub(crate) dns: Option<crate::dns::DnsConfig>,
+    pub(crate) dns: Option<DnsConfig>,
 
     /// Anti-loop dedup for flooded ADD/DEL messages. Handlers call `seen.check(body)`
     /// before processing; `true` → dup, drop silently.
@@ -388,7 +402,7 @@ pub struct Daemon {
 
     /// Off-loop FIFO executor for host/subnet hooks: slow scripts
     /// must not freeze the data plane on reachability flips.
-    pub(crate) script_worker: crate::scriptworker::ScriptWorker,
+    pub(crate) script_worker: ScriptWorker,
 
     /// Derived, not a config var: `(device emits full eth frames) &&
     /// (Mode=router)`. Router-mode IGNORES MACs but the kernel
@@ -438,7 +452,7 @@ pub struct Daemon {
     pub(crate) punch_timers: HashMap<NodeId, TimerId>,
     /// Pre-bound ephemeral sockets per inflight punch (≤2: v4 + v6).
     /// Bound before `PUNCH` so the port is known; consumed at dial.
-    pub(crate) punch_socks: HashMap<NodeId, Vec<crate::outgoing::PunchSock>>,
+    pub(crate) punch_socks: HashMap<NodeId, Vec<PunchSock>>,
     /// Punch conns in flight, for RST recovery.
     pub(crate) punch_dials: HashMap<ConnId, punch::PunchDial>,
     /// Failed punch dials awaiting their re-dial timer.
@@ -554,7 +568,7 @@ pub struct Daemon {
 
     /// Off-thread `getaddrinfo`. Owns the only call sites that hit
     /// libc DNS after setup. Drained in `on_periodic_tick`.
-    pub(crate) dns_worker: crate::bgresolve::DnsWorker,
+    pub(crate) dns_worker: DnsWorker,
 
     /// Off-thread DNS results for `Address=` hostnames, by node name.
     /// Chained into `addr_cache.known` alongside the edge-walk in `setup_outgoing_connection`. Cleared on `retry_outgoing` so
@@ -571,13 +585,13 @@ pub struct Daemon {
     /// `Some` iff `UPnP != no` and the feature is compiled in. Polled
     /// from `on_periodic_tick`.
     #[cfg(feature = "upnp")]
-    pub(crate) portmapper: Option<crate::portmap::Portmapper>,
+    pub(crate) portmapper: Option<Portmapper>,
 
     /// TX fast-path snapshot. The Super arm `mem::take`s this,
     /// calls `tx_probe(&snap, ...)`, runs the seal-send loop on
     /// `Some`, restores. `None` until setup finishes; `Default` for
     /// `mem::take`.
-    pub(crate) tx_snap: Option<crate::shard::TxSnapshot>,
+    pub(crate) tx_snap: Option<TxSnapshot>,
 
     /// Per-peer fast-path handles. Same `Arc` as in `tx_snap.tunnels`;
     /// kept here so `minmtu`/`udp_addr` updates have a place to
@@ -585,10 +599,10 @@ pub struct Daemon {
     /// here is visible to the next `tx_probe`'s `load(Relaxed)` — no
     /// fence, no fan-out, no wake. Populated at `HandshakeDone`;
     /// cleared at `BecameUnreachable`.
-    pub(crate) tunnel_handles: IntHashMap<NodeId, Arc<crate::shard::TunnelHandles>>,
+    pub(crate) tunnel_handles: IntHashMap<NodeId, Arc<TunnelHandles>>,
 
     /// Data-plane worker threads (`Shards > 1`); empty otherwise.
-    pub(crate) shards: crate::shard::runtime::ShardRuntime,
+    pub(crate) shards: ShardRuntime,
 }
 
 impl Daemon {
@@ -614,7 +628,7 @@ impl Daemon {
             s.routes = Arc::clone(&self.last_routes);
             // Size from the slab itself: `last_routes` is empty until
             // the first `run_graph_and_log` (e.g. peerless `tinc purge`).
-            s.ns = Arc::new(crate::shard::NodeView::build(
+            s.ns = Arc::new(NodeView::build(
                 &self.graph,
                 &self.node_ids,
                 &self.nodes,
@@ -690,7 +704,7 @@ impl Daemon {
         // Reusable buffers. `tick`/`turn`/`drain` clear these
         // before pushing.
         let mut fired_timers = Vec::with_capacity(8);
-        let mut fired_io = Vec::with_capacity(crate::event::MAX_EVENTS_PER_TURN);
+        let mut fired_io = Vec::with_capacity(MAX_EVENTS_PER_TURN);
         let mut fired_signals = Vec::with_capacity(4);
 
         while self.running {
@@ -717,7 +731,7 @@ impl Daemon {
                         self.on_keyexpire();
                     }
                     TimerWhat::Watchdog => {
-                        crate::sd_notify::notify_watchdog();
+                        sd_notify::notify_watchdog();
                         if let Some((tid, iv)) = self.watchdog {
                             self.timers.set(tid, iv);
                         }
@@ -859,7 +873,7 @@ impl Drop for Daemon {
         if self.device_enabled {
             self.run_script("tinc-down");
         }
-        let _ = std::fs::remove_file(&self.pidfile);
+        let _ = fs::remove_file(&self.pidfile);
         // Signal handlers stay installed (SelfPipe::drop doesn't del
         // them - see tinc-event/sig.rs Drop doc). Process is exiting;
         // doesn't matter.
@@ -882,13 +896,13 @@ pub enum SetupError {
         what: String,
         /// Underlying errno.
         #[source]
-        source: std::io::Error,
+        source: io::Error,
     },
 }
 
 impl SetupError {
     /// Tag an I/O error with the operation that produced it.
-    pub(crate) fn io(what: impl Into<String>, source: std::io::Error) -> Self {
+    pub(crate) fn io(what: impl Into<String>, source: io::Error) -> Self {
         Self::Io {
             what: what.into(),
             source,

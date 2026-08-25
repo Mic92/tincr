@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 #![expect(clippy::cast_possible_truncation)] // header-size constants, max 32
 
+use std::mem;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use zerocopy::{FromBytes, IntoBytes};
@@ -84,7 +85,7 @@ pub(crate) fn build_arp_reply(original: &[u8]) -> Vec<u8> {
         .expect("validated");
     let mut arp = EtherArp::read_from_bytes(arp_bytes).expect("28 bytes");
 
-    std::mem::swap(&mut arp.arp_tpa, &mut arp.arp_spa); // :1011-1013
+    mem::swap(&mut arp.arp_tpa, &mut arp.arp_spa); // :1011-1013
     arp.arp_tha = arp.arp_sha; // :1014
 
     // :1015-1016 fake-MAC: orig eth-src, last byte flipped
@@ -234,13 +235,14 @@ pub(crate) fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packet::ETH_P_ARP;
 
     /// Eth+ARP "who has `tpa`? tell `spa`". eth-src locally administered.
     fn mk_arp_req(spa: [u8; 4], tpa: [u8; 4]) -> Vec<u8> {
         let mut f = Vec::with_capacity(ETHER_SIZE + ARP_SIZE);
         f.extend_from_slice(&[0xff; 6]);
         f.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x01]);
-        f.extend_from_slice(&crate::packet::ETH_P_ARP.to_be_bytes());
+        f.extend_from_slice(&ETH_P_ARP.to_be_bytes());
         let mut a = EtherArp::default();
         a.ea_hdr.set_hrd(ARPHRD_ETHER);
         a.ea_hdr.set_pro(ETH_P_IP);

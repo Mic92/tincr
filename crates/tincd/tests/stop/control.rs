@@ -1,34 +1,32 @@
 use super::common::{Node, poll_until, read_cookie, tincd_at, wait_for_file};
 use super::testnode;
+use std::fs;
+use std::fs::Permissions;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::UdpSocket;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
+use std::process::Stdio;
+use std::thread;
 use std::time::Duration;
+#[cfg(target_os = "macos")]
+use std::{mem, ptr};
 
 fn count_open_fds(pid: nix::unistd::Pid) -> usize {
     #[cfg(target_os = "linux")]
     {
-        std::fs::read_dir(format!("/proc/{pid}/fd"))
-            .unwrap()
-            .count()
+        fs::read_dir(format!("/proc/{pid}/fd")).unwrap().count()
     }
     #[cfg(target_os = "macos")]
     {
         // No lsof in the nix sandbox; a null buffer returns the list size.
         let bytes = unsafe {
-            libc::proc_pidinfo(
-                pid.as_raw(),
-                libc::PROC_PIDLISTFDS,
-                0,
-                std::ptr::null_mut(),
-                0,
-            )
+            libc::proc_pidinfo(pid.as_raw(), libc::PROC_PIDLISTFDS, 0, ptr::null_mut(), 0)
         };
         assert!(bytes >= 0, "proc_pidinfo({pid})");
         #[expect(clippy::cast_sign_loss)]
         {
-            bytes as usize / std::mem::size_of::<libc::proc_fdinfo>()
+            bytes as usize / mem::size_of::<libc::proc_fdinfo>()
         }
     }
 }
@@ -69,7 +67,7 @@ fn stray_udp_is_drained() {
             .send_to(b"not a tinc packet", node.tcp_addr())
             .unwrap();
     }
-    std::thread::sleep(Duration::from_millis(100));
+    thread::sleep(Duration::from_millis(100));
 
     node.assert_alive();
     let _ = node.ctl().dump(3);
@@ -185,8 +183,7 @@ fn set_debug_reports_previous_and_reverts_on_close() {
     let tmp = tmp!("set-debug");
     let mut node = testnode(tmp.path());
     let mut cmd = tincd_at(&node.confbase, &node.pidfile, &node.socket);
-    cmd.env_remove("RUST_LOG")
-        .stderr(std::process::Stdio::piped());
+    cmd.env_remove("RUST_LOG").stderr(Stdio::piped());
     node.start_command(cmd);
 
     let (mut reader, writer) = control_socket(&node);
@@ -209,15 +206,15 @@ fn tinc_up_runs_in_confbase() {
     let mut node = testnode(tmp.path());
     let cwd_file = tmp.path().join("cwd.txt");
     let tinc_up = node.confbase.join("tinc-up");
-    std::fs::write(
+    fs::write(
         &tinc_up,
         format!("#!/bin/sh\npwd > '{}'\n", cwd_file.display()),
     )
     .unwrap();
-    std::fs::set_permissions(&tinc_up, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&tinc_up, Permissions::from_mode(0o755)).unwrap();
 
     let mut cmd = tincd_at(&node.confbase, &node.pidfile, &node.socket);
-    cmd.current_dir("/").stderr(std::process::Stdio::piped());
+    cmd.current_dir("/").stderr(Stdio::piped());
     node.start_command(cmd);
     // tinc-up runs after the socket appears.
     assert!(
@@ -227,7 +224,7 @@ fn tinc_up_runs_in_confbase() {
     );
     node.stop();
 
-    let script_cwd = std::fs::read_to_string(&cwd_file).unwrap();
+    let script_cwd = fs::read_to_string(&cwd_file).unwrap();
     assert_eq!(
         std::path::Path::new(script_cwd.trim())
             .canonicalize()
@@ -242,8 +239,7 @@ fn control_connection_churn_leaks_no_fds() {
     let mut node = testnode(tmp.path());
     // Dumpable so /proc/PID/fd stays readable.
     let mut cmd = tincd_at(&node.confbase, &node.pidfile, &node.socket);
-    cmd.env("TINCR_ALLOW_COREDUMP", "1")
-        .stderr(std::process::Stdio::piped());
+    cmd.env("TINCR_ALLOW_COREDUMP", "1").stderr(Stdio::piped());
     node.start_command(cmd);
 
     let pid = node.pid();

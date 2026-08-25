@@ -8,8 +8,11 @@ use std::time::{Duration, Instant};
 
 use super::common::{poll_until, read_cookie, read_tcp_addr, read_to_eof, tincd_at};
 use super::testnode;
+use std::fs;
+use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
+use std::thread;
 
 /// Raw greeting: `0 ^COOKIE 0` → `0 testnode 17.7` + `4 0 PID`.
 fn greet(socket: &UnixStream, cookie: &str) -> (String, String) {
@@ -83,7 +86,7 @@ fn umbilical_on_stderr_is_ignored() {
     let mut cmd = tincd_at(&node.confbase, &node.pidfile, &node.socket);
     cmd.env("TINC_UMBILICAL", "2 0").stderr(Stdio::piped());
     node.start_command(cmd);
-    std::thread::sleep(Duration::from_millis(300));
+    thread::sleep(Duration::from_millis(300));
     node.assert_alive();
     // Would also be EOF here had fd 2 been closed.
     assert!(!node.log().contains('\0'), "NUL on stderr");
@@ -110,7 +113,7 @@ fn umbilical_gets_nul_after_setup() {
     unsafe {
         cmd.pre_exec(|| {
             if libc::dup2(0, 3) == -1 {
-                return Err(std::io::Error::last_os_error());
+                return Err(io::Error::last_os_error());
             }
             Ok(())
         });
@@ -121,7 +124,7 @@ fn umbilical_gets_nul_after_setup() {
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
     let mut buf = [0u8; 16];
-    let n = std::io::Read::read(&mut test_end, &mut buf).expect("read umbilical");
+    let n = io::Read::read(&mut test_end, &mut buf).expect("read umbilical");
     assert_eq!(&buf[..n], [0]);
     // No EOF check: fd 0 in the child still refers to the socket.
 
@@ -135,7 +138,7 @@ fn sigterm_exits_cleanly() {
     let mut node = testnode(tmp.path());
     node.start();
 
-    let pidfile_pid: i32 = std::fs::read_to_string(&node.pidfile)
+    let pidfile_pid: i32 = fs::read_to_string(&node.pidfile)
         .unwrap()
         .split_whitespace()
         .next()
@@ -159,7 +162,7 @@ fn usr1_usr2_winch_are_ignored() {
 
     for signal in [Signal::SIGUSR1, Signal::SIGUSR2, Signal::SIGWINCH] {
         node.signal(signal);
-        std::thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
         node.assert_alive();
     }
     node.signal(Signal::SIGTERM);
@@ -194,7 +197,7 @@ fn responsive_after_timer_rearm() {
     let tmp = tmp!("alive");
     let mut node = testnode(tmp.path());
     node.start();
-    std::thread::sleep(Duration::from_secs(2));
+    thread::sleep(Duration::from_secs(2));
     node.assert_alive();
     let _ = node.ctl().dump(3);
 }

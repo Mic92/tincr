@@ -30,6 +30,9 @@ use tinc_crypto::sign::{self, PUBLIC_LEN as SIGN_PUBLIC_LEN, SIG_LEN, SigningKey
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{KEX_LEN, NONCE_LEN, REC_HANDSHAKE, VERSION};
+use core::fmt;
+use std::error;
+use std::mem;
 
 /// The session label and AEAD selector, bundled because both feed the
 /// SIG transcript and PRF seed and must agree on both ends.
@@ -135,15 +138,15 @@ pub enum SptpsError {
     RecordTooLong,
 }
 
-impl std::fmt::Display for SptpsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for SptpsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Terse on purpose: the daemon will log surrounding context.
         // Not security-sensitive — no key bytes leak through Debug.
-        std::fmt::Debug::fmt(self, f)
+        fmt::Debug::fmt(self, f)
     }
 }
 
-impl std::error::Error for SptpsError {}
+impl error::Error for SptpsError {}
 
 /// One side of the handshake.
 ///
@@ -213,8 +216,8 @@ pub enum Output {
 
 // Manual Debug: `bytes` is decrypted payload / KEX material; print len
 // only so `{:?}` in logs or assert_eq! failures doesn't leak it.
-impl core::fmt::Debug for Output {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Debug for Output {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Wire { record_type, bytes } => f
                 .debug_struct("Wire")
@@ -1679,7 +1682,7 @@ impl Sptps {
         // Pull the framed bytes out and reset the buffer immediately.
         // Clearing first (C tinc clears after processing) means an
         // error doesn't re-process the same buffer on the next call.
-        let mut framed = std::mem::take(&mut self.stream.buf);
+        let mut framed = mem::take(&mut self.stream.buf);
         self.stream.reclen = 0;
 
         let (ty, body) = if let Some(cipher) = &self.incipher {

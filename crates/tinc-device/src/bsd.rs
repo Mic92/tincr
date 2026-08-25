@@ -45,6 +45,8 @@ use std::os::unix::io::{AsFd, BorrowedFd, OwnedFd};
 
 use crate::ether::{ETH_HLEN, ETH_P_IP, ETH_P_IPV6, from_ip_nibble, set_etherheader};
 use crate::{Device, MTU, Mac, Mode, assert_read_buf, read_fd, write_fd};
+#[cfg(target_os = "macos")]
+use crate::{DeviceArena, DrainResult, drain_via_read};
 
 // Constants — the +10 prefix length
 
@@ -256,17 +258,13 @@ impl Device for BsdTun {
     /// `read()`-loop. Either way the arena slots end up byte-identical
     /// (same `+10` offset, same eth-header synthesis).
     #[cfg(target_os = "macos")]
-    fn drain(
-        &mut self,
-        arena: &mut crate::DeviceArena,
-        cap: usize,
-    ) -> io::Result<crate::DrainResult> {
+    fn drain(&mut self, arena: &mut DeviceArena, cap: usize) -> io::Result<DrainResult> {
         if let Some(b) = self.batch.as_mut()
             && let Some(r) = b.drain(self.fd.as_fd(), arena, cap)
         {
             return r;
         }
-        crate::drain_via_read(self, arena, cap)
+        drain_via_read(self, arena, cap)
     }
 
     #[cfg(target_os = "macos")]
@@ -309,6 +307,7 @@ mod utun {
         socket, sockopt,
     };
 
+    use super::macos_x::UtunBatch;
     use super::{BsdTun, BsdVariant};
 
     const UTUN_CONTROL_NAME: &str = "com.apple.net.utun_control";
@@ -377,7 +376,7 @@ mod utun {
                 fd,
                 variant: BsdVariant::Utun,
                 iface,
-                batch: Some(super::macos_x::UtunBatch::new()),
+                batch: Some(UtunBatch::new()),
             })
         }
     }

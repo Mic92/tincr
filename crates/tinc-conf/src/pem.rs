@@ -179,6 +179,7 @@ pub fn write_pem(mut w: impl Write, ty: &str, body: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str;
     use tinc_crypto::sign::SigningKey;
 
     /// Round-trip at the canonical sizes. 32 bytes (public, one line),
@@ -223,7 +224,7 @@ mod tests {
         let blob = [0u8; 49];
         let mut buf = Vec::new();
         write_pem(&mut buf, "X", &blob).unwrap();
-        let lines: Vec<_> = std::str::from_utf8(&buf).unwrap().lines().collect();
+        let lines: Vec<_> = str::from_utf8(&buf).unwrap().lines().collect();
         assert_eq!(lines.len(), 4); // BEGIN, 64-char, 2-char, END
         assert_eq!(lines[1].len(), 64);
         // 1 byte → 2 chars (no padding). `b64encode_tinc([0x00])` = "AA".
@@ -382,7 +383,7 @@ AA
         let mut pem = Vec::new();
         write_pem(&mut pem, "ED25519 PUBLIC KEY", pk).unwrap();
 
-        let lines: Vec<_> = std::str::from_utf8(&pem).unwrap().lines().collect();
+        let lines: Vec<_> = str::from_utf8(&pem).unwrap().lines().collect();
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[1].len(), 43);
 

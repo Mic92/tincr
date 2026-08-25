@@ -19,6 +19,8 @@ use rand_core::Rng;
 use tinc_crypto::os_rng;
 use zeroize::Zeroizing;
 
+use std::io;
+use std::path::PathBuf;
 use tinc_conf::Config;
 use tinc_conf::pem::{PemError, read_pem, write_pem};
 use tinc_crypto::b64;
@@ -49,7 +51,7 @@ pub fn generate() -> SigningKey {
 /// # Errors
 /// I/O on either file. Not transactional: you can end up with a
 /// private file written and no public file. Nothing in tinc is.
-pub fn write_pair(sk: &SigningKey, private: &Path, public: &Path) -> std::io::Result<()> {
+pub fn write_pair(sk: &SigningKey, private: &Path, public: &Path) -> io::Result<()> {
     // Private: full 96-byte blob.
     {
         let f = File::create(private)?;
@@ -129,13 +131,13 @@ pub fn load_public_from_config(cfg: &Config, default_path: &Path) -> Option<[u8;
 pub enum LoadError {
     #[error("Could not open {}: {err}", path.display())]
     Io {
-        path: std::path::PathBuf,
+        path: PathBuf,
         #[source]
-        err: std::io::Error,
+        err: io::Error,
     },
     #[error("Could not read key from {}: {err}", path.display())]
     Pem {
-        path: std::path::PathBuf,
+        path: PathBuf,
         #[source]
         err: PemError,
     },

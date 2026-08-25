@@ -33,6 +33,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::env;
+use std::fs;
+use std::process;
+use std::thread;
 use tinc_proto::Subnet;
 use tinc_proto::subnet::DEFAULT_WEIGHT;
 use tinc_tools::ctl::rows::{SubnetRow, strip_weight};
@@ -153,14 +157,14 @@ fn handle(req: tiny_http::Request, paths: &Paths, netname: &str, map: &UserMap) 
 /// `LISTEN_PID`/`LISTEN_FDS`, same logic as tincd's
 /// `check_socket_activation`.
 fn check_socket_activation() -> Option<usize> {
-    let pid_ok = std::env::var("LISTEN_PID")
+    let pid_ok = env::var("LISTEN_PID")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
-        == Some(std::process::id());
+        == Some(process::id());
     if !pid_ok {
         return None;
     }
-    std::env::var("LISTEN_FDS")
+    env::var("LISTEN_FDS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&n| n > 0)
@@ -204,7 +208,7 @@ fn parse_args() -> Result<Args, String> {
     let mut email_domain = None;
     let mut id_token_ttl = idp::DEFAULT_ID_TOKEN_TTL;
     let mut access_token_ttl = idp::DEFAULT_ACCESS_TOKEN_TTL;
-    let mut args = std::env::args().skip(1);
+    let mut args = env::args().skip(1);
 
     let next_val = |args: &mut dyn Iterator<Item = String>, flag: &str, glued: Option<&str>| {
         glued.map_or_else(
@@ -332,11 +336,11 @@ fn parse_args() -> Result<Args, String> {
                      is your laptop, this is what you want. If `alice` is a server\n\
                      with twelve SSH users, all twelve appear as `alice`."
                 );
-                std::process::exit(0);
+                process::exit(0);
             }
             "--version" => {
                 println!("tinc-auth {} (Rust)", env!("CARGO_PKG_VERSION"));
-                std::process::exit(0);
+                process::exit(0);
             }
             _ => return Err(format!("unknown argument: {arg}")),
         }
@@ -359,7 +363,7 @@ fn parse_args() -> Result<Args, String> {
 fn load_map(path: Option<&PathBuf>) -> Result<UserMap, String> {
     match path {
         None => Ok(UserMap::new()),
-        Some(p) => std::fs::read(p)
+        Some(p) => fs::read(p)
             .map_err(|e| format!("{}: {e}", p.display()))
             .and_then(|b| serde_json::from_slice(&b).map_err(|e| format!("{}: {e}", p.display()))),
     }
@@ -386,14 +390,14 @@ fn build_idp(args: &Args, paths: &Paths, netname: &str) -> Result<Idp, String> {
         .clients
         .as_ref()
         .ok_or("--idp-listen requires --clients")?;
-    let clients = std::fs::read(clients_path)
+    let clients = fs::read(clients_path)
         .map_err(|e| format!("{}: {e}", clients_path.display()))
         .and_then(|b| {
             serde_json::from_slice(&b).map_err(|e| format!("{}: {e}", clients_path.display()))
         })?;
     let groups: HashMap<String, Vec<String>> = match &args.groups {
         None => HashMap::new(),
-        Some(p) => std::fs::read(p)
+        Some(p) => fs::read(p)
             .map_err(|e| format!("{}: {e}", p.display()))
             .and_then(|b| {
                 serde_json::from_slice(&b).map_err(|e| format!("{}: {e}", p.display()))
@@ -502,7 +506,7 @@ fn main() -> ExitCode {
         Some(UnixListener::from(owned))
     } else if let Some(path) = &args.listen_socket {
         // A previous instance might have died without cleanup.
-        let _ = std::fs::remove_file(path);
+        let _ = fs::remove_file(path);
         match UnixListener::bind(path) {
             Ok(l) => Some(l),
             Err(e) => {
@@ -552,7 +556,7 @@ fn main() -> ExitCode {
             let paths = paths.clone();
             let idp = Arc::new(idp);
             let map = Arc::clone(&map);
-            Some(std::thread::spawn(move || {
+            Some(thread::spawn(move || {
                 for req in server.incoming_requests() {
                     handle_idp(req, &idp, &paths, &map);
                 }

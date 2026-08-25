@@ -17,8 +17,11 @@ use super::{ConnId, Daemon};
 
 use std::fmt;
 
+use crate::daemon;
 use crate::graph::NodeId;
+use crate::keys as hostkeys;
 use rand_core::Rng;
+use std::str;
 use tinc_crypto::os_rng;
 
 mod edges;
@@ -64,9 +67,9 @@ impl Daemon {
         &self,
         name: &str,
     ) -> Option<([u8; tinc_crypto::sign::PUBLIC_LEN], tinc_sptps::SptpsAead)> {
-        let cfg = crate::keys::read_host_config(&self.confbase, name);
-        let key = crate::keys::read_ecdsa_public_key(&cfg, &self.confbase, name)?;
-        let aead = crate::keys::read_sptps_cipher(&cfg, name).unwrap_or(self.settings.sptps_cipher);
+        let cfg = hostkeys::read_host_config(&self.confbase, name);
+        let key = hostkeys::read_ecdsa_public_key(&cfg, &self.confbase, name)?;
+        let aead = hostkeys::read_sptps_cipher(&cfg, name).unwrap_or(self.settings.sptps_cipher);
         Some((key, aead))
     }
 
@@ -77,8 +80,8 @@ impl Daemon {
     /// two reads independent means the meta-conn and UDP-tunnel paths
     /// can't drift on which one consults the host file.
     pub(super) fn peer_sptps_kex(&self, name: &str) -> tinc_sptps::SptpsKex {
-        let cfg = crate::keys::read_host_config(&self.confbase, name);
-        crate::daemon::read_sptps_kex(&cfg, self.settings.sptps_kex).unwrap_or_else(|v| {
+        let cfg = hostkeys::read_host_config(&self.confbase, name);
+        daemon::read_sptps_kex(&cfg, self.settings.sptps_kex).unwrap_or_else(|v| {
             log::warn!(target: "tincd::net",
                            "hosts/{name}: SPTPSKex = {v}: invalid, using {}",
                            self.settings.sptps_kex);
@@ -152,7 +155,7 @@ impl Daemon {
     /// Nonce token stripped from key (stricter than C).
     pub(super) fn seen_request(&mut self, body: &[u8]) -> bool {
         // Parsers validated UTF-8; failure → not-seen (handler rejects).
-        let Ok(s) = std::str::from_utf8(body) else {
+        let Ok(s) = str::from_utf8(body) else {
             return false;
         };
         self.seen.check(s, self.timers.now())
@@ -179,7 +182,7 @@ impl Daemon {
     /// caller's local graph update already happened.
     pub(super) fn forward_request(&mut self, from: ConnId, body: &[u8]) -> bool {
         // Post-parse; from_utf8 already succeeded.
-        let Ok(s) = std::str::from_utf8(body) else {
+        let Ok(s) = str::from_utf8(body) else {
             log::warn!(target: "tincd::proto",
                        "forward_request: non-UTF-8 body, dropping");
             return false;

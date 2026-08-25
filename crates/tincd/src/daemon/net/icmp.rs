@@ -8,6 +8,7 @@ use crate::{icmp, neighbor};
 
 use crate::graph::NodeId;
 
+use crate::sock_cloexec_flag;
 use nix::sys::socket::{AddressFamily, SockType, SockaddrStorage, connect, getsockname, socket};
 
 /// Variant of ICMP error to emit. Ratelimit + ethertype dispatch +
@@ -231,7 +232,7 @@ fn local_ip_facing(orig_src: IpAddr) -> Option<IpAddr> {
         IpAddr::V4(_) => AddressFamily::Inet,
         IpAddr::V6(_) => AddressFamily::Inet6,
     };
-    let sock = socket(af, SockType::Datagram, crate::sock_cloexec_flag(), None).ok()?;
+    let sock = socket(af, SockType::Datagram, sock_cloexec_flag(), None).ok()?;
     let ss = SockaddrStorage::from(SocketAddr::new(orig_src, 1));
     connect(sock.as_raw_fd(), &ss).ok()?;
     let local: SockaddrStorage = getsockname(sock.as_raw_fd()).ok()?;

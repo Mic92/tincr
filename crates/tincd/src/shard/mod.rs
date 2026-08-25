@@ -49,6 +49,7 @@ use tinc_sptps::ReplayWindow;
 use crate::inthash::IntHashMap;
 use crate::node_id::NodeId6Table;
 use crate::subnet_tree::SubnetTree;
+use crate::tunnel::TrafficStats;
 
 // TunnelHandles — shared per-peer fast-path state
 
@@ -131,7 +132,7 @@ pub(crate) struct TunnelHandles {
     /// `TunnelState::stats` clone. RX fast-path bumps `in_*` after a
     /// successful `rx_open`; without this the operator sees a frozen
     /// RX counter once the fast path takes over.
-    pub stats: Arc<crate::tunnel::TrafficStats>,
+    pub stats: Arc<TrafficStats>,
 }
 
 // TxSnapshot — the fast-path's read-only view of routing state

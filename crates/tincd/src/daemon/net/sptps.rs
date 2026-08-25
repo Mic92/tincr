@@ -3,11 +3,23 @@ use std::io;
 use std::os::fd::AsFd;
 
 use crate::compress;
-use crate::listen::Listener;
 use crate::node_id::NodeId6;
 use crate::tunnel::{MTU, TunnelState};
 
+use super::helpers;
+use crate::daemon::ListenerSlot;
+use crate::dispatch::OPTION_TCPONLY;
+use crate::egress::EgressBatch;
 use crate::graph::NodeId;
+use crate::packet::ETH_P_IP;
+use crate::set_udp_tos;
+use crate::shard::TunnelHandles;
+use crate::tcp_tunnel;
+use std::mem;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU16;
 use tinc_crypto::os_rng;
 use tinc_proto::Request;
 use tinc_sptps::Output;
@@ -59,7 +71,7 @@ impl Daemon {
                 return false; // NodeState.conn stale (race)
             };
             // RED first; maxoutbufsize default 10*MTU.
-            if crate::tcp_tunnel::random_early_drop(
+            if tcp_tunnel::random_early_drop(
                 conn.outbuf.live_len(),
                 self.settings.maxoutbufsize,
                 &mut os_rng(),
@@ -186,7 +198,7 @@ impl Daemon {
                     // control-side seal_data_into would. Rekey: this
                     // arm fires again, fresh Arc replaces; old drops.
                     if let Some(sptps) = tunnel.sptps.as_deref() {
-                        let handles = std::sync::Arc::new(crate::shard::TunnelHandles {
+                        let handles = Arc::new(TunnelHandles {
                             outseqno: sptps.outseqno_handle(),
                             out_key_base: sptps.out_key_base(),
                             replay: sptps.replay_handle(),
@@ -198,16 +210,15 @@ impl Daemon {
                                 sptps.aead(),
                                 &sptps.incipher_key().expect("post-HandshakeDone"),
                             ),
-                            udp_addr: std::sync::Mutex::new(tunnel.udp_addr_cached.clone()),
-                            validkey: std::sync::atomic::AtomicBool::new(true),
-                            minmtu: std::sync::atomic::AtomicU16::new(tunnel.minmtu()),
+                            udp_addr: Mutex::new(tunnel.udp_addr_cached.clone()),
+                            validkey: AtomicBool::new(true),
+                            minmtu: AtomicU16::new(tunnel.minmtu()),
                             outcompression: tunnel.outcompression,
-                            stats: std::sync::Arc::clone(&tunnel.stats),
+                            stats: Arc::clone(&tunnel.stats),
                         });
                         // Mirror first so on_probe_reply's minmtu
                         // store finds it.
-                        self.tunnel_handles
-                            .insert(peer, std::sync::Arc::clone(&handles));
+                        self.tunnel_handles.insert(peer, Arc::clone(&handles));
                         if let Some(s) = self.tx_snap.as_mut() {
                             s.tunnels.insert(peer, handles);
                         }
@@ -243,7 +254,7 @@ impl Daemon {
     ) -> bool {
         let body_len = self.dp.rx_scratch.len() - 14;
 
-        if body_len > usize::from(crate::tunnel::MTU) {
+        if body_len > usize::from(MTU) {
             log::error!(target: "tincd::net",
                         "Packet from {peer_name} larger than MTU ({} > {})",
                         body_len, crate::tunnel::MTU);
@@ -271,7 +282,7 @@ impl Daemon {
                 p.maxrecentlen = body_len_u16;
             }
             // mem::take dance: udp_probe_h is &mut self.
-            let scratch = std::mem::take(&mut self.dp.rx_scratch);
+            let scratch = mem::take(&mut self.dp.rx_scratch);
             let nw = self.udp_probe_h(peer, peer_name, &scratch[14..]);
             self.dp.rx_scratch = scratch;
             return nw;
@@ -305,7 +316,7 @@ impl Daemon {
         if record_type & PKT_COMPRESSED != 0 {
             let incomp = self.dp.tunnels.get(&peer).map_or(0, |t| t.incompression);
             let level = compress::Level::from_wire(incomp);
-            let scratch = std::mem::take(&mut self.dp.rx_scratch);
+            let scratch = mem::take(&mut self.dp.rx_scratch);
             let d = self
                 .dp
                 .compressor
@@ -332,7 +343,7 @@ impl Daemon {
         // mem::take swaps out rx_scratch for the &mut borrow during
         // forward_packet; restored after.
         let mut frame_vec: Vec<u8>;
-        let mut scratch = std::mem::take(&mut self.dp.rx_scratch);
+        let mut scratch = mem::take(&mut self.dp.rx_scratch);
         let frame: &mut [u8] = if let Some(body) = &decompressed {
             if offset == 0 {
                 frame_vec = body.clone();
@@ -342,7 +353,7 @@ impl Daemon {
                     return false;
                 }
                 let ethertype: u16 = match body[0] >> 4 {
-                    4 => crate::packet::ETH_P_IP,
+                    4 => ETH_P_IP,
                     6 => 0x86DD,
                     v => {
                         log::debug!(target: "tincd::net",
@@ -366,7 +377,7 @@ impl Daemon {
                 return false;
             }
             let ethertype: u16 = match scratch[14] >> 4 {
-                4 => crate::packet::ETH_P_IP,
+                4 => ETH_P_IP,
                 6 => 0x86DD,
                 v => {
                     log::debug!(target: "tincd::net",
@@ -462,7 +473,7 @@ impl Daemon {
         // exempt: O(100B), state-machine-paced, and ANS_KEY drops
         // would wedge the tunnel.
         if record_type != tinc_sptps::REC_HANDSHAKE
-            && crate::tcp_tunnel::random_early_drop(
+            && tcp_tunnel::random_early_drop(
                 conn.outbuf.live_len(),
                 self.settings.maxoutbufsize,
                 &mut os_rng(),
@@ -481,7 +492,7 @@ impl Daemon {
             // TCP path always uses the real dst id.
             let src_id = self.id6_table.id_of(from_nid).unwrap_or(NodeId6::NULL);
             let dst_id = self.id6_table.id_of(to_nid).unwrap_or(NodeId6::NULL);
-            let frame = crate::tcp_tunnel::build_frame(dst_id, src_id, ct);
+            let frame = tcp_tunnel::build_frame(dst_id, src_id, ct);
             let mut nw = conn.send(format_args!("{} {}", Request::SptpsPacket, frame.len()));
             nw |= conn.send_raw(&frame);
             return nw;
@@ -580,8 +591,7 @@ impl Daemon {
         // EITHER side requesting tcponly forces TCP.
         // TODO(bitflags-opts): relay_options is u32 from tinc-graph Route;
         // .bits() shim until tinc-graph migrates / udp-info-carry lands.
-        let tcponly =
-            (self.myself_options.bits() | relay_options) & crate::dispatch::OPTION_TCPONLY != 0;
+        let tcponly = (self.myself_options.bits() | relay_options) & OPTION_TCPONLY != 0;
 
         // Same as C tinc: data stays on TCP until a
         // probe reply lifts `minmtu` above 0. Probes are exempt so
@@ -726,7 +736,7 @@ impl Daemon {
         let Some(slot) = self.listeners.get_mut(usize::from(sock)) else {
             return false;
         };
-        let Err(e) = slot.egress.send_batch(&crate::egress::EgressBatch {
+        let Err(e) = slot.egress.send_batch(&EgressBatch {
             dst: sockaddr,
             frames: &self.dp.tx_scratch,
             stride: len,
@@ -740,16 +750,11 @@ impl Daemon {
         } else if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) {
             #[expect(clippy::cast_possible_truncation)] // origlen ≤ MTU
             let at_len = origlen as u16;
-            super::helpers::handle_udp_emsgsize(
-                &mut self.dp.tunnels,
-                &self.graph,
-                relay_nid,
-                at_len,
-            );
-        } else if super::helpers::is_udp_unreachable_errno(&e) {
+            helpers::handle_udp_emsgsize(&mut self.dp.tunnels, &self.graph, relay_nid, at_len);
+        } else if helpers::is_udp_unreachable_errno(&e) {
             // node_log_name borrows self; clone for the helper.
             let relay_name = self.node_log_name(relay_nid).to_owned();
-            super::helpers::handle_udp_unreachable(
+            helpers::handle_udp_unreachable(
                 &mut self.dp.tunnels,
                 &self.tunnel_handles,
                 relay_nid,
@@ -768,22 +773,11 @@ impl Daemon {
 
 /// Copy inner TOS to outer socket. Without it, all encrypted
 /// traffic gets default DSCP regardless of inner QoS marking.
-fn inherit_tos(
-    listeners: &mut [crate::daemon::ListenerSlot],
-    sock: u8,
-    sockaddr: &socket2::SockAddr,
-    prio: u8,
-) {
+fn inherit_tos(listeners: &mut [ListenerSlot], sock: u8, sockaddr: &socket2::SockAddr, prio: u8) {
     if let Some(slot) = listeners.get_mut(usize::from(sock))
         && slot.last_tos != prio
     {
         slot.last_tos = prio;
-        set_udp_tos(&slot.listener, sockaddr.is_ipv6(), prio);
+        set_udp_tos(slot.listener.udp.as_fd(), sockaddr.is_ipv6(), prio);
     }
-}
-
-/// setsockopt `IP_TOS`/`IPV6_TCLASS` on the listener's UDP socket.
-/// Thin shim over [`crate::set_udp_tos`] that picks the right fd.
-fn set_udp_tos(l: &Listener, is_ipv6: bool, prio: u8) {
-    crate::set_udp_tos(l.udp.as_fd(), is_ipv6, prio);
 }

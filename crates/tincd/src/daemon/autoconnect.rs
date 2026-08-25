@@ -7,8 +7,11 @@ use super::{Daemon, TimerWhat, parse_subnets_from_config};
 use std::collections::HashSet;
 use std::time::Duration;
 
+use crate::addrcache::AddressCache;
 use crate::autoconnect::{self, AutoAction, NodeSnapshot, OutgoingSnapshot, ShortcutKnobs};
+use crate::keys;
 use crate::outgoing::{OutOrigin, Outgoing, OutgoingId, resolve_config_addrs};
+use std::fs;
 use tinc_crypto::os_rng;
 
 impl Daemon {
@@ -28,7 +31,7 @@ impl Daemon {
     /// Diff old/new authorized sets, broadcast deltas.
     pub(super) fn load_all_nodes(&mut self) {
         let hosts_dir = self.confbase.join("hosts");
-        let dir = match std::fs::read_dir(&hosts_dir) {
+        let dir = match fs::read_dir(&hosts_dir) {
             Ok(d) => d,
             Err(e) => {
                 log::error!(target: "tincd",
@@ -54,7 +57,7 @@ impl Daemon {
 
             self.lookup_or_add_node(&fname);
 
-            let cfg = crate::keys::read_host_config(&self.confbase, &fname);
+            let cfg = keys::read_host_config(&self.confbase, &fname);
 
             if cfg.lookup("Address").next().is_some() {
                 self.has_address.insert(fname.clone());
@@ -212,8 +215,7 @@ impl Daemon {
                 }
                 self.lookup_or_add_node(&name);
                 let config_addrs = resolve_config_addrs(&self.confbase, &name);
-                let addr_cache =
-                    crate::addrcache::AddressCache::open(&self.confbase, &name, config_addrs);
+                let addr_cache = AddressCache::open(&self.confbase, &name, config_addrs);
                 let oid = self.outgoings.insert(Outgoing {
                     node_name: name,
                     origin,

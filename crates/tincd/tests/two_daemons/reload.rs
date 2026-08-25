@@ -6,18 +6,20 @@ use super::common::{
     Ctl, Node, poll_until, pubkey_from_seed, wait_for_file, write_ed25519_privkey,
 };
 use std::fmt::Write;
+use std::fs;
+use std::thread;
 use tinc_crypto::invite::{build_slug, cookie_filename};
 use tinc_crypto::sign::SigningKey;
 
 /// Rewrite `hosts/SELF` with `subnets` and SIGHUP. The sleep is for
 /// the reload's `mtime > last_check` comparison at second granularity.
 fn reload_with_subnets(node: &Node, subnets: &[&str]) {
-    std::thread::sleep(Duration::from_millis(1100));
+    thread::sleep(Duration::from_millis(1100));
     let mut host = format!("Port = {}\n", node.port);
     for subnet in subnets {
         writeln!(host, "Subnet = {subnet}").unwrap();
     }
-    std::fs::write(node.confbase.join("hosts").join(&node.name), host).unwrap();
+    fs::write(node.confbase.join("hosts").join(&node.name), host).unwrap();
     node.signal(Signal::SIGHUP);
 }
 
@@ -60,12 +62,12 @@ fn tinc_join_consumes_invitation() {
     alice.start();
 
     let invitations = alice.confbase.join("invitations");
-    std::fs::create_dir_all(&invitations).unwrap();
+    fs::create_dir_all(&invitations).unwrap();
     let invitation_key = SigningKey::from_seed(&[0x11; 32]);
     write_ed25519_privkey(&invitations, &[0x11; 32]);
     let cookie: [u8; 18] = *b"test-cookie-18bxxx";
     let invitation_file = invitations.join(cookie_filename(&cookie, invitation_key.public_key()));
-    std::fs::write(
+    fs::write(
         &invitation_file,
         format!(
             "Name = bob\nConnectTo = alice\n\
@@ -95,7 +97,7 @@ fn tinc_join_consumes_invitation() {
         panic!("join: {err:?}\nalice:\n{}", alice.stop());
     }
     let bob_confbase = tmp.path().join("bob");
-    let bob_conf = std::fs::read_to_string(bob_confbase.join("tinc.conf")).unwrap();
+    let bob_conf = fs::read_to_string(bob_confbase.join("tinc.conf")).unwrap();
     assert!(
         bob_conf.contains("Name = bob") && bob_conf.contains("ConnectTo = alice"),
         "{bob_conf}"
@@ -133,12 +135,12 @@ fn control_reload_after_hosts_swap_drops_rekeyed_peer() {
     let mut bob = Node::new(tmp.path(), "bob", 0xBB);
     bob.start_dialing(&mut alice);
 
-    std::thread::sleep(Duration::from_millis(1100));
+    thread::sleep(Duration::from_millis(1100));
     let hosts = bob.confbase.join("hosts");
     let new_hosts = bob.confbase.join("hosts.new");
-    std::fs::create_dir(&new_hosts).unwrap();
-    std::fs::copy(hosts.join("bob"), new_hosts.join("bob")).unwrap();
-    std::fs::write(
+    fs::create_dir(&new_hosts).unwrap();
+    fs::copy(hosts.join("bob"), new_hosts.join("bob")).unwrap();
+    fs::write(
         new_hosts.join("alice"),
         format!(
             "Ed25519PublicKey = {}\nAddress = 127.0.0.1 {}\n",
@@ -147,13 +149,13 @@ fn control_reload_after_hosts_swap_drops_rekeyed_peer() {
         ),
     )
     .unwrap();
-    std::fs::rename(&hosts, bob.confbase.join("hosts.old")).unwrap();
-    std::fs::rename(&new_hosts, &hosts).unwrap();
+    fs::rename(&hosts, bob.confbase.join("hosts.old")).unwrap();
+    fs::rename(&new_hosts, &hosts).unwrap();
 
     let mut bob_ctl = bob.ctl();
     assert_eq!(bob_ctl.reload(), 0);
     bob.wait_for_peer("alice", false, Duration::from_secs(10));
-    std::thread::sleep(Duration::from_millis(1500));
+    thread::sleep(Duration::from_millis(1500));
     assert!(
         !bob.has_active_peer("alice"),
         "re-authenticated with stale key"

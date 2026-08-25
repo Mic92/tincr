@@ -50,6 +50,11 @@ use std::process::{Command, ExitStatus};
 
 use crate::sandbox;
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+use std::sync::Mutex;
+use std::sync::MutexGuard;
+use std::sync::PoisonError;
+use std::thread;
+use std::time::Duration;
 
 /// One script invocation's environment. Upstream `environment_t`: a
 /// growing `char**` arena of `"KEY=value"` strings, fed to
@@ -181,7 +186,7 @@ fn retry_txtbsy<T>(mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
         match f() {
             Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 50 => {
                 tries += 1;
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                thread::sleep(Duration::from_millis(10));
             }
             r => return r,
         }
@@ -245,14 +250,12 @@ pub(crate) fn execute(
 /// `Mutex` not because we're multithreaded (the event loop isn't) but
 /// because a `static` needs interior mutability and `RefCell` isn't
 /// `Sync`. No contention in practice.
-static CHILDREN: std::sync::Mutex<Vec<nix::unistd::Pid>> = std::sync::Mutex::new(Vec::new());
+static CHILDREN: Mutex<Vec<nix::unistd::Pid>> = Mutex::new(Vec::new());
 
 /// `lock()` that ignores poisoning: the only thing under the lock is
 /// a `Vec<Pid>`, which has no invariants a panic could violate.
-fn children() -> std::sync::MutexGuard<'static, Vec<nix::unistd::Pid>> {
-    CHILDREN
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn children() -> MutexGuard<'static, Vec<nix::unistd::Pid>> {
+    CHILDREN.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Record a detached child pid for later reaping. Used by callers
@@ -299,6 +302,9 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use crate::testutil::tmpdir;
+    use std::path::Path;
+    use std::thread;
+    use std::time::Duration;
 
     fn write_script(dir: &Path, name: &str, body: &str) {
         let p = dir.join(name);
@@ -434,7 +440,7 @@ mod tests {
         // harvest its zombie and `other.wait()` would then fail
         // with ECHILD.
         let mut other = Command::new("true").spawn().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(50));
 
         let mut ours = Command::new("true").spawn().unwrap();
         #[expect(clippy::cast_possible_wrap)]
@@ -468,7 +474,7 @@ mod tests {
         // canonicalize both — tmpdir may be a symlink (/tmp →
         // /private/tmp on macOS).
         let want = dir.canonicalize().unwrap();
-        let got = std::path::Path::new(got.trim()).canonicalize().unwrap();
+        let got = Path::new(got.trim()).canonicalize().unwrap();
         assert_eq!(got, want);
     }
 }

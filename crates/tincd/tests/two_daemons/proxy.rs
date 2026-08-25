@@ -7,16 +7,18 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 
 use super::common::{Node, TmpGuard};
+use std::io;
+use std::thread;
 
 fn relay(client: TcpStream, upstream: TcpStream) {
     let mut client_read = client.try_clone().unwrap();
     let mut upstream_write = upstream.try_clone().unwrap();
-    let to_upstream = std::thread::spawn(move || {
-        let _ = std::io::copy(&mut client_read, &mut upstream_write);
+    let to_upstream = thread::spawn(move || {
+        let _ = io::copy(&mut client_read, &mut upstream_write);
         let _ = upstream_write.shutdown(Shutdown::Write);
     });
     let (mut upstream_read, mut client_write) = (upstream, client);
-    let _ = std::io::copy(&mut upstream_read, &mut client_write);
+    let _ = io::copy(&mut upstream_read, &mut client_write);
     let _ = client_write.shutdown(Shutdown::Write);
     let _ = to_upstream.join();
 }
@@ -29,7 +31,7 @@ fn spawn_proxy(
 ) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || {
+    thread::spawn(move || {
         let (client, _) = listener.accept().unwrap();
         let mut reader = BufReader::new(client);
         let target = handshake(&mut reader);

@@ -3,6 +3,11 @@ use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
 use nix::sys::socket::getsockopt;
 #[cfg(target_os = "macos")]
 use socket2::SockAddr;
+use std::fs::File;
+use std::mem;
+use std::net::TcpListener;
+#[cfg(target_os = "macos")]
+use std::process;
 #[cfg(target_os = "macos")]
 use tinc_device::{BsdTun, Device, DeviceArena, DrainResult};
 
@@ -279,7 +284,7 @@ fn open_udp_dontfrag_blocks_underlay_fragments() {
     }
 
     let mut dev = BsdTun::open_utun(None).expect("open_utun");
-    let status = std::process::Command::new("ifconfig")
+    let status = process::Command::new("ifconfig")
         .args([
             dev.iface(),
             "inet",
@@ -541,7 +546,7 @@ fn sockopts_defaults_match_c() {
 /// whatever the test harness has open at low numbers.
 #[test]
 fn adopt_listeners_from_high_fd() {
-    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
     let want_addr = tcp.local_addr().unwrap();
 
     // dup() to get a fresh high fd. We don't care WHERE it
@@ -618,7 +623,7 @@ fn adopt_listeners_too_many() {
 #[test]
 fn adopt_listeners_not_a_socket() {
     // /dev/null at a high fd. getsockname → ENOTSOCK.
-    let f = std::fs::File::open("/dev/null").unwrap();
+    let f = File::open("/dev/null").unwrap();
     let high_fd = nix::unistd::dup(&f).expect("dup");
     drop(f);
 
@@ -644,7 +649,7 @@ fn adopt_listeners_mid_error_closes_tail() {
     // dups are adjacent in a quiescent test thread; if some other
     // thread raced an open between them we just skip — the
     // property under test needs contiguity.
-    let devnull = std::fs::File::open("/dev/null").unwrap();
+    let devnull = File::open("/dev/null").unwrap();
     let a = nix::unistd::dup(&devnull).expect("dup a");
     let mut b = nix::unistd::dup(&devnull).expect("dup b");
     let (a_raw, b_raw) = (a.as_raw_fd(), b.as_raw_fd());
@@ -653,14 +658,14 @@ fn adopt_listeners_mid_error_closes_tail() {
         return;
     }
     // Replace b with a real socket whose port witnesses closure.
-    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
     let tcp_addr = tcp.local_addr().unwrap();
     nix::unistd::dup2(&tcp, &mut b).expect("dup2");
     drop(tcp);
 
     // Hand ownership of both ints to adopt_listeners_from.
-    std::mem::forget(a);
-    std::mem::forget(b);
+    mem::forget(a);
+    mem::forget(b);
 
     let e = adopt_listeners_from(a_raw, 2, &opts())
         .err()
@@ -671,5 +676,5 @@ fn adopt_listeners_mid_error_closes_tail() {
     // early return. A closed listener frees its port, so rebinding
     // proves closure. Probing the fd number instead would race with
     // concurrent tests reusing it.
-    std::net::TcpListener::bind(tcp_addr).expect("tail fd leaked: port still bound");
+    TcpListener::bind(tcp_addr).expect("tail fd leaked: port still bound");
 }

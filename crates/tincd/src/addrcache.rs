@@ -33,6 +33,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
@@ -113,7 +114,7 @@ impl AddressCache {
     /// cache files degrade to empty.
     #[must_use]
     pub(crate) fn open(confbase: &Path, peer: &str, config_addrs: Vec<(String, u16)>) -> Self {
-        let state_dir = std::env::var_os("STATE_DIRECTORY").map(PathBuf::from);
+        let state_dir = env::var_os("STATE_DIRECTORY").map(PathBuf::from);
         let path = resolve_cache_dir(confbase, state_dir.as_deref()).join(peer);
         let (config, hostnames) = split_config(config_addrs);
         Self {
@@ -335,6 +336,7 @@ impl Drop for AddressCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::iter;
 
     fn sa(s: &str) -> SocketAddr {
         s.parse().unwrap()
@@ -343,7 +345,7 @@ mod tests {
     use crate::testutil::tmpdir;
 
     fn drain(c: &mut AddressCache) -> Vec<SocketAddr> {
-        std::iter::from_fn(|| c.next_addr()).collect()
+        iter::from_fn(|| c.next_addr()).collect()
     }
 
     #[test]

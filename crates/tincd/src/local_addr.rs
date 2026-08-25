@@ -30,6 +30,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+use crate::listen;
 use rand_core::Rng;
 
 /// Contract: `current` indexes into `listener_addrs`. If
@@ -140,7 +141,7 @@ pub(crate) fn parse_addr_port(addr: &str, port: &str) -> Option<SocketAddr> {
     let port: u16 = port.parse().ok()?;
     let ip: IpAddr = addr.parse().ok()?;
     // Unmap ::ffff:a.b.c.d → v4 so adapt_socket picks the v4 listener (v6 is V6ONLY).
-    Some(crate::listen::unmap(SocketAddr::new(ip, port)))
+    Some(listen::unmap(SocketAddr::new(ip, port)))
 }
 
 /// `sockaddr2str` shape for the `ANS_KEY` append. Dotted-quad / RFC-5952 v6.

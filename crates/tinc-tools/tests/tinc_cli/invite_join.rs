@@ -2,6 +2,7 @@
 //! a TCP connection (the SPTPS exchange is unit-tested in-process).
 
 use super::Conf;
+use std::fs;
 use tinc_crypto::invite::{SLUG_LEN, SLUG_PART_LEN, parse_slug};
 
 fn with_address(name: &str) -> Conf {
@@ -52,12 +53,12 @@ fn invite_without_address() {
 fn invite_records_netname() {
     let conf = with_address("alice");
     conf.tinc(&["-n", "mymesh", "invite", "bob"]).succeeds();
-    let invitation = std::fs::read_dir(conf.base().join("invitations"))
+    let invitation = fs::read_dir(conf.base().join("invitations"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .find(|path| path.file_name().unwrap().len() == SLUG_PART_LEN)
         .unwrap();
-    let body = std::fs::read_to_string(invitation).unwrap();
+    let body = fs::read_to_string(invitation).unwrap();
     assert!(body.contains("NetName = mymesh\n"), "{body}");
 }
 

@@ -32,6 +32,7 @@
 use super::{TunnelHandles, TxSnapshot};
 use crate::graph::NodeId;
 use crate::node_id::NodeId6;
+use crate::tunnel::MTU;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
@@ -360,7 +361,7 @@ pub(crate) fn rx_open(
     // configured MTU is a peer misconfig; slow path logs + drops.
     // `MTU` is the daemon's `tunnel::MTU` (1518); we compare body
     // length against it same as `receive_sptps_record` does.
-    if body_len > usize::from(crate::tunnel::MTU) {
+    if body_len > usize::from(MTU) {
         return Err(());
     }
 
@@ -447,6 +448,7 @@ mod tests {
     use crate::node_id::NodeId6Table;
     use crate::shard::NodeView;
     use crate::subnet_tree::SubnetTree;
+    use std::net;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64};
     use tinc_crypto::aead::SptpsCipher;
@@ -517,7 +519,7 @@ mod tests {
             outcipher: SptpsCipher::new(aead, &[0u8; 64]),
             incipher: SptpsCipher::new(aead, &inkey),
             udp_addr: Mutex::new(Some((
-                socket2::SockAddr::from("10.0.0.2:655".parse::<std::net::SocketAddr>().unwrap()),
+                socket2::SockAddr::from("10.0.0.2:655".parse::<net::SocketAddr>().unwrap()),
                 0,
             ))),
             validkey: AtomicBool::new(true),

@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use super::common::{Node, poll_until};
 use super::fd_tunnel::{FdPair, mk_ipv4_pkt, read_fd_nb, sockpair_datagram, write_fd};
+use std::array;
+use std::thread;
 
 /// Last four columns of a `dump nodes` (3) or `dump traffic` (13) row:
 /// `in_packets in_bytes out_packets out_bytes`.
@@ -13,7 +15,7 @@ fn counters(rows: &[String], subtype: u8, name: &str) -> [u64; 4] {
         .find(|row| row.starts_with(&prefix))
         .unwrap_or_else(|| panic!("no {name} row in {rows:?}"));
     let fields: Vec<&str> = row.split_whitespace().collect();
-    std::array::from_fn(|i| fields[fields.len() - 4 + i].parse().unwrap())
+    array::from_fn(|i| fields[fields.len() - 4 + i].parse().unwrap())
 }
 
 /// alice's device → route → per-node SPTPS over UDP → bob's device,
@@ -121,7 +123,7 @@ fn traffic_survives_key_expiry() {
     let tmp = tmp!("keyexpire");
     let pair = FdPair::new(tmp.path(), "KeyExpire = 1\n", "KeyExpire = 1\n").start();
     pair.establish_udp_key();
-    std::thread::sleep(Duration::from_secs(2));
+    thread::sleep(Duration::from_secs(2));
     // A packet may land mid-rekey and be dropped; retry.
     let packet = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"post-rekey");
     let received = poll_until(Duration::from_secs(5), || {

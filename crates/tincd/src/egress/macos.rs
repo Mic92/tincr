@@ -35,8 +35,10 @@ use std::os::fd::AsRawFd;
 
 use socket2::Socket;
 
+use super::UDP_MAX_SEGMENTS;
 use super::{EgressBatch, Portable, UdpEgress};
 use crate::darwin_x::{MsghdrX, sendmsg_x, zeroed_boxed_array};
+use std::ptr;
 
 // SAFETY: the raw pointers in `MsghdrX`/`iovec` are scratch slots
 // fully overwritten before every `sendmsg_x` call and never read by
@@ -47,7 +49,7 @@ unsafe impl Send for Fast {}
 /// Max datagrams per `sendmsg_x` call. The daemon caps a `TxBatch` run
 /// at `UDP_MAX_SEGMENTS = 128`; we size the header/iov scratch arrays
 /// to match so they're allocated once and never grow.
-const HDR_CAP: usize = super::UDP_MAX_SEGMENTS as usize;
+const HDR_CAP: usize = UDP_MAX_SEGMENTS as usize;
 
 /// macOS batch UDP egress. Falls back to [`Portable`] for `count == 1`
 /// (no batching win) and on `ENOSYS`.
@@ -121,7 +123,7 @@ impl Fast {
                 msg_namelen: b.dst.len(),
                 msg_iov: &raw mut self.iovs[i],
                 msg_iovlen: 1,
-                msg_control: std::ptr::null_mut(),
+                msg_control: ptr::null_mut(),
                 msg_controllen: 0,
                 msg_flags: 0,
                 msg_datalen: 0,

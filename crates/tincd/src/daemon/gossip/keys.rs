@@ -7,7 +7,9 @@ use crate::dispatch::DispatchError;
 use crate::local_addr;
 use crate::tunnel::{MTU, make_udp_label};
 
+use crate::dispatch;
 use crate::graph::NodeId;
+use crate::tunnel::TunnelState;
 use tinc_crypto::os_rng;
 use tinc_crypto::sign::SigningKey;
 use tinc_proto::Request;
@@ -286,7 +288,7 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let (body_str, msg) = crate::dispatch::parse_key_msg(body, "REQ_KEY", ReqKey::parse)?;
+        let (body_str, msg) = dispatch::parse_key_msg(body, "REQ_KEY", ReqKey::parse)?;
 
         // lookup, not lookup_or_add.
         let Some((conn_name, from_nid, to_nid)) =
@@ -531,7 +533,7 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let (body_str, msg) = crate::dispatch::parse_key_msg(body, "ANS_KEY", AnsKey::parse)?;
+        let (body_str, msg) = dispatch::parse_key_msg(body, "ANS_KEY", AnsKey::parse)?;
 
         let Some((conn_name, from_nid, to_nid)) =
             self.routed_prologue(from_conn, "ANS_KEY", &msg.from, &msg.to)
@@ -555,11 +557,7 @@ impl Daemon {
             // using UDP so reflexive addr is useful).
             let appended = if msg.udp_addr.is_none() {
                 let from_udp = self.dp.tunnels.get(&from_nid).and_then(|t| t.udp_addr);
-                let to_minmtu = self
-                    .dp
-                    .tunnels
-                    .get(&to_nid)
-                    .map_or(0, crate::tunnel::TunnelState::minmtu);
+                let to_minmtu = self.dp.tunnels.get(&to_nid).map_or(0, TunnelState::minmtu);
                 match from_udp {
                     Some(from_addr) if to_minmtu > 0 => {
                         log::debug!(target: "tincd::proto",
@@ -700,7 +698,7 @@ impl Daemon {
         from_conn: ConnId,
         body: &[u8],
     ) -> Result<bool, DispatchError> {
-        let (s, kc) = crate::dispatch::parse_key_msg(body, "KEY_CHANGED", KeyChanged::parse)?;
+        let (s, kc) = dispatch::parse_key_msg(body, "KEY_CHANGED", KeyChanged::parse)?;
         if !tinc_proto::check_id(&kc.node) {
             return Err(DispatchError::BadKey("KEY_CHANGED: bad node name".into()));
         }

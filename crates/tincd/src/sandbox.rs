@@ -51,6 +51,14 @@ use landlock::{
     ABI, Access, AccessFs, BitFlags, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
     path_beneath_rules,
 };
+#[cfg(target_os = "linux")]
+use std::env;
+#[cfg(target_os = "linux")]
+use std::fs;
+#[cfg(target_os = "linux")]
+use std::fs::OpenOptions;
+#[cfg(target_os = "linux")]
+use std::iter;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -275,7 +283,7 @@ fn discover_paths(level: Level, paths: &Paths) -> SandboxPaths {
     // addrcache falls back to `$STATE_DIRECTORY/addrcache`
     // when confbase is read-only (NixOS store). Allow it so the
     // fallback survives Landlock too.
-    if let Some(sd) = std::env::var_os("STATE_DIRECTORY") {
+    if let Some(sd) = env::var_os("STATE_DIRECTORY") {
         rwc.push(PathBuf::from(sd).join("addrcache"));
     }
     if let Some(dev) = &paths.device {
@@ -351,9 +359,9 @@ fn build_and_apply_ruleset(p: SandboxPaths, level: Level) -> Result<(), String> 
     // skip them. Everything else in `rwc` is a directory we want
     // to ensure exists (addrcache, invitations, $STATE_DIRECTORY).
     let dirs_to_create =
-        std::iter::once(&p.hosts).chain(p.rwc.iter().filter(|d| !d.starts_with("/dev/")));
+        iter::once(&p.hosts).chain(p.rwc.iter().filter(|d| !d.starts_with("/dev/")));
     for d in dirs_to_create {
-        if let Err(e) = std::fs::create_dir_all(d) {
+        if let Err(e) = fs::create_dir_all(d) {
             // Non-fatal: hosts/ existing is required by setup()
             // already. cache/ and invitations/ are optional. If
             // mkdir fails, path_beneath_rules skips the entry and
@@ -367,11 +375,7 @@ fn build_and_apply_ruleset(p: SandboxPaths, level: Level) -> Result<(), String> 
     // already created it; belt-and-braces).
     if p.has_logfile {
         let lf = p.runtime_files.last().expect("has_logfile invariant");
-        if let Err(e) = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(lf)
-        {
+        if let Err(e) = OpenOptions::new().append(true).create(true).open(lf) {
             log::warn!(target: "tincd",
                 "Sandbox: touch {}: {e}", lf.display());
         }

@@ -50,6 +50,8 @@ use crate::ctl::{CtlError, CtlRequest, CtlSocket};
 use crate::names::Paths;
 
 use super::CmdError;
+use std::env;
+use std::io;
 use std::io::IsTerminal;
 
 // Shared header parse + size limits
@@ -135,12 +137,12 @@ const DEBUG_UNSET: i32 = -1;
 /// `NO_COLOR` is not honored; force color via a PTY (`script -c "tinc
 /// log"`) if needed.
 fn use_ansi_escapes_stdout() -> bool {
-    if !std::io::stdout().is_terminal() {
+    if !io::stdout().is_terminal() {
         return false;
     }
     // An empty `TERM=` still enables color (it's != "dumb"). Arguably
     // wrong, but matches C tinc's behavior.
-    match std::env::var("TERM") {
+    match env::var("TERM") {
         Ok(term) => term != "dumb",
         Err(_) => false, // unset, or non-UTF-8 (unlikely)
     }
@@ -251,7 +253,7 @@ pub fn run_log(paths: &Paths, level: Option<i32>) -> Result<(), CmdError> {
     // anyway, but the lock avoids per-write mutex contention with
     // any background thread that might println (there are none, but
     // the lock is free and idiomatic).
-    let stdout = std::io::stdout();
+    let stdout = io::stdout();
     let mut out = stdout.lock();
 
     Ok(log_loop(&mut ctl, &mut out, level, use_color)?)
@@ -454,7 +456,7 @@ where
 pub fn run_pcap(paths: &Paths, snaplen: u32) -> Result<(), CmdError> {
     let mut ctl = CtlSocket::connect(paths)?;
 
-    let stdout = std::io::stdout();
+    let stdout = io::stdout();
     let mut out = stdout.lock();
 
     Ok(pcap_loop(&mut ctl, &mut out, snaplen, SystemTime::now)?)
@@ -467,6 +469,7 @@ mod tests {
     use super::*;
     use CtlRequest::{Log, Pcap};
     use std::cell::RefCell;
+    use std::io;
     use std::io::Cursor;
     use std::rc::Rc;
     use std::time::Duration;
@@ -603,15 +606,15 @@ mod tests {
         write_side: Vec<u8>,
     }
     impl Read for Duplex {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             self.read_side.read(buf)
         }
     }
     impl Write for Duplex {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             self.write_side.write(buf)
         }
-        fn flush(&mut self) -> std::io::Result<()> {
+        fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }

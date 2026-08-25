@@ -17,6 +17,7 @@
 
 use std::io;
 
+use crate::graph::NodeId;
 use socket2::{SockAddr, Socket};
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -148,7 +149,7 @@ pub(crate) struct TxBatch {
     /// The relay node whose `pmtu` shrinks on `EMSGSIZE`. Stored
     /// per-run so `flush` can call `on_emsgsize` without re-
     /// resolving the route. `crate::graph::NodeId` is `Copy`.
-    relay: crate::graph::NodeId,
+    relay: NodeId,
     /// Plaintext body length of the LARGEST frame in the run.
     /// `on_emsgsize` shrinks `maxmtu` to this (the kernel rejected
     /// at the OUTER size, but PMTU is tracked at the inner-body
@@ -169,7 +170,7 @@ impl Default for TxBatch {
             count: 0,
             dst: None,
             sock: 0,
-            relay: crate::graph::NodeId(0),
+            relay: NodeId(0),
             origlen: 0,
         }
     }
@@ -188,7 +189,7 @@ impl TxBatch {
             count: 0,
             dst: None,
             sock: 0,
-            relay: crate::graph::NodeId(0),
+            relay: NodeId(0),
             origlen: 0,
         }
     }
@@ -244,7 +245,7 @@ impl TxBatch {
         &mut self,
         dst: &SockAddr,
         sock: u8,
-        relay: crate::graph::NodeId,
+        relay: NodeId,
         origlen: u16,
         frame: &[u8],
     ) {
@@ -272,7 +273,7 @@ impl TxBatch {
     /// `batch`; the daemon's error handler needs the rest for
     /// `EMSGSIZE` → `pmtu.on_emsgsize(origlen)`.
     #[must_use]
-    pub(crate) fn take(&mut self) -> Option<(EgressBatch<'_>, u8, crate::graph::NodeId, u16)> {
+    pub(crate) fn take(&mut self) -> Option<(EgressBatch<'_>, u8, NodeId, u16)> {
         if self.count == 0 {
             return None;
         }

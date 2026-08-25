@@ -10,6 +10,9 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::time::SystemTime;
 
+use crate::cmd::fsck;
+use std::mem;
+use std::str;
 use tinc_crypto::invite::{COOKIE_LEN, SLUG_LEN, SLUG_PART_LEN};
 use tinc_crypto::sign::SigningKey;
 use tinc_sptps::{Framing, Output, Role, Sptps};
@@ -411,7 +414,7 @@ fn server_stub_recovers_file() {
 
     assert_eq!(name, "bob");
     // First line is `Name = bob`.
-    let s = std::str::from_utf8(&contents).unwrap();
+    let s = str::from_utf8(&contents).unwrap();
     assert!(s.starts_with("Name = bob\n"));
     // The .used file exists, original is gone.
     assert!(used_path.exists());
@@ -592,7 +595,7 @@ fn invite_join_roundtrip_in_process() {
 
         // Server processes its inbox
         if !to_server.is_empty() {
-            let inp = std::mem::take(&mut to_server);
+            let inp = mem::take(&mut to_server);
             let mut off = 0;
             while off < inp.len() {
                 let (n, outs): (usize, Vec<Output>) =
@@ -689,7 +692,7 @@ fn invite_join_roundtrip_in_process() {
         // process testing. Same structure: type-0 accumulate,
         // type-1 finalize, type-2 success.
         if !to_joiner.is_empty() {
-            let inp = std::mem::take(&mut to_joiner);
+            let inp = mem::take(&mut to_joiner);
             let mut off = 0;
             while off < inp.len() {
                 let (n, outs): (usize, Vec<Output>) =
@@ -784,7 +787,7 @@ fn invite_join_roundtrip_in_process() {
     // 6. fsck passes on the joiner's confbase. The contract:
     //    join produces a confbase that fsck approves of. If join
     //    ever writes something fsck flags, this fires.
-    let report = crate::cmd::fsck::run(joiner_paths, false).unwrap();
+    let report = fsck::run(joiner_paths, false).unwrap();
     assert!(
         report.ok,
         "join should produce fsck-clean confbase: {:?}",

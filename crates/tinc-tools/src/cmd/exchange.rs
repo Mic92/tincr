@@ -71,7 +71,9 @@ use crate::names::{self, Paths, check_id};
 // invitation file format reuses the same string, so the constant
 // lives in `cmd::invite`.
 use super::invite::SEPARATOR;
+use std::io::ErrorKind;
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
 
 /// `get_my_name` — read `Name = X` from `tinc.conf`, expand `$HOST`.
 ///
@@ -265,7 +267,7 @@ pub fn export_all(paths: &Paths, mut out: impl Write) -> Result<(), CmdError> {
 pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, CmdError> {
     let mut out: Option<BufWriter<fs::File>> = None;
     // For error messages. Set when `out` is.
-    let mut current_path: Option<std::path::PathBuf> = None;
+    let mut current_path: Option<PathBuf> = None;
     let mut count = 0usize;
     let mut firstline = true;
 
@@ -312,7 +314,7 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
             }
             let f = match opts.open(&path) {
                 Ok(f) => f,
-                Err(e) if !force && e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(e) if !force && e.kind() == ErrorKind::AlreadyExists => {
                     eprintln!(
                         "Host configuration file {} already exists, skipping.",
                         path.display()

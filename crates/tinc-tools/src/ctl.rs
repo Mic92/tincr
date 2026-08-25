@@ -44,6 +44,9 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use crate::names::Paths;
+use std::fs;
+use std::io;
+use std::path::PathBuf;
 
 pub mod rows;
 
@@ -141,7 +144,7 @@ impl Pidfile {
     /// # Errors
     /// File open failed, or contents don't match the expected shape.
     pub fn read(path: &Path) -> Result<Self, CtlError> {
-        let s = std::fs::read_to_string(path).map_err(|e| CtlError::PidfileMissing {
+        let s = fs::read_to_string(path).map_err(|e| CtlError::PidfileMissing {
             path: path.to_path_buf(),
             err: e,
         })?;
@@ -189,9 +192,9 @@ pub enum CtlError {
     /// pidfile, or you can't read it.
     #[error("Could not open pid file {}: {err}", path.display())]
     PidfileMissing {
-        path: std::path::PathBuf,
+        path: PathBuf,
         #[source]
-        err: std::io::Error,
+        err: io::Error,
     },
     /// Pidfile exists but doesn't parse: daemon crashed mid-write, or
     /// it's from a different tinc version.
@@ -205,9 +208,9 @@ pub enum CtlError {
     /// listening.
     #[error("Cannot connect to UNIX socket {}: {err}", path.display())]
     SocketConnect {
-        path: std::path::PathBuf,
+        path: PathBuf,
         #[source]
-        err: std::io::Error,
+        err: io::Error,
     },
     /// Greeting exchange failed. Wrong cookie, daemon spoke wrong
     /// protocol, EOF mid-greeting.
@@ -215,7 +218,7 @@ pub enum CtlError {
     Greeting(String),
     /// Socket I/O after greeting. Daemon closed, write failed.
     #[error("Connection to tincd lost: {0}")]
-    Io(#[source] std::io::Error),
+    Io(#[source] io::Error),
 }
 
 /// The connected control socket, plus the daemon's pid (from greeting
@@ -255,15 +258,15 @@ struct ReadHalf<S>(Rc<RefCell<S>>);
 struct WriteHalf<S>(Rc<RefCell<S>>);
 
 impl<S: Read> Read for ReadHalf<S> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.0.borrow_mut().read(buf)
     }
 }
 impl<S: Write> Write for WriteHalf<S> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.0.borrow_mut().write(buf)
     }
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         self.0.borrow_mut().flush()
     }
 }

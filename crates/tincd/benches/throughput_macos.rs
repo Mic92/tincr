@@ -37,6 +37,10 @@ mod bench {
     };
     use super::common::macos::{route_del_host, run, wait_for_utun};
     use super::common::{Node, TmpGuard, node_traffic};
+    use std::env;
+    use std::fs;
+    use std::process;
+    use std::thread;
 
     // High utun unit numbers: dodge VPN clients / leftover devices.
     const ALICE_IFACE: &str = "utun210";
@@ -126,7 +130,7 @@ mod bench {
                 .spawn()
                 .expect("spawn iperf3 server"),
         );
-        std::thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(200));
         let sum = iperf3_client(&tunnel.0, &["-c", BOB_IP, "-B", ALICE_IP, "-t", "5"]);
         (sum.bits_per_second, sum.bytes)
     }
@@ -251,7 +255,7 @@ mod bench {
     }
 
     pub fn main() {
-        let filters: Vec<String> = std::env::args()
+        let filters: Vec<String> = env::args()
             .skip(1)
             .filter(|a| !a.starts_with('-'))
             .collect();
@@ -266,10 +270,10 @@ mod bench {
             eprintln!("SKIP throughput_macos: iperf3 not on PATH (nix develop provides it)");
             return;
         }
-        let perf_out = std::env::var_os("TINCD_PERF_DIR")
+        let perf_out = env::var_os("TINCD_PERF_DIR")
             .map_or_else(|| PathBuf::from("/tmp/tincd-perf"), PathBuf::from);
         if perf_enabled() {
-            std::fs::create_dir_all(&perf_out).unwrap();
+            fs::create_dir_all(&perf_out).unwrap();
         } else {
             eprintln!("(set TINCD_PERF=1 for sample(1) profile)");
         }
@@ -322,7 +326,7 @@ mod bench {
                 "no pairing matched {filters:?}; available: {}, latency_<pairing>",
                 names.join(", ")
             );
-            std::process::exit(1);
+            process::exit(1);
         }
         let bps = |name: &str| results.iter().find(|(n, _)| *n == name).map(|r| r.1);
         if let (Some(rust), Some(c)) = (bps("rust_rust"), bps("c_c")) {

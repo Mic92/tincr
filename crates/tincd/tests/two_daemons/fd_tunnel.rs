@@ -1,6 +1,9 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
+use std::path::Path;
+use std::thread;
+use std::time::Instant;
 
 /// `socketpair` with datagram semantics (one write = one read),
 /// faking a TUN fd. `SEQPACKET` on Linux, `DGRAM` on macOS (no
@@ -87,7 +90,7 @@ pub(crate) struct FdPair {
 impl FdPair {
     /// Configs written, bob started (alice needs his port), alice not
     /// yet — so callers can drop scripts into her confbase first.
-    pub(crate) fn new(dir: &std::path::Path, alice_conf: &str, bob_conf: &str) -> Self {
+    pub(crate) fn new(dir: &Path, alice_conf: &str, bob_conf: &str) -> Self {
         let (alice_dev, alice_daemon_end) = sockpair_datagram();
         let (bob_dev, bob_daemon_end) = sockpair_datagram();
         let alice = Node::new(dir, "alice", 0xA7)
@@ -128,7 +131,7 @@ impl FdPair {
     }
 
     fn wait_status(&self, bit: u32, what: &str) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let alice_ok =
                 node_status(&self.alice.ctl().dump(3), "bob").is_some_and(|s| s & bit != 0);
@@ -142,7 +145,7 @@ impl FdPair {
                 "not {what};\n{}",
                 self.logs()
             );
-            std::thread::sleep(Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(20));
         }
     }
 
