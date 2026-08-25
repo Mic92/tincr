@@ -5,16 +5,11 @@ use std::time::Duration;
 use std::time::Instant;
 
 impl Daemon {
-    /// EWMA + asymmetric-hysteresis weight update (§3.C of
-    /// `edge-weight-stability.md`, RFC 9616 / ironwood shape).
-    ///
-    /// `srtt += (min(rtt, srtt*2) - srtt) >> 3`. Re-gossip our own
-    /// edge when `srtt` leaves the `[0.7·g, 1.5·g]` band around the
-    /// last-advertised weight `g`, but never more often than
-    /// `5·PingInterval`. Upward band is wider (queueing only adds
-    /// delay) so jitter alone can't push the weight up.
-    ///
-    /// Returns `needs_write` for the broadcast it queues.
+    /// EWMA plus asymmetric hysteresis (§3.C of `edge-weight-stability.md`, RFC
+    /// 9616 shape): `srtt += (min(rtt, 2·srtt) - srtt) >> 3`; re-gossip our edge
+    /// when `srtt` leaves `[0.7·g, 1.5·g]` around the last advertised weight `g`,
+    /// at most every `5·PingInterval`. The wider upward band keeps jitter from
+    /// raising the weight. Returns `needs_write`.
     pub(in crate::daemon) fn on_pong_rtt(&mut self, id: ConnId, now: Instant) -> bool {
         let pinginterval = u64::from(self.settings.pinginterval);
         let Some(conn) = self.conns.get_mut(id) else {

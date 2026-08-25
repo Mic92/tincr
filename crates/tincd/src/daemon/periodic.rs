@@ -45,14 +45,10 @@ impl Daemon {
         self.timers.set(self.pingtimer, PING_SWEEP);
     }
 
-    /// Dead-conn sweep + ping.
-    ///
-    /// Per-conn cases: skip control; pre-ACK timeout (handshake
-    /// stalled); PING sent but no PONG; idle → send PING.
-    ///
-    /// Laptop-suspend detector: timer skipped >1min → daemon was
-    /// asleep → peers dropped us → force-close all (sending into
-    /// stale SPTPS contexts is just noise).
+    /// Dead-conn sweep and ping: skip control conns; time out stalled handshakes
+    /// and unanswered PINGs; PING idle conns. If the timer was skipped by over a
+    /// minute the host was asleep and peers dropped us, so close everything rather
+    /// than talk into stale SPTPS contexts.
     fn on_conn_sweep_tick(&mut self, now: Instant) {
         // Laptop-suspend detection. Saturating sub: clock-goes-
         // backwards (NTP) reads as zero (safe).
@@ -239,15 +235,11 @@ impl Daemon {
         }
     }
 
-    /// Contradicting-edge storm detection + autoconnect.
-    ///
-    /// Both counters >100 → two daemons same Name. C tinc does a
-    /// blocking `nanosleep`; we instead defer all outgoing retries
-    /// and the next periodic tick by `sleeptime` (peer can drive the
-    /// counters; blocking the loop is a DoS). Doubled per trigger
-    /// (cap 3600s), halved per clean period (floor 10s).
-    ///
-    /// Returns the deferral duration for the unit test only.
+    /// Contradicting-edge storm detection plus autoconnect. Both counters >100
+    /// means two daemons share a Name; instead of C's blocking sleep (a
+    /// peer-triggerable DoS) we defer outgoing retries and the next tick by
+    /// `sleeptime`, doubled per trigger (cap 3600s), halved per clean period (floor
+    /// 10s). Returns the deferral for the unit test.
     pub(super) fn on_periodic_tick(&mut self) -> Duration {
         let slept = if self.contradicting_del_edge > EDGE_STORM_THRESHOLD
             && self.contradicting_add_edge > EDGE_STORM_THRESHOLD
@@ -537,15 +529,10 @@ impl Daemon {
         }
     }
 
-    /// The "network came back, reconnect NOW" button: zeroes outgoing
-    /// backoff, fires retry timers immediately, and kicks the ping
-    /// sweep so in-progress connects (stuck on a stale fd before
-    /// suspend) get reaped this turn instead of after `pingtimeout`
-    /// more seconds.
-    ///
-    /// Triggered by SIGALRM and `tinc retry`. Without this, a laptop
-    /// suspended past `MaxTimeout` waits up to 15 min for the next
-    /// reconnect attempt.
+    /// Network-came-back button (SIGALRM, `tinc retry`): zero outgoing backoff,
+    /// fire retry timers now, and kick the ping sweep so connects stuck on a
+    /// pre-suspend fd are reaped this turn. Otherwise a laptop suspended past
+    /// `MaxTimeout` waits up to 15 minutes.
     pub(super) fn on_retry(&mut self) {
         // Per outgoing, zero backoff + arm timer for now. Every
         // `outgoings` slot has a paired timer (`Daemon::setup` adds

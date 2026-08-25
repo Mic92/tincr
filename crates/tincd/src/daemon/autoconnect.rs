@@ -15,20 +15,11 @@ use std::fs;
 use tinc_crypto::os_rng;
 
 impl Daemon {
-    /// Walk `confbase/hosts/`, add every valid-named file to the
-    /// graph, populate `has_address`.
-    ///
-    /// Every hosts/-file name goes into the graph even with no edge
-    /// to us — a `has_address && !reachable` node is exactly
-    /// autoconnect's eligible-to-dial set. Without the graph add it'd
-    /// be invisible to `decide()`.
-    ///
-    /// strictsubnets: preload Subnet= lines so the lookup-first gate
-    /// in `on_add_subnet` finds them; only unauthorized subnets fall
-    /// through.
-    ///
-    /// `TODO(strictsubnets-reload)`: we only do cold-start preload.
-    /// Diff old/new authorized sets, broadcast deltas.
+    /// Walk `confbase/hosts/`, add every valid-named file to the graph and populate
+    /// `has_address`; a `has_address && !reachable` node is exactly what
+    /// autoconnect may dial, so it must exist in the graph. With strictsubnets,
+    /// `Subnet=` lines are preloaded so `on_add_subnet`'s lookup-first gate finds
+    /// them (cold start only; a reload doesn't diff the authorised set yet).
     pub(super) fn load_all_nodes(&mut self) {
         let hosts_dir = self.confbase.join("hosts");
         let dir = match fs::read_dir(&hosts_dir) {

@@ -226,23 +226,12 @@ impl Daemon {
         FeedDrain::Again
     }
 
-    /// `Request::Id` arm: build `IdCtx`, call `handle_id`, then drain
-    /// the SPTPS-init piggyback.
-    ///
-    /// `handle_id` itself is pure (in `dispatch.rs`); the piggyback is
-    /// the messy part. SPTPS-start emits the first KEX as `Output::Wire`.
-    /// We queue that, then `take_rest` from inbuf — the peer often
-    /// sends ID + KEX in one TCP segment, and the bytes after the
-    /// ID-line newline are now SPTPS framing, not protocol lines.
-    /// Re-feed those through `feed_sptps` immediately.
-    ///
-    /// `Peer` and `Invitation` cases are the same shape; the only
-    /// per-case bits are `conn.invite = Some(...)` for invitations
-    /// and which name field goes in the error log.
-    ///
-    /// Returns `None` if the conn was terminated (SPTPS error in
-    /// piggyback, or `dispatch_sptps_outputs` killed it). Caller
-    /// must `return FeedDrain::Done`.
+    /// `Request::Id` arm: build `IdCtx`, run the pure `handle_id`, then handle the
+    /// SPTPS-init piggyback: queue the first KEX `Output::Wire` and re-feed
+    /// whatever followed the ID line in the same segment through `feed_sptps`,
+    /// since those bytes are SPTPS framing. Peer and invitation differ only in
+    /// `conn.invite` and the logged name. `None` if the conn was terminated; the
+    /// caller returns `FeedDrain::Done`.
     fn dispatch_request_id(&mut self, id: ConnId, line: &[u8]) -> Option<(DispatchResult, bool)> {
         // Split borrow: helper would lock all of `self`.
         let conn = self.conns.get_mut(id).expect("ConnId not live");
@@ -464,15 +453,10 @@ impl Daemon {
                 self.ctl_send_dump(id, rows, REQ_DUMP_TRAFFIC)
             }
             DispatchResult::Log(level) => {
-                // No reply. The conn now passively receives log records
-                // via `flush_log_tap`.
-                //
-                // Debug levels: -1=UNSET, 0=always, 1=CONNECTIONS, ...,
-                // 5=TRAFFIC, ..., 10=SCARY. Map roughly: 0→Info,
-                // 1-2→Debug, 3+→Trace. Same shape as `main.rs::
-                // debug_level_to_filter`. -1 (UNSET) = "use daemon's
-                // level"; we use Trace (everything the tap captures —
-                // the daemon's stderr filter already applied).
+                // No reply; the conn now passively receives log records via `flush_log_tap`.
+                // tinc debug levels map roughly 0→Info, 1-2→Debug, 3+→Trace (as
+                // `debug_level_to_filter`); -1 means the daemon's own level, i.e. everything
+                // the tap captures.
                 let conn = self.conn_mut(id);
                 conn.log_level = Some(match level {
                     i32::MIN..=-1 => log::Level::Trace,
@@ -741,22 +725,11 @@ impl Daemon {
                                 )
                         }
                         Request::KeyChanged => {
-                            // Legacy-crypto distro builds broadcast
-                            // this every `KeyExpire` seconds (default
-                            // 3600). Before this fix, we'd terminate
-                            // every such connection at the one-hour
-                            // mark. Bug audit `deef1268`.
-                            //
-                            // The forward is the only thing that
-                            // matters for an SPTPS-only build.
-                            //
-                            // TODO: cross-impl regression — build a
-                            // `tincd-c-legacy` flake output WITHOUT
-                            // `-Dcrypto=nolegacy` and assert the conn
-                            // survives a KEY_CHANGED. crossimpl runs
-                            // for ~10s; default KeyExpire is 3600s,
-                            // so set `KeyExpire = 5` in the C peer's
-                            // tinc.conf for that test.
+                            // Legacy-crypto peers broadcast this every `KeyExpire` seconds;
+                            // terminating on it dropped every such connection hourly (`deef1268`).
+                            // For an SPTPS-only build only the forward matters. A cross-impl
+                            // regression test needs a C peer built with legacy crypto and a short
+                            // `KeyExpire`.
                             self.on_key_changed(id, body)
                         }
                         Request::Status => {

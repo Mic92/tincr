@@ -80,16 +80,11 @@ use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
 
-/// For each `BindToAddress` line then each `ListenAddress` line,
-/// resolve and create listener pair(s). If neither key is present,
-/// fall through to the wildcard default (`open_listeners`).
-///
-/// Port reuse: the first listener picks an ephemeral with `Port=0`;
-/// every subsequent bind tries to reuse it so the daemon advertises
-/// one port to peers regardless of how many addresses it listens on.
-///
-/// `bindto`: `BindToAddress` listeners are also used as outgoing-
-/// connect source addresses; `ListenAddress` listeners are listen-only.
+/// For each `BindToAddress` then each `ListenAddress` line, resolve and open
+/// listener pairs; with neither, fall back to the wildcard `open_listeners`.
+/// The first listener's ephemeral port (with `Port=0`) is reused by the rest so
+/// one port is advertised. `BindToAddress` listeners double as outgoing source
+/// addresses; `ListenAddress` ones don't.
 fn build_listeners(
     config: &tinc_conf::Config,
     port: u16,
@@ -254,15 +249,10 @@ fn open_device(
         }
         #[cfg(any(target_os = "linux", target_os = "android"))]
         Some("tun") => {
-            // Real kernel TUN via `/dev/net/tun` + TUNSETIFF.
-            // Needs `CAP_NET_ADMIN`; the netns harness grants it
-            // inside an unprivileged userns via bwrap.
-            //
-            // `Interface = NAME` → attach to a precreated
-            // persistent device; unset → kernel picks `tun0`/etc.
-            // The netns test precreates so it can move the device
-            // into a child netns after the daemon attaches (the
-            // fd→device binding survives `ip link set netns`).
+            // Real kernel TUN via `/dev/net/tun` + TUNSETIFF; needs `CAP_NET_ADMIN` (the
+            // netns harness grants it in a userns via bwrap). `Interface = NAME` attaches
+            // to a precreated persistent device, which the netns test then moves into a
+            // child netns (the fd binding survives); unset lets the kernel pick.
             let cfg = tinc_device::DeviceConfig {
                 iface: config
                     .lookup("Interface")
@@ -373,17 +363,11 @@ fn register_listeners(
             .map_err(|e| SetupError::io("register TCP listener with event loop", e))?;
         ev.add(l.udp_fd(), Io::Read, IoWhat::Udp(i))
             .map_err(|e| SetupError::io("register UDP listener with event loop", e))?;
-        // On Linux, dup into `linux::Fast` (UDP_SEGMENT cmsg,
-        // one sendmsg per batch).
-        // No probe: kernel ≥4.18 floor; ENOPROTOOPT at
-        // first batch → panic with a clear message (see
-        // `egress/linux.rs::map_errno`). Non-Linux stays
-        // `Portable` (count × sendto).
-        //
-        // The listener keeps its copy for `recvmmsg`; the egress
-        // sends on the dup. Same file description → same bound
-        // addr, same TOS (the daemon's `set_udp_tos` sets it on
-        // the listener fd).
+        // Linux: dup into `linux::Fast` (UDP_SEGMENT cmsg, one sendmsg per batch;
+        // kernel ≥4.18 assumed, ENOPROTOOPT panics with a clear message in
+        // `egress/linux.rs`). Elsewhere `Portable`. The listener keeps its fd for
+        // `recvmmsg`; the dup shares the file description, so bound addr and TOS carry
+        // over.
         #[cfg(any(target_os = "linux", target_os = "android"))]
         let egress: Box<dyn UdpEgress> = Box::new(
             Fast::new(&l.udp).map_err(|e| SetupError::io("dup UDP socket for egress", e))?,
@@ -577,16 +561,10 @@ fn register_signals(
     signals.add(Signal::SIGHUP as i32, SignalWhat::Reload)?;
     signals.add(Signal::SIGALRM as i32, SignalWhat::Retry)?;
 
-    // USR1/USR2/WINCH: ignore. Old tinc 1.0.x dumped state on
-    // USR1/USR2; that moved to the control socket. Left at default
-    // disposition they terminate the process — a stray `kill -USR1`
-    // from a monitoring script expecting the old behaviour would
-    // kill the daemon.
-    //
-    // SAFETY: nix::signal is `unsafe` because the `Handler` variant
-    // can install an arbitrary fn pointer; `SigIgn` carries none, so
-    // there is no async-signal-safety concern. We are still single-
-    // threaded at setup (called before the event loop runs).
+    // USR1/USR2/WINCH: ignore. tinc 1.0 dumped state on USR1/2; at default
+    // disposition a stray `kill -USR1` from an old monitoring script would
+    // terminate us. SAFETY: `SigIgn` installs no handler fn, and we are still
+    // single-threaded here.
     #[expect(unsafe_code)]
     unsafe {
         let _ = signal(Signal::SIGUSR1, SigHandler::SigIgn);
@@ -626,20 +604,13 @@ fn add_broadcast_subnets(subnets: &mut SubnetTree, config: &tinc_conf::Config) {
 }
 
 impl Daemon {
-    /// `confbase` is the `-c` argument (or `CONFDIR/tinc[/NETNAME]`
-    /// resolved by main.rs). `pidfile`/`socket` are the runtime paths.
+    /// Bring the daemon up from `confbase` (`-c`) and the runtime paths.
     ///
     /// # Errors
-    /// Startup failures: tinc.conf missing/malformed, no `Name`,
-    /// device open failed, pidfile write failed (permissions),
-    /// socket bind failed (already running).
+    /// tinc.conf/`Name` missing, or device, pidfile or control socket failed.
     ///
     /// # Panics
-    /// `SelfPipe::new` panics if a `SelfPipe` already exists in this
-    /// process (it's a singleton - see tinc-event/sig.rs). Can't
-    /// happen here: setup is called once. Tests that call setup
-    /// twice in one process are wrong; integration tests use
-    /// subprocess.
+    /// If a `SelfPipe` already exists; setup runs once per process.
     #[expect(clippy::too_many_lines)] // straight-line struct init; pulling 3 fields out makes it worse
     pub fn setup(
         confbase: &Path,
@@ -1069,19 +1040,11 @@ impl Daemon {
             id6_prefix[6..].copy_from_slice(src_id6.as_bytes());
 
             TxSnapshot {
-                // any_pcap not folded — it flips at runtime via
-                // `tinc pcap` (metaconn.rs sets, route.rs recomputes
-                // on conn drop). Checked live at the call site
-                // (device.rs) so the fast path bypasses pcap when
-                // armed instead of silently shipping uncaptured.
-                // overwrite_mac (Router+TAP) folded for the RX fast
-                // path: send_packet_myself stamps the eth header
-                // before TUN write. RX fast path inlines that write
-                // without the stamp — fine for TUN (kernel ignores
-                // eth), wrong for TAP. Spawn-const; fold here. TX
-                // fast path doesn't write TUN, doesn't care; the
-                // gate is shared so TAP loses TX fast-path too —
-                // acceptable, TAP+Router is fringe.
+                // `any_pcap` is not folded: it flips at runtime via `tinc pcap` and is checked
+                // live at the call site. `overwrite_mac` (Router on TAP) is folded because the
+                // RX fast path writes the device without stamping the eth header, which only
+                // TUN tolerates; the shared gate costs TAP+Router the TX fast path too,
+                // acceptable for a fringe setup.
                 slowpath_all: daemon.dns.is_some()
                     || daemon.settings.routing_mode != RoutingMode::Router
                     || daemon.settings.priorityinheritance
@@ -1317,14 +1280,10 @@ mod tests {
 
     #[test]
     fn expand_name_host_fallback() {
-        // `$HOST` falls back to gethostname() when unset. We can't
-        // control the test machine's hostname, but we CAN assert:
-        //   1. it succeeds
-        //   2. result is non-empty
-        //   3. result is fully alphanumeric (sanitized) — no `.`
-        //      survived (stripped at first `.` then sanitized)
-        // If $HOST happens to be set in env, that path is exercised
-        // instead - same postconditions hold.
+        // `$HOST` falls back to gethostname(), which we can't control, so assert the
+        // postconditions: succeeds, non-empty, fully alphanumeric (truncated at the
+        // first `.` then sanitised). A set `$HOST` exercises the env path with the
+        // same postconditions.
         let n = expand_name("$HOST").unwrap();
         assert!(!n.is_empty());
         assert!(n.chars().all(|c| c.is_alphanumeric() || c == '_'));

@@ -19,18 +19,12 @@ use crate::shard::TxSnapshot;
 use std::mem;
 
 impl Daemon {
-    /// Drain loop. LT epoll re-fires next turn if we leave bytes
-    /// behind; the loop here is a fairness cap (iperf3 saturating
-    /// the TUN shouldn't starve meta-conn flush/UDP recv/timers)
-    /// and pulls `GSO_NONE` ACKs that pile up behind a TSO super.
-    ///
-    /// One `device.drain(&mut arena, cap)` returns N frames in arena
-    /// slots. The default `drain()` is `read()`-in-a-loop — byte-for-
-    /// byte the same syscall sequence on bsd/fd backends. The Linux
-    /// `vnet_hdr` device override returns `Super` for TSO segments.
-    // `Super` arm is the TSO-split path. Factoring it out
-    // would mean threading `arena`/`nw`/`tx_batch` through a helper;
-    // the control flow reads cleaner inline.
+    /// Drain loop: LT epoll re-fires if bytes remain, so the loop is a fairness cap
+    /// (a saturated TUN mustn't starve meta flush, UDP recv and timers) that also
+    /// pulls the `GSO_NONE` ACKs queued behind a TSO super. One `device.drain()`
+    /// fills N arena slots; the Linux `vnet_hdr` device may return `Super` instead.
+    /// The `Super` arm is inline because factoring it out would thread
+    /// `arena`/`nw`/`tx_batch` through a helper.
     pub(in crate::daemon) fn on_device_read(&mut self) {
         // tx_batch_live tells send_sptps_data_relay to stage instead
         // of send; must not outlive this fn. The buffer is warm-
@@ -42,17 +36,11 @@ impl Daemon {
             "tx_batch carries staged frames"
         );
         let mut nw = false;
-        // The default `Device::drain` loops INTERNALLY until EAGAIN
-        // or cap; one call suffices. The vnet_hdr drain reads one
-        // skb (`Super` or `Frames{1}`) per call — looping here pulls
-        // the GSO_NONE ACKs queued behind a TSO super. Bounded so a
-        // saturating sender doesn't starve UDP/timers (`0f120b11`).
-        //
-        // The `Frames` arm with the default drain hits this loop
-        // once: it returns count<cap (drained to EAGAIN, the second
-        // iteration sees `Empty`) or count==cap (we break out; LT
-        // re-fires next turn). Either way, no behavior change for
-        // the non-vnet path.
+        // The default `Device::drain` loops internally to EAGAIN or cap, so it runs
+        // this loop once (count<cap → next iteration is `Empty`; count==cap → break,
+        // LT re-fires). The vnet_hdr drain returns one skb per call, so the loop pulls
+        // the ACKs queued behind a super; bounded so a saturating sender can't starve
+        // UDP/timers (`0f120b11`).
         let mut iters = 0usize;
         // tx_batch spans outer-loop iterations: vnet drain returns 1
         // frame per call, the burst is in `iters` not `count`. Arm
@@ -104,17 +92,11 @@ impl Daemon {
                 }
                 tinc_device::DrainResult::Frames { count } => {
                     self.device_errors = 0;
-                    // TX batching: `tx_batch` Some → send site stages
-                    // instead of `sendto`; ship the run in one
-                    // `EgressBatch` after the loop. Encrypt still goes
-                    // into `tx_scratch` per-frame, batch COPIES from
-                    // there (one ~1.5KB memcpy vs 43× fewer syscalls).
-                    //
-                    // Arm on a burst: count>1 or iters>1. An idle ping
-                    // (count==1 && iters==1) falls through to immediate
-                    // send. Once armed, stays armed across iterations
-                    // so vnet's Frames{1}×N then Super coalesce into
-                    // one sendmsg.
+                    // TX batching: with `tx_batch` armed the send site stages into an
+                    // `EgressBatch` shipped after the loop (one memcpy per frame from
+                    // `tx_scratch`, far fewer syscalls). Armed on a burst (count>1 or iters>1), so
+                    // an idle ping sends immediately; stays armed across iterations so Frames then
+                    // Super coalesce into one sendmsg.
                     if count > 1 || iters > 1 {
                         self.dp.tx_batch_live = true;
                     }
@@ -205,33 +187,13 @@ impl Daemon {
                             let myself_tunnel = self.dp.tunnels.entry(self.myself).or_default();
                             myself_tunnel.stats.add_in(1, len as u64);
 
-                            // The win: `forward_packet` runs once per super.
-                            // The first call does the trie lookup; the
-                            // rest reuse the same dst (TSO is single-flow,
-                            // mixed-dst super-packets don't exist — the
-                            // kernel TCP stack segments per-socket).
-                            //
-                            // BUT: forward_packet has side effects per-packet
-                            // (TX stats, PMTU drive via try_tx, the dense
-                            // batch staging). Calling it once and looping
-                            // would mean rewriting the send path. For now:
-                            // call it `count` times. The 0.94µs→0.56µs
-                            // "other" projection assumed the trie lookup
-                            // amortizes; it does (same `last_routes[]`
-                            // index), and that's the expensive half.
-                            //
-                            // TX fast-path: tx_probe walks the gate
-                            // chain on the snapshot once per super.
-                            // On Some we seal+ship inline — no
-                            // forward_packet, no &mut self reborrow per
-                            // chunk. Wire-identical (handle_based_
-                            // seal_byte_identical proves the bytes;
-                            // netns tests prove the wiring).
-                            //
-                            // mem::take: tx_probe is &TxSnapshot but
-                            // seal+ship needs &mut self.dp +
-                            // &mut self.listeners alongside. Same
-                            // dance as device_arena/tso_scratch.
+                            // TSO is single-flow, so every chunk shares a destination and the route
+                            // lookup amortises via `last_routes[]`; `forward_packet` still runs per
+                            // chunk for its side effects. TX fast path: `tx_probe` walks the gate
+                            // chain once per super and on `Some` we seal and ship inline,
+                            // wire-identical (`handle_based_seal_byte_identical`). `mem::take`
+                            // because `tx_probe` borrows the snapshot while seal+ship needs `&mut
+                            // self.dp`.
                             let snap = self.tx_snap.take();
                             // any_pcap is the only slowpath_all input
                             // that flips at runtime (`tinc pcap` arms
@@ -422,16 +384,10 @@ impl Daemon {
         }
     }
 
-    /// TX fast-path attempt for one super. Returns `true` if the
-    /// super was sealed+shipped (caller skips the slow loop), `false`
-    /// if any gate failed (caller runs `forward_packet` per chunk).
-    ///
-    /// Lifted out of the Super arm to keep nesting sane: the caller
-    /// is already 5 levels deep in `match drain { Super { match split`.
-    /// `count > 1`: single-chunk supers get no batch win. `tx_batch`
-    /// is `Some` here (armed at `count > 1`). Snap is `&Option<_>`
-    /// because the caller `mem::take`s and restores; passing it by
-    /// value would force the restore inside this fn for both arms.
+    /// TX fast-path attempt for one super: `true` if sealed and shipped, `false` if
+    /// a gate failed and the caller must `forward_packet` per chunk. Only for
+    /// `count > 1` (`tx_batch` is armed then). `snap` is `&Option<_>` because the
+    /// caller `mem::take`s and restores it around both arms.
     fn tx_fast_super(
         &mut self,
         snap: Option<&TxSnapshot>,

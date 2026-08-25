@@ -25,18 +25,11 @@ use super::net;
 /// the scratch capacities are MTU-derived. `setup.rs` builds this
 /// the same way it built the inline fields before.
 pub(crate) struct DataPlane {
-    /// Data-plane half. Separate from `nodes`/`NodeState` because
-    /// the lifecycles differ — `TunnelState` exists for any
-    /// reachable node (we send UDP to nodes we have no TCP
-    /// connection to, forwarding the handshake via nexthop's conn).
-    ///
-    /// `entry().or_default()` lazy-init: a node learned from
-    /// `ADD_EDGE` has no tunnel until `send_req_key` starts one.
-    ///
-    /// Gossip-side accesses (`gossip.rs`, `metaconn.rs`) appear as
-    /// `self.dp.tunnels` outside the hot-path modules — the boundary
-    /// between gossip-triggered tunnel state changes and per-packet
-    /// reads is now grep-visible.
+    /// Data-plane half, separate from `nodes` because the lifecycles differ:
+    /// `TunnelState` exists for any reachable node, including ones we only reach
+    /// via a nexthop's conn. Lazily created via `entry().or_default()` when
+    /// `send_req_key` starts a tunnel. Gossip-side accesses show up as
+    /// `self.dp.tunnels`, keeping the hot-path boundary grep-visible.
     pub tunnels: IntHashMap<NodeId, TunnelState>,
 
     /// `choose_udp_address` cycle counter. 2-of-3 calls explore an
@@ -49,14 +42,10 @@ pub(crate) struct DataPlane {
     /// adding persistent `z_stream` state doesn't churn wire-up sites.
     pub compressor: compress::Compressor,
 
-    /// Reused send-side scratch for the UDP data path. `seal_data_into`
-    /// writes `[0;12] ‖ SPTPS-datagram` here; `send_sptps_data_relay`
-    /// then overwrites the 12-byte prefix with `[dst_id6 ‖ src_id6]`
-    /// in-place and `sendto`s the whole thing. Cleared (not freed)
-    /// between packets — after the first packet at MTU, capacity is
-    /// `12 + MTU + 21` and stays there. Net: zero allocs on the
-    /// per-packet send path. Can't VLA in Rust; an owned Vec is the
-    /// closest equivalent to a stack arena.
+    /// Reused send-side scratch: `seal_data_into` writes `[0;12] ‖ SPTPS-datagram`,
+    /// `send_sptps_data_relay` overwrites the prefix with `dst_id6 ‖ src_id6` and
+    /// sends the buffer. Cleared between packets, so after the first MTU-sized
+    /// packet the send path allocates nothing.
     pub tx_scratch: Vec<u8>,
 
     /// Inner-packet TOS set by `forward_packet`, read by the UDP send
@@ -88,15 +77,11 @@ pub(crate) struct DataPlane {
     /// dance as `rx_scratch`).
     pub udp_rx_batch: Option<net::UdpRxBatch>,
 
-    /// GRO TUN-write coalescer.
-    /// `recvmmsg_batch` arms it; `send_packet_myself` offers each
-    /// inbound-for-us packet; the post-dispatch flush ships the
-    /// super. Same `mem::take`-out-of-self dance as `rx_scratch`
-    /// (`send_packet_myself` is `&mut self` and the bucket borrow
-    /// would conflict). `None` outside the batch loop — the send
-    /// site checks: `Some` ⇒ try coalesce, `None` ⇒ immediate write
-    /// (the ICMP-reply / broadcast-echo / kernel-mode paths, which
-    /// hit `send_packet_myself` outside any UDP recv batch).
+    /// GRO TUN-write coalescer: armed by `recvmmsg_batch`, offered each
+    /// inbound-for-us packet by `send_packet_myself`, flushed after dispatch.
+    /// `None` outside the batch loop, in which case the send site writes
+    /// immediately (ICMP replies, broadcast echo). `mem::take`n like `rx_scratch`
+    /// to dodge the `&mut self` conflict.
     pub gro_bucket: Option<GroBucket>,
 
     /// Persistent backing for `gro_bucket`. `GroBucket::new()` heap-
@@ -114,29 +99,15 @@ pub(crate) struct DataPlane {
     /// dispatch a `mode()` call per packet.
     pub gro_enabled: bool,
 
-    /// Slot arena for `Device::drain`. Replaces `on_device_read`'s 1.5KB stack buf: drain reads
-    /// frames into slots, the loop body walks them. Phase 1 widens:
-    /// encrypt into slots, hand the contiguous run to `egress`.
-    /// Phase 0 only uses it on the read side; `tx_scratch` stays
-    /// for the encrypt path until Phase 1 unifies them (separate
-    /// buffers, no overlap).
-    ///
-    /// `Option` for the same `mem::take` dance as `udp_rx_batch`:
-    /// `forward_packet` borrows `&mut self`; the arena slot borrow
-    /// conflicts. Take, walk, put back.
+    /// Slot arena for `Device::drain`: frames land in slots and the loop body walks
+    /// them; the encrypt path still uses `tx_scratch`. `Option` for the `mem::take`
+    /// dance, since `forward_packet` borrows `&mut self` while a slot is borrowed.
     pub device_arena: Option<DeviceArena>,
 
-    /// `tso_split` output scratch.
-    /// `DrainResult::Super` means the device put a ≤64KB IP super-
-    /// segment in `device_arena`; `tso_split` writes N × ~1500B
-    /// eth frames into this buffer (the input slice can't overlap
-    /// the output — same arena would alias). Same `mem::take` dance:
-    /// `forward_packet` borrows `&mut self`, the slot borrow conflicts.
-    ///
-    /// Sized at `DEVICE_DRAIN_CAP * STRIDE` = 64*1600 = 100KB. A
-    /// 64KB super-segment at MSS 1400 = 47 segments; fits with room.
-    /// `None` until the first `Super` arrives (the non-vnet path
-    /// never allocates this).
+    /// `tso_split` output scratch: a `DrainResult::Super` in `device_arena` is
+    /// split into N eth frames here (input and output can't alias). Sized
+    /// `DEVICE_DRAIN_CAP * STRIDE`, enough for a 64KB super at MSS 1400. `None`
+    /// until the first `Super`; same `mem::take` dance as the arena.
     pub tso_scratch: Option<Box<[u8]>>,
 
     /// Per-segment lengths from `tso_split`. Same lifetime as

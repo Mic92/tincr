@@ -46,14 +46,11 @@ impl Daemon {
                     log::info!(target: "tincd::graph",
                                "Node {name} became reachable (via {via_name})");
 
-                    // Seed `udp_addr`. Direct neighbors:
-                    // `NodeState.edge_addr` (set in on_ack). Transitive
-                    // nodes: prevedge's wire addr from `edge_addrs`.
-                    // Without this, `choose_udp_address` for a
-                    // transitive non-INDIRECT node returns None and
-                    // direct UDP probes are silently dropped.
-                    // We key incoming UDP on [dst_id6][src_id6]
-                    // prefix - no tree to re-index.
+                    // Seed `udp_addr`: direct neighbours from `NodeState.edge_addr` (set in
+                    // on_ack), transitive nodes from prevedge's wire addr. Without it
+                    // `choose_udp_address` returns None for transitive non-INDIRECT nodes and
+                    // direct probes are silently dropped. Incoming UDP is keyed on the id6 prefix,
+                    // so nothing to re-index.
                     let name_owned = name.to_owned();
                     let addr = self
                         .nodes

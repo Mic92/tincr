@@ -54,15 +54,11 @@ impl Daemon {
         id
     }
 
-    /// Read `hosts/{name}` and return its Ed25519 pubkey. Shared by
-    /// `send_req_key` (initiator) and `on_req_key` (responder); both
-    /// need the same "parse host config → read key" pair and both
-    /// hard-error on miss because `REQ_PUBKEY` is unsupported.
-    /// Per-tunnel SPTPS handshake inputs from `hosts/NAME`: the peer's
-    /// Ed25519 pubkey and the `SPTPSCipher` to use for that edge
-    /// (per-host override, else the global default). One host-file
-    /// read for both so the UDP-tunnel start path doesn't open the
-    /// same file twice.
+    /// Per-tunnel SPTPS handshake inputs from `hosts/{name}`: the peer's Ed25519
+    /// pubkey and the `SPTPSCipher` for that edge (per-host override, else the
+    /// global default), in one file read. Shared by `send_req_key` and
+    /// `on_req_key`; both hard-error on a missing key because `REQ_PUBKEY` is
+    /// unsupported.
     pub(super) fn load_peer_tunnel_cfg(
         &self,
         name: &str,
@@ -216,14 +212,10 @@ impl Daemon {
         nw
     }
 
-    /// `from=None` skips nothing; new/dying conn isn't `active` so
-    /// filtered anyway. Format once outside loop → one nonce.
-    ///
-    /// `#[must_use]`: dropping the return is the `97ef5af0` bug class
-    /// — line sits in outbuf until the next natural WRITE arm (up to
-    /// pinginterval=60s away). Either or into the caller's `nw`, or
-    /// `let _nw =` with a comment pointing at the `maybe_set_write_any`
-    /// that covers it.
+    /// `from=None` skips nothing; new or dying conns aren't `active` and are
+    /// filtered anyway. Formatted once outside the loop, so one nonce.
+    /// `#[must_use]` because a dropped return leaves the line in outbuf until the
+    /// next unrelated write (the `97ef5af0` bug class).
     #[must_use]
     pub(super) fn broadcast_line(&mut self, line: &str) -> bool {
         let targets = self.broadcast_targets(None);

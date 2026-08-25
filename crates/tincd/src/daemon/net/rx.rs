@@ -126,32 +126,19 @@ impl Daemon {
         }
     }
 
-    /// RX fast-path TUN sink. Mirror of `send_packet_myself`'s GRO
-    /// arm (device.rs:429-474), but as an associated fn so the
-    /// dispatch loop can call it while `tx_snap` is borrowed out of
-    /// `self`. `&mut self.device` + `&mut gro` (the dispatch loop's
-    /// local `Option<GroBucket>`) is the disjoint-borrow shape.
-    ///
-    /// `data` is `[synth_eth:14][IP]` (`rx_open`'s output). The
-    /// offer wants raw IP; the eth header is throwaway in TUN mode
-    /// (the device write stomps it for the vnet header anyway).
-    ///
-    /// `gro = None` (`gro_enabled` false, or count == 1): immediate
-    /// device write, no coalesce attempt.
+    /// RX fast-path TUN sink, the GRO arm of `send_packet_myself` as an associated
+    /// fn so the dispatch loop can call it with `tx_snap` borrowed out of `self`
+    /// (`&mut device` + `&mut gro` are disjoint). `data` is `[synth_eth:14][IP]`;
+    /// the offer wants raw IP. `gro = None` writes immediately.
     fn rx_fast_sink(device: &mut Box<dyn Device>, gro: &mut Option<GroBucket>, data: &mut [u8]) {
         helpers::gro_offer_or_write(device.as_mut(), gro, data);
     }
 
-    /// Wire layout: `[dst_id:6][src_id:6][sptps...]`. The 12-byte
-    /// ID prefix is OUTSIDE SPTPS framing; `dst == nullid` means
-    /// "direct to you".
-    ///
-    /// One `recvmmsg(64)` per wake. LT epoll: if the kernel had ≥64
-    /// queued, the next `turn()` re-fires after TUN-read/meta-conn/
-    /// timers get a slice. Same fairness as the old `recv_from` loop's
-    /// `UDP_DRAIN_CAP=64` (bug audit `deef1268`).
-    /// iperf3 is TCP-over-tunnel — alice must get back to TUN reads
-    /// or the send window fills and the whole thing stalls.
+    /// Wire layout `[dst_id:6][src_id:6][sptps...]`; the 12-byte prefix is outside
+    /// SPTPS framing and `dst == nullid` means direct. One `recvmmsg(64)` per wake;
+    /// under LT epoll a fuller queue re-fires after TUN reads, meta conns and
+    /// timers had their slice (`deef1268`), which TCP-over-tunnel needs to keep its
+    /// send window moving.
     pub(in crate::daemon) fn on_udp_recv(&mut self, i: u8) {
         // Take the batch out so we can borrow bufs immutably while
         // calling `&mut self.handle_incoming_vpn_packet`. Same
@@ -249,43 +236,22 @@ impl Daemon {
         let mut meta: [(u16, Option<SocketAddr>); UDP_RX_BATCH] = [(0u16, None); UDP_RX_BATCH];
         let count = Self::udp_recv_phase1(fd, batch, &mut meta);
 
-        // Phase 2: dispatch. iov borrows are dead; `batch.bufs`.
-        // is now free to read while we hold `&mut self`.
-        //
-        // GRO TUN write: arm the coalescer for the duration
-        // of this dispatch loop. `send_packet_myself` (the local-
-        // delivery sink, hit via `forward_packet` when the inner dst
-        // is in our subnet) sees `gro_bucket.is_some()` and offers
-        // the IP packet to it instead of writing immediately. Batch
-        // boundary = coalesce window: flush after the loop, never
-        // hold across recvmmsg calls (latency cap; the kernel's own
-        // GRO has a similar napi-poll-quantum boundary).
-        //
-        // Only meaningful when count > 1 (single packet → nothing
-        // to coalesce with; the bucket would round-trip it through a
-        // memcpy for no win). And only when the device can take a
-        // vnet_hdr super — see the `gro_enabled` gate at setup.
+        // Phase 2: dispatch; iov borrows are dead so `batch.bufs` is readable under
+        // `&mut self`. Arm the GRO coalescer for this loop: `send_packet_myself`
+        // offers local-delivery packets to it and we flush after the loop, never
+        // across recvmmsg calls (latency cap, like the kernel's napi quantum). Only
+        // when count > 1 and the device takes vnet_hdr supers (`gro_enabled`).
         let mut gro = if self.dp.gro_enabled && count > 1 {
             self.dp.gro_bucket_spare.take()
         } else {
             None
         };
-        // RX fast-path: take the snapshot out for the loop body.
-        // rx_probe is &TxSnapshot but rx_open's GRO offer +
-        // device.write needs &mut self.device alongside. Same dance
-        // as the TX Super arm (device.rs:256). The any_pcap gate is
-        // checked once here, not per-packet — it flips at gossip-
-        // rate via `tinc pcap`, not packet-rate; a packet that
-        // sneaks past during the flip just doesn't get captured.
-        // Same one-packet window as TX.
-        //
-        // rx_fast_scratch: dp.rx_fast_scratch, not dp.rx_scratch.
-        // The slow path mem::takes dp.rx_scratch internally (sptps.
-        // rs:354,389,428); a separate Vec lets fast/slow interleave
-        // in one batch without scratch contention. Taken out here
-        // (not Vec::new) so capacity persists across wakes — ~50k
-        // recvmmsg calls per bench run, one alloc-per-wake would be
-        // measurable.
+        // RX fast path: take the snapshot out for the loop body (`rx_probe` borrows it
+        // while `rx_open` needs `&mut self.device`). `any_pcap` is checked once per
+        // batch; it flips at human rate. `rx_fast_scratch` is separate from
+        // `rx_scratch`, which the slow path `mem::take`s internally, so both paths can
+        // interleave in one batch; taken rather than fresh so capacity persists across
+        // wakes.
         let snap = if self.any_pcap {
             None
         } else {
@@ -300,33 +266,19 @@ impl Daemon {
             }
             let pkt = &batch.bufs[idx][..n];
 
-            // RX fast-path attempt. rx_probe walks the gate.
-            // chain (slowpath_all/dst_null/src_known/tunnel/udp_addr);
-            // rx_open decrypts + post-gates + replay-commits. On Ok
-            // we have `[eth:14][IP]` in rx_fast_scratch ready for
-            // GRO/TUN. On any miss we fall through to the slow path
-            // with the replay window UNTOUCHED (rx.rs hard rule).
-            //
-            // Ordering invariant: the GRO bucket is a SINGLE bucket
-            // shared by fast and slow paths. Packet 4 (fast) coalesces
-            // into `gro`; packet 5 (slow, e.g. PKT_PROBE) parks the
-            // same bucket into dp.gro_bucket via the take/restore
-            // below; send_packet_myself sees packet 4's data in there
-            // and either coalesces into it or flushes-first. Same
-            // bucket, same handoff, no reordering.
+            // RX fast-path attempt: `rx_probe` walks the gate chain, `rx_open` decrypts,
+            // post-gates and commits replay, leaving `[eth:14][IP]` in `rx_fast_scratch`.
+            // Any miss falls to the slow path with the replay window untouched. Fast and
+            // slow share one GRO bucket (handed over via the take/restore below), so mixed
+            // batches keep packet order.
             if let Some(snap) = snap.as_ref()
                 && let Some(target) = shard::rx_probe(snap, pkt)
                 && let Ok(len) = shard::rx_open(&target, snap, &mut rx_fast_scratch, &mut dst_memo)
             {
                 target.handles.stats.add_in(1, len as u64);
-                // Consumed. Replay window is advanced — the slow
-                // path won't see this packet. GRO offer/TUN write
-                // inline (no &mut self via send_packet_myself; we
-                // own the bucket and the device borrow directly).
-                //
-                // No GRO (Darwin utun, no vnet_hdr): use the staged
-                // write so the whole batch ships in one `sendmsg_x`.
-                // Elsewhere `write_stage` is `write` (trait default).
+                // Consumed; the replay window advanced so the slow path won't see it. GRO
+                // offer or TUN write inline. Without GRO (Darwin utun) use `write_stage` so
+                // the batch ships in one `sendmsg_x`; elsewhere that is plain `write`.
                 if gro.is_some() {
                     Self::rx_fast_sink(&mut self.device, &mut gro, &mut rx_fast_scratch[..len]);
                 } else if let Err(e) = self.device.write_stage(&mut rx_fast_scratch[..len]) {
@@ -370,14 +322,8 @@ impl Daemon {
         count
     }
 
-    /// Authenticates the immediate UDP sender before the relay
-    /// branch. SRCID-fallback only fires when `dst==nullid` — a
-    /// relay packet cannot bootstrap auth via SRCID. For direct
-    /// receive, SRCID alone is fine (AEAD tag validates end-to-end);
-    /// for relay we never decrypt, so this gate is the only thing
-    /// stopping a 1:1 UDP reflector attack (security audit `2f72c2ba`).
-    /// Drain worker `k`'s punt queue: clear the eventfd, then run
-    /// each packet through the normal slow path.
+    /// Drain worker `k`'s punt queue: clear the eventfd, then run each packet
+    /// through the normal slow path.
     pub(in crate::daemon) fn on_shard_punt(&mut self, k: u8) {
         let Some((punt, efd)) = self.shards.punt_handle(usize::from(k)) else {
             return;
@@ -441,14 +387,10 @@ impl Daemon {
                             "Got packet from {from_name} but we haven't \
                              exchanged keys yet");
                 if self.send_req_key(from_nid) {
-                    // The decode-error arms below thread through
-                    // `maybe_restart_stuck_tunnel`; this cold-start
-                    // arm is the only one that fires `send_req_key`
-                    // unconditionally. Either way the REQ_KEY is
-                    // sitting in a meta-conn outbuf and nothing on
-                    // the UDP-receive path arms EPOLLOUT for it —
-                    // without this flush the new handshake stalls
-                    // until the next ping tick.
+                    // This cold-start arm fires `send_req_key` unconditionally (the decode-error
+                    // arms go through `maybe_restart_stuck_tunnel`). The REQ_KEY now sits in a
+                    // meta-conn outbuf and nothing on the UDP path arms EPOLLOUT, so flush here or
+                    // the handshake waits for the next ping tick.
                     self.maybe_set_write_any();
                 }
             }
@@ -460,25 +402,12 @@ impl Daemon {
         // defer the clear below.
         tunnel.status.udppacket = true;
 
-        // Fast path: decrypt directly into rx_scratch with 14 bytes
-        // headroom (ETH_HLEN, for the synthetic header). Mirror of
-        // seal_data_into→tx_scratch. Falls through to the slow
-        // Vec<Output> path on:
-        //   - InvalidState: no incipher yet (pre-handshake UDP)
-        //   - BadRecord: REC_HANDSHAKE/KEX-renegotiate (rare; replay
-        //     window not advanced, receive() sees the seqno fresh)
-        //
-        // Across a REQ_KEY restart, `tunnel.sptps` is the *new*
-        // mid-handshake session but the peer's in-flight datagrams
-        // (and anything they keep sealing until our REQ_KEY/ANS_KEY
-        // reaches them) are still under the *old* key. The salvaged
-        // `prev_sptps` covers that gap: try it on `InvalidState` (new
-        // session has no incipher yet) and on `DecryptFailed` (new
-        // session HAS its incipher but old-key stragglers are still
-        // arriving — ordering between `HandshakeDone` and the last
-        // old-key datagram is RTT-dependent). `BadRecord`/`BadSeqno`
-        // do not retry: those mean the new session DID authenticate
-        // the packet, so it can't also be an old-key straggler.
+        // Fast path: decrypt into `rx_scratch` with 14 bytes headroom for the
+        // synthetic header; `InvalidState` (no incipher) and `BadRecord` (handshake
+        // record, replay untouched) fall to the `Vec<Output>` path. Across a REQ_KEY
+        // restart in-flight datagrams are still under the old key, so `prev_sptps` is
+        // retried on `InvalidState` and `DecryptFailed`; `BadRecord`/`BadSeqno` mean
+        // the new session authenticated the packet, so no retry.
         let mut open_result = sptps.open_data_into(ct, &mut self.dp.rx_scratch, 14);
         if matches!(
             open_result,
@@ -600,15 +529,11 @@ impl Daemon {
         }
     }
 
-    /// Relay-receive path. `dst_id != null` → packet is addressed to
-    /// someone, possibly us-via-relay. Returns `true` when the packet
-    /// was consumed (forwarded or dropped); `false` when `dst ==
-    /// myself` and the caller should fall through to local decrypt.
-    ///
-    /// Validates the immediate UDP sender against the addr-confirm
-    /// gate before forwarding — we never decrypt on the relay path,
-    /// so without this check anyone who knows two node names could
-    /// use us as a 1:1 UDP reflector (security audit `2f72c2ba`).
+    /// Relay-receive path (`dst_id != null`): `true` when forwarded or dropped,
+    /// `false` when `dst == myself` and the caller should decrypt locally. The
+    /// immediate UDP sender is validated against the addr-confirm gate first; we
+    /// never decrypt on this path, so otherwise two node names would make us a 1:1
+    /// UDP reflector (`2f72c2ba`).
     fn handle_relay_receive(
         &mut self,
         ct: &[u8],
