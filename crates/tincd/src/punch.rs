@@ -151,11 +151,11 @@ pub(crate) fn format_sync_payload(nonce: u64) -> String {
 }
 
 pub(crate) fn parse_sync_payload(s: &str) -> Option<u64> {
-    let mut parts = s.splitn(2, ';');
-    if parts.next()? != VERSION {
+    let (version, nonce) = s.split_once(';')?;
+    if version != VERSION {
         return None;
     }
-    u64::from_str_radix(parts.next()?, 16).ok()
+    u64::from_str_radix(nonce, 16).ok()
 }
 
 /// Parse `,`-separated `addr_port` list. Bad elements skipped.

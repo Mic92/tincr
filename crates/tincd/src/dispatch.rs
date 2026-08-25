@@ -546,12 +546,11 @@ fn parse_id_line(line: &[u8]) -> Result<(&[u8], u8, u8), DispatchError> {
         .next()
         .and_then(|t| str::from_utf8(t).ok())
         .ok_or_else(|| DispatchError::BadId("no version token".into()))?;
-    let mut parts = ver.splitn(2, '.');
-    let major = parts
-        .next()
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| DispatchError::BadId(format!("bad major in {ver:?}")))?;
-    let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let (major, minor) = ver.split_once('.').unwrap_or((ver, ""));
+    let major = major
+        .parse()
+        .map_err(|_| DispatchError::BadId(format!("bad major in {ver:?}")))?;
+    let minor = minor.parse().unwrap_or(0);
     Ok((name_tok, major, minor))
 }
 

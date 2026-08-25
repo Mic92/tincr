@@ -558,14 +558,9 @@ pub(crate) fn parse_connect_to_from_config(
 /// `Port`). `"*"` means the wildcard - `build_listeners` translates
 /// it to the literal wildcard IP per requested family.
 pub(super) fn parse_bind_addr(s: &str, default_port: u16) -> (&str, u16) {
-    let mut parts = s.splitn(2, ' ');
-    let host = parts.next().unwrap_or("");
+    let (host, port) = s.split_once(' ').unwrap_or((s, ""));
     // Numeric only (no service-name resolution).
-    let port = parts
-        .next()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(default_port);
-    (host, port)
+    (host, port.parse().unwrap_or(default_port))
 }
 
 /// Parse the non-reloadable settings from `config` into a fresh
