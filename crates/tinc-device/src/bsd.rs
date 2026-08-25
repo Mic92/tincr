@@ -118,16 +118,11 @@ const fn to_af_prefix(ethertype: u16) -> Option<[u8; 4]> {
     Some((af as u32).to_be_bytes())
 }
 
-// BsdTun — the Device impl
-
-/// The variant-dispatched BSD backend. `OwnedFd` not `File`: utun is
-/// a `PF_SYSTEM` socket, old TUN/TAP are device nodes.
-///
-/// On macOS the `Utun` variant additionally carries persistent
-/// `recvmsg_x`/`sendmsg_x` scratch (see [`macos_x`]) so `drain()` and
-/// the staged-write path are one syscall per batch instead of one per
-/// packet. Other variants / other BSDs use the trait-default
-/// `read()`-loop drain unchanged.
+/// The variant-dispatched BSD backend. `OwnedFd` not `File`: utun is a
+/// `PF_SYSTEM` socket, classic TUN/TAP are device nodes. On macOS the `Utun`
+/// variant carries `recvmsg_x`/`sendmsg_x` scratch ([`macos_x`]) so drain and
+/// staged writes are one syscall per batch; other variants use the default
+/// `read()` loop.
 pub struct BsdTun {
     fd: OwnedFd,
     variant: BsdVariant,
@@ -286,16 +281,11 @@ impl Device for BsdTun {
     }
 }
 
-// open() constructors are cfg-gated per target. Tests construct
-// `BsdTun { fd, variant, iface }` directly (module-private fields).
-//
-// FreeBSD/NetBSD/OpenBSD/DragonFly `/dev/tun*` + `TUNSIFHEAD` and
-// `/dev/tap*` + `TAPGIFNAME` open paths are not yet wired — they
-// land with a BSD CI runner. The variant-dispatched read/write above
-// is fd-agnostic and already covered by the pipe/seqpacket tests.
-
-// macOS utun constructor via SYSPROTO_CONTROL socket. nix wraps
-// every step (`SysControlAddr::from_name`, `sockopt::UtunIfname`).
+// open() constructors are cfg-gated per target; tests construct `BsdTun`
+// directly. Free/Net/Open/DragonFly `/dev/tun*` and `/dev/tap*` opens land
+// with a BSD CI runner; read/write above is fd-agnostic and covered by the
+// pipe tests. The macOS utun constructor goes through nix's `SysControlAddr` /
+// `sockopt::UtunIfname`.
 #[cfg(target_os = "macos")]
 mod utun {
     use std::io;

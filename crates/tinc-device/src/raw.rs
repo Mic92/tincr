@@ -41,15 +41,9 @@ use std::mem;
 /// we do it ourselves for `sll_protocol`.
 const ETH_P_ALL: u16 = 0x0003;
 
-// RawSocket — the Device impl
-
-/// `PF_PACKET` raw socket device. TAP-only.
-///
-/// No `mac` field: `SIOCGIFHWADDR` isn't queried here. `raw_socket`
-/// attaches to an EXISTING interface (sniffing, not hosting); the
-/// daemon doesn't originate ARP replies on a real segment.
-/// `mac() → None` is correct despite TAP mode — `linux::Tun` in TAP
-/// creates a NEW interface and is the host, hence the difference.
+/// `PF_PACKET` raw socket device, TAP-only. `mac()` is `None`: this attaches to
+/// an existing interface rather than hosting one, so the daemon doesn't
+/// originate ARP replies here (unlike `linux::Tun` in TAP mode).
 #[derive(Debug)]
 pub struct RawSocket {
     /// `PF_PACKET` socket, `SOCK_RAW`, bound to `iface`. `OwnedFd`
@@ -93,26 +87,12 @@ impl RawSocket {
     }
 }
 
-// bind_packet — shim #6, hand-rolled, trivial
-
-/// Build `sockaddr_ll`, bind the `PF_PACKET` socket to the
-/// interface. nix's `LinkAddr` is getters-only (no constructor),
-/// so this goes through raw libc.
-///
-/// SAFETY argument:
-/// - `sockaddr_ll` is `repr(C)`, no niche, all fields integers.
-///   `mem::zeroed` is sound (same as `linux.rs::ifreq`).
-/// - We write three fields. The unwritten fields (`sll_hatype`,
-///   `sll_pkttype`, `sll_halen`, `sll_addr`) stay zero. The
-///   kernel ignores them for `bind` (man 7 packet: "For
-///   purposes of binding, only `sll_protocol` and `sll_ifindex`
-///   are used." `sll_family` is the discriminant). Zero is a
-///   valid don't-care.
-/// - `bind` reads exactly `addrlen` bytes from the pointer.
-///   `size_of::<sockaddr_ll>()` is 20 (gcc-verified). We pass
-///   `&raw const sa` cast to `*const sockaddr` (the kernel
-///   discriminates on `sa_family`, finds `AF_PACKET`, reads as
-///   `sockaddr_ll`).
+/// Build a `sockaddr_ll` and bind the `PF_PACKET` socket to the interface;
+/// nix's `LinkAddr` has no constructor, so raw libc. SAFETY: `sockaddr_ll` is
+/// `repr(C)` all-integers so `mem::zeroed` is sound; only
+/// `sll_family`/`sll_protocol`/`sll_ifindex` matter for bind (man 7 packet) and
+/// the rest stay zero; `bind` reads exactly `size_of::<sockaddr_ll>()` bytes
+/// through the `*const sockaddr` cast.
 #[expect(unsafe_code)]
 fn bind_packet(fd: BorrowedFd<'_>, ifindex: libc::c_uint) -> io::Result<()> {
     let sa = sockaddr_ll_packet(ifindex);
@@ -215,14 +195,10 @@ mod tests {
     use super::*;
     use io::ErrorKind as K;
 
-    /// `open()` on a bad interface name errors (EPERM/EACCES if no
-    /// `CAP_NET_RAW`, else ENODEV/EINVAL from `if_nametoindex`)
-    /// instead of panicking.
-    ///
-    /// The 23-char case proves "no truncation" implicitly — the full
-    /// name reaches `if_nametoindex` (C would truncate to 15). The
-    /// empty case mirrors the C ioctl path; glibc's
-    /// `if_nametoindex("")` sometimes returns EINVAL instead of ENODEV.
+    /// `open()` on a bad interface name errors (EPERM/EACCES without `CAP_NET_RAW`,
+    /// else ENODEV/EINVAL from `if_nametoindex`) instead of panicking. The 23-char
+    /// case shows the full name reaches `if_nametoindex` untruncated; glibc may
+    /// return EINVAL rather than ENODEV for the empty name.
     #[test]
     fn open_bad_iface_errors() {
         for (name, allowed) in [

@@ -26,15 +26,8 @@ pub(crate) const ETH_P_IP: u16 = 0x0800;
 /// IPv6 ethertype.
 pub(crate) const ETH_P_IPV6: u16 = 0x86DD;
 
-// from_ip_nibble — version → ethertype
-
-/// IP version nibble → ethertype. IPv4 and IPv6 both put the
-/// version in the high nibble of byte 0; `>> 4` extracts it.
-/// The first IP byte is
-/// always at `buf[ETH_HLEN]` regardless of read offset.
-///
-/// `None` for unknown: C uses an `ETH_P_MAX` sentinel or errors
-/// inline; both mean "drop". Caller decides the error.
+/// IP version nibble (high nibble of `buf[ETH_HLEN]`) → ethertype. `None` for
+/// unknown versions; the caller drops.
 #[must_use]
 pub(crate) const fn from_ip_nibble(ip0: u8) -> Option<u16> {
     match ip0 >> 4 {
