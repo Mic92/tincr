@@ -170,24 +170,11 @@ fn non_tcp_noop() {
 
 #[test]
 fn skips_other_option_then_finds_mss() {
-    // [opt 8 (timestamp) len=10, ..8 bytes.., NOP, NOP, MSS]
-    // Wait — the len check reads packet[start+21] which is the
-    // first option's len byte (10), not the MSS option's (4).
-    // So this would bail. Upstream bug. Skip; covered separately.
-    //
-    // Instead test: [NOP, NOP, NOP, NOP, MSS]. NOPs are
-    // single-byte so they don't trip the start+21 check.
-    // But MSS is at i=4, so packet[start+21] is the byte at
-    // i=1 — a NOP (0x01). 0x01 != 4 → bail. ALSO the C bug.
-    //
-    // The only way MSS gets clamped is if the byte at
-    // start+21 happens to be 4. That's: MSS first (its own
-    // len), or something else with len=4 first. Test the
-    // realistic case in `clamps_basic_v4_syn` (MSS first);
-    // document the bug here.
-    //
-    // Actually verify: [opt 3 (wscale, len=3), NOP, MSS].
-    // start+21 = wscale's len byte = 3. 3 != 4 → bail.
+    // Because the length check reads `packet[start+21]` (first option's length
+    // byte), MSS is only clamped when it is first or preceded by something whose
+    // byte there happens to be 4. `[wscale(len 3), NOP, MSS]` puts 3 at start+21 →
+    // bail. `clamps_basic_v4_syn` covers the realistic MSS-first case; this
+    // documents the C bug.
     let mut pkt = build_v4_tcp(&[0x03, 0x03, 0x07, 0x01, 0x02, 0x04, 0x05, 0xb4]);
     let before = pkt.clone();
     assert!(!clamp(&mut pkt, 1400));

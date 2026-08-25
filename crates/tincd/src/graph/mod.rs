@@ -36,14 +36,11 @@ pub const OPTION_INDIRECT: u32 = ConnOptions::INDIRECT.bits();
 /// hysteresis (`netcheck.go:1453`).
 pub const STICKY_THRESHOLD_PCT: i32 = 133;
 
-/// Stickiness post-pass for [`Graph::sssp_sticky`].
-///
-/// `sticky_wdist[n]` is `Some(w)` iff the BFS discovered an equal-hop
-/// path to `n` whose first hop is `prev[n].nexthop`, with cumulative
-/// weight `w`. That is the only safe stickiness: the old nexthop
-/// provably still reaches `n` at the same hop count in the current
-/// graph. Checking merely "old nexthop is still a neighbour" is not
-/// enough — the far-side edge may be gone, and pinning it would loop.
+/// Stickiness post-pass for [`Graph::sssp_sticky`]. `sticky_wdist[n]` is
+/// `Some(w)` iff the BFS found an equal-hop path to `n` through
+/// `prev[n].nexthop` with weight `w` — the only safe stickiness, since it
+/// proves the old nexthop still reaches `n` at that hop count. "Old nexthop is
+/// still a neighbour" is not enough; the far edge may be gone.
 fn sticky_post_pass(
     route: &mut [Option<Route>],
     prev: &[Option<Route>],
@@ -123,16 +120,10 @@ pub struct Edge {
     to_name: String,
 }
 
-// SSSP output, kept as a side table.
-
-/// SSSP routing for one node, or `None` if unreachable from `myself`.
-///
-/// "Unreachable" means the BFS never visited the node.
-/// (`check_reachability` then flips `reachable` to match `visited`.)
-///
-/// `Copy`: 32 bytes, all-Copy fields. The daemon snapshots the routes
-/// vector behind `Arc`; by-value lookup avoids a borrow chain through
-/// the `Arc` deref at every read site.
+/// SSSP routing for one node, or `None` if the BFS never visited it
+/// (unreachable; `check_reachability` then syncs `reachable`). `Copy` (32
+/// bytes): the daemon keeps the routes behind `Arc`, and by-value lookup avoids
+/// a borrow chain at every read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Route {
     /// `n->status.indirect`. Reached only through `OPTION_INDIRECT`
@@ -282,20 +273,13 @@ impl Graph {
         id
     }
 
-    /// Delete an edge. Unlinks the twin's `reverse`, removes from the
-    /// per-node sorted list and `weight_order`, frees the slot.
-    ///
-    /// Returns `None` if the slot was already freed (no-op). Chosen
-    /// over panic because daemon teardown can hit double-delete races
-    /// (connection close + `DEL_EDGE` arriving close together) and a
-    /// no-op is the conservative choice. Callers that care can check
-    /// the return.
+    /// Delete an edge: unlink the twin's `reverse`, remove from the per-node list
+    /// and `weight_order`, free the slot. `None` if already freed, since conn close
+    /// and `DEL_EDGE` can race during teardown and a no-op is the safe answer.
     ///
     /// # Panics
-    /// If the edge is live but its `from` node is freed, or its
-    /// per-node-list / `weight_order` entry is missing. Both are arena
-    /// invariants this module maintains; a panic means a bug here, not
-    /// in the caller.
+    /// If the edge is live but its `from` node or index entries are missing — arena
+    /// invariants, a bug here rather than in the caller.
     pub fn del_edge(&mut self, e: EdgeId) -> Option<()> {
         // Read what we need *before* mutating the slab. The per-node
         // edge list still contains `e` itself; the binary-search
@@ -333,21 +317,11 @@ impl Graph {
         Some(())
     }
 
-    /// Delete a node. Cascades: deletes all the node's outgoing edges
-    /// first (their twins become reverseless), then frees the slot.
-    ///
-    /// Does **not** hunt down *incoming* edges. Any edge with `to ==`
-    /// this node becomes a dangling reference; the protocol layer
-    /// (`DEL_EDGE` handling) is responsible for deleting both halves of
-    /// a pair before the node itself is purged. That said, the cascade
-    /// nulls the twin's `reverse`, and `sssp`/`mst` skip reverseless
-    /// edges — so a dangling `to` is invisible to the algorithms.
-    ///
-    /// Returns `None` if already freed (same rationale as
-    /// [`Self::del_edge`]).
-    ///
-    /// Subnet cascade is not here — subnets are daemon-side, not in
-    /// this crate.
+    /// Delete a node: cascade-delete its outgoing edges (their twins become
+    /// reverseless, which `sssp`/`mst` skip), then free the slot. Incoming edges
+    /// are not hunted down; the protocol layer deletes both halves before purging a
+    /// node. `None` if already freed, as [`Self::del_edge`]. Subnets are
+    /// daemon-side.
     pub fn del_node(&mut self, n: NodeId) -> Option<()> {
         // Can't `take` yet — `del_edge` needs the node live to look
         // up `from_name` and edit `from_edges`. Check liveness, drain
@@ -363,25 +337,13 @@ impl Graph {
         Some(())
     }
 
-    /// In-place edge update. Mutates `options` directly; re-keys
-    /// `weight_order` only if weight changed (weight is the sort key
-    /// there). Does *not* touch the per-node index — that's keyed on
-    /// `to_name` alone, so a weight change doesn't break it. Mutate
-    /// the slot, re-key
-    /// `weight_order` if weight moved, leave `from.edges` untouched.
-    ///
-    /// Returns `None` if the slot is freed (stale `EdgeId`).
-    ///
-    /// **Why this exists** when del+add already works (`gossip::on_add_edge`):
-    /// `EdgeId` stability. del+add recycles the slot — same index, but
-    /// any parallel table keyed on `EdgeId` (e.g. `Daemon::edge_addrs`
-    /// for `e->address`)
-    /// would see a delete+insert. `update_edge` is one slot write; the
-    /// ID is the same handle before and after.
+    /// In-place edge update: write `options`, re-key `weight_order` only if
+    /// the weight changed, leave the per-node index alone. Exists alongside
+    /// del+add for `EdgeId` stability, so side tables keyed on the id see one
+    /// write. `None` for a stale id.
     ///
     /// # Panics
-    /// If the edge is live but its `from` node is freed, or its
-    /// `weight_order` entry is missing. Arena invariants.
+    /// If a live edge's `from` node or `weight_order` entry is missing.
     pub fn update_edge(&mut self, e: EdgeId, weight: i32, options: u32) -> Option<()> {
         let edge = self.edges[e.0 as usize].as_mut()?;
         edge.options = options;
@@ -459,18 +421,10 @@ impl Graph {
             .map(NodeId)
     }
 
-    /// Dump all edges. Nested walk — outer over nodes (alphabetical
-    /// by node name), inner over each node's edges (alphabetical by
-    /// `to_name`). We
-    /// have a flat slab; this yields slot order (insertion-then-recycle).
-    ///
-    /// Order differs from C tinc's per-node walk on purpose: the CLI
-    /// sorts client-side before display. The wire format is one edge per line, no inter-row
-    /// dependency. Slab order is one pass over `Vec<Option<Edge>>`,
-    /// no per-node indirection.
-    ///
-    /// Each direction is its own `Edge`, so a bidi link yields two
-    /// items here — matches the per-direction rows in the edge dump.
+    /// All edges in slab order, one pass over `Vec<Option<Edge>>`. C walks per node
+    /// alphabetically; order doesn't matter since the dump is one edge per line and
+    /// the CLI sorts. A bidi link is two `Edge`s and yields two items, matching the
+    /// dump's per-direction rows.
     pub fn edge_iter(&self) -> impl Iterator<Item = (EdgeId, &Edge)> + '_ {
         self.edges.iter().enumerate().filter_map(|(i, slot)| {
             #[expect(clippy::cast_possible_truncation)] // slab is u32-bounded
@@ -488,47 +442,22 @@ impl Graph {
             .map_or(&[], |node| node.edges.as_slice())
     }
 
-    // sssp_bfs
-
-    /// `sssp_bfs`. Returns one `Option<Route>` per node, indexed by
-    /// `NodeId.0`. `None` = unreachable from `myself`.
-    ///
-    /// The revisit condition is the part that needs care:
-    ///
-    /// ```c
-    /// if (e->to->status.visited
-    ///     && (!e->to->status.indirect || indirect)
-    ///     && (e->to->distance != n->distance + 1
-    ///         || e->to->weighted_distance <= n->weighted_distance + e->weight))
-    ///     continue;
-    /// ```
-    ///
-    /// In English: skip if already visited **and** (already direct, or
-    /// new path is also indirect) **and** (different hop count, or new
-    /// path isn't lighter). I.e. revisit when (1) indirect→direct, or
-    /// (2) same hop count, lighter weight.
+    /// BFS from `myself`; one `Option<Route>` per node indexed by `NodeId.0`,
+    /// `None` = unreachable. The revisit rule is the subtle part: an
+    /// already-visited node is revisited only when the new path upgrades
+    /// indirect→direct, or has the same hop count and lower weight.
     #[must_use]
     pub fn sssp(&self, myself: NodeId) -> Vec<Option<Route>> {
         self.sssp_sticky(myself, &[])
     }
 
-    /// [`sssp`](Self::sssp) with Tailscale-style nexthop stickiness.
-    ///
-    /// After the BFS, for every node whose `nexthop` would change
-    /// versus `prev`: if the previous route is still valid (same hop
-    /// count, same `indirect`) and its `weighted_distance` is within
-    /// [`STICKY_THRESHOLD_PCT`] % of the freshly-computed best, keep
-    /// the previous `nexthop`/`weighted_distance` instead of
-    /// switching. Pure local damping — absorbs weight jitter without
-    /// any re-gossip. Does not override hop-count or indirect→direct
-    /// changes (those are topology, not metric noise).
-    ///
-    /// `prev` is the last `sssp` result (slot-indexed, same shape).
-    /// Shorter/empty `prev` (first run, or graph grew) means no
-    /// stickiness for the uncovered slots — plain BFS result.
-    ///
-    /// Analogue: Tailscale `netcheck.go:1453` (DERP home sticky
-    /// unless new region beats old by ≥33 %).
+    /// [`sssp`](Self::sssp) with nexthop stickiness: where `nexthop` would change
+    /// versus `prev` but the previous route is still valid (same hop count, same
+    /// `indirect`) and within [`STICKY_THRESHOLD_PCT`] % of the new best weight,
+    /// keep it. Local damping of weight jitter, no re-gossip; topology changes
+    /// still win. `prev` is the last result; uncovered slots get the plain BFS
+    /// answer. Analogue: Tailscale's DERP home stays unless a new region wins by
+    /// ≥33 %.
     #[must_use]
     #[expect(clippy::missing_panics_doc)] // unwraps are on enqueued (⇒ visited) IDs
     pub fn sssp_sticky(&self, myself: NodeId, prev: &[Option<Route>]) -> Vec<Option<Route>> {
@@ -592,17 +521,11 @@ impl Graph {
                 let cand_wdist = n_wdist.saturating_add(e.weight);
                 let cand_nexthop = if n_nexthop == myself { e.to } else { n_nexthop };
 
-                // Stickiness bookkeeping: record the cheapest wdist of
-                // any candidate that (a) arrives via this node's
-                // previous nexthop and (b) is at the same hop count as
-                // whatever the BFS ultimately picks. (b) is enforced
-                // by only recording when first-visit or same-hop
-                // revisit — BFS never lowers `distance` after first
-                // visit, and the indirect→direct upgrade (which can
-                // raise it) doesn't touch nexthop so stickiness is
-                // moot there. Recorded before the skip so the
-                // "heavier equal-hop alternative" case (the whole
-                // point) isn't lost.
+                // Stickiness bookkeeping: record the cheapest wdist of any candidate arriving
+                // via this node's previous nexthop at the hop count the BFS will settle on
+                // (only on first visit or same-hop revisit; BFS never lowers `distance` later,
+                // and the indirect→direct upgrade keeps nexthop). Recorded before the skip so
+                // the heavier equal-hop alternative isn't lost.
                 if Some(cand_nexthop) == prev_nh(e.to) {
                     let same_hop = route[e.to.0 as usize]
                         .as_ref()
@@ -624,14 +547,10 @@ impl Graph {
                     }
                 }
 
-                // nexthop and weighted_distance update only if first
-                // visit or (same hop, lighter weight). The
-                // indirect→direct upgrade case *doesn't* update nexthop
-                // — it keeps the old one. But it *does* update
-                // distance, prevedge, via, options. Yes, this means
-                // distance can go *up* and nexthop stays; matching
-                // C tinc's routing exactly matters for mesh-wide
-                // consistency, and the KAT pins it.
+                // nexthop and weighted_distance update only on first visit or same-hop lighter
+                // weight. The indirect→direct upgrade keeps nexthop but updates
+                // distance/prevedge/via/options, so distance can rise while nexthop stays;
+                // matching C exactly keeps routing consistent mesh-wide (KAT-pinned).
                 let prev = route[e.to.0 as usize].as_ref();
                 let update_nexthop = prev.is_none()
                     || (prev.unwrap().distance == cand_hops
@@ -672,26 +591,12 @@ impl Graph {
         route
     }
 
-    // mst_kruskal
-
-    /// `mst_kruskal`. Returns the set of edges whose `connection_t`
-    /// would have `status.mst = true`.
-    ///
-    /// The algorithm is Kruskal without union-find — it walks edges in
-    /// weight order, takes each edge that connects an unvisited node to
-    /// a visited one (a "safe edge" in the textbook sense), and
-    /// *rewinds to the start* whenever it makes progress after a skip.
-    /// That rewind is the key trick: a light edge between two unvisited
-    /// nodes gets skipped on the first pass, then picked up after a
-    /// heavier edge connects one of them.
-    ///
-    /// The starting point is the `from` node of the first edge in
-    /// weight order whose `from` is `reachable`. (Uses `reachable` as
-    /// set by the previous `check_reachability`, i.e. last SSSP's
-    /// `visited`.)
-    ///
-    /// Both the edge *and* its reverse get their connection's `mst`
-    /// bit set. We return both `EdgeId`s.
+    /// Kruskal without union-find, as C tinc: walk edges by weight, take each one
+    /// joining an unvisited node to a visited one, and rewind to the start after
+    /// progress following a skip (so a light edge between two unvisited nodes is
+    /// picked up once one end is connected). Starts from the first reachable `from`
+    /// in weight order. Returns both directions' `EdgeId`s — the edges whose
+    /// connection gets `mst` set.
     #[must_use]
     #[expect(clippy::missing_panics_doc)] // reverse.unwrap() guarded two lines up
     pub fn mst(&self) -> Vec<EdgeId> {
@@ -1176,27 +1081,13 @@ mod tests {
     }
 }
 
-// `graph()` glue: SSSP result → reachability transitions.
-//
-// `sssp` runs the BFS and returns `Vec<Option<Route>>` — `Some` =
-// visited, `None` = unvisited. We then diff visited against the
-// *previous* `reachable` bit per node. A flip in either direction is
-// a transition: log line,
-// host-up/host-down script, subnet-up/down, SPTPS reset, MTU probe
-// timer reset.
-//
-// All of those touch daemon state outside the graph (script spawn,
-// per-node SPTPS sessions, timer wheel). Same pattern as
-// `tinc_sptps::Output`: return a `Vec<Transition>` for the daemon.
-//
-// The one side-effect that *does* belong here: writing the new
-// `reachable` bit back into the `Graph`. The next `sssp` reads it
-// (gates `update_node_udp` on `!n->status.reachable`), and `mst`
-// picks its starting point from it. So [`diff_reachability`]
-// persists before returning.
+// SSSP result → reachability transitions. `sssp` says visited or not; diffing
+// against each node's previous `reachable` bit yields transitions the daemon
+// turns into logs, host-up/down scripts, subnet updates, SPTPS resets and MTU
+// timers (returned like `tinc_sptps::Output`). The one side effect kept here
+// is writing `reachable` back, since the next `sssp` and `mst` read it.
 
-/// One reachability transition. The daemon turns these into log
-/// lines + script spawns + per-node-SPTPS resets.
+/// One reachability transition for the daemon to act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Transition {
     /// `n->status.reachable` went false→true. Log `"Node %s became
@@ -1212,23 +1103,12 @@ pub(crate) enum Transition {
     BecameUnreachable { node: NodeId },
 }
 
-/// `check_reachability`. Diffs old vs new reachability per node.
-/// WRITES BACK [`Graph::set_reachable`] so the next sssp's
-/// `update_node_udp` gate reads the updated bit. Returns
-/// transitions for the daemon to act on.
-///
-/// `myself` is excluded. `myself` always has a route (sssp seeds
-/// it) so its `reachable` never flips, but we skip it before the
-/// diff anyway — never
-/// emit a transition for it, never touch its bit.
-///
-/// `new_routes` is indexed by raw slot number (same as `sssp`'s
-/// return). Dead slots are `None` and are skipped via `node_ids()`.
+/// Diff old vs new reachability per node (skipping `myself`), write the new
+/// bit back via [`Graph::set_reachable`] for the next sssp/mst, and return
+/// the transitions. `new_routes` is slot-indexed like `sssp`'s output.
 ///
 /// # Panics
-/// If `new_routes` is shorter than the graph's node slab, or if a
-/// `NodeId` from `node_ids()` reads a freed slot. Neither happens
-/// when `new_routes` is a fresh `sssp()` result on the same graph.
+/// If `new_routes` is shorter than the node slab; never for a fresh `sssp()`.
 pub(crate) fn diff_reachability(
     graph: &mut Graph,
     myself: NodeId,

@@ -25,17 +25,11 @@ const ETH_P_8021Q: u16 = 0x8100;
 /// Ethernet header is 14 bytes (`route.c` `ether_size`).
 const ETHER_SIZE: usize = 14;
 
-/// Walk a packet for a TCP MSS option; clamp it to `mtu - hdrs`
-/// if found. Returns `true` if modified.
-///
-/// `packet` is the full ethernet frame (14-byte eth hdr first).
-/// Handles 8021Q (one tag, +4 bytes), IP-in-IP (RFC 2003, one
-/// level), v4 and v6. Everything else: no-op, return `false`.
-///
-/// **Never panics on malformed packets** — every read is bounds-
-/// checked, every "this can't be right" returns `false`. Forwarded
-/// traffic is untrusted; this fn must be panic-free even on the
-/// fuzz corpus.
+/// Find a TCP MSS option in the ethernet frame `packet` and clamp it to `mtu -
+/// hdrs`; `true` if modified. Handles one 802.1Q tag, one level of IP-in-IP
+/// (RFC 2003), v4 and v6; anything else is a no-op. Forwarded traffic is
+/// untrusted, so every read is bounds-checked and malformed input returns
+/// `false` rather than panicking (fuzz corpus included).
 #[must_use]
 pub(crate) fn clamp(packet: &mut [u8], mtu: u16) -> bool {
     // Read ethertype from eth header. We must bounds-check
@@ -56,14 +50,9 @@ pub(crate) fn clamp(packet: &mut [u8], mtu: u16) -> bool {
         ethertype = u16::from(packet[16]) << 8 | u16::from(packet[17]);
     }
 
-    // IP-in-IP (RFC 2003). Outer IPv4 with protocol field (offset
-    // +9) == 4 → the payload is another IPv4 header. Skip a fixed
-    // 20 bytes (assumes the outer
-    // IP header has no options, IHL=5).
-    //
-    // We must bounds-check the [start+9] read here, since a
-    // 14-byte frame with type=0800 would
-    // otherwise read OOB.
+    // IP-in-IP (RFC 2003): outer IPv4 protocol (offset +9) == 4 means another IPv4
+    // header follows; skip a fixed 20 bytes (outer IHL=5 assumed). The +9 read is
+    // bounds-checked; a 14-byte frame with type 0800 would otherwise read OOB.
     if ethertype == ETH_P_IP {
         if packet.len() <= start + 9 {
             return false;
@@ -132,19 +121,9 @@ pub(crate) fn clamp(packet: &mut [u8], mtu: u16) -> bool {
             continue;
         }
 
-        // Bounds check on the length byte and the option body.
-        // `i > opt_len - 2` means the length byte itself would be
-        // OOB. `i > opt_len - opt[i+1]`
-        // means the body would overrun. The C reads
-        // `packet[start+21+i]` inside the second condition; that
-        // read is itself guarded by the first condition because
-        // `i > opt_len - 2` short-circuits.
-        //
-        // We've already established `opt_len >= 2` here (kind!=0,
-        // kind!=1, and i<opt_len means at least one byte; but the
-        // C check `i > len-2` also handles the i==opt_len-1 case
-        // where the len byte is missing). Mirror the C: compare
-        // signed-style by lifting to checked subtraction.
+        // Bounds: `i > opt_len - 2` means the length byte is missing; `i > opt_len -
+        // opt[i+1]` means the body overruns (that read is guarded by the first check
+        // short-circuiting). Mirror C's signed comparisons with checked subtraction.
         if i + 2 > opt_len {
             return false;
         }
@@ -166,17 +145,11 @@ pub(crate) fn clamp(packet: &mut [u8], mtu: u16) -> bool {
             continue;
         }
 
-        // MSS option must have length exactly 4 (kind, len, 2-byte
-        // MSS).
-        //
-        // Mirror the C bug-for-bug: it reads `packet[start+21]`
-        // (not `+i`) — the *first* option's length byte, not this
-        // one's. In practice MSS is almost always the first
-        // option in a SYN, so the bug rarely fires. We replicate
-        // it because the alternative (fixing it) changes
-        // observable behavior on weird-but-valid packets, and
-        // this module is a faithful port. The packet-level test
-        // `mss_not_first_option_c_bug` documents this.
+        // MSS option length must be 4. Bug-for-bug with C, the length read is
+        // `packet[start+21]` — the first option's length, not this one's. MSS is
+        // nearly always first in a SYN so it rarely matters, and fixing it would
+        // change behaviour on odd-but-valid packets; `mss_not_first_option_c_bug`
+        // documents it.
         if packet[start + 21] != 4 {
             return false;
         }
@@ -209,17 +182,9 @@ pub(crate) fn clamp(packet: &mut [u8], mtu: u16) -> bool {
         packet[start + 22 + i] = (newmss >> 8) as u8;
         packet[start + 23 + i] = (newmss & 0xff) as u8;
 
-        // Incremental TCP checksum adjustment, RFC 1624. The TCP
-        // checksum is the one's-complement of
-        // the one's-complement sum over the pseudo-header + TCP
-        // segment. We changed exactly one 16-bit word (the MSS).
-        // RFC 1624 eqn 3: HC' = ~(~HC + ~m + m')
-        //   where HC is the old checksum, m the old word, m' new.
-        // The naive `HC - m + m'` is WRONG in one's-complement:
-        // it doesn't handle the end-around carry, and gets the
-        // 0x0000/0xFFFF edge cases wrong. The C does the math in
-        // u32 to capture carry-out, then folds twice (because the
-        // first fold can itself carry).
+        // Incremental TCP checksum update, RFC 1624 eqn 3: `HC' = ~(~HC + ~m + m')`
+        // for the one 16-bit word changed. Plain `HC - m + m'` mishandles the
+        // end-around carry and the 0x0000/0xFFFF cases; sum in u32 and fold twice.
         let oldcsum = u32::from(packet[start + 16]) << 8 | u32::from(packet[start + 17]);
         let mut csum = oldcsum ^ 0xffff; // ~HC (16-bit)
         csum += u32::from(oldmss) ^ 0xffff; // + ~m

@@ -316,39 +316,22 @@ pub struct Daemon {
     /// `AgePastRequests` timer evicts old entries.
     pub(crate) seen: SeenRequests,
 
-    /// Runtime annotation. Graph topology vs runtime state are
-    /// different things: `tinc-graph::Node` is name + edges; this is
-    /// which-conn-serves-it + the edge metadata `ack_h` builds.
-    ///
-    /// Only DIRECTLY-connected peers get a `NodeState` (via
-    /// `on_ack`). Transitively-known nodes (learned from forwarded
-    /// `ADD_EDGE`) are graph-only.
-    ///
-    /// Keyed by `NodeId`: tincd never calls `Graph::del_node`, so
-    /// any `NodeId` is always live. Keying by the `Copy` ID kills
-    /// the name→id→name double-lookup at every per-packet site.
+    /// Runtime annotation for directly connected peers (created in `on_ack`): which
+    /// conn serves the node plus the edge metadata from ACK. Transitively known
+    /// nodes are graph-only. Keyed by `NodeId`, which is never freed in tincd,
+    /// avoiding a name round-trip at per-packet sites.
     pub(crate) nodes: IntHashMap<NodeId, NodeState>,
 
-    /// Per-edge address annotation. `tinc-graph::Edge` is topology-
-    /// only (from/to/weight/options); the WIRE addresses live here.
-    /// Split so the graph crate stays `#![no_std]`-clean.
-    ///
-    /// Stored as `(addr, port, local_addr, local_port)` raw `AddrStr`
-    /// pairs (not parsed `SocketAddr`): `dump_edges` round-trips
-    /// what arrived on the wire byte-exact.
-    ///
-    /// Populated by `on_ack` (direct edges) and `on_add_edge`
-    /// (transitive). Cleaned up alongside `graph.del_edge`.
+    /// Per-edge wire addresses `(addr, port, local_addr, local_port)` as raw
+    /// `AddrStr`, so `dump_edges` round-trips them byte-exact; `graph::Edge` stays
+    /// topology-only. Populated by `on_ack` and `on_add_edge`, removed alongside
+    /// `graph.del_edge`.
     pub(crate) edge_addrs: HashMap<EdgeId, (AddrStr, AddrStr, AddrStr, AddrStr)>,
 
-    /// Per-packet state. Everything the hot loop touches lives here;
-    /// everything the gossip/timer/meta-conn machinery touches lives
-    /// in `Daemon` proper. The exception is `dp.tunnels`: gossip
-    /// pokes it for `BecameReachable`/`Unreachable` transitions and
-    /// `ans_key` handshake completion. `self.dp.tunnels` outside
-    /// `net/` and `tx_control` is the grep pattern for finding the
-    /// boundary between gossip-triggered tunnel state changes and
-    /// per-packet reads.
+    /// Per-packet state; everything gossip/timer/meta-conn machinery touches lives
+    /// in `Daemon` proper. The exception is `dp.tunnels`, which gossip pokes on
+    /// reachability changes and `ans_key`; `self.dp.tunnels` outside `net/` and
+    /// `tx_control` is the grep pattern for that boundary.
     pub(crate) dp: DataPlane,
 
     /// UDP fast-path lookup: every packet has `[dst_id6][src_id6]`
@@ -432,17 +415,10 @@ pub struct Daemon {
     /// disarms it first thing.
     pub(crate) outgoing_timers: slotmap::SecondaryMap<OutgoingId, TimerId>,
 
-    /// Names of nodes whose `hosts/NAME` file has an `Address =`
-    /// line. Populated by `load_all_nodes` at setup + reload. Read
-    /// by `autoconnect::decide` (the eligible-to-dial gate).
-    ///
-    /// **Why a `HashSet`, not a `NodeState` field**: `NodeState` is
-    /// direct-peers-only (allocated in `on_ack`). `has_address`
-    /// applies to any node we have a hosts/ file for, including ones
-    /// we've never connected to. `load_all_nodes` does add every
-    /// hosts/-file name to the GRAPH so `node_ids` is the
-    /// authoritative "nodes I know exist" set; this is just the
-    /// `has_address` annotation on top.
+    /// Names whose `hosts/NAME` has an `Address =` line; populated by
+    /// `load_all_nodes`, read by `autoconnect::decide` as the eligible-to-dial
+    /// gate. A set rather than a `NodeState` field because `NodeState` is
+    /// direct-peers-only while this covers every hosts/ file.
     pub(crate) has_address: HashSet<String>,
 
     /// In-flight sim-open punches by peer. One per peer max.
@@ -469,21 +445,11 @@ pub struct Daemon {
     /// `None` until the first periodic tick.
     pub(crate) last_autoconnect_tick: Option<Instant>,
 
-    /// Last `sssp` result. Side table indexed by `NodeId.0` (same
-    /// indexing as `sssp`'s output). `dump_nodes` reads this for
-    /// the `nexthop`/`via`/`distance` columns. Updated by
-    /// `run_graph_and_log`.
-    ///
-    /// `Arc`: `sssp` already builds a fresh `Vec` per BFS, so the
-    /// swap is `Arc::new(routes)` — no copy-on-write, no in-place
-    /// mutation. Reads deref through `Arc` transparently (zero
-    /// hot-path cost: `*arc` is a pointer chase, same as `&Vec`).
-    /// Clonable into a snapshot for the TX fast path.
-    ///
-    /// Not `ArcSwap`: the daemon's own loop is single-threaded, so
-    /// the writer and reader are the same thread. The per-read
-    /// fence in `ArcSwap::load()` measured -2.4% on the hot path
-    /// for zero benefit.
+    /// Last `sssp` result, indexed by `NodeId.0`; `dump_nodes` reads
+    /// nexthop/via/distance from it, `run_graph_and_log` replaces it. `Arc` because
+    /// `sssp` builds a fresh `Vec` anyway and the TX fast path clones a snapshot;
+    /// not `ArcSwap`, whose per-read fence cost 2.4% on a single-threaded loop for
+    /// nothing.
     pub(crate) last_routes: Arc<Vec<Option<Route>>>,
 
     /// MST membership. We store the edge IDs and map at broadcast
@@ -678,27 +644,13 @@ impl Daemon {
         self.conns.get(id).expect("ConnId not live")
     }
 
-    /// The `while(running)` loop. `tinc-event` deliberately doesn't
-    /// have this; `turn()` is one iteration. This is the stitch.
-    ///
-    /// Consumes `self` - the loop runs once, then teardown is `Drop`.
-    ///
-    /// ```text
-    /// while running:
-    ///     timeout = timers.tick(fired_timers)
-    ///     for t in fired_timers: dispatch_timer(t)
-    ///     ev.turn(timeout, fired_io)               ─ epoll_wait
-    ///     for (w, ready) in fired_io: dispatch_io
-    /// ```
-    ///
-    /// Timers first: pingtimer might close a connection; that
-    /// connection then doesn't show up as readable. "Fire timers,
-    /// then compute timeout" so a timer that re-arms itself yields
-    /// the correct next deadline.
-    ///
-    /// `timeout = None` means block forever - only safe because
-    /// `tick()` returns `None` precisely when no timers are armed,
-    /// and we always re-arm. `epoll_wait(-1)` blocks forever.
+    /// The `while running` loop around `tinc-event`'s single-iteration `turn()`;
+    /// consumes `self`, teardown is `Drop`. Per iteration: `timers.tick` (fire
+    /// timers, then compute the timeout so a self-re-arming timer yields the right
+    /// deadline; a ping timer may close a conn before it polls readable), dispatch
+    /// fired timers, `ev.turn(timeout)`, dispatch fired I/O. `timeout = None`
+    /// blocks forever, safe because `tick()` returns `None` only with no timers
+    /// armed and we always re-arm.
     #[must_use]
     pub fn run(mut self) -> RunOutcome {
         // Reusable buffers. `tick`/`turn`/`drain` clear these
@@ -785,18 +737,10 @@ impl Daemon {
                         if !self.conns.contains_key(id) {
                             continue;
                         }
-                        // Connecting check first. The async-connect
-                        // probe. On success FALL THROUGH to the
-                        // write/read dispatch — the socket is
-                        // writable now and the ID line is queued; do
-                        // the flush in the same wake instead of
-                        // costing another loop iteration. Under LT
-                        // epoll this is an optimisation, not a
-                        // correctness requirement (a `continue` would
-                        // re-fire on the next `turn()` since the fd
-                        // is still writable). Probe-spurious and
-                        // probe-fail paths DO return; probe-success
-                        // falls through.
+                        // Async-connect probe first. On success fall through to write/read
+                        // dispatch: the socket is writable and the ID line queued, so flush in this
+                        // wake rather than the next (an optimisation under LT epoll, not a
+                        // requirement). Spurious and failed probes return.
                         if self.conns[id].connecting {
                             if !self.on_connecting(id) {
                                 // Spurious / failed.
@@ -910,14 +854,9 @@ impl SetupError {
     }
 }
 
-// tests
-//
-// `setup()` and `run()` are not unit-testable: SelfPipe is a process
-// singleton, signal handlers are process-global. The integration test
-// (tests/stop.rs) does the real thing in a subprocess.
-//
-// What is testable here: the small pieces that don't touch signals
-// — the IoWhat/TimerWhat enum shapes, rate-limit/backoff arithmetic.
+// `setup()` and `run()` aren't unit-testable (SelfPipe singleton,
+// process-global signal handlers); tests/stop.rs covers them in a subprocess.
+// Testable here: enum shapes and rate-limit/backoff arithmetic.
 
 #[cfg(test)]
 mod tests {
@@ -941,16 +880,9 @@ mod tests {
         assert!(!rl.should_drop(43, 3));
     }
 
-    /// `periodic_handler` backoff arithmetic. Can't construct a
-    /// full `Daemon` (`SelfPipe` is process-singleton); test the math
-    /// on a fake. The function is
-    /// extracted so the storm-detection arithmetic is checkable
-    /// without sleeping.
-    ///
-    /// Mirrors `on_periodic_tick`'s body. Any divergence between
-    /// this and the real fn would be caught by the integration
-    /// test (which doesn't exist for the storm case - hard to
-    /// induce). The arithmetic is the easy bit; pin it.
+    /// Storm-detection backoff arithmetic on a fake, since a full `Daemon` can't be
+    /// built here. Mirrors `on_periodic_tick`; the storm case is hard to induce in
+    /// integration, so pin the math.
     #[test]
     fn periodic_contradicting_edge_backoff() {
         // Same arithmetic as `on_periodic_tick`.

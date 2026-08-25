@@ -47,20 +47,13 @@ pub(crate) fn is_multicast_subnet(subnet: &Subnet) -> bool {
     }
 }
 
-// Keys
-//
-// One key type per family. The key STORES the full `Subnet` plus the
-// owner name: lookup hands back `(&Subnet, &str)` and both live
-// inside the key. The alternative — `BTreeMap<SortTuple, (Subnet,
-// String)>` — would duplicate addr/prefix/weight bytes between key
-// and value. `Subnet` is `Copy` (enum of PODs); storing once saves
-// ~28 bytes per entry. The owner `String` is the only allocation.
+// One key type per family. The key stores the full `Subnet` (a `Copy` enum)
+// plus owner name and lookup returns `(&Subnet, &str)` borrowed from it,
+// avoiding a duplicate in the value; the owner `String` is the only
+// allocation.
 
-/// `subnet_compare_ipv4` sort key.
-///
-/// The `Subnet` field is always `Subnet::V4` — enforced by `add()`.
-/// We keep the full enum (not destructured fields) so `lookup_ipv4`
-/// can return `&Subnet` without reconstructing.
+/// IPv4 sort key. Always holds `Subnet::V4` (enforced by `add()`); the whole
+/// enum is kept so `lookup_ipv4` can return `&Subnet`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Ipv4Key {
     subnet: Subnet,
@@ -286,18 +279,10 @@ impl SubnetTree {
         }
     }
 
-    /// `lookup_subnet`. Exact-match lookup (not prefix-match —
-    /// that's `lookup_ipv4`/`lookup_ipv6`).
-    ///
-    /// Used by `add_subnet_h` for the strictsubnets lookup-first
-    /// idempotency check: if the gossiped
-    /// subnet is already in the tree (preloaded by `load_all_nodes`
-    /// from the operator's hosts/ files), the strictsubnets gate is
-    /// silently bypassed. The gate fires only on UNAUTHORIZED subnets
-    /// (not in tree → fall through to).
-    ///
-    /// Allocates a `String` for the lookup key (same shape as
-    /// `del()`). `ADD_SUBNET` is control-path-rare; the alloc is fine.
+    /// Exact-match lookup (prefix match is `lookup_ipv4`/`lookup_ipv6`). Used by
+    /// `add_subnet_h`'s strictsubnets lookup-first check: a gossiped subnet already
+    /// preloaded from hosts/ passes silently; only unlisted ones hit the gate.
+    /// Allocates the key `String`; `ADD_SUBNET` is rare.
     #[must_use]
     pub(crate) fn contains(&self, subnet: &Subnet, owner: &str) -> bool {
         let owner = Some(owner.to_owned());
@@ -317,26 +302,11 @@ impl SubnetTree {
         }
     }
 
-    /// IPv4 longest-prefix lookup.
-    ///
-    /// Linear scan in tree order. Tree order has `/32` before `/24`
-    /// before `/8` (descending prefix), so the first entry whose
-    /// top-`prefix` bits match `addr` is the longest-prefix match.
-    ///
-    /// ## Reachability
-    ///
-    /// The scan keeps going past matches whose owner is down, looking
-    /// for a less-specific match owned by someone reachable. (If alice
-    /// owns `10.0.0.0/24` but is offline, and bob owns `10.0.0.0/16`,
-    /// route to bob.)
-    ///
-    /// We don't have node state here. `is_reachable` lets the caller
-    /// inject it: return `true` for nodes that are up. The closure
-    /// is called once per matching subnet, in longest-first order.
-    ///
-    /// If no reachable owner is found, the last mask hit is still
-    /// returned so the caller can log "Node %s is not reachable" with
-    /// that owner's name.
+    /// IPv4 longest-prefix lookup: linear scan in tree order, which sorts longer
+    /// prefixes first, so the first mask hit is the LPM. The scan continues past
+    /// hits whose owner `is_reachable` rejects, so an offline /24 falls back to
+    /// someone's /16. With no reachable owner the last hit is still returned so the
+    /// caller can name it in the log.
     pub(crate) fn lookup_ipv4(
         &self,
         addr: Ipv4Addr,

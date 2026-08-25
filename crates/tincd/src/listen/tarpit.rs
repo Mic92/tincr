@@ -17,25 +17,12 @@ const MAX_BURST: u32 = 10;
 /// Ring-buffer length for tarpitted fds.
 const PIT_SIZE: usize = 10;
 
-/// Connection-burst rate limiter.
-///
-/// Two leaky buckets:
-/// - same-host: if this peer matches the previous one, drain+refill
-///   the same-host bucket. `> max_burst` → pit.
-/// - all-host: drain+refill regardless of peer. `>= max_burst` → pit.
-///
-/// The off-by-one between `>` and `>=` matches C tinc for identical
-/// behavior: same-host triggers at 11, all-host at 10.
-///
-/// `pits[]`: ring buffer of fds we accepted but won't serve. They
-/// stay open, doing nothing, until evicted by a newer pit (10 slots).
-/// The peer's `connect()` succeeds (TCP handshake completes — kernel
-/// did that before we called `accept`), but reads block forever.
-/// Slows down scanners.
-///
-/// `now` is `tinc-event::Timers::now()` — the cached per-tick Instant.
-/// Comparisons are at second granularity (`.as_secs()`) to match
-/// C tinc's `time_t` arithmetic.
+/// Connection-burst rate limiter with two leaky buckets: same-host (peer equals
+/// the previous one; pit at `> max_burst`) and all-host (pit at `>=
+/// max_burst`); the off-by-one matches C, triggering at 11 and 10. Pitted fds
+/// sit in a 10-slot ring, accepted but never served, so a scanner's connect
+/// succeeds and its reads hang. `now` is the cached per-tick `Instant`,
+/// compared at second granularity like C's `time_t`.
 pub(crate) struct Tarpit {
     /// The last peer's address, port-stripped. `None` is the initial
     /// state — first peer never matches.
@@ -80,15 +67,9 @@ impl Tarpit {
         }
     }
 
-    /// Returns `true` if this connection should be pitted; the caller
-    /// hands the fd to `pit()` and does not register the connection.
-    ///
-    /// Mutates self even on `false` — the buckets always update.
-    ///
-    /// `addr` should be `unmap()`ed. Comparison is on `.ip()`, so the
-    /// port doesn't matter.
-    ///
-    /// `now` from `Timers::now()`. The drain is second-granularity.
+    /// `true` if this connection should be pitted; the caller hands the fd to
+    /// `pit()` instead of registering it. Buckets update either way. `addr` should
+    /// be `unmap()`ed; only `.ip()` is compared. `now` from `Timers::now()`.
     pub(crate) fn check(&mut self, addr: SocketAddr, now: Instant) -> bool {
         // Same-host bucket.
         let same_host = self.prev_addr.is_some_and(|p| p.ip() == addr.ip());
@@ -140,17 +121,10 @@ impl Tarpit {
         false
     }
 
-    /// Shove the fd into the pit ring. Evict-on-insert: if the slot is
-    /// occupied, drop the old fd (closes it).
-    ///
-    /// The fd must not be registered with the event loop. We're
-    /// silent-treatment-ing the peer: their `connect` succeeded (the
-    /// kernel did the 3-way handshake before `accept` returned),
-    /// reads block, writes succeed until the kernel buffer fills.
-    /// They look connected but nothing happens.
-    ///
-    /// 10 slots = 10 simultaneous tarpitted peers. The 11th evicts
-    /// the 1st (its `OwnedFd` drops, peer sees RST). Fixed memory.
+    /// Put the fd into the pit ring, evicting (closing) the slot's previous
+    /// occupant; the 11th peer's arrival RSTs the 1st. The fd must not be
+    /// registered with the event loop: the peer looks connected and nothing ever
+    /// happens.
     pub(crate) fn pit(&mut self, fd: OwnedFd) {
         // Option::replace drops the old OwnedFd; Drop closes. `let _ =`
         // so clippy knows the discard is intentional.
@@ -210,31 +184,13 @@ mod tests {
         assert_eq!(allhost, 10);
     }
 
-    /// The same-host early-return. When same-host triggers, `check`
-    /// returns before updating `prev_addr` or the all-host bucket.
-    ///
-    /// Observable effect: once same-host triggers, the attacker's burst
-    /// stops ticking all-host. The all-host bucket can leak. A legit
-    /// different host arriving 1+ sec later might get through.
-    ///
-    /// Trace (all conns at t=0 unless noted):
-    /// - conn 1 (A): prev=None, no match. sh=0. ah=1.
-    /// - conn 2..9 (A): prev=A, match. sh ticks: 1,2,...,8. ah: 2..9.
-    /// - conn 10 (A): sh=9. ah=10, >=10, PITTED by all-host. ah clamped
-    ///   at 10. `prev_addr` was updated (`prev_sa` update is before the
-    ///   all-host check, after the same-host check).
-    /// - conn 11 (A): sh=10. >10? no. ah: 10-0+1=11, >=10, PITTED by
-    ///   all-host. Clamped at 10 again.
-    /// - conn 12 (A): sh=11. >10? YES. PITTED BY same-HOST. Early
-    ///   return: ah stays at 10, `prev_addr` stays A.
-    /// - conn 13 (A): sh=12. Same-host pit again. ah still 10.
-    /// - conn 14 (B) at t=2: prev=A, no match. sh stays 12. ah: 10-2=8,
-    ///   refill to 9. PASSES.
-    ///
-    /// Observable difference vs no-early-return: `prev_addr` and
-    /// `allhost_time` freeze. A subsequent DIFFERENT host's leak
-    /// measures from the last pre-pit allhost timestamp, giving it
-    /// MORE leak. This test pins the early-return-skips-allhost shape.
+    /// The same-host early return: once same-host triggers, `check` returns before
+    /// touching `prev_addr` or the all-host bucket, so those freeze and a different
+    /// host arriving a second later gets more leak than it otherwise would. Trace:
+    /// conns 1-9 from A tick both buckets; 10 and 11 are pitted by all-host
+    /// (clamped at 10, `prev_addr` updated); 12 and 13 are pitted by same-host with
+    /// the early return (all-host stays 10); conn 14 from B at t=2 leaks all-host
+    /// to 8, refills to 9, passes.
     #[test]
     fn tarpit_samehost_early_return() {
         let t0 = Instant::now();

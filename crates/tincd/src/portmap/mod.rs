@@ -123,14 +123,10 @@ impl fmt::Display for BadExt {
     }
 }
 
-/// Is this `(ip, port)` plausibly a public endpoint? Returns the
-/// reject reason rather than a bare `bool` so the worker can log it.
-///
-/// Intentionally does not reject RFC1918 / ULA / documentation
-/// ranges: a CGNAT'd or lab gateway legitimately hands back
-/// `100.64/10` / `10/8` here, and the NixOS test mesh runs entirely
-/// in `2001:db8::/32`. The categories rejected here are the ones that
-/// can never be a useful dial target from any peer.
+/// Is `(ip, port)` plausibly a public endpoint? Returns the reject reason for
+/// logging. RFC1918/ULA/documentation ranges are deliberately allowed: CGNAT
+/// and lab gateways hand those back and the NixOS mesh lives in
+/// `2001:db8::/32`. Only categories that can never be dialled are rejected.
 pub(crate) fn is_publishable_ext(ip: IpAddr, port: u16) -> Result<(), BadExt> {
     if port == 0 {
         return Err(BadExt::ZeroPort);
@@ -211,16 +207,13 @@ pub(crate) struct Portmapper {
 }
 
 impl Portmapper {
-    /// Spawn the refresh thread. `local_port` is the daemon's bound
-    /// listener port (TCP and UDP share it — `open_listener_pair`
-    /// guarantees that). `refresh` is `UPnPRefreshPeriod`; lease is
-    /// `max(2×refresh, 120s)` — RFC 6887 recommends 120 s as
-    /// `min_lifetime` and miniupnpd clamps below that anyway, so
-    /// asking for less just makes the response a surprise.
+    /// Spawn the refresh thread. `local_port` is the shared TCP/UDP listener port;
+    /// `refresh` is `UPnPRefreshPeriod`; the lease asked for is `max(2×refresh,
+    /// 120s)` because RFC 6887 recommends and miniupnpd enforces a 120s minimum.
     /// `discover_wait` caps the SSDP wait.
     ///
     /// # Panics
-    /// `std::thread::spawn` failure (out of threads/memory).
+    /// `thread::spawn` failure.
     #[must_use]
     pub(crate) fn spawn(
         local_port: u16,
@@ -253,14 +246,10 @@ impl Drop for Portmapper {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(j) = self.join.take() {
-            // Worst case: the 1 s sleep slices in the refresh wait,
-            // PCP's 2 s deadline, or one `igd::http_roundtrip`
-            // (capped at 5 s wall-clock by `HTTP_DEADLINE`). The
-            // worker holds nothing the daemon needs after shutdown
-            // — the lease simply expires — so a longer hang would
-            // argue for detaching instead; with the bounded
-            // round-trip, joining is safe and keeps test teardown
-            // deterministic. C tinc doesn't even try.
+            // Worst-case join wait: the 1s refresh sleep slice, PCP's 2s deadline, or one
+            // HTTP round trip capped at 5s. The worker holds nothing the daemon needs
+            // after shutdown (the lease just expires), and with bounded round trips
+            // joining keeps test teardown deterministic.
             let _ = j.join();
         }
     }
@@ -427,16 +416,11 @@ fn worker(
     // Per-slot last-known mapping. Change → emit Mapped; was-Some
     // now-Err → emit Lost.
     let mut last: [Option<SocketAddr>; 4] = [None; 4];
-    // Per-slot: have we already INFO-logged the current failure
-    // streak? Reset on success so a later loss (network change,
-    // router toggled UPnP off) surfaces again instead of staying
-    // debug-only forever after the first boot-time round.
-
-    // Floor at 120 s: RFC 6887 §15 recommended `min_lifetime`, also
-    // miniupnpd's hard-coded clamp. Asking for less means the
-    // response carries a different lifetime than we asked → benign
-    // but confusing in logs; and a non-clamping server would expire
-    // the rule before our default 60 s refresh's second round.
+    // Per slot: has the current failure streak been INFO-logged yet? Reset on
+    // success so a later loss surfaces again. Lease floor 120s: RFC 6887 §15's
+    // recommended minimum and miniupnpd's clamp; asking less gets a surprising
+    // lifetime back, or on a non-clamping server expires before our second 60s
+    // refresh.
     let lease = (refresh.as_secs() * 2).max(120).min(u64::from(u32::MAX)) as u32;
 
     // RFC 6887 §11.2: nonce is random per-mapping, stable across

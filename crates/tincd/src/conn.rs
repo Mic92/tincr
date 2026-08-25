@@ -658,17 +658,13 @@ impl Connection {
         was_empty
     }
 
-    /// `send_request` → `send_meta`. Plaintext: straight into
-    /// outbuf. SPTPS: `sptps_send_record(.., 0, line, len)`. The
-    /// `\n` is redundant under SPTPS framing but upstream sends it;
-    /// the receive side strips.
-    ///
-    /// Returns `true` if outbuf went empty→nonempty.
+    /// Queue one request line. Plaintext goes straight into outbuf; SPTPS wraps it
+    /// as a type-0 record (the `\n` is redundant there but sent for compat; the
+    /// receiver strips it). Returns `true` if outbuf went empty→nonempty.
     ///
     /// # Panics
-    /// `InvalidState`: cipher not installed or `type >= 128`. Type is 0;
-    /// cipher is set at `receive_sig` before `HandshakeDone`. Unreachable
-    /// barring a `tinc-sptps` bug.
+    /// On `InvalidState` from SPTPS, which can't happen after `HandshakeDone` with
+    /// type 0.
     pub(crate) fn send(&mut self, args: Arguments<'_>) -> bool {
         if self.dead {
             return false;

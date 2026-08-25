@@ -32,25 +32,11 @@ use std::mem::size_of;
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-// inet_checksum.
-
-/// `inet_checksum`. RFC 1071 one's-complement sum.
-///
-/// Chainable: pass `0xFFFF` for the first call, then feed the
-/// previous return value as `prevsum` to fold in more data (e.g.
-/// ICMP header, then chain the payload).
-///
-/// **Endianness**: words are loaded native-
-/// endian (`from_ne_bytes`). RFC 1071 §2(B) proves the
-/// sum is byte-order independent on the wire (the byte-swapped sum
-/// equals the swap of the sum), but the *numeric* `u16` we return
-/// is host-order. Doesn't matter: it's always written back into a
-/// raw checksum field via `memcpy`/`to_ne_bytes`, so the bytes on
-/// the wire are correct on either endianness.
-///
-/// **Odd tail**: the last byte goes in the low half of the u32, not
-/// high. Easy to get wrong if you "fix" it to
-/// look like a big-endian high-byte pad.
+/// RFC 1071 one's-complement sum, chainable: start with `0xFFFF`, feed each
+/// return as the next `prevsum`. Words are loaded native-endian; the sum is
+/// byte-order independent on the wire (RFC 1071 §2(B)) and the host-order
+/// result is always written back with `to_ne_bytes`. The odd tail byte goes in
+/// the low half, not padded high.
 #[must_use]
 pub(crate) fn inet_checksum(data: &[u8], prevsum: u16) -> u16 {
     let mut checksum: u32 = u32::from(prevsum ^ 0xFFFF);

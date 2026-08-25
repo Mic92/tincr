@@ -32,14 +32,11 @@ struct Slot<W> {
 /// Generic over `W: Copy` — the daemon's `enum TimerWhat`. See lib.rs
 /// for the dispatch-enum design rationale.
 pub(crate) struct Timers<W> {
-    /// Ordered by deadline. Value is the slot index. `(Instant, u64)`
-    /// because `Instant` alone collides for timers armed in the same
-    /// `tick` to the same offset (and `BTreeMap::insert` overwrites,
-    /// silently dropping the earlier).
-    ///
-    /// `BTreeMap` not `BinaryHeap`: every timer in tinc is re-armable,
-    /// and re-arm on a heap means push-new + tombstone-old. The map's
-    /// remove-mutate-reinsert is O(log n) — same as the C splay.
+    /// Ordered by deadline; value is the slot index. Keyed `(Instant, u64)` because
+    /// timers armed in the same tick to the same offset share an `Instant` and
+    /// `insert` would overwrite. `BTreeMap` not `BinaryHeap`: every tinc timer is
+    /// re-armed, which on a heap means push plus tombstone; remove-and-reinsert is
+    /// O(log n) like C's splay.
     by_deadline: BTreeMap<(Instant, u64), usize>,
 
     /// Slot storage. `None` = freed (liveness bit for idempotent
@@ -70,14 +67,10 @@ impl<W: Copy> Timers<W> {
         }
     }
 
-    /// Allocate a timer slot. The caller calls `set` separately.
-    /// Reason: `add` happens
-    /// once at construction (or per-connection-create), `set` happens
-    /// per-re-arm. Separating them makes the dynamic timers
-    /// (`RetryOutgoing(OutgoingId)`) cheap to pre-create.
-    ///
-    /// Returns a stable handle. Unlike `IoId` this is not an epoll token
-    /// — timers don't go through the poll fd.
+    /// Allocate a timer slot; `set` arms it separately. `add` is per construction,
+    /// `set` per re-arm, which keeps pre-creating dynamic timers
+    /// (`RetryOutgoing(OutgoingId)`) cheap. The handle is stable and, unlike
+    /// `IoId`, not a poll token.
     pub(crate) fn add(&mut self, what: W) -> TimerId {
         let slot = Some(Slot { what, at: None });
         let idx = if let Some(idx) = self.free.pop() {
@@ -91,14 +84,10 @@ impl<W: Copy> Timers<W> {
         TimerId(idx)
     }
 
-    /// Arm a timer. `after` is RELATIVE to the cached `now`.
-    ///
-    /// If already armed, removes the old entry from the map first.
+    /// Arm a timer `after` the cached `now`, replacing any existing entry.
     ///
     /// # Panics
-    /// If `id` is dangling (was `del`'d). C doesn't check — it
-    /// dereferences the caller's `timeout_t*`, which is UB if freed.
-    /// We panic, which is louder.
+    /// If `id` was `del`'d (C would dereference freed memory; we are louder).
     pub(crate) fn set(&mut self, id: TimerId, after: Duration) {
         let slot = self.slots[id.0].as_mut().expect("dangling TimerId");
         if let Some(old_key) = slot.at.take() {
@@ -133,19 +122,12 @@ impl<W: Copy> Timers<W> {
         self.free.push(id.0);
     }
 
-    /// Snapshot `now`, drain expired timers into `out`, return time
-    /// until the next one (`None` = empty) for the poll timeout.
-    ///
-    /// Unlike C `event.c` we don't fire callbacks inline (the daemon
-    /// owns `&mut Timers` and `&mut everything_else`); the daemon
-    /// matches on `out`. Consequence: C's implicit "cb didn't re-arm
-    /// → auto-delete" is not ported — a fired timer stays disarmed
-    /// but allocated until the daemon's match arm calls `set` again.
-    ///
-    /// `out` is borrowed so the caller can reuse one `Vec` across
-    /// ticks (hot loop).
-    // The `expect` below cannot fire: single-threaded, key was just
-    // peeked from the same map. clippy can't see that.
+    /// Snapshot `now`, drain expired timers into `out` (reused across ticks),
+    /// return time until the next one (`None` = none armed) for the poll timeout.
+    /// Callbacks aren't fired inline as in C since the daemon owns both `&mut
+    /// Timers` and everything else; consequently a fired timer stays allocated but
+    /// disarmed until the daemon `set`s it again. The `expect` below can't fire:
+    /// the key was just peeked from the same map.
     pub(crate) fn tick(&mut self, out: &mut Vec<W>) -> Option<Duration> {
         out.clear();
         // Single clock read per execute.
@@ -276,14 +258,9 @@ mod tests {
         assert_eq!(t.by_deadline.len(), 1);
     }
 
-    /// Sequence-number tiebreak. Two timers set to the same relative
-    /// offset in the same tick get the same `Instant` (because `set`
-    /// reads cached `self.now`). Without
-    /// the seq tiebreak, `BTreeMap::insert` would overwrite. With it,
-    /// both fire.
-    ///
-    /// Without disambiguation, one timer would silently be lost on
-    /// the duplicate insert.
+    /// Sequence-number tiebreak: two timers set to the same offset in one tick
+    /// share an `Instant` (cached `now`); without the seq, `BTreeMap::insert` would
+    /// silently drop one. Both must fire.
     #[test]
     fn same_instant_timers_both_fire() {
         let mut t = Timers::new();

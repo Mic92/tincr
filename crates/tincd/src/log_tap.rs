@@ -77,15 +77,10 @@ pub fn debug_level() -> i32 {
     DEBUG_LEVEL.load(Ordering::Relaxed)
 }
 
-/// Set the debug level. Updates both the stored i32 (for readback)
-/// and `log::max_level()` (the actual gate). Negative = no-op
-/// (query-only). Returns the PREVIOUS level.
-///
-/// Interaction with `set_active`: `REQ_LOG` already bumps
-/// `max_level` to Trace. If a log conn is active and someone does
-/// `tinc debug 0`, we'd lower `max_level` back to Info, breaking
-/// the log tap. Check `LOG_TAP_ACTIVE` and don't lower below Trace
-/// if it's set.
+/// Set the debug level: store the i32 for readback and update
+/// `log::max_level()`; negative only queries. Returns the previous level. Never
+/// lowers below Trace while `LOG_TAP_ACTIVE`, or `tinc debug 0` would mute a
+/// running `tinc log`.
 pub fn set_debug_level(new_level: i32) -> i32 {
     let prev = DEBUG_LEVEL.load(Ordering::Relaxed);
     if new_level >= 0 {
@@ -132,14 +127,10 @@ impl log::Log for TapLogger {
         self.inner.log(r);
 
         if LOG_TAP_ACTIVE.load(Ordering::Relaxed) {
-            // Format ONCE, push. Daemon drains per-turn. Prefix
-            // with level + target so `tinc log 5` on a busy mesh
-            // is grep-able rather than an undifferentiated wall;
-            // the CLI side prints the body verbatim. No timestamp:
-            // the tap drains once per event-loop turn so a
-            // wall-clock stamp here would be misleadingly precise,
-            // and the operator's terminal/journal already stamps
-            // arrival.
+            // Format once, push; the daemon drains per turn. Prefixed with level and
+            // target so `tinc log 5` on a busy mesh is grep-able. No timestamp: per-turn
+            // draining would make it misleadingly precise and the reader's terminal or
+            // journal stamps arrival.
             TAP.with_borrow_mut(|v| {
                 v.push((
                     r.level(),
@@ -154,21 +145,13 @@ impl log::Log for TapLogger {
     }
 }
 
-/// Install the tap logger as the global logger. Replaces the usual
-/// `builder.init()`. Called once from `main.rs::init_logging`.
-///
-/// `max_level` is computed from the inner logger's filter. With no
-/// log conns, that's the floor: `log::log!` checks `max_level()`
-/// first (before `enabled()`), so a `trace!` with stderr at `Info`
-/// is zero-cost — the macro doesn't even reach our `enabled()`.
-///
-/// When a log conn arrives, `set_active(true)` ALSO bumps
-/// `max_level` to `Trace` so `enabled()` gets called for everything.
-/// Dropped back when the last log conn leaves.
+/// Install the tap logger as the global logger (from `init_logging`, instead of
+/// `builder.init()`). `max_level` starts at the inner filter's, so with no log
+/// conns a `trace!` under an Info stderr short-circuits in the macro;
+/// `set_active(true)` raises it to Trace while a log conn exists.
 ///
 /// # Panics
-/// Same as `env_logger::Builder::init`: called twice, or another
-/// logger already installed.
+/// As `env_logger::Builder::init`: called twice or another logger installed.
 pub fn init(inner: env_logger::Logger) {
     let max_level = inner.filter();
     log::set_boxed_logger(Box::new(TapLogger { inner }))
@@ -184,16 +167,10 @@ pub fn drain() -> Vec<(log::Level, String)> {
     TAP.with_borrow_mut(mem::take)
 }
 
-/// Gate control. Daemon calls `set_active(true)` when the first
-/// `REQ_LOG` arrives, `set_active(false)` when the last log conn
-/// disconnects.
-///
-/// `on=true` also raises `max_level` to `Trace` so the `log!` macro
-/// reaches our `enabled()`. `on=false` does not lower it back: we
-/// don't know what the inner filter wanted, and the cost is one
-/// `enabled()` call per log macro (which short-circuits on the
-/// atomic). The next `set_active(true)/false` cycle costs nothing
-/// extra. Simpler than caching the inner level.
+/// Gate control: `true` when the first `REQ_LOG` arrives (also raising
+/// `max_level` to Trace so `enabled()` is consulted), `false` when the last log
+/// conn leaves. `false` doesn't lower `max_level` back — the inner level isn't
+/// cached, and the cost is one atomic check per log macro.
 pub fn set_active(on: bool) {
     LOG_TAP_ACTIVE.store(on, Ordering::Relaxed);
     if on {

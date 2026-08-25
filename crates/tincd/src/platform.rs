@@ -77,11 +77,9 @@ pub(crate) fn msg_nosignal() -> nix::sys::socket::MsgFlags {
     }
 }
 
-/// Raw `setsockopt` for `c_int`-valued options that neither nix nor
-/// socket2 wrap. After routing TOS/TCLASS/`BOUND_IF` through socket2
-/// the only remaining caller is `IP{,V6}_MTU_DISCOVER` in
-/// [`set_udp_dontfrag`] (Linux-only), so this is gated to keep the
-/// unsafe surface minimal on other targets.
+/// Raw `setsockopt` for `c_int` options neither nix nor socket2 wrap; only
+/// `IP{,V6}_MTU_DISCOVER` in [`set_udp_dontfrag`] remains, hence Linux-gated to
+/// keep the unsafe surface small elsewhere.
 ///
 /// # Errors
 /// `last_os_error()` from `setsockopt(2)`.
@@ -133,14 +131,12 @@ pub(crate) fn set_udp_tos(fd: impl AsFd, is_ipv6: bool, prio: u8) {
     }
 }
 
-/// `bind_to_interface`. Linux: `SO_BINDTODEVICE` (by name). macOS:
-/// `IP_BOUND_IF`/`IPV6_BOUND_IF` (by index, resolved via
-/// `if_nametoindex`). Returns `Err` on failure (caller closes the
-/// socket) — unlike the other sockopts, this is intentional: see
-/// `SockOpts.bind_to_interface`.
+/// Bind a socket to an interface: `SO_BINDTODEVICE` by name on Linux,
+/// `IP_BOUND_IF`/`IPV6_BOUND_IF` by index on macOS. Unlike the other sockopts
+/// this is meant to fail hard (see `SockOpts.bind_to_interface`).
 ///
 /// # Errors
-/// `setsockopt(SO_BINDTODEVICE)` failure.
+/// The `setsockopt` failure.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn bind_to_interface(s: &Socket, iface: &str) -> io::Result<()> {
     let name = OsString::from(iface);
@@ -216,12 +212,9 @@ pub(crate) fn set_udp_dontfrag(s: &Socket, ipv6: bool) {
     }
 }
 
-/// `daemon(3)`: fork, parent `_exit(0)`, child `setsid()` and
-/// redirects stdio to `/dev/null`. (nochdir=true, noclose=false):
-/// keep cwd (paths already resolved), close stdio.
-///
-/// nix wraps this on Linux only; macOS deprecates `daemon(3)` (it
-/// wants launchd) but the libc symbol still works.
+/// `daemon(3)` with nochdir (paths are resolved) and stdio to `/dev/null`. nix
+/// only wraps it on Linux; macOS deprecates it in favour of launchd but the
+/// symbol works.
 ///
 /// # Errors
 /// fork/setsid failure, formatted for the CLI.
@@ -247,11 +240,9 @@ pub fn daemonize() -> Result<(), String> {
     }
 }
 
-/// `initgroups(3)`: set the supplementary group list for `user` from
-/// `/etc/group`, plus `gid`. nix gates `unistd::initgroups` out on
-/// Apple targets (the libc signature differs: gid is `c_int` there,
-/// `gid_t` elsewhere); a single raw libc call with an `as _` cast
-/// covers both.
+/// `initgroups(3)`: supplementary groups for `user` plus `gid`. nix omits it on
+/// Apple targets because the gid parameter is `c_int` there and `gid_t`
+/// elsewhere; one raw call covers both.
 ///
 /// # Errors
 /// `last_os_error()` from `initgroups(3)`.

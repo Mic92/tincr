@@ -57,22 +57,13 @@ pub(super) struct Gateway {
     service_type: String,
 }
 
-/// SSDP multicast → parse first IGD reply → fetch root desc →
-/// substring-scan for a WAN service's `controlURL`.
-///
-/// `gw_v4`: the v4 default gateway, if known. When set, the same
-/// M-SEARCH bytes are sent *unicast* to `gw_v4:1900` first, on the
-/// same socket, before the standard multicast. Rationale (Tailscale
-/// `net/portmapper`, tailscale#3197): the SSDP multicast goes to
-/// `239.255.255.250:1900` but the IGD answers *unicast* from
-/// `gw:1900` — a stateful host firewall (nixos-fw, ufw) sees the
-/// reply 5-tuple as NEW (request dst was the multicast group, not
-/// `gw`) and drops it. The unicast send creates the conntrack entry
-/// `{us:eph ↔ gw:1900}` so the reply matches ESTABLISHED. Most
-/// routers also *answer* the unicast M-SEARCH directly (miniupnpd
-/// binds `INADDR_ANY:1900`, `minissdp.c:205`); for the few that
-/// only reply to multicast, the unicast send still serves as the
-/// firewall punch.
+/// SSDP search, parse the first IGD reply, fetch the root description, scan for
+/// a WAN service's `controlURL`. With `gw_v4` known the same M-SEARCH is first
+/// sent unicast to `gw:1900` on the same socket (Tailscale, tailscale#3197):
+/// the IGD answers the multicast query unicast from `gw:1900`, which a stateful
+/// host firewall drops as NEW; the unicast send creates the conntrack entry so
+/// the reply is ESTABLISHED. Most routers answer the unicast directly anyway
+/// (miniupnpd binds `INADDR_ANY:1900`).
 pub(super) fn discover(timeout: Duration, gw_v4: Option<Ipv4Addr>) -> Result<Gateway, String> {
     let sock =
         UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| format!("bind 0.0.0.0:0: {e}"))?;

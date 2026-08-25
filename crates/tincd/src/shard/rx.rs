@@ -70,16 +70,9 @@ const ETH_P_IP: u16 = 0x0800;
 /// Ethertype for IPv6.
 const ETH_P_IPV6: u16 = 0x86DD;
 
-// RxTarget — probe result
-
-/// One packet's fast-path target. Everything is a borrow into the
-/// snapshot (lifetime `'a`) plus the `NodeId` copy. ~32 bytes; cheap
-/// to construct and discard per packet.
-///
-/// `ct` is `pkt[12..]` — the SPTPS frame past the id6 prefix. Carried
-/// as a slice so [`rx_open`] doesn't re-slice; the daemon's dispatch
-/// loop already had `pkt` borrowed from `batch.bufs`, so this is the
-/// same memory, no copy.
+/// One packet's fast-path target: borrows into the snapshot plus the `NodeId`.
+/// `ct` is `pkt[12..]`, the SPTPS frame past the id6 prefix, carried so
+/// [`rx_open`] doesn't re-slice; same memory as `batch.bufs`.
 pub(crate) struct RxTarget<'a> {
     /// `id6.lookup(src_id6)`. For the replay lock + cipher key probe.
     /// Carried so the caller can do per-peer accounting later (or so
@@ -97,25 +90,11 @@ pub(crate) struct RxTarget<'a> {
     pub ct: &'a [u8],
 }
 
-// RxDstMemo — per-batch trie cache
-
-/// Per-batch dst-subnet memo. `rx_open` decrypts then asks "does
-/// `route(dst_ip)` resolve to myself?" — a trie probe. For a TCP
-/// flow, 64 packets in one recvmmsg batch share the same inner dst.
-/// Cache the answer keyed on the raw dst bytes; reset at batch
-/// boundary (the GRO scope).
-///
-/// `bool` = "owner is myself". `false` covers both "not myself"
-/// (peer is forwarding through us — slow path does the relay) and
-/// "no covering subnet" (slow path sends ICMP unreachable). The
-/// fast path doesn't distinguish; either way it's a punt.
-///
-/// Separate v4/v6 slots because a dual-stack flow could in
-/// principle interleave (rare, but two slots is cheaper than an
-/// enum match per packet). `None` ⇒ memo cold; do the trie probe.
-///
-/// `Default` for the per-batch reset — `RxDstMemo::default()` at
-/// the top of the dispatch loop. Stack-allocated, ~50 bytes.
+/// Per-batch memo for "does `route(dst_ip)` resolve to myself?", keyed on the
+/// raw dst bytes: a TCP flow's 64 packets per recvmmsg share one dst, so one
+/// trie probe serves the batch. `false` covers both not-myself and
+/// no-covering-subnet; either punts. Separate v4/v6 slots; `Default` resets it
+/// at the top of each dispatch loop.
 #[derive(Default)]
 pub(crate) struct RxDstMemo {
     v4: Option<([u8; 4], bool)>,
@@ -123,20 +102,11 @@ pub(crate) struct RxDstMemo {
 }
 
 impl RxDstMemo {
-    /// One v4 dst probe. On memo hit: 4-byte compare, return cached.
-    /// On miss: `subnets.lookup_ipv4` (the trie walk) + string
-    /// compare against `myself_name`, cache, return.
-    ///
-    /// `lookup_ipv4` is the same fn `route_ipv4` calls (route.rs:113).
-    /// We pass `|_| true` for `is_reachable` — myself is always
-    /// reachable, and we only care about the myself case anyway.
-    /// The subtlety: `lookup_ipv4` keeps walking on unreachable
-    /// owners (the LPM "fallback" semantics), but with `|_| true`
-    /// it always breaks on the first prefix match. That's correct
-    /// for "is dst mine?": if the longest match is myself, that's
-    /// the answer; if it's some unreachable peer, route would have
-    /// returned Unreachable, which is not-myself, which is a punt.
-    /// We collapse "first match owner == myself" to the answer.
+    /// One v4 dst probe: 4-byte compare on a memo hit; on a miss
+    /// `subnets.lookup_ipv4` plus a name compare, cached. `is_reachable` is `|_|
+    /// true`, so the walk stops at the first (longest) prefix match: if that's
+    /// myself the answer is yes, and if it's an unreachable peer `route` would say
+    /// Unreachable, which is also a punt.
     fn probe_v4(&mut self, dst: [u8; 4], snap: &TxSnapshot) -> bool {
         if let Some((k, v)) = self.v4
             && k == dst
@@ -176,34 +146,13 @@ impl RxDstMemo {
     }
 }
 
-// rx_probe — gate chain (no decrypt)
-
-/// Probe whether this packet can take the RX fast path. Runs the
-/// same gate chain `handle_incoming_vpn_packet` would, returning
-/// `Some(RxTarget)` only if the packet is direct-to-us from a peer
-/// with a live tunnel and a cached UDP address. No side effects.
-/// `None` ⇒ caller falls through to slow path.
-///
-/// Gates (any ⇒ `None`):
-///   - `slowpath_all` (setup-time fold; covers `!Router`)
-///   - `pkt.len() < 12 + 21` (id6 prefix + minimum SPTPS datagram)
-///   - `dst_id6 != NULL` (relay branch — we don't decrypt for relay)
-///   - `src_id6` not in `id6` table (unknown peer)
-///   - no `TunnelHandles` (pre-handshake; slow path runs `send_req_key`)
-///   - `udp_addr` not cached (first valid packet from this peer;
-///     slow path's rx.rs:325 caches it; next packet goes fast)
-///
-/// Gates DEFERRED to [`rx_open`] (post-decrypt):
-///   - `ty != PKT_NORMAL` (probe/compressed/mac; encrypted)
-///   - `route(dst_ip) != myself` (dst is encrypted)
-///   - `body_len > MTU` (also post-decrypt, body length unknown here)
-///
-/// Non-gates (covered by `slowpath_all`'s `!= Router` fold):
-///   - `overwrite_mac`: Router+TAP; TUN ignores eth header anyway
-///   - `forwarding_mode == Kernel`: gated `from.is_some()`, that's
-///     us, but only for FORWARDING; `to == myself` arm precedes it
-///
-/// `pkt` is the raw UDP payload: `[dst_id6:6][src_id6:6][SPTPS]`.
+/// Can this raw UDP payload `[dst_id6][src_id6][SPTPS]` take the RX fast path?
+/// No side effects; `None` ⇒ slow path when: `slowpath_all`; shorter than
+/// 12+21; `dst_id6` non-null (relay); unknown `src_id6`; no `TunnelHandles`
+/// yet; no cached `udp_addr` (the slow path caches it on the first valid
+/// packet). Type, dst-subnet and MTU gates need plaintext and are deferred to
+/// [`rx_open`]. `overwrite_mac` and kernel forwarding are covered by the
+/// `!Router` fold.
 #[must_use]
 pub(crate) fn rx_probe<'a>(snap: &'a TxSnapshot, pkt: &'a [u8]) -> Option<RxTarget<'a>> {
     // Setup-time fold. Same gate as tx_probe; same one-bool early-out.
@@ -219,17 +168,10 @@ pub(crate) fn rx_probe<'a>(snap: &'a TxSnapshot, pkt: &'a [u8]) -> Option<RxTarg
         return None;
     }
 
-    // dst==NULL ⇔ direct-to-us. `dst!=NULL` means relay: either
-    // we're a hop (forward without decrypt, rx.rs:451) or it WAS
-    // for us via relay (`handle_relay_receive` returns false for
-    // `to==myself`, falls through with `direct=false`). Both have
-    // side effects (`send_mtu_info`, the security gate scan) that
-    // need `&mut Daemon`. Punt the whole `!is_null()` branch.
-    //
-    // The 6-byte all-zero check inlines to one u32 + one u16 compare.
-    // Cheaper than `NodeId6::from_bytes` + `is_null()` (compiler
-    // probably folds those anyway, but this is the hot path; be
-    // explicit).
+    // dst == NULL ⇔ direct to us. Non-null is the relay branch (forward without
+    // decrypt, or for-us-via-relay), which has `&mut Daemon` side effects; punt
+    // all of it. The 6-byte zero check is written as u32+u16 compares explicitly
+    // on this hot path.
     if pkt[..6] != [0u8; 6] {
         return None;
     }
@@ -262,52 +204,13 @@ pub(crate) fn rx_probe<'a>(snap: &'a TxSnapshot, pkt: &'a [u8]) -> Option<RxTarg
     })
 }
 
-// rx_open — decrypt + post-gates + ethertype synth
-
-/// Decrypt `target.ct` into `scratch`, run post-decrypt gates, synth
-/// the ethernet header, strip the type byte. On `Ok(len)`:
-/// `scratch[..len]` is `[synth_eth:14][IP body]`, ready for GRO offer
-/// or `device.write`. On `Err(())`: scratch is dirtied but the replay
-/// window is UNTOUCHED — caller falls through to slow path, which
-/// re-decrypts (same ct, same key, same seqno) and handles it
-/// correctly.
-///
-/// The wasted re-decrypt costs ~4µs. Gates that fail post-decrypt
-/// are rare (`PKT_PROBE` is once/sec; dst-not-myself is per-flow,
-/// memoized in `dst_memo`; tag mismatch is ~never for a healthy
-/// tunnel). The trade is: one branch in `rx_open` vs. plumbing a
-/// "decrypt OK but gate failed, here's the plaintext" return through
-/// the slow path. The branch is cheaper.
-///
-/// ## Gate order (the hard rule from the brief)
-///
-/// 1. **`ChaPoly::open_into`** (decrypt; `&self`, no commit). Tag
-///    fail ⇒ `Err(())`. `out` is unchanged on tag fail (chapoly.rs:254
-///    extends only after the tag check passes), so a forged packet
-///    doesn't dirty `scratch`.
-/// 2. **Type gate** (`ty == PKT_NORMAL`). `PKT_PROBE`/`COMPRESSED`/
-///    `MAC` ⇒ `Err(())`. Replay not advanced — slow path's
-///    `open_data_into` re-decrypts, gets the same `ty`, dispatches
-///    `udp_probe_h`/decompress correctly.
-/// 3. **MTU gate** (`body_len > MTU`). Same rationale.
-/// 4. **dst-subnet gate** (memo probe on plaintext dst-ip). Same.
-/// 5. **Then `replay.check_public`** — only commit after every gate
-///    passed. A replayed packet that would have failed a gate is
-///    fine (it'll fail in the slow path too, double-drop, no harm),
-///    but a fresh packet that fails a gate must stay un-committed
-///    so the slow path can handle it.
-/// 6. ethertype synth + type-byte strip (the memmove).
-///
-/// `scratch`: cleared and resized internally. Same `Vec` the slow
-/// path uses (`dp.rx_scratch`); after the first MTU-sized packet
-/// it's grown to ~1550 bytes and stays there. Zero allocs steady-state.
-///
-/// # Errors
-/// `Err(())` on any gate fail. The unit error is intentional: every
-/// failure mode has the same caller response (fall through to slow
-/// path), and the slow path's own error handling produces the
-/// log line. Adding an enum here would just be dead-code at the
-/// call site.
+/// Decrypt `target.ct` into `scratch`, run post-decrypt gates, synthesize
+/// the eth header, strip the type byte; `Ok(len)` leaves `[eth:14][IP]` for
+/// GRO or `device.write`. Order is the hard rule: `open_into` (tag fail
+/// leaves `scratch` untouched), type == `PKT_NORMAL`, body ≤ MTU, dst is
+/// ours, and only then `replay.check_public` — a fresh packet failing a gate
+/// stays uncommitted for the slow path. `Err(())` on any gate; the caller's
+/// only response is the slow path, which re-decrypts (~4µs, rare) and logs.
 pub(crate) fn rx_open(
     target: &RxTarget<'_>,
     snap: &TxSnapshot,
@@ -339,16 +242,10 @@ pub(crate) fn rx_open(
 
     let ty = scratch[ETH_HLEN];
 
-    // Step 2: type gate. PKT_NORMAL is 0; PKT_COMPRESSED bit 0,.
-    // PKT_MAC bit 1, PKT_PROBE bit 2. Any nonzero bit ⇒ slow path.
-    // REC_HANDSHAKE (≥128) is the KEX-renegotiate marker — open_into
-    // succeeded (tag passed) but the body is a handshake record;
-    // slow path's `sptps.receive(ct)` handles the rekey. The
-    // `open_data_into` slow path returns `BadRecord` for this and
-    // falls through to receive(); we do the same by punting.
-    // ty < REC_HANDSHAKE covers PROBE/COMPRESSED/MAC (bits 0-2);
-    // ty >= REC_HANDSHAKE covers in-band rekey. Both punt. The
-    // const exists so the next person to add a ty bit greps for it.
+    // Step 2: type gate. `PKT_NORMAL` is 0; COMPRESSED/MAC/PROBE are bits 0-2 and
+    // `REC_HANDSHAKE` (≥128) marks an in-band rekey record. Anything nonzero
+    // punts, matching `open_data_into`'s `BadRecord` fallthrough. The const exists
+    // so the next ty bit is greppable.
     let _ = REC_HANDSHAKE;
     if ty != PKT_NORMAL {
         return Err(());
@@ -365,14 +262,9 @@ pub(crate) fn rx_open(
         return Err(());
     }
 
-    // Step 4: dst-subnet gate. Read the IP version nibble.
-    // (`body[0] >> 4`), parse dst, probe memo. Body lives at
-    // `scratch[15..]` (ETH_HLEN + type byte). Empty body ⇒ can't
-    // route ⇒ punt (sptps.rs:443 has the same check).
-    //
-    // The version-nibble dispatch mirrors sptps.rs:457: `4` ⇒ IPv4,
-    // `6` ⇒ IPv6, anything else ⇒ "unknown IP version" log. We
-    // punt instead of log; slow path logs.
+    // Step 4: dst-subnet gate. Body is at `scratch[15..]` (eth + type byte); empty
+    // ⇒ punt. Dispatch on the version nibble as sptps.rs does (4/6), punting
+    // instead of logging on anything else.
     if body_len == 0 {
         return Err(());
     }

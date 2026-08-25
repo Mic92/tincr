@@ -48,17 +48,11 @@ use std::fmt;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 
-/// One outgoing-connection slot: the node name (not a `NodeId` —
-/// outgoings are config-derived, the node might not exist in the graph
-/// yet), the backoff seconds, and the address cache.
-///
-/// Why this `Outgoing` slot exists. autoconnect's drop logic must
-/// distinguish demand-driven shortcuts (eligible for idle-reap) from
-/// the random degree-3 backbone (only dropped when `nc > D_HI`).
-/// `ConfigConnectTo` is currently treated like `AutoBackbone` for
-/// `CancelPending` (see `AutoAction::CancelPending` doc) — carrying
-/// the provenance now lets that be tightened later without another
-/// plumbing pass.
+/// One outgoing-connection slot: node name (config-derived; the node may not be
+/// in the graph yet), backoff seconds, address cache, and its `OutOrigin`. The
+/// origin lets autoconnect tell demand-driven shortcuts (idle-reapable) from
+/// the degree-3 backbone; `ConfigConnectTo` is treated like backbone for
+/// `CancelPending` for now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum OutOrigin {
     /// `ConnectTo =` in `tinc.conf` (setup or reload).
@@ -112,14 +106,9 @@ pub(crate) enum ConnectAttempt {
     Exhausted,
 }
 
-/// `configure_tcp:104-106` (`SO_MARK`) + `do_outgoing_connection:623`
-/// (`SO_BINDTODEVICE`). Shared by direct dial + SOCKS/HTTP proxy dial
-/// (the `if(proxytype != PROXY_EXEC)` gate covers both).
-///
-/// Best-effort: `bind_to_interface`'s return value is discarded on
-/// the dial path (only listen hard-fails). We match —
-/// log + continue. Policy-routing setups get a warning; the connect
-/// proceeds (kernel picks via routing table, same as no-bind).
+/// `SO_MARK` and `SO_BINDTODEVICE` for dialled sockets, shared by direct and
+/// SOCKS/HTTP proxy dials. Best-effort as in C: failure logs and the connect
+/// proceeds via the routing table.
 fn apply_dial_sockopts(sock: &Socket, sockopts: &SockOpts) {
     // `if(fwmark) setsockopt(SO_MARK)`. 0 = unset = skip.
     #[cfg(target_os = "linux")]
@@ -318,24 +307,13 @@ pub(crate) fn try_connect_via_proxy(
     }
 }
 
-/// Probe the async connect: a zero-length `send` returns 0 on success,
-/// `EWOULDBLOCK` on spurious wakeup (Linux), `ENOTCONN` on failure
-/// (POSIX) — in which case `getsockopt(SO_ERROR)` gets the cause.
-///
-/// `Ok(true)` → connected; caller does `finish_connecting`.
-/// `Ok(false)` → spurious wakeup, stay registered for write.
+/// Probe an async connect: a zero-length `send` returns 0 when connected,
+/// `EWOULDBLOCK` on a spurious wakeup (`Ok(false)`), `ENOTCONN` on failure
+/// with the cause in `SO_ERROR`. Takes `Connection.fd`'s `BorrowedFd`; a
+/// separate dup'd `Socket` once left epoll busy-looping on a stale interest.
 ///
 /// # Errors
-/// Connect failed (`ECONNREFUSED`, `EHOSTUNREACH`, etc). Caller
-/// terminates and retries the next addr.
-///
-/// Takes `BorrowedFd`, not `&Socket`: the connecting fd is owned by
-/// `Connection.fd` (the one owner). An earlier shape kept a separate
-/// `socket2::Socket` around just for this probe, dup'd the fd into
-/// `Connection`, and registered the dup with epoll — two fds on one
-/// open-file-description. epoll keys on the description, so closing
-/// only the dup left a stale interest → 100% CPU busy-loop on
-/// ERR|HUP. One fd, one owner, no aliasing hazard.
+/// The connect error; the caller tries the next address.
 pub(crate) fn probe_connecting(fd: BorrowedFd<'_>) -> io::Result<bool> {
     // Zero-byte write: touches connection state without sending data.
     match send(fd.as_raw_fd(), &[], MsgFlags::empty()) {
@@ -441,14 +419,11 @@ impl ProxyConfig {
     }
 }
 
-/// Parse `Proxy = type [args...]`. Returns `Ok(None)` for
-/// `Proxy = none` and missing config; `Err` for
-/// unknown types and types we don't support yet (SOCKS/HTTP).
+/// Parse `Proxy = type [args...]`. `Ok(None)` for `none` or no config.
 ///
 /// # Errors
-/// String describing why the config is invalid (unknown type, missing
-/// arg, or unsupported type). The caller (`setup()`) wraps this in
-/// `SetupError::Config`.
+/// A description of what's wrong (unknown type, missing arg, unsupported type);
+/// `setup()` wraps it in `SetupError::Config`.
 pub(crate) fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, String> {
     // First word is the type, rest is args.
     let mut parts = value.splitn(2, ' ');
@@ -505,37 +480,13 @@ pub(crate) fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, Str
     }
 }
 
-/// `do_outgoing_pipe`. `socketpair(AF_UNIX, SOCK_STREAM)` + `fork`. Child dup2's `sock[1]` to fds 0 and 1,
-/// runs `/bin/sh -c <cmd>`. Parent gets `sock[0]` as an `OwnedFd`
-/// that acts like a connected TCP socket.
-///
-/// `addr`/`node_name`/`my_name`: for the child's environment
-/// (`REMOTEADDRESS`, `REMOTEPORT`, `NODE`, `NAME`). The proxy
-/// script reads these to know where to connect.
-///
-/// ## Why `unsafe`
-///
-/// `fork()` in a multi-threaded program is dangerous: only the
-/// calling thread survives in the child; if any other thread held a
-/// lock at fork time (allocator, log buffer, libc env lock), the child
-/// inherits the locked state and deadlocks on first touch. The
-/// standard mitigation is `exec()` immediately, before touching
-/// any std/allocator state. The child here does exactly that:
-/// libc-only (`close`, `dup2`, `setsid`, `execve`,
-/// `_exit`). The `CString` allocations happen in the parent before
-/// the fork; the child only borrows their `.as_ptr()`.
-///
-/// The daemon itself is single-threaded here, but the test harness
-/// might not be (cargo-nextest spawns threads), so stay async-signal-
-/// safe anyway.
+/// `Proxy = exec`: `socketpair` + `fork`; the child dup2's its end onto
+/// fds 0/1 and execs `/bin/sh -c <cmd>` with `REMOTEADDRESS` etc. set,
+/// using only async-signal-safe calls before `execve` (the test harness is
+/// threaded). An exec failure `_exit(1)`s, seen by the parent as EOF.
 ///
 /// # Errors
-/// `socketpair` or `fork` syscall failure. The child's `exec`
-/// failure is signaled via `_exit(1)` → the parent's read returns
-/// EOF → normal terminate path.
-///
-/// Interior NUL in `cmd`, `my_name` or `node_name` returns
-/// `InvalidInput` rather than panicking.
+/// `socketpair`/`fork` failure, or `InvalidInput` for an interior NUL.
 pub(crate) fn do_outgoing_pipe(
     cmd: &str,
     addr: SocketAddr,
@@ -654,18 +605,11 @@ pub(crate) fn do_outgoing_pipe(
     }
 }
 
-/// Parse `Address = host port` lines from `hosts/NAME` into
-/// **unresolved** `(host, port)` pairs. Resolve happens
-/// lazily in `get_recent_address`. We mirror that:
-/// no DNS here, just string parsing. Literal IPs are parsed inline by
-/// [`AddressCache::next_addr`]; hostnames are handed to
-/// [`crate::bgresolve::DnsWorker`] via
-/// [`AddressCache::unresolved_hosts`].
-///
-/// `Address = 10.0.0.1 655` → `("10.0.0.1", 655)`. `Address =
-/// bob.example.com` (no port) → `("bob.example.com", 655)` (default).
-///
-/// Unparseable lines (bad port) warn-and-skip.
+/// Parse `Address = host [port]` lines from `hosts/NAME` into unresolved
+/// `(host, port)` pairs (default port 655); no DNS here. Literal IPs are parsed
+/// later by [`AddressCache::next_addr`], hostnames go to
+/// [`crate::bgresolve::DnsWorker`] via [`AddressCache::unresolved_hosts`]. A
+/// bad port warns and skips the line.
 #[must_use]
 pub(crate) fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(String, u16)> {
     if !confbase.join("hosts").join(node_name).exists() {

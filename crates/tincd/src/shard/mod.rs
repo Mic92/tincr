@@ -51,19 +51,11 @@ use crate::node_id::NodeId6Table;
 use crate::subnet_tree::SubnetTree;
 use crate::tunnel::TrafficStats;
 
-// TunnelHandles — shared per-peer fast-path state
-
-/// Per-peer fast-path state cloned out of the live `Sptps` at
-/// `HandshakeDone` time. The daemon holds `Arc<TunnelHandles>` per
-/// peer; the [`TxSnapshot`] holds a copy of the same `Arc`.
-///
-/// Built from `Sptps`: take `outseqno_handle()`/`replay_handle()`
-/// (clone the existing Arcs inside the Sptps — both views see the
-/// same counter), snapshot `outcipher_key()`/`incipher_key()`, copy
-/// the cached `udp_addr`. On rekey: build a fresh `TunnelHandles`,
-/// swap; the old `Arc` drops when the last reference goes.
-///
-/// Not `Debug`: holds live key material.
+/// Per-peer fast-path state taken from the live `Sptps` at `HandshakeDone`: the
+/// outseqno/replay Arcs (shared with the Sptps), copies of both cipher keys,
+/// and the cached `udp_addr`. The daemon and [`TxSnapshot`] hold the same
+/// `Arc<TunnelHandles>`; rekey builds a fresh one and the old drops with its
+/// last reference. Not `Debug`: live key material.
 pub(crate) struct TunnelHandles {
     /// `Sptps::outseqno_handle()`. `fetch_add(n, Relaxed)` per super
     /// (not per packet — one alloc, N seals). Shared with the
@@ -92,15 +84,10 @@ pub(crate) struct TunnelHandles {
     /// Open-side cipher. Same story.
     pub incipher: SptpsCipher,
 
-    /// Cached `sendto` target. `socket2::SockAddr` not `std::net`
-    /// because `sendto` wants the kernel sockaddr layout. The `u8` is
-    /// the listen-socket index (which UDP socket to send from). `None`
-    /// when UDP isn't confirmed yet — [`tx_probe`] returns `None`
-    /// (slow path drives `choose_udp_address`).
-    ///
-    /// `Mutex` not atomic: `SockAddr` is 128 bytes. Written once when
-    /// the first valid UDP packet arrives (`rx.rs`); read once per
-    /// super by [`tx_probe`]. Uncontended.
+    /// Cached `sendto` target in kernel sockaddr layout plus the listener index to
+    /// send from. `None` until UDP is confirmed; [`tx_probe`] then returns `None`
+    /// and the slow path runs `choose_udp_address`. `Mutex` rather than atomic (128
+    /// bytes); written once from `rx.rs`, read once per super.
     pub udp_addr: Mutex<Option<(socket2::SockAddr, u8)>>,
 
     /// `false` when control starts a rekey. [`tx_probe`] checks before
@@ -119,14 +106,10 @@ pub(crate) struct TunnelHandles {
     /// means one EMSGSIZE → `on_emsgsize` shrinks. Self-correcting.
     pub minmtu: AtomicU16,
 
-    /// `tunnel.outcompression`. The level the PEER asked for in
-    /// `ANS_KEY`. Non-zero ⇒ `send_sptps_packet` mutates the body
-    /// (compress, set `PKT_COMPRESSED`); the seal-send fast path
-    /// can't do that without `&mut Compressor`. Gate at eligibility:
-    /// `outcompression != 0` ⇒ slow path. Set once at `HandshakeDone`
-    /// from `ANS_KEY`; never changes mid-session. Not atomic: written
-    /// once before the `Arc` is published, happens-before via
-    /// `Arc::new`/send.
+    /// The compression level the peer asked for in `ANS_KEY`. Non-zero means
+    /// `send_sptps_packet` must compress the body, which the seal fast path can't,
+    /// so it is an eligibility gate. Set before the `Arc` is published and never
+    /// changed.
     pub outcompression: u8,
 
     /// `TunnelState::stats` clone. RX fast-path bumps `in_*` after a
@@ -135,19 +118,11 @@ pub(crate) struct TunnelHandles {
     pub stats: Arc<TrafficStats>,
 }
 
-// TxSnapshot — the fast-path's read-only view of routing state
-
-/// The Super arm's read-only snapshot. [`tx_probe`] takes
-/// `&TxSnapshot`; the seal+ship needs `&mut self.dp`/`&mut listeners`
-/// alongside, so the daemon `mem::take`s this out of `self.tx_snap`
-/// for the duration of the Super arm — same dance as `device_arena`/
-/// `tso_scratch`.
-///
-/// Fields are refreshed at gossip-event sites (post-`run_graph_and_log`,
-/// `HandshakeDone`, `ADD_SUBNET`/`DEL_SUBNET`, PMTU advance, UDP addr
-/// confirm). Direct field assigns; no channels, no fences. Stale by
-/// at most one event-loop iteration.
-///
+/// The Super arm's read-only view of routing state. [`tx_probe`] borrows it
+/// while seal+ship needs `&mut self.dp`, so the daemon `mem::take`s it out of
+/// `self.tx_snap` for the arm. Fields are assigned directly at gossip-event
+/// sites (graph run, `HandshakeDone`, subnet add/del, PMTU advance, UDP addr
+/// confirm); stale by at most one loop iteration.
 #[derive(Clone)]
 pub(crate) struct TxSnapshot {
     /// Spawn-time fold of every config-immutable slow-path gate:
@@ -169,27 +144,16 @@ pub(crate) struct TxSnapshot {
     /// once at setup; the seal loop `copy_from_slice`s it.
     pub id6_prefix: [u8; 12],
 
-    /// `Daemon::name`. The dst-subnet probe in [`rx_open`] resolves
-    /// the trie's owner string to "is this me?" by string compare.
-    /// One compare per memo MISS (≈ once per recvmmsg batch for a
-    /// unidirectional flow). The TX path's `route()` doesn't need
-    /// this — it resolves owner→nid via `ns.resolve()` and compares
-    /// nids — but the RX path only cares about myself/not-myself
-    /// (everything else is slow-path forwarding) so a string compare
-    /// is cheaper than a hashmap probe + nid compare. Set once at
-    /// setup; never changes.
+    /// `Daemon::name`, set once. [`rx_open`]'s dst-subnet probe only asks whether
+    /// the trie's owner string is us, once per memo miss; a string compare is
+    /// cheaper than resolving owner→nid as the TX `route()` does.
     pub myself_name: Box<str>,
 
-    /// `id6_table` snapshot. The RX gate chain reads `pkt[6..12]`
-    /// (`src_id6`), looks it up here → `NodeId`, then `tunnels.get()`.
-    /// Same `Arc::new(clone())` pattern as `subnets`: O(nodes) clone
-    /// at gossip-rate. Refreshed in `tx_snap_refresh_graph` — the
-    /// table only changes on `lookup_or_add_node` (which only does
-    /// real work on the first `ADD_EDGE`/`ADD_SUBNET` mentioning a
-    /// new name) and `purge`, both of which already run that hook.
-    /// A node learned via `ADD_SUBNET` alone (no edge) cannot send
-    /// us UDP — unreachable — so the lag between subnet-learn and
-    /// edge-learn-triggers-refresh is harmless.
+    /// `id6_table` snapshot for the RX gate chain (`pkt[6..12]` → `NodeId` →
+    /// tunnel). Cloned into an `Arc` at gossip rate in `tx_snap_refresh_graph`,
+    /// which already runs on every event that changes the table
+    /// (`lookup_or_add_node`'s first sighting, `purge`). A node known only via
+    /// `ADD_SUBNET` can't send us UDP yet, so that lag is harmless.
     pub id6: Arc<NodeId6Table>,
 
     /// `last_routes` snapshot. Same Arc the daemon holds; refreshed

@@ -64,27 +64,13 @@ pub(crate) struct TunnelState {
     /// Datagram-mode SPTPS; cleared on unreachable. Boxed: ~1KB, most nodes never tunnel.
     pub sptps: Option<Box<Sptps>>,
 
-    /// Previous per-tunnel SPTPS, salvaged at
-    /// `send_req_key`/`on_req_key` so UDP datagrams already in flight
-    /// under the old key still decrypt instead of surfacing as the
-    /// production `Invalid packet seqno: N != 0` / `BadSeqno` burst.
-    /// C tinc has the same restart window and just eats the loss.
-    ///
-    /// **RX-only** — we never seal with it; sealing past the restart
-    /// would extend the old key's nonce stream after we already
-    /// announced a new one.
-    ///
-    /// **Lifetime bound** — set only when the outgoing session had a
-    /// working `incipher`. Not cleared at `HandshakeDone` (old-key
-    /// stragglers can still arrive ~RTT after our side completes);
-    /// instead reaped by `on_ping_tick` once `status.validkey &&
-    /// last_req_key + 2×PingInterval` has passed **or**
-    /// `prev_sptps_installed_at + KeyExpire` has passed (whichever
-    /// first), by `reset_unreachable`, or by the next salvage. The
-    /// second arm is the forward-secrecy backstop: if the new
-    /// handshake stalls (`validkey` never goes true, `last_req_key`
-    /// keeps refreshing), the old key still dies after one
-    /// `KeyExpire`.
+    /// Previous SPTPS session, salvaged at `REQ_KEY` time so datagrams in
+    /// flight under the old key still decrypt across a restart (C eats that
+    /// loss). RX-only; sealing with it would extend an abandoned nonce
+    /// stream. Set only if the old session had an `incipher`. Reaped by
+    /// `on_ping_tick` once `validkey && last_req_key + 2×PingInterval`, after
+    /// `KeyExpire` regardless (forward-secrecy backstop), by
+    /// `reset_unreachable`, or by the next salvage.
     pub prev_sptps: Option<Box<Sptps>>,
 
     /// When `prev_sptps` was salvaged. Drives the `KeyExpire`
@@ -150,17 +136,11 @@ pub(crate) struct TunnelState {
     /// `&mut Daemon`) can bump the same counters via [`TunnelHandles`].
     pub stats: Arc<TrafficStats>,
 
-    /// Lifetime bytes we originated toward this node that
-    /// left via a relay (TCP `SPTPS_PACKET` through `nexthop`, or UDP
-    /// to a `relay_nid != to`). Bumped in `send_sptps_data_relay`
-    /// only — once a direct meta-conn exists, the PACKET 17 short-
-    /// circuit in `send_sptps_packet` fires and this stops growing,
-    /// which is exactly the oscillation damper the autoconnect-
-    /// shortcut heuristic needs (theory doc §3, damping (c)).
-    ///
-    /// Not a `dump_nodes` column, not reset on unreachable (lifetime,
-    /// like `out_bytes`). EWMA derivation lives in the cold-path
-    /// `decide_autoconnect`; the hot path does 1 add + 1 store.
+    /// Lifetime bytes we originated toward this node that left via a relay (TCP
+    /// through nexthop, or UDP to `relay != to`). Bumped only in
+    /// `send_sptps_data_relay`, so it stops growing once a direct meta conn exists
+    /// — the damper the autoconnect shortcut heuristic needs. Not dumped, not reset
+    /// on unreachable; the EWMA lives in cold-path `decide_autoconnect`.
     pub relay_tx_bytes: u64,
 
     /// Previous-tick samples + EWMA rates for autoconnect-shortcut.
@@ -200,18 +180,11 @@ impl TunnelState {
     }
 }
 
-/// Reap predicate for [`TunnelState::prev_sptps`], factored out so the
-/// forward-secrecy bound is unit-testable without a full daemon.
-///
-/// Reaps when **either**:
-///  - the new session is healthy (`validkey`) and `last_req_key` is
-///    `>2×PingInterval` old — normal case, no old-key datagram can
-///    still be in flight; **or**
-///  - the salvage itself is older than `KeyExpire` — backstop for the
-///    stalled-handshake case where `validkey` stays `false` and
-///    `last_req_key` is bumped on every retry, which would otherwise
-///    keep the old RX key alive indefinitely and defeat the FS bound
-///    `KeyExpire` is meant to enforce.
+/// Reap predicate for [`TunnelState::prev_sptps`]: the new session is healthy
+/// (`validkey`) and `last_req_key` is over `2×PingInterval` old, or the salvage
+/// is older than `KeyExpire` — the backstop for a stalled handshake whose
+/// retries keep bumping `last_req_key` and would otherwise keep the old RX key
+/// alive past the forward-secrecy bound.
 #[must_use]
 pub(crate) fn should_reap_prev_sptps(
     validkey: bool,

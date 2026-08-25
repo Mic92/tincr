@@ -81,34 +81,13 @@ fn ipv4_ord_weight_negative() {
     assert!(neg < pos);
 }
 
-/// **[DOCUMENTED]** divergence from upstream `subnet_compare`.
-///
-/// Found by analysis of the C implementation. Upstream does
-/// `a->weight - b->weight` — signed-overflow UB, observably wrap
-/// under `-fwrapv`. Rust uses `Ord::cmp` which never overflows.
-/// At `i32::MAX` vs `i32::MIN` the C result wraps to `-1` (Less);
-/// Rust correctly says Greater.
-///
-/// **Wire-reachable:** weight is `%d`-parsed with no range check. `Subnet = 10.0.0.0/8#2147483647` is accepted.
-/// Two such subnets with the same prefix+addr from different owners
-/// route differently on C tincd vs Rust tincd: C's splay tree and
-/// Rust's `BTreeMap` iterate them in opposite order.
-///
-/// **Why we don't match C:** the C behaviour is *undefined*, not
-/// merely different. Without `-fwrapv` (which upstream's meson
-/// build does not set) the optimizer can assume the subtraction
-/// never overflows and rearrange the comparison arbitrarily.
-/// Replicating UB with `wrapping_sub().signum()` would pin us to
-/// the gcc-x86_64-at-O2 behaviour, which is exactly the kind of
-/// thing that breaks under LTO or a clang upgrade.
-///
-/// **This test passes.** It pins the Rust behaviour (correct
-/// integer order). If someone later "fixes" the comparator to
-/// match C's wrap, this breaks and they read why that's wrong.
-/// The right fix is on the parse side: clamp weight to a sane
-/// range (±2^30) and the subtraction can't overflow on either
-/// side. That's a wire-format change — separate commit, needs
-/// crossimpl validation.
+/// Documented divergence: C's `subnet_compare` does `a->weight - b->weight`,
+/// signed-overflow UB (upstream builds without `-fwrapv`); at `i32::MAX` vs
+/// `i32::MIN` gcc's wrap says Less where `Ord::cmp` says Greater.
+/// Wire-reachable, since weight is `%d`-parsed unchecked, so two such subnets
+/// iterate in opposite order on C and Rust. We don't emulate UB. This pins
+/// correct integer order; the real fix is clamping weight at parse time, a wire
+/// change needing crossimpl validation.
 #[test]
 fn ipv4_ord_weight_at_i32_extremes() {
     // Same prefix+addr forces the comparator down to the weight

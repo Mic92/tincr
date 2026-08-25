@@ -39,26 +39,11 @@ use crate::graph::Graph;
 use crate::graph::NodeId;
 use crate::inthash::IntHashMap;
 
-/// Per-nid dense entry. Indexed by `NodeId.0` (slab index, never deleted in
-/// tincd, so dead slots stay `None`). Same layout discipline as `last_routes`.
-///
-/// 32 bytes: `name` (16 bytes inline `Arc<str>`, see below) + `edge_addr`
-/// (28 bytes `Option<SocketAddr>`) + bools packed into a u8. ...except
-/// `Option<SocketAddr>` is large (~28B) and 100 nodes × 28B = ~3KB which
-/// is fine but the cache footprint matters on the hot path read.
-///
-/// Hot-path access pattern:
-///   - `name`: log strings only (`node_log_name`, 9 sites). Debug-level
-///     mostly; cold when traffic flows. `Arc<str>` over `String`: the same
-///     name appears in `node_ids` (the resolve map's key) — share the alloc.
-///   - `reachable`: `handle_relay_receive` gate (1 site, rare branch).
-///   - `has_direct_conn`: `try_tx` `TCPOnly` gate + `send_sptps_packet`
-///     PACKET-17 short-circuit (2 sites, every packet that goes via TCP
-///     fallback — rare in steady state, common during PMTU discovery).
-///   - `edge_addr`: `choose_udp_address` cold path only (cached path
-///     bypasses it). One read per peer per session typically.
-///
-/// So the hot read is `has_direct_conn`. Put it first.
+/// Per-nid dense entry indexed by `NodeId.0` (never deleted; dead slots stay
+/// `None`), like `last_routes`. Access pattern: `has_direct_conn` is the hot
+/// read (`TCPOnly` gate, PACKET-17 short-circuit) and goes first; `reachable` is
+/// a rare relay gate; `edge_addr` is `choose_udp_address`'s cold fallback;
+/// `name` is for log strings and shares its `Arc<str>` with the `node_ids` key.
 #[derive(Debug, Clone)]
 pub(crate) struct NodeViewEntry {
     /// `nodes.get(nid).conn.is_some()`. The `TCPOnly` / PACKET-17 gate.
@@ -71,14 +56,10 @@ pub(crate) struct NodeViewEntry {
     /// `myself` is trivially yes. Carrying it explicitly avoids the
     /// `nid == myself` special case at every read site.
     pub reachable: bool,
-    /// `nodes.get(nid).edge_addr`. The peer-ACK addr (TCP addr, port
-    /// rewritten to UDP). `choose_udp_address` cold-path fallback when
-    /// `tunnel.udp_addr` isn't set yet. Also seeded into `tunnel.udp_addr`
-    /// at `BecameReachable`.
-    ///
-    /// `None` for transitives (no `NodeState` entry; only direct neighbors
-    /// get one) — `choose_udp_address` returns `None` and the caller drops
-    /// the packet, same as today. `None` for `myself`.
+    /// The peer-ACK address (TCP addr, port rewritten to UDP):
+    /// `choose_udp_address`'s fallback before `tunnel.udp_addr` is set, and its
+    /// seed at `BecameReachable`. `None` for transitive nodes (no `NodeState`) and
+    /// for `myself`; the caller drops the packet.
     pub edge_addr: Option<SocketAddr>,
     /// `graph.node(nid).name`. `node_log_name`. `Arc<str>` so cloning
     /// `NodeView` (fanout to N shards) doesn't clone N×100 Strings.
@@ -87,30 +68,20 @@ pub(crate) struct NodeViewEntry {
     pub name: Arc<str>,
 }
 
-/// The snapshot. Dense `Vec<Option<NodeViewEntry>>` indexed by `NodeId.0`,
-/// plus the `name → NodeId` resolve map for the route closure.
-///
-/// `Clone`: O(1) refcount bumps (every field is `Arc`).
-///
-/// `Default`: empty snapshot. Reads safe: `entries.get(nid)` → `None`
-/// → `<gone>` for log names, `false` for `has_direct_conn` — matches
-/// a node-not-yet-learned state.
+/// The snapshot: dense `Vec<Option<NodeViewEntry>>` by `NodeId.0` plus the
+/// `name → NodeId` map for the route closure. `Clone` is refcount bumps.
+/// `Default` is empty and reads as node-not-yet-learned (`<gone>` names,
+/// `false` gates).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NodeView {
     /// Indexed by `NodeId.0`. `None` for freed slots (never happens in
     /// tincd — nodes are monotonic — but `Graph` is a generic slab and
     /// `node_ids()` skips freed slots).
     entries: Arc<Vec<Option<NodeViewEntry>>>,
-    /// `Daemon::node_ids` clone. The route resolve closure
-    /// (`route.rs:73-77`) does `node_ids.get(name)? → reachable check`.
-    /// `Arc<HashMap>` so the snapshot clone is a refcount bump; the
-    /// `HashMap` itself is rebuilt only when a new node name appears
-    /// (`lookup_or_add_node`), which is the same event that triggers
-    /// `id6_table` rebuild — rare.
-    ///
-    /// `Arc<str>` keys: shared with `NodeViewEntry::name`. One alloc per
-    /// node name, total. The route closure does `&str` key lookups via
-    /// `Borrow<str>`, no temporary `Arc` constructed per lookup.
+    /// `Daemon::node_ids` behind an `Arc`, rebuilt only when a new name appears
+    /// (the same event that rebuilds `id6_table`). `Arc<str>` keys shared with
+    /// `NodeViewEntry::name`; `&str` lookups go through `Borrow<str>` without a
+    /// temporary.
     name_to_nid: Arc<HashMap<Arc<str>, NodeId>>,
 }
 
@@ -128,18 +99,10 @@ impl NodeView {
             .map_or("<gone>", |e| &*e.name)
     }
 
-    /// The route resolve closure body. `daemon/net/route.rs:73-77` does:
-    /// ```ignore
-    /// let nid = *node_ids.get(name)?;
-    /// graph.node(nid).filter(|n| n.reachable).map(|_| nid)
-    /// ```
-    /// Same shape here, reading the snapshot. The `&str` lookup goes
-    /// through `Borrow<str> for Arc<str>` — no temporary alloc.
-    ///
-    /// `route()` calls this once per packet (the LPM lookup returns an
-    /// owner *name*, this maps name → nid + reachability gate). On the
-    /// hot path. The `HashMap` probe is the cost; same as today (the daemon
-    /// does the same probe against `self.node_ids`).
+    /// The route resolve closure: `node_ids.get(name)` then the reachability gate,
+    /// as `daemon/net/route.rs` does against the live maps. Once per packet after
+    /// the LPM lookup returns an owner name; the `HashMap` probe is the cost, same
+    /// as the slow path.
     #[inline]
     #[must_use]
     pub(crate) fn resolve(&self, name: &str) -> Option<NodeId> {
@@ -186,18 +149,11 @@ impl NodeView {
             .edge_addr
     }
 
-    /// Daemon-side builder. Called from `run_graph_and_log` after the
-    /// transition loop (so `reachable` reflects the *post*-BFS state) and
-    /// from `on_ack` / `terminate` (when `nodes.insert`/`conn = None`
-    /// flips `has_direct_conn`).
-    ///
-    /// Takes `&Graph` + `&HashMap<String, NodeId>` (the `node_ids` map) +
-    /// `&IntHashMap<NodeId, NodeState>` separately rather than `&Daemon`
-    /// — keeps this module decoupled from the daemon struct, and lets the
-    /// tests below build snapshots from minimal inputs.
-    ///
-    /// `n_nodes` is `graph.slab_len()` (slab length, including holes).
-    /// Dense vec sizing: same indexing invariant as `last_routes`.
+    /// Daemon-side builder, called after `run_graph_and_log`'s transition loop (so
+    /// `reachable` is post-BFS) and from `on_ack`/`terminate` when
+    /// `has_direct_conn` flips. Takes graph, `node_ids` and `nodes` separately
+    /// rather than `&Daemon` so tests can build snapshots from minimal inputs.
+    /// `n_nodes` is the slab length including holes.
     #[must_use]
     pub(crate) fn build(
         graph: &Graph,

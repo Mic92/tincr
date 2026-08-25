@@ -55,14 +55,10 @@ impl ConnOptions {
     }
 }
 
-// Transitional `u32` aliases. `tinc-graph` (`Edge.options`, `Route
-// .options`) and `tinc-proto` (`AddEdge.options`) stay `u32` (separate
-// crates, separate change). The gate sites in `tx_control.rs`/`udp_info.rs`/
-// `net.rs` reading those `u32`s use these consts. The three storage
-// sites (`Connection.options`, `Daemon.myself_options`, `NodeState
-// .edge_options`) are `ConnOptions`; calls into the `u32` boundary go
-// through `.bits()` / `from_bits_retain`. A follow-up cleans the gates
-// after the udp-info-carry agent lands.
+// `u32` aliases for the option bits: `tinc-graph` and `tinc-proto` carry
+// options as `u32`, while `Connection.options`, `Daemon.myself_options` and
+// `NodeState.edge_options` are `ConnOptions` and cross the boundary via
+// `.bits()`/`from_bits_retain`.
 pub(crate) const OPTION_TCPONLY: u32 = ConnOptions::TCPONLY.bits();
 pub(crate) const OPTION_CLAMP_MSS: u32 = ConnOptions::CLAMP_MSS.bits();
 
@@ -75,16 +71,10 @@ fn myself_options_default() -> ConnOptions {
     (ConnOptions::PMTU_DISCOVERY | ConnOptions::CLAMP_MSS).with_minor(PROT_MINOR)
 }
 
-/// Build our own connection options from global config. Called once
-/// at `setup()`. Returns the global defaults that per-host
-/// `IndirectData`/`TCPOnly`/`ClampMSS` are OR'd against in [`send_ack`].
-///
-/// Implication chain:
-///   - `TCPOnly` → also INDIRECT
-///   - `PMTUDiscovery` default = `!(options & OPTION_TCPONLY)`
-///   - `ClampMSS` default = on
-///
-/// `.ok()`: a value that fails to parse is treated as absent.
+/// Our own connection options from global config, computed once at `setup()`;
+/// per-host `IndirectData`/`TCPOnly`/`ClampMSS` are OR'd in by [`send_ack`].
+/// `TCPOnly` implies INDIRECT; `PMTUDiscovery` defaults to `!TCPOnly`;
+/// `ClampMSS` defaults on. Unparseable values count as absent.
 #[must_use]
 pub(crate) fn myself_options_from_config(config: &tinc_conf::Config) -> ConnOptions {
     let mut opts = ConnOptions::empty().with_minor(PROT_MINOR);
@@ -304,14 +294,10 @@ pub(crate) fn check_gate(conn: &Connection, line: &[u8]) -> Result<Request, Disp
     Ok(req)
 }
 
-/// SPTPS label for the TCP meta connection.
-///
-/// The trailing NUL is wire format: it feeds the SIG transcript + PRF
-/// seed, and omitting it fails the handshake with `BadSig`. The
-/// invitation label ([`INVITE_LABEL`]) has no NUL — historical accident
-/// in C tinc, but equally wire format.
-///
-/// Argument order: always (initiator, responder).
+/// SPTPS label for the TCP meta connection, always (initiator, responder). The
+/// trailing NUL is wire format (it feeds the SIG transcript and PRF seed; omit
+/// it and the handshake fails `BadSig`). [`INVITE_LABEL`] has no NUL, equally
+/// by C accident and equally wire format.
 #[must_use]
 pub(crate) fn tcp_label(initiator: &str, responder: &str) -> Vec<u8> {
     // Explicit push so the NUL is visible in source.
@@ -379,14 +365,11 @@ pub(crate) struct IdCtx<'a> {
 /// [`tcp_label`]; wire format.
 const INVITE_LABEL: &[u8] = b"tinc invitation";
 
-/// Handle an ID line, all three branches.
-///
-/// Format: `ID <name> <major>.<minor>`; minor is optional (defaults to
-/// 0). Dispatch on the first byte of the name: `^`→control,
-/// `?`→invitation, else peer.
+/// Handle `ID <name> <major>[.<minor>]`: `^` prefix → control, `?` →
+/// invitation, else peer.
 ///
 /// # Errors
-/// `BadId`: malformed, cookie mismatch, bad name, peer==self, version
+/// `BadId`: malformed, cookie mismatch, bad name, peer == self, version
 /// mismatch, no pubkey, rollback.
 pub(crate) fn handle_id(
     conn: &mut Connection,
@@ -743,15 +726,11 @@ fn load_peer_host_config(
     ecdsa
 }
 
-/// Called on SPTPS `HandshakeDone` when `allow_request == ACK`. Queues
-/// `ACK <udp-port> <weight> <options-hex>` — the first line sent
-/// encrypted.
-///
-/// SIDE EFFECT: writes `conn.options` and `conn.estimated_weight`
-/// (read later when the peer's ACK arrives).
-///
-/// `global_weight`: tinc.conf `Weight` — fallback when per-host
-/// `Weight` absent. `None` = RTT wins.
+/// On SPTPS `HandshakeDone` with `allow_request == ACK`: queue `ACK <udp-port>
+/// <weight> <options-hex>`, the first encrypted line. Also records
+/// `conn.options` and `conn.estimated_weight` for when the peer's ACK arrives.
+/// `global_weight` is tinc.conf `Weight`, the fallback when the host has none;
+/// `None` lets RTT decide.
 pub(crate) fn send_ack(
     conn: &mut Connection,
     my_udp_port: u16,

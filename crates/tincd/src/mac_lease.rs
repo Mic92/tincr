@@ -40,16 +40,9 @@ pub(crate) struct MacLeases {
 }
 
 impl MacLeases {
-    /// New MAC. Returns `true` if this was the first lease (table
-    /// was empty). Daemon arms the age timer on first add (on
-    /// `true`).
-    /// return.
-    ///
-    /// Idempotent: `learn` of an already-leased MAC just refreshes
-    /// (`route_mac` returns `Refresh`, not `New` → daemon calls
-    /// `refresh`, not `learn`). But guard against caller mistakes:
-    /// if the MAC is
-    /// already in the table, log debug + treat as refresh.
+    /// New MAC. Returns `true` if the table was empty, so the daemon arms the age
+    /// timer. `route_mac` reports `Refresh` for known MACs, so this shouldn't see
+    /// duplicates; if it does, log debug and treat as refresh.
     pub(crate) fn learn(&mut self, mac: Mac, now: Instant, expire_secs: u64) -> bool {
         let expires = now + Duration::from_secs(expire_secs);
         if let Some(slot) = self.leases.get_mut(&mac) {
@@ -80,17 +73,10 @@ impl MacLeases {
         }
     }
 
-    /// Prune expired. Returns `(expired_macs, any_left)`.
-    ///
-    /// `any_left` = at least one unexpired lease remains.
-    /// Daemon re-arms the 10s timer iff `any_left`; otherwise lets it
-    /// lapse.
-    ///
-    /// `expired` are removed from `self`. Daemon for each:
-    /// `subnets.del(Subnet::Mac{addr,..})` + broadcast DEL.
-    ///
-    /// Expiry boundary: STRICT less. A lease expiring exactly at
-    /// `now` is still alive for one more tick.
+    /// Prune expired leases (strictly older than `now`; expiring exactly at `now`
+    /// survives one more tick) and return `(expired_macs, any_left)`. The daemon
+    /// deletes and broadcasts each expired subnet and re-arms the 10s timer iff
+    /// `any_left`.
     pub(crate) fn age(&mut self, now: Instant) -> (Vec<Mac>, bool) {
         // Strict less. `expires == now` → not expired yet.
         let expired: Vec<Mac> = self

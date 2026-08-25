@@ -172,14 +172,9 @@ impl Compressor {
         }
     }
 
-    /// Decompress a packet. `level` is the SENDER's level (we know it from their
-    /// `ADD_EDGE`). `max_len` is the dest buffer cap — for LZ4 it's
-    /// the only sizing hint (C's `LZ4_decompress_safe(src, dest,
-    /// srclen, destlen)` has no length prefix); for zlib it's the
-    /// inflate bound.
-    ///
-    /// Returns `None` on corrupt input or backend stubbed. Never
-    /// panics on garbage.
+    /// Decompress a packet. `level` is the sender's (known from their `ADD_EDGE`);
+    /// `max_len` caps the output (LZ4's only sizing hint, zlib's inflate bound).
+    /// `None` on corrupt input or a stubbed backend; never panics on garbage.
     #[must_use]
     #[expect(clippy::unused_self)] // becomes &mut when state lands
     pub(crate) fn decompress(
@@ -538,14 +533,10 @@ mod tests {
 
     #[test]
     fn lzo_hi_compress_stub_decompress_works() {
-        // Asymmetric: minilzo lacks lzo1x_999_compress so LzoHi
-        // compress is stubbed (None), but decompress uses the same
-        // lzo1x_decompress_safe as LzoLo (shared wire format). We
-        // can RECEIVE level-11 from a C peer; we just can't SEND it.
-        // This is fine — compression level is per-direction: we
-        // advertise our level in ANS_KEY, peer compresses outbound
-        // to us with whatever THEY choose. We must decompress
-        // anything; we may compress with anything we have.
+        // Asymmetric: minilzo lacks lzo1x_999 so LzoHi compress is stubbed, but
+        // decompress shares LzoLo's routine. That is fine because levels are per
+        // direction: we must decompress anything a peer sends and may compress with
+        // whatever we have.
         let mut c = Compressor::new();
         let src = b"Hello, world! Hello, world! Hello, world!";
         assert!(c.compress(src, Level::LzoHi).is_none());

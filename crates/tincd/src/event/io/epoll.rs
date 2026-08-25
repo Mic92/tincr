@@ -40,16 +40,11 @@ pub(super) fn add(ep: &Poller, fd: BorrowedFd<'_>, token: usize, i: Io) -> io::R
     Ok(ep.add(fd, ev)?)
 }
 
-/// `epoll_ctl(MOD/DEL)` taking `RawFd` directly.
-///
-/// nix's `Epoll::modify`/`delete` want `impl AsFd`, but the loop
-/// stores fds non-owningly (see module doc) and only the caller can
-/// vouch for liveness. Forging a `BorrowedFd` here would assert an
-/// open-for-'a invariant the loop cannot guarantee — if the caller
-/// closed the fd first, that is the *caller's* bug (the EBADF
-/// tripwire in `EventLoop::del` catches it), not a soundness hole
-/// in this crate. So use nix's deprecated free-function `epoll_ctl`,
-/// which still takes `RawFd` and keeps the `unsafe` inside nix.
+/// `epoll_ctl(MOD/DEL)` on a `RawFd`. The loop stores fds non-owningly and
+/// can't vouch they are still open, so forging a `BorrowedFd` would assert a
+/// liveness we don't have; a caller closing first is their bug (the EBADF
+/// tripwire in `EventLoop::del` catches it). nix's deprecated free function
+/// takes `RawFd` and keeps the `unsafe` inside nix.
 #[expect(deprecated)]
 fn epoll_ctl_raw(
     ep: &Poller,

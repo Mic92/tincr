@@ -128,14 +128,12 @@ impl<W: Copy> EventLoop<W> {
         })
     }
 
-    /// Register an fd. The loop stores the raw fd only as a
-    /// reregister/deregister key — it never closes it (see module
-    /// doc).
+    /// Register an fd. The raw fd is kept only as a reregister/deregister key and
+    /// never closed here (module doc).
     ///
     /// # Errors
-    /// Propagates `epoll_ctl(ADD)` failures — `EEXIST` if the fd is
-    /// already registered (caller bug), `EBADF`/`ENOMEM` from the
-    /// kernel.
+    /// `epoll_ctl(ADD)`: `EEXIST` if already registered (caller bug),
+    /// `EBADF`/`ENOMEM`.
     pub(crate) fn add(&mut self, fd: BorrowedFd<'_>, interest: Io, what: W) -> io::Result<IoId> {
         let raw = fd.as_raw_fd();
         let idx = self.free.pop().unwrap_or_else(|| {
@@ -157,15 +155,13 @@ impl<W: Copy> EventLoop<W> {
         Ok(IoId(idx))
     }
 
-    /// Change interest on an already-registered fd. No-op if
-    /// unchanged — skips the `epoll_ctl(MOD)` syscall.
+    /// Change interest on a registered fd; no syscall if unchanged.
     ///
     /// # Errors
-    /// Propagates `epoll_ctl(MOD)` failures.
+    /// `epoll_ctl(MOD)` failures.
     ///
     /// # Panics
-    /// If `id` is dangling. C dereferences caller-owned `io_t*` —
-    /// would be UAF.
+    /// If `id` is dangling (C would use-after-free).
     pub(crate) fn set(&mut self, id: IoId, interest: Io) -> io::Result<()> {
         let slot = self.slots[id.0].as_mut().expect("dangling IoId");
         if slot.interest == interest {
@@ -199,44 +195,13 @@ impl<W: Copy> EventLoop<W> {
         self.live -= 1;
     }
 
-    /// one iteration of the event loop. The `while(running)` outer
-    /// loop is the daemon's job.
-    ///
-    /// Blocks for at most `timeout` (or forever if `None`). Drains
-    /// readiness into `out` as `(what, ready)` pairs. The daemon's
-    /// loop matches on `what`.
-    ///
-    /// `Ok(())` even if no events fired (timeout expired).
-    ///
-    /// # The generation-guard substitute
-    ///
-    /// Generation tracking: instead of bailing the whole dispatch
-    /// loop when a cb removes/alters another slot, we check per-event:
-    /// `slots.get(token)` returns `None` if removed; `interest.wants
-    /// (ready)` is false if reregistered to a non-overlapping
-    /// interest. Stale events are dropped silently. Level-triggered:
-    /// anything still actually ready re-fires next turn.
-    ///
-    /// This processes more events per wake than C (C bails at first
-    /// change; we keep going). That's correct: the C bail is
-    /// conservative because it can't tell WHICH slot changed.
-    ///
-    /// `out` is borrowed not returned — same hot-loop reasoning as
-    /// `Timers::tick`.
-    ///
-    /// # WRITE before READ
-    ///
-    /// WRITE is dispatched before READ. The reason: the meta
-    /// connection's WRITE cb can drain the outbuf and call
-    /// `io_set(READ)`, which means the READ that follows is for a slot
-    /// that just changed. C's generation bail handles that. We check
-    /// `interest.wants` between WRITE and READ dispatch for the same
-    /// slot. Same effect.
+    /// One iteration: block up to `timeout` (`None` = forever), drain
+    /// readiness into `out`. Stale events (slot removed or interest changed
+    /// by an earlier callback) are dropped per event rather than bailing as
+    /// C does; WRITE is dispatched before READ, re-checking in between.
     ///
     /// # Errors
-    /// Returns the underlying I/O error from `epoll_wait` / `kqueue`.
-    /// `EINTR` is *not* an error — it returns `Ok(())` with `out`
-    /// empty so the caller's `while running` loop re-checks its flag.
+    /// The `epoll_wait`/`kqueue` error; `EINTR` is `Ok` with `out` empty.
     pub(crate) fn turn(
         &mut self,
         timeout: Option<Duration>,

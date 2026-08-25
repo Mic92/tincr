@@ -33,16 +33,10 @@ use std::net::{IpAddr, SocketAddr};
 use crate::listen;
 use rand_core::Rng;
 
-/// Contract: `current` indexes into `listener_addrs`. If
-/// `listener_addrs[current]` already matches `target`'s family, return
-/// `current` unchanged (the C's early-exit). Otherwise scan; first match
-/// wins. No match → return `current` (the C falls out of the loop with
-/// `*sock` untouched; the subsequent `sendto` will fail with EAFNOSUPPORT,
-/// which is fine — the daemon logs and moves on).
-///
-/// `listener_addrs` is `&[SocketAddr]` not `&[Listener]`: we only need the
-/// family. Daemon builds it as `daemon.listeners.iter().map(|l|
-/// l.local).collect()` once per call (cheap; ≤8 elements).
+/// If `listener_addrs[current]` already matches `target`'s family return
+/// `current`; else the first matching index; else `current` unchanged (the
+/// later `sendto` fails EAFNOSUPPORT and is logged). Takes `&[SocketAddr]`
+/// since only the family matters; the daemon maps its ≤8 listeners per call.
 #[must_use]
 pub(crate) fn adapt_socket(target: &SocketAddr, current: u8, listener_addrs: &[SocketAddr]) -> u8 {
     // `is_ipv4()` is the family check; SocketAddr has no direct family().
@@ -67,28 +61,11 @@ pub(crate) fn adapt_socket(target: &SocketAddr, current: u8, listener_addrs: &[S
         .unwrap_or(current) // no match: leave as-is
 }
 
-/// Pick a random edge's `local_address` (edges WHERE `from == n`).
-///
-/// We take the candidates pre-filtered. Daemon builds:
-/// ```ignore
-/// let cands: Vec<_> = self.edge_addrs.iter()
-///     .filter(|(eid, _)| self.graph.edge(**eid)
-///             .is_some_and(|e| e.from == target_nid))
-///     .filter_map(|(_, (_, _, la, lp))|
-///             parse_addr_port(la.as_str(), lp.as_str()))
-///     .collect();
-/// ```
-/// then calls `choose_local(&cands, &mut self.prng, &listener_addrs)`.
-///
-/// Returns `(addr, sock_index)`. `None` if `candidates` is empty (the C:
-/// `*sa = NULL`, caller checks).
-///
-/// `listener_addrs` is the same `&[SocketAddr]` as `adapt_socket` — passed
-/// through for the post-pick family adjustment.
-///
-/// `R: RngCore` — daemon passes `OsRng`; tests use `ChaCha8Rng` for
-/// determinism (same pattern as `autoconnect.rs`). The `next_u32() % len`
-/// modulo bias matches C's `prng()` (`utils.h`: `xoshiro() % max`).
+/// Pick a random `local_address` among `candidates` (the daemon pre-filters
+/// edges with `from == n` and parses their local addr/port), then adjust the
+/// socket index by family via `listener_addrs`. Returns `(addr, sock_index)`,
+/// `None` if there are no candidates. `next_u32() % len` has the same modulo
+/// bias as C's `prng()`; tests pass a seeded RNG.
 #[must_use]
 pub(crate) fn choose_local<R: Rng>(
     candidates: &[SocketAddr],
@@ -120,14 +97,9 @@ pub(crate) fn choose_local<R: Rng>(
     Some((sa, adapt_socket(&sa, sock, listener_addrs)))
 }
 
-/// `str2sockaddr` for the reflexive-address fields. Same shape as
-/// `udp_info.rs::parse_socket_addr` (private there). `unspec` → `None`.
-/// Unparseable → `None` (the C would build `AF_UNKNOWN` and silently never
-/// connect; we bail earlier).
-///
-/// Handles bracketing: caller may pass `"[::1]"` (it shouldn't —
-/// `sockaddr2str` doesn't bracket — but be defensive). `IpAddr::parse`
-/// rejects brackets, so strip them first.
+/// Parse the reflexive-address fields: `unspec` or anything unparseable →
+/// `None` (C would build `AF_UNKNOWN` and never connect). Brackets around v6
+/// are stripped defensively though `sockaddr2str` never emits them.
 #[must_use]
 pub(crate) fn parse_addr_port(addr: &str, port: &str) -> Option<SocketAddr> {
     if addr == tinc_proto::AddrStr::UNSPEC {

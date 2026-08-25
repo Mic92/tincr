@@ -56,32 +56,19 @@ use std::sync::PoisonError;
 use std::thread;
 use std::time::Duration;
 
-/// One script invocation's environment. Upstream `environment_t`: a
-/// growing `char**` arena of `"KEY=value"` strings, fed to
-/// `putenv()`. We use a `Vec` of pairs because [`Command::envs`]
-/// takes
-/// `IntoIterator<Item = (K, V)>`.
-///
-/// Keys are `&'static str` because every key in the C is a literal
-/// (`"NETNAME="`, `"NODE="`, etc). Values are owned `String` because
-/// they're formatted (`"%s"`, `"%d"`).
+/// One script invocation's environment as `(key, value)` pairs for
+/// [`Command::envs`]. Keys are `&'static str` (all literals); values are
+/// formatted `String`s.
 #[derive(Clone)]
 pub(crate) struct ScriptEnv {
     vars: Vec<(&'static str, String)>,
 }
 
 impl ScriptEnv {
-    /// `environment_init`. Base vars every script gets. We take
-    /// them as args (upstream reads from globals).
-    ///
-    /// `NETNAME` / `DEVICE` / `INTERFACE` are only exported when
-    /// set; `Option<&str>` here.
-    /// `NAME` is always set by the time scripts run (set from
-    /// `Name=`); required `&str` here.
-    ///
-    /// `DEBUG` is `if(debug_level >= 0)`. `debug_level`
-    /// is signed in C; `-1` means "don't set". We take `Option<i32>`
-    /// and the caller passes `None` for that case.
+    /// Base vars every script gets, passed in rather than read from globals.
+    /// `NETNAME`/`DEVICE`/`INTERFACE` are exported only when set; `NAME` always is
+    /// by the time scripts run. `DEBUG` is exported for `Some(level)`; C's `-1`
+    /// (don't set) is `None`.
     #[must_use]
     pub(crate) fn base(
         netname: Option<&str>,
@@ -172,14 +159,11 @@ fn prepare(
     Ok(cmd)
 }
 
-/// Retry an exec on `ETXTBSY`. If another thread `fork()`s while we
-/// hold a script open for writing (e.g. the daemon rewriting an
-/// invitation hook, or — the case that bit us — parallel unit tests
-/// each `write_script`+`execute`), the forked child briefly inherits
-/// the write fd until its `exec()` closes CLOEXEC fds. Our own
-/// `exec()` of that inode then fails `ETXTBSY`. The window is the
-/// fork→exec gap in the *other* thread; bounded and short. Retrying
-/// is what `system(3)`/shells do.
+/// Retry exec on `ETXTBSY`: if another thread forks while a script is open for
+/// writing (parallel unit tests doing `write_script` + `execute`), its child
+/// holds the write fd until its own exec closes CLOEXEC fds, and our exec of
+/// that inode fails meanwhile. The window is that fork→exec gap; retrying is
+/// what `system(3)` does.
 fn retry_txtbsy<T>(mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     let mut tries = 0;
     loop {
@@ -193,29 +177,13 @@ fn retry_txtbsy<T>(mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     }
 }
 
-/// `execute_script`.
-///
-/// Builds `<confbase>/<name>` (e.g. `/etc/tinc/foo/host-up`).
-/// If it doesn't exist: returns
-/// [`ScriptResult::NotFound`] — NOT an error. If it runs and exits
-/// non-zero: [`ScriptResult::Failed`] — daemon logs a
-/// warning, doesn't abort.
+/// Run `<confbase>/<name>` (e.g. `host-up`), via `interpreter` if set. A
+/// missing script is [`ScriptResult::NotFound`], a non-zero exit
+/// [`ScriptResult::Failed`]; neither is an error. Blocks the loop like C's
+/// `system()`.
 ///
 /// # Errors
-///
-/// Spawn failures only: ENOENT-after-stat-race, EACCES, ENOEXEC
-/// (shebang-less script with no `interpreter` — see module doc).
-///
-/// **Blocks.** Upstream uses `system()`. The daemon calls this on
-/// the epoll thread; a slow tinc-up stalls the whole daemon. Same
-/// in C. (Upstream wants async script spawn — out of scope.)
-///
-/// `interpreter` is the `ScriptInterpreter` setting:
-/// if `Some`, run `<interpreter> <script>`; else run `<script>`
-/// directly. See module doc for the shebang caveat.
-///
-/// `scriptextension` is empty on Unix (`names.c`). Not a
-/// parameter.
+/// Spawn failures only (EACCES, ENOEXEC, ENOENT race).
 pub(crate) fn execute(
     confbase: &Path,
     name: &str,
@@ -242,14 +210,10 @@ pub(crate) fn execute(
     }
 }
 
-/// Pids we spawned and have not yet reaped. [`register_child`]
-/// pushes, [`reap_children`] drains. Scoping `waitpid` to this set
-/// (instead of `waitpid(-1)`) means we never steal exit statuses from
-/// children other code is `wait()`ing on.
-///
-/// `Mutex` not because we're multithreaded (the event loop isn't) but
-/// because a `static` needs interior mutability and `RefCell` isn't
-/// `Sync`. No contention in practice.
+/// Pids we spawned and haven't reaped: [`register_child`] pushes,
+/// [`reap_children`] drains. Scoping `waitpid` to this set avoids stealing exit
+/// statuses other code waits on. `Mutex` only because a `static` needs `Sync`
+/// interior mutability.
 static CHILDREN: Mutex<Vec<nix::unistd::Pid>> = Mutex::new(Vec::new());
 
 /// `lock()` that ignores poisoning: the only thing under the lock is

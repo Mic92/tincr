@@ -38,38 +38,13 @@ pub(crate) struct TxTarget {
     pub sock: u8,
 }
 
-/// Probe whether this super can take the fast path. Runs `route()` on
-/// `chunk0`, walks the gate chain WITHOUT side effects (except seqno
-/// alloc), returns the copies the seal loop needs. `None` ⇒ slow path.
-///
-/// Gates (any ⇒ `None`):
-///   - `slowpath_all` (setup-time fold of `dns | !Router |
-///     priorityinheritance`; `any_pcap` checked live at call site)
-///   - ARP ethertype (`handle_arp` writes device, reads subnets diff)
-///   - `route()` returns `Forward` (not Unreachable/Broadcast/etc)
-///   - `to != myself` (loopback writes TUN directly)
-///   - `route.via == to && route.nexthop == to` (DIRECT: no relay-MTU
-///     frag, no PACKET 17 short-circuit, no `via_mtu` floor)
-///   - `!TCPONLY` (we're sending UDP)
-///   - `tunnels.get(to)` exists, `validkey`, `outcompression == 0`
-///   - `minmtu > 0 && body_len <= minmtu` (PMTU converged; pre-PMTU
-///     ~3.3s on the slow path is fine)
-///   - `udp_addr` set (cold `choose_udp_address` builds stack-local)
-///
-/// Non-gates (dead on TX, `from=None` semantics):
-///   - `forwarding_mode == Kernel` (gated `&& from.is_some()`)
-///   - `decrement_ttl`, `forwarding_mode == Off` (same)
-///   - `via_mtu` floor (gated `via != myself`, but `via == to` here)
-///   - `CLAMP_MSS`: walks TCP options, only present in SYN/SYN-ACK.
-///     SYN arrives as `Frames{1}` with `gso_type=0` — the `Frames`
-///     arm, not `Super`. The Super arm structurally cannot see a SYN.
-///     Gating on it would reject every default-config peer (the bit
-///     is default-on). Slow path's Frames arm still clamps.
-///
-/// `count`: seqnos to reserve. The `fetch_add` is the one side effect:
-/// burns seqnos even when the result is discarded. Gaps are valid
-/// (SPTPS replay window is a sliding bitmap, REJECTS reused seqnos,
-/// doesn't accept-twice).
+/// Can this super take the TX fast path? Runs `route()` on `chunk0` and
+/// walks the gate chain, side-effect free except reserving `count` seqnos
+/// (gaps are valid). `None` ⇒ slow path when: `slowpath_all`; ARP; not
+/// `Forward`; `to == myself`; not direct (`via == nexthop == to`); TCPONLY;
+/// no tunnel, `!validkey` or compression; PMTU unconverged or body > minmtu;
+/// no `udp_addr`. Forwarding-mode/TTL/`via_mtu` gates are `from.is_some()`
+/// only; `CLAMP_MSS` touches SYNs, which never arrive as `Super`.
 #[must_use]
 pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<TxTarget> {
     // Setup-time fold of every "this packet must go through control"
@@ -98,14 +73,10 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
         return None; // dispatch_route_result:1377 — loopback to TUN
     }
 
-    // `last_routes` lookup. DIRECT gate: target is the relay and is
-    // the nexthop. Covers (a) distance-1 neighbor (`via=nexthop=to`
-    // by tinc-graph:632 — `via = if indirect {n_via} else {e.to}`)
-    // and (b) what the slow path actually checks: sptps.rs's
-    // relay-pick collapses to `to == relay_nid` for from=myself +
-    // non-indirect (via!=myself ⇒ relay=via, then direct = to==via).
-    // `via == myself` only ever holds for myself itself (graph:547),
-    // already excluded above.
+    // `last_routes` lookup and DIRECT gate: the target is both relay and nexthop.
+    // That covers a distance-1 neighbour (`via = nexthop = to`) and exactly what
+    // the slow path's relay pick reduces to for `from = myself` and non-indirect.
+    // `via == myself` only holds for myself, excluded above.
     let route = snap.route_of(to_nid)?;
     if route.via != to_nid || route.nexthop != to_nid {
         return None;

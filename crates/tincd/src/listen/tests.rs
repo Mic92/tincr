@@ -112,14 +112,10 @@ fn fmt_addr_cases() {
     }
 }
 
-/// `pidfile_addr` does the unspec→loopback mapping. We can't
-/// test it directly without a real `Listener` (needs sockets),
-/// but the mapping logic is the same as `init_control:164-173`.
-/// Integration test (`stop.rs::tcp_listener_accepts_and_rejects_control`) verifies via
-/// the actual pidfile.
-///
-/// What we CAN test: empty slice → "127.0.0.1 port 0". The C
-/// getsockname-fail fallback.
+/// `pidfile_addr`'s unspec→loopback mapping needs real listeners, so
+/// `stop.rs::tcp_listener_accepts_and_rejects_control` covers it via the actual
+/// pidfile. Here: empty slice → `127.0.0.1 port 0`, the getsockname-failed
+/// fallback.
 #[test]
 fn pidfile_addr_empty_fallback() {
     assert_eq!(pidfile_addr(&[]), "127.0.0.1 port 0");
@@ -532,18 +528,10 @@ fn sockopts_defaults_match_c() {
     assert!(o.bind_to_interface.is_none());
 }
 
-// adopt_listeners (socket activation).
-
-/// Put a TCP listener at a high fd (avoiding the fd-3 races
-/// that nextest's shared-process model would cause), call
-/// `adopt_listeners_from`, verify the address was discovered
-/// and a UDP socket was opened on the same port.
-///
-/// The dup2-to-a-specific-fd dance is exactly what systemd
-/// does (it dup2's the listening socket to fd 3 before exec).
-/// Using a high fd (`dup` picks the lowest free; we re-dup
-/// from there to a fixed slot) sidesteps collisions with
-/// whatever the test harness has open at low numbers.
+/// Put a TCP listener at a fixed high fd (dup, then dup2, as systemd dup2's to
+/// fd 3; high to avoid whatever nextest's shared process has open low), call
+/// `adopt_listeners_from`, verify the address was discovered and a UDP socket
+/// opened on the same port.
 #[test]
 fn adopt_listeners_from_high_fd() {
     let tcp = TcpListener::bind("127.0.0.1:0").unwrap();

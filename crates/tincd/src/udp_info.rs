@@ -143,15 +143,10 @@ pub(crate) fn should_send_udp_info(
     true
 }
 
-/// What to do with a received `UDP_INFO`.
-///
-/// Every variant except `UnknownNode` and `DroppedPastRelay` implies
-/// "and then forward up the chain"; the daemon re-runs
-/// `should_send_udp_info(from, to)` on Forward / Update.
-///
-/// `N` is the caller's node-id type. The forwarding variants carry
-/// `from`/`to` so the caller doesn't have to re-unwrap `Option`s
-/// whose `Some`-ness this function already proved.
+/// What to do with a received `UDP_INFO`. All but `UnknownNode` and
+/// `DroppedPastRelay` imply forwarding up the chain afterwards (the daemon
+/// re-runs `should_send_udp_info`). Forwarding variants carry `from`/`to` so
+/// the caller needn't re-unwrap what this already proved `Some`.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum UdpInfoAction<N> {
     /// `from` is not directly connected, not UDP-confirmed, and the
@@ -241,17 +236,10 @@ fn parse_socket_addr(addr: &str, port: &str) -> Option<SocketAddr> {
     Some(SocketAddr::new(ip, port))
 }
 
-/// Gates before sending `MTU_INFO`.
-///
-/// Same shape as [`should_send_udp_info`] but: no TCPONLY check
-/// (MTU info is useful even on TCP-mostly paths — *some* hop might
-/// use UDP), and the minor-version gate is **6** not 5 (`MTU_INFO`
-/// was introduced one protocol minor after `UDP_INFO`).
-///
-/// On `true` return when `from_is_myself`, caller bumps the MTU-info
-/// timestamp — a separate timestamp from the UDP-info one.
-///
-/// The MTU *value* adjustment is not here — see
+/// Gates before sending `MTU_INFO`: as [`should_send_udp_info`] but without the
+/// TCPONLY check (some hop may still use UDP) and with minor ≥ 6 (`MTU_INFO`
+/// came one minor after `UDP_INFO`). On `true` with `from_is_myself` the caller
+/// bumps the separate MTU-info timestamp. The value adjustment is
 /// [`adjust_mtu_for_send`].
 #[expect(clippy::too_many_arguments)] // mirrors should_send_udp_info: each param is one snapshot read
 #[expect(clippy::fn_params_excessive_bools)] // independent gates, not a state machine
@@ -291,28 +279,12 @@ pub(crate) fn should_send_mtu_info(
     true
 }
 
-/// MTU adjustment before sending, called by the daemon after
-/// `should_send_mtu_info` returns `true`. Takes the MTU we were about
-/// to send and possibly tightens it based on what we know about the
-/// path to `from`.
-///
-/// `mtu`: the value we were going to send. On the originating call
-///   this is the compile-time max; on forward it's the received value.
-/// `from_via_is_myself`: route to `from` has no static relay — we send
-///   directly or via dynamic relays, so our own measurement is
-///   authoritative.
-/// `from_pmtu`: our PMTU state for `from`. `None` if we have no tunnel.
-/// `via_pmtu`: the relay's PMTU. `None` if no tunnel.
-/// `via_nexthop_pmtu`: the relay's *own* nexthop's PMTU. Only consulted
-///   in the dynamic-relay case.
-///
-/// Branches:
-///   1. converged direct measurement and no static relay: override
-///      `mtu` entirely — the only branch that can increase it.
-///   2. static relay converged: `min` clamp, never increase.
-///   3. dynamic relay's nexthop converged: same `min` clamp.
-///   4. else: leave `mtu` alone (path is TCP-only for us, but forward
-///      anyway — downstream might use UDP).
+/// Tighten the MTU about to be sent (compile-time max when originating,
+/// received value when forwarding) using what we know of the path to `from`: a
+/// converged direct measurement with no static relay (`from_via_is_myself`)
+/// overrides it outright, the only branch that can raise it; a converged static
+/// relay (`via_pmtu`) or dynamic relay's nexthop (`via_nexthop_pmtu`) clamps
+/// with `min`; otherwise leave it, since a downstream hop may still use UDP.
 #[must_use]
 pub(crate) fn adjust_mtu_for_send(
     mtu: i32,
@@ -358,14 +330,9 @@ pub(crate) enum MtuInfoAction<N> {
     UnknownNode,
 }
 
-/// `MTU_INFO` receive decision.
-///
-/// `from`/`to`: `None` if the node isn't in our graph; `N` rides along
-///   so the caller gets it back in the action.
-///
-/// The `mtu < 512` check happens first, before node lookups. That's
-/// the only `Malformed` (connection-fatal) outcome; everything else is
-/// drop-and-continue.
+/// `MTU_INFO` receive decision. `from`/`to` are `None` if not in our graph; `N`
+/// rides along into the action. `mtu < 512` is checked first and is the only
+/// `Malformed` (connection-fatal) outcome; everything else drops and continues.
 #[must_use]
 pub(crate) fn on_receive_mtu_info<N>(
     parsed: &MtuInfo,

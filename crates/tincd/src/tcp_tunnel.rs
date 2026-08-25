@@ -78,20 +78,9 @@ pub(crate) fn parse_frame(blob: &[u8]) -> Option<(NodeId6, NodeId6, &[u8])> {
     ))
 }
 
-// random early drop.
-
-/// Congestion gate for the TCP fallback. Higher outbuf fill →
-/// linearly higher drop probability above the half-max threshold.
-///
-/// `if(outbuf.len > max/2) if((outbuf.len - max/2) > prng(max/2))
-/// return true`.
-///
-/// Returns `true` = DROP this packet. Don't send.
-///
-/// We use `next_u32() % half` (modulo bias is negligible at these
-/// sizes; matches `autoconnect.rs`
-/// idiom). Doesn't matter — this is congestion heuristics, not
-/// crypto.
+/// Random early drop for the TCP fallback: above half of `max` outbuf fill,
+/// drop with probability rising linearly to 1 at full. `true` = drop.
+/// `next_u32() % half` has negligible bias for a congestion heuristic.
 #[must_use]
 pub(crate) fn random_early_drop<R: Rng>(outbuf_len: usize, max: usize, rng: &mut R) -> bool {
     // Degenerate config: max == 0 or max == 1 → half == 0. C would
