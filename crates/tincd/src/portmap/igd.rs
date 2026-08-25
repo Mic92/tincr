@@ -252,7 +252,8 @@ fn http_roundtrip(addr: SocketAddrV4, req: &str) -> Result<String, String> {
     let deadline = Instant::now() + HTTP_DEADLINE;
     let mut s = TcpStream::connect_timeout(&SocketAddr::V4(addr), HTTP_TIMEOUT)
         .map_err(|e| format!("connect {addr}: {e}"))?;
-    s.set_write_timeout(Some(HTTP_TIMEOUT)).ok();
+    s.set_write_timeout(Some(HTTP_TIMEOUT))
+        .map_err(|e| format!("set_write_timeout: {e}"))?;
     s.write_all(req.as_bytes())
         .map_err(|e| format!("write: {e}"))?;
     // Manual read loop instead of `read_to_end`: enforce both a
@@ -265,7 +266,7 @@ fn http_roundtrip(addr: SocketAddrV4, req: &str) -> Result<String, String> {
             .checked_duration_since(Instant::now())
             .ok_or_else(|| format!("read: exceeded {HTTP_DEADLINE:?} wall-clock deadline"))?;
         s.set_read_timeout(Some(remain.max(Duration::from_millis(1))))
-            .ok();
+            .map_err(|e| format!("set_read_timeout: {e}"))?;
         match s.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {

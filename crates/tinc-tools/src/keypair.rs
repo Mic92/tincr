@@ -110,16 +110,17 @@ pub fn read_public(path: &Path) -> Result<[u8; PUBLIC_LEN], LoadError> {
 /// emit one generic message (verify).
 #[must_use]
 pub fn load_public_from_config(cfg: &Config, default_path: &Path) -> Option<[u8; PUBLIC_LEN]> {
+    // Bad b64 is `None`, not a fall-through — a malformed line is a
+    // config bug, not a "look elsewhere" hint.
     if let Some(entry) = cfg.lookup("Ed25519PublicKey").next() {
-        // Bad b64 is `None`, not a fall-through — a malformed line is a
-        // config bug, not a "look elsewhere" hint.
-        return b64::decode(entry.get_str())?.try_into().ok();
+        b64::decode(entry.get_str())?.try_into().ok()
+    } else {
+        let pem_path = cfg
+            .lookup("Ed25519PublicKeyFile")
+            .next()
+            .map_or_else(|| default_path.to_owned(), |e| e.get_str().into());
+        read_public(&pem_path).ok()
     }
-    let pem_path = cfg
-        .lookup("Ed25519PublicKeyFile")
-        .next()
-        .map_or_else(|| default_path.to_owned(), |e| e.get_str().into());
-    read_public(&pem_path).ok()
 }
 
 /// Key file load failure. Wraps the inner errors with the path for

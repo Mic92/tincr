@@ -57,13 +57,13 @@ impl Run {
     }
 
     #[track_caller]
-    pub fn ok(self) -> String {
+    pub fn succeeds(self) -> String {
         assert!(self.success, "failed: {}", self.stderr);
         self.stdout
     }
 
     #[track_caller]
-    pub fn ok_stderr(self) -> String {
+    pub fn succeeds_stderr(self) -> String {
         assert!(self.success, "failed: {}", self.stderr);
         self.stderr
     }
@@ -118,7 +118,7 @@ impl Conf {
 
     pub fn init(name: &str) -> Self {
         let conf = Self::bare();
-        conf.tinc(&["init", name]).ok();
+        conf.tinc(&["init", name]).succeeds();
         conf
     }
 

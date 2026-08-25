@@ -490,7 +490,7 @@ fn upnp_rogue_gateway_ext_addr_rejected() {
             let Ok(mut stream) = stream else { return };
             stream
                 .set_read_timeout(Some(Duration::from_millis(200)))
-                .ok();
+                .unwrap();
             let mut raw = Vec::new();
             let mut chunk = [0u8; 4096];
             while let Ok(len @ 1..) = stream.read(&mut chunk) {

@@ -16,9 +16,9 @@ fn export_then_import() {
     let host = alice.read("hosts/alice") + "Address = 192.0.2.1\nSubnet = 10.0.1.0/24\n";
     alice.write("hosts/alice", &host);
 
-    let exported = alice.tinc(&["export"]).ok();
+    let exported = alice.tinc(&["export"]).succeeds();
     assert_eq!(exported.lines().next(), Some("Name = alice"));
-    bob.tinc_stdin(&["import"], exported.as_bytes()).ok();
+    bob.tinc_stdin(&["import"], exported.as_bytes()).succeeds();
     assert_eq!(bob.read("hosts/alice"), host);
 }
 
@@ -28,11 +28,11 @@ fn export_all_then_import() {
     let charlie = Conf::init("charlie");
     alice.write("hosts/bob", "Subnet = 10.0.2.0/24\nAddress = 192.0.2.2\n");
 
-    let exported = alice.tinc(&["export-all"]).ok();
+    let exported = alice.tinc(&["export-all"]).succeeds();
     assert!(exported.contains("Name = alice") && exported.contains("Name = bob"));
     let run = charlie.tinc_stdin(&["import"], exported.as_bytes());
     assert!(run.stderr.contains("Imported 2"), "{}", run.stderr);
-    run.ok();
+    run.succeeds();
     assert_eq!(
         charlie.read("hosts/bob"),
         "Subnet = 10.0.2.0/24\nAddress = 192.0.2.2\n"
@@ -58,6 +58,6 @@ fn import_existing_needs_force() {
     );
     assert!(conf.read("hosts/alice").contains("Ed25519PublicKey"));
 
-    conf.tinc_stdin(&["--force", "import"], blob).ok();
+    conf.tinc_stdin(&["--force", "import"], blob).succeeds();
     assert_eq!(conf.read("hosts/alice"), "OVERWRITTEN\n");
 }

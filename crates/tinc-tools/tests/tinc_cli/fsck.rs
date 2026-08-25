@@ -7,7 +7,7 @@ use super::{Conf, tinc};
 fn clean_init_is_silent() {
     let run = Conf::init("alice").tinc(&["fsck"]);
     assert_eq!(run.stderr, "");
-    run.ok();
+    run.succeeds();
 }
 
 /// The suggestion includes the `-c` prefix the user needs.
@@ -29,7 +29,7 @@ fn warning_exits_zero() {
     let run = conf.tinc(&["fsck"]);
     assert!(run.stderr.contains("WARNING:"), "{}", run.stderr);
     assert!(run.stderr.contains("Port"), "{}", run.stderr);
-    run.ok();
+    run.succeeds();
 }
 
 /// Missing public key: error without `--force`, fixed with it, clean
@@ -42,10 +42,10 @@ fn force_fixes_missing_public_key() {
 
     let run = conf.tinc(&["--force", "fsck"]);
     assert!(run.stderr.contains("Wrote Ed25519"), "{}", run.stderr);
-    run.ok();
+    run.succeeds();
     assert!(
         conf.read("hosts/alice")
             .contains("-----BEGIN ED25519 PUBLIC KEY-----")
     );
-    conf.tinc(&["fsck"]).ok();
+    conf.tinc(&["fsck"]).succeeds();
 }

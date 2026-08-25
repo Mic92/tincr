@@ -377,7 +377,7 @@ mod tests {
             }
         }
         fn write(&mut self, _: &mut [u8]) -> io::Result<usize> {
-            unimplemented!()
+            unreachable!("read-path test double")
         }
         fn mode(&self) -> Mode {
             Mode::Tun

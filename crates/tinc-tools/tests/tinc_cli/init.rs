@@ -7,7 +7,7 @@ fn init_creates_confbase() {
     let conf = Conf::bare();
     let run = conf.tinc(&["INIT", "alice"]);
     assert!(run.stderr.contains("Generating Ed25519"), "{}", run.stderr);
-    assert_eq!(run.ok(), "");
+    assert_eq!(run.succeeds(), "");
     assert_eq!(conf.read("tinc.conf"), "Name = alice\n");
     assert!(conf.host("alice").exists());
     assert!(conf.base().join("ed25519_key.priv").exists());
@@ -17,7 +17,7 @@ fn init_creates_confbase() {
 #[test]
 fn init_glued_config_option() {
     let conf = Conf::bare();
-    tinc(&[&format!("--config={}", conf.arg()), "init", "bob"]).ok();
+    tinc(&[&format!("--config={}", conf.arg()), "init", "bob"]).succeeds();
     assert_eq!(conf.read("tinc.conf"), "Name = bob\n");
 }
 
@@ -30,6 +30,6 @@ fn init_name_from_stdin() {
     assert!(stderr.contains("Usage: tinc init NAME"), "{stderr}");
     assert!(!conf.base().join("tinc.conf").exists());
 
-    tinc_stdin(&["-c", &conf.arg(), "init"], b"alice\n").ok();
+    tinc_stdin(&["-c", &conf.arg(), "init"], b"alice\n").succeeds();
     assert_eq!(conf.read("tinc.conf"), "Name = alice\n");
 }

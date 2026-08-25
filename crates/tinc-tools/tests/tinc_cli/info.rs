@@ -48,7 +48,7 @@ fn info_node() {
             cmd.env("TZ", "UTC");
         },
     )
-    .ok();
+    .succeeds();
     daemon.finish();
     assert_eq!(
         stdout,
@@ -100,7 +100,7 @@ fn info_address() {
         ctl.send("18 5 ff:ff:ff:ff:ff:ff (broadcast)");
         ctl.send("18 5");
     });
-    let stdout = conf.tinc(&["info", "10.0.0.5"]).ok();
+    let stdout = conf.tinc(&["info", "10.0.0.5"]).succeeds();
     daemon.finish();
     assert_eq!(
         stdout,
