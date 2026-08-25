@@ -9,7 +9,7 @@
 //!
 //! The signalling channel is a `socketpair(AF_UNIX, SOCK_STREAM)`.
 //! Parent keeps one end; child gets the other end's fd number in
-//! `TINC_UMBILICAL` env. The daemon (`crates/tincd/src/main.rs::
+//! `TINC_UMBILICAL` env. The daemon (`crates/tincd/src/bin/tincd/procsetup.rs::
 //! cut_umbilical`) writes a single nul byte after `Daemon::setup`
 //! returns Ok, then closes. Parent reads until EOF; if the last
 //! byte before EOF was nul, success.
