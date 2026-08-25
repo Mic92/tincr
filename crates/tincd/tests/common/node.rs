@@ -13,6 +13,7 @@
 )]
 #![allow(dead_code)]
 
+use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::os::fd::{OwnedFd, RawFd};
@@ -206,7 +207,6 @@ impl Node {
     /// Like `start`, letting `fd` survive the exec so the daemon can
     /// use it as its device. Drop the caller's copy afterwards.
     pub fn start_with_fd(&mut self, fd: &OwnedFd) -> &mut Self {
-        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
         fcntl(fd, FcntlArg::F_SETFD(FdFlag::empty())).expect("clear CLOEXEC");
         self.start()
     }

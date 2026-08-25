@@ -1,7 +1,8 @@
 use super::*;
-use std::fs;
-
+use crate::cmd::invite;
 use crate::names::PathsInput;
+use std::fs;
+use std::thread;
 
 // Kind parsing: argv → Kind. The `reachable nodes` shift must happen
 // before the arity check.
@@ -441,7 +442,6 @@ fn conn_fmt_plain_contract() {
 /// Tempdir for invitations tests. Same shape as invite.rs tests:
 /// init confbase, write the invitations dir manually.
 fn setup_inv() -> (tempfile::TempDir, Paths) {
-    use std::thread;
     let tid = format!("{:?}", thread::current().id());
     let dir = tempfile::Builder::new()
         .prefix(&format!("tinc-dump-inv-{tid}-"))
@@ -664,8 +664,6 @@ fn inv_file_perms_skip() {
 /// `build_invitation_file`.
 #[test]
 fn inv_roundtrip_with_invite() {
-    use crate::cmd::invite;
-
     let cd = crate::testutil::ConfDir::bare();
     let paths = cd.paths().clone();
     let cb = cd.confbase();

@@ -1,9 +1,11 @@
+// LineBuf.
+
 use super::*;
 use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
 use nix::unistd::write;
 use tinc_crypto::os_rng;
-
-// LineBuf.
+use tinc_crypto::sign::SigningKey;
+use tinc_sptps::{Framing, Output, Role};
 
 #[test]
 fn linebuf_one_full_line() {
@@ -262,9 +264,6 @@ impl rand_core::TryRng for NoRng {
 /// `feed_sptps([])` → empty. Early-return before sptps is touched.
 #[test]
 fn feed_sptps_empty_chunk() {
-    use tinc_crypto::sign::SigningKey;
-    use tinc_sptps::{Framing, Role};
-
     let mykey = SigningKey::from_seed(&[1; 32]);
     let hispub = *SigningKey::from_seed(&[2; 32]).public_key();
     let (mut sptps, _) = Sptps::start(
@@ -289,9 +288,6 @@ fn feed_sptps_empty_chunk() {
 /// `receive()` call would strand the second.
 #[test]
 fn feed_sptps_two_records_one_chunk() {
-    use tinc_crypto::sign::SigningKey;
-    use tinc_sptps::{Framing, Output, Role};
-
     let alice_k = SigningKey::from_seed(&[10; 32]);
     let bob_k = SigningKey::from_seed(&[20; 32]);
     let alice_pub = *alice_k.public_key();
@@ -378,9 +374,6 @@ fn feed_sptps_two_records_one_chunk() {
 /// `(2, [])`; loop terminates (no spin).
 #[test]
 fn feed_sptps_partial_record() {
-    use tinc_crypto::sign::SigningKey;
-    use tinc_sptps::{Framing, Role};
-
     let mykey = SigningKey::from_seed(&[1; 32]);
     let hispub = *SigningKey::from_seed(&[2; 32]).public_key();
     let (mut sptps, _) = Sptps::start(
@@ -403,9 +396,6 @@ fn feed_sptps_partial_record() {
 /// Decrypt fail → Dead.
 #[test]
 fn feed_sptps_decrypt_fail_is_dead() {
-    use tinc_crypto::sign::SigningKey;
-    use tinc_sptps::{Framing, Role};
-
     let mykey = SigningKey::from_seed(&[1; 32]);
     let hispub = *SigningKey::from_seed(&[2; 32]).public_key();
     let (mut sptps, _) = Sptps::start(
@@ -429,9 +419,6 @@ fn feed_sptps_decrypt_fail_is_dead() {
 
 /// Handshaked pair with bob as a Connection's sptps.
 fn sptps_conn_pair() -> (Connection, tinc_sptps::Sptps, OwnedFd) {
-    use tinc_crypto::sign::SigningKey;
-    use tinc_sptps::{Framing, Output, Role};
-
     let alice_k = SigningKey::from_seed(&[10; 32]);
     let bob_k = SigningKey::from_seed(&[20; 32]);
     let alice_pub = *alice_k.public_key();
@@ -554,7 +541,6 @@ fn feed_sptpslen_straddle() {
 /// next iter eats blob. Events must be `[Blob, Record(PING)]`.
 #[test]
 fn feed_sptpslen_then_record() {
-    use tinc_sptps::Output;
     let (mut conn, mut alice, wr) = sptps_conn_pair();
     conn.allow_request = None; // peek is gated to post-ACK
 

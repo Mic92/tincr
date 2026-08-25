@@ -2,7 +2,9 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf}; // for st_uid
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -157,7 +159,6 @@ fn fix_public_key(
         o.append(true).create(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::OpenOptionsExt;
             o.custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
         }
         let f = o.open(host_file)?;
@@ -194,8 +195,6 @@ fn fix_public_key(
 /// gates the fix.
 #[cfg(unix)]
 fn check_key_mode(path: &Path, force: bool, findings: &mut Vec<Finding>) {
-    use std::os::unix::fs::MetadataExt; // for st_uid
-
     // We already successfully opened this file (in `read_private`),
     // so metadata failing here would be a TOCTOU race. Just skip —
     // the `read_private` call is the real existence check.

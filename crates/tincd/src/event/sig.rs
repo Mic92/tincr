@@ -35,6 +35,14 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::sync::atomic::{AtomicI32, Ordering};
 
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly",
+)))]
+use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
 
 /// Write-end fd for the handler. `-1` = not initialized; `new()`
@@ -145,7 +153,6 @@ impl<W: Copy> SelfPipe<W> {
             target_os = "dragonfly",
         )))]
         {
-            use nix::fcntl::{FcntlArg, FdFlag, fcntl};
             let (rd, wr) = nix::unistd::pipe()?;
             fcntl(&rd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
             fcntl(&wr, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;

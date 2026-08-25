@@ -9,11 +9,14 @@
 
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::TcpStream;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tinc_crypto::sign::SigningKey;
+use tinc_sptps::{Framing, Output, Role, Sptps};
 
 pub mod bench;
 pub mod node;
@@ -250,7 +253,6 @@ pub fn pubkey_from_seed(seed: &[u8; 32]) -> [u8; 32] {
 }
 
 pub fn write_ed25519_privkey(confbase: &Path, seed: &[u8; 32]) {
-    use std::os::unix::fs::OpenOptionsExt;
     let key = tinc_crypto::sign::SigningKey::from_seed(seed);
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -439,9 +441,6 @@ impl PeerFixture {
     }
 
     pub fn spawn_with_conf(tag: &str, extra_conf: &str) -> Self {
-        use tinc_crypto::sign::SigningKey;
-        use tinc_sptps::{Framing, Output, Role, Sptps};
-
         let tmp = TmpGuard::new("peer", tag);
         let peer = Node::new(tmp.path(), "testpeer", PEER_SEED);
         // We never answer PING, so keep the daemon from reaping us.
@@ -494,7 +493,6 @@ impl PeerFixture {
     }
 
     pub fn send_record(&mut self, body: &[u8]) {
-        use tinc_sptps::Output;
         for output in self.sptps.send_record(0, body).expect("send_record") {
             if let Output::Wire { bytes, .. } = output {
                 (&self.stream).write_all(&bytes).expect("send record");
@@ -506,7 +504,6 @@ impl PeerFixture {
     /// socket read times out with nothing buffered. Handshake `Wire`
     /// output (our SIG) is written back as it appears.
     fn pump(&mut self, timeout: Duration, done: impl Fn(&[Vec<u8>]) -> bool) -> Vec<Vec<u8>> {
-        use tinc_sptps::Output;
         let deadline = Instant::now() + timeout;
         let mut pending = Vec::new();
         let mut records = Vec::new();

@@ -29,6 +29,12 @@ use std::path::Path;
 
 use crate::ether::{ETH_HLEN, from_ip_nibble, set_etherheader};
 use crate::{Device, MTU, Mac, Mode, assert_read_buf, read_fd, write_fd};
+use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
+#[cfg(target_os = "android")]
+use std::os::android::net::SocketAddrExt;
+#[cfg(target_os = "linux")]
+use std::os::linux::net::SocketAddrExt;
+use std::os::unix::net::SocketAddr;
 
 // FdSource — the union type the config-string dispatch implies
 
@@ -96,8 +102,6 @@ fn recv_scm_rights(path: &Path) -> io::Result<OwnedFd> {
 /// socket. Factored out so the test can drive it on a `socketpair`
 /// without the `connect_unix` step.
 fn recv_one_fd(stream: &impl AsRawFd) -> io::Result<OwnedFd> {
-    use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
-
     // 1-byte iov: the Java sender writes one payload byte alongside
     // the fd cmsg; a zero-length recv would look like EOF.
     let mut iobuf = [0u8; 1];
@@ -182,11 +186,6 @@ fn connect_unix(path: &Path) -> io::Result<UnixStream> {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             // Abstract namespace: std adds the leading NUL, so strip `@`.
-            #[cfg(target_os = "android")]
-            use std::os::android::net::SocketAddrExt;
-            #[cfg(target_os = "linux")]
-            use std::os::linux::net::SocketAddrExt;
-            use std::os::unix::net::SocketAddr;
             let addr = SocketAddr::from_abstract_name(&bytes[1..])?;
             return UnixStream::connect_addr(&addr);
         }
@@ -277,6 +276,10 @@ impl Device for FdTun {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nix::sys::socket::{
+        AddressFamily, ControlMessage, MsgFlags, SockFlag, SockType, sendmsg, socketpair,
+    };
+    use std::io::IoSlice;
 
     // pipe-based integration: this backend reads raw IP (no kernel-
     // side layout to fake), so a `pipe()` is enough to exercise the
@@ -390,11 +393,6 @@ mod tests {
     /// the dup points at the same open file description.
     #[test]
     fn scm_rights_round_trip() {
-        use nix::sys::socket::{
-            AddressFamily, ControlMessage, MsgFlags, SockFlag, SockType, sendmsg, socketpair,
-        };
-        use std::io::IoSlice;
-
         let (snd, rcv) = socketpair(
             AddressFamily::Unix,
             SockType::Stream,

@@ -311,6 +311,7 @@ mod tests {
     use tinc_crypto::b64::encode;
 
     use crate::testutil::TmpDir;
+    use std::os::unix::fs::OpenOptionsExt;
 
     /// Generate a deterministic keypair for tests. Seeded from a tag.
     fn det_key(tag: u8) -> SigningKey {
@@ -319,7 +320,6 @@ mod tests {
 
     /// Write a private key PEM file with given mode.
     fn write_priv(path: &Path, sk: &SigningKey, mode: u32) {
-        use std::os::unix::fs::OpenOptionsExt;
         let f = std::fs::OpenOptions::new()
             .write(true)
             .create(true)

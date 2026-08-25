@@ -155,6 +155,7 @@ mod tests {
     use super::*;
     use rand_chacha::ChaCha8Rng;
     use rand_core::SeedableRng;
+    use tinc_proto::msg::AnsKey;
 
     fn v4(s: &str) -> SocketAddr {
         s.parse().unwrap()
@@ -307,7 +308,6 @@ mod tests {
     /// is right for both v4 and v6.
     #[test]
     fn ans_key_reflexive_roundtrip() {
-        use tinc_proto::msg::AnsKey;
         // Base ANS_KEY (7-field, no addr).
         let base = "16 alice bob aGVsbG8 0 0 0 0";
         for sa in [v4("192.168.1.42:655"), v6("[fe80::1]:12345")] {

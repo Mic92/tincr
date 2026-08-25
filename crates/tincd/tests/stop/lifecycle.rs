@@ -1,3 +1,4 @@
+use nix::sys::signal::Signal;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
@@ -5,10 +6,10 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::Signal;
-
 use super::common::{poll_until, read_cookie, read_tcp_addr, read_to_eof, tincd_at};
 use super::testnode;
+use std::os::fd::OwnedFd;
+use std::os::unix::process::CommandExt;
 
 /// Raw greeting: `0 ^COOKIE 0` → `0 testnode 17.7` + `4 0 PID`.
 fn greet(socket: &UnixStream, cookie: &str) -> (String, String) {
@@ -93,8 +94,6 @@ fn umbilical_on_stderr_is_ignored() {
 /// expect exactly one NUL byte once setup is done.
 #[test]
 fn umbilical_gets_nul_after_setup() {
-    use std::os::fd::OwnedFd;
-
     let tmp = tmp!("umbilical-daemon");
     let mut node = testnode(tmp.path());
     let (mut test_end, daemon_end) = UnixStream::pair().unwrap();
@@ -109,7 +108,6 @@ fn umbilical_gets_nul_after_setup() {
     // SAFETY: dup2 is async-signal-safe.
     #[expect(unsafe_code)]
     unsafe {
-        use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {
             if libc::dup2(0, 3) == -1 {
                 return Err(std::io::Error::last_os_error());

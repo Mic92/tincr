@@ -3,6 +3,7 @@
 //! `/authorize` whois succeed on loopback.
 
 use super::{AuthDaemon, Conf, HttpResponse};
+use base64::Engine;
 use std::io::Write;
 use std::net::TcpStream;
 
@@ -117,7 +118,6 @@ fn idp_full_flow_over_http() {
     let t = tok.json();
     let id_token = t["id_token"].as_str().unwrap();
     let claims: serde_json::Value = {
-        use base64::Engine;
         let payload = id_token.split('.').nth(1).unwrap();
         serde_json::from_slice(
             &base64::engine::general_purpose::URL_SAFE_NO_PAD

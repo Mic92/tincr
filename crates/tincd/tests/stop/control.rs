@@ -1,10 +1,10 @@
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::UdpSocket;
-use std::os::unix::net::UnixStream;
-use std::time::Duration;
-
 use super::common::{Node, poll_until, read_cookie, tincd_at, wait_for_file};
 use super::testnode;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::UdpSocket;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
+use std::time::Duration;
 
 fn count_open_fds(pid: nix::unistd::Pid) -> usize {
     #[cfg(target_os = "linux")]
@@ -205,8 +205,6 @@ fn set_debug_reports_previous_and_reverts_on_close() {
 /// it. Launch from `/` to make the check meaningful.
 #[test]
 fn tinc_up_runs_in_confbase() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tmp!("tinc-up-cwd");
     let mut node = testnode(tmp.path());
     let cwd_file = tmp.path().join("cwd.txt");

@@ -27,6 +27,7 @@
 //! fails with EACCES on `/etc/tinc` mkdir, a known papercut. We
 //! don't fix it here.
 
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 /// `CONFDIR` from `config.h`. Baked at compile time.
@@ -278,7 +279,6 @@ impl Paths {
             // instead. On Unix, `OsStr::from_bytes` is the safe path.
             #[cfg(unix)]
             {
-                use std::os::unix::ffi::OsStrExt;
                 let mut s = std::ffi::OsStr::from_bytes(stem).to_owned();
                 s.push(".socket");
                 PathBuf::from(s)

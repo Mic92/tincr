@@ -356,6 +356,7 @@ pub(crate) fn make_udp_label(initiator: &str, responder: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn reset_unreachable_clears_everything() {
@@ -521,7 +522,6 @@ mod tests {
     /// `KeyExpire`; healthy path reaps after 2×PingInterval as before.
     #[test]
     fn prev_sptps_reap_predicate() {
-        use std::time::Duration;
         let pi2 = Duration::from_mins(2);
         let ke = Duration::from_hours(1);
         let t0 = Instant::now();
@@ -575,7 +575,6 @@ mod tests {
 
     #[test]
     fn periodic_rekey_due_gates() {
-        use std::time::Duration;
         let pi = Duration::from_mins(1);
         let t0 = Instant::now();
         let late = t0 + pi + Duration::from_secs(1);

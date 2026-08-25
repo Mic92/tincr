@@ -61,6 +61,9 @@ use crate::tui;
 // `TrafficRow` lives in `ctl::rows` alongside the other dump-row schemas;
 // re-exported for `top/tests.rs`.
 pub use crate::ctl::rows::TrafficRow;
+use SortMode::{InBytes, InPackets, Name, OutBytes, OutPackets, TotalBytes, TotalPackets};
+use std::collections::btree_map::Entry;
+use std::fmt::Write as _;
 
 /// Per-node accumulator. The name is the `BTreeMap` key, not stored here.
 ///
@@ -179,8 +182,6 @@ impl Stats {
     /// Returns true if a new node appeared.
     #[expect(clippy::cast_precision_loss)] // u64→f32: 1s deltas ≪ 2^24; cumulative is display-only
     pub fn update(&mut self, rows: &[TrafficRow], now: Instant) -> bool {
-        use std::collections::btree_map::Entry;
-
         // First tick: prev=None → interval ≈ epoch seconds → rate ≈ 0
         // (see module doc).
         let interval: f32 = match self.prev_instant {
@@ -284,7 +285,6 @@ fn compare(a: &NodeStats, b: &NodeStats, mode: SortMode, cumulative: bool) -> st
 /// keys directly, so the arm only keeps the match exhaustive.
 #[expect(clippy::cast_precision_loss)] // see compare()
 fn sort_key(s: &NodeStats, mode: SortMode, cumulative: bool) -> f64 {
-    use SortMode::{InBytes, InPackets, Name, OutBytes, OutPackets, TotalBytes, TotalPackets};
     let pick = |cum: u64, rate: f32| {
         if cumulative {
             cum as f64
@@ -319,8 +319,6 @@ fn sort_key(s: &NodeStats, mode: SortMode, cumulative: bool) -> f64 {
 /// Returns one String with embedded `goto`; caller writes it in one
 /// syscall so there is no flicker between rows.
 fn render_header(netname: Option<&str>, stats: &Stats) -> String {
-    use std::fmt::Write as _;
-
     let netname = netname.unwrap_or("");
     let count = stats.nodes.len();
     let sortname = SORTNAME[stats.sort_mode as usize];

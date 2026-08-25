@@ -29,6 +29,7 @@ use kem::{Decapsulate, Encapsulate, Kem, KeyExport};
 use ml_kem::MlKem768;
 use ml_kem::ml_kem_768::{DecapsulationKey, EncapsulationKey};
 use rand_core::CryptoRng;
+use sha2::{Digest, Sha512};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// ML-KEM-768 encapsulation key (`ek`). FIPS 203 §8, table 2.
@@ -182,7 +183,6 @@ pub const HYBRID_SHARED_LEN: usize = crate::ecdh::SHARED_LEN + 2 * SS_LEN;
 /// so the seed stays small. See `docs/PROTOCOL.md`.
 #[must_use]
 pub fn kem_transcript_hash(ek_i: &[u8], ek_r: &[u8], ct_i2r: &[u8], ct_r2i: &[u8]) -> [u8; 64] {
-    use sha2::{Digest, Sha512};
     let mut h = Sha512::new();
     h.update(ek_i);
     h.update(ek_r);

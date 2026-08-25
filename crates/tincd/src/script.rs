@@ -49,6 +49,7 @@ use std::path::Path;
 use std::process::{Command, ExitStatus};
 
 use crate::sandbox;
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 
 /// One script invocation's environment. Upstream `environment_t`: a
 /// growing `char**` arena of `"KEY=value"` strings, fed to
@@ -269,7 +270,6 @@ pub(crate) fn register_child(pid: nix::unistd::Pid) {
 /// route) is visible at default log level instead of silently
 /// swallowed.
 pub(crate) fn reap_children() {
-    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
     children().retain(|&pid| {
         match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
             // Not exited yet: keep.

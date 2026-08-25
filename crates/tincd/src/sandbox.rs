@@ -46,6 +46,11 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(target_os = "linux")]
+use landlock::{
+    ABI, Access, AccessFs, BitFlags, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
+    path_beneath_rules,
+};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -311,11 +316,6 @@ fn discover_paths(level: Level, paths: &Paths) -> SandboxPaths {
 /// pre-split body.
 #[cfg(target_os = "linux")]
 fn build_and_apply_ruleset(p: SandboxPaths, level: Level) -> Result<(), String> {
-    use landlock::{
-        ABI, Access, AccessFs, BitFlags, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
-        path_beneath_rules,
-    };
-
     // ABI V1 = kernel 5.13 (June 2021). Everything we need
     // (Execute, ReadFile, WriteFile, ReadDir, Make*, Remove*) is
     // V1. V3 adds Truncate which `addrcache.rs::save` (`fs::write`

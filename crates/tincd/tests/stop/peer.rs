@@ -11,6 +11,8 @@ use std::time::Duration;
 use super::common::{
     Node, PeerFixture, is_timeout, node_reachable, node_status, read_cookie, read_line_unbuffered,
 };
+use tinc_crypto::sign::SigningKey;
+use tinc_sptps::{Framing, Output, Role, Sptps};
 
 /// Our ACK (`4 udp-port weight options`) followed by the edge a real
 /// peer would announce for its side of the connection. Without that
@@ -216,9 +218,6 @@ fn transitive_edge_makes_node_reachable() {
 /// connection must be dropped.
 #[test]
 fn handshake_with_wrong_key_is_rejected() {
-    use tinc_crypto::sign::SigningKey;
-    use tinc_sptps::{Framing, Output, Role, Sptps};
-
     let tmp = tmp!("wrong-key");
     let registered_peer = Node::new(tmp.path(), "testpeer", 0x88);
     let mut node = Node::new(tmp.path(), "testnode", 0x42);

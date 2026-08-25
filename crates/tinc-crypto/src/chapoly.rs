@@ -139,6 +139,7 @@ mod backend {
     use openssl_sys as ffi;
     use std::cell::RefCell;
     use std::sync::OnceLock;
+    use zeroize::Zeroize;
 
     /// Fetched `POLY1305` EVP_MAC: immutable, refcounted, thread-safe.
     struct Mac(*mut ffi::EVP_MAC);
@@ -212,7 +213,6 @@ mod backend {
         /// (partial updates hit EVP's buffering slow path). u64-typed
         /// so the wipe is 8 volatile stores, not 64.
         pub(super) fn block0(&mut self) -> [u8; 32] {
-            use zeroize::Zeroize;
             const ZEROS: [u8; 64] = [0u8; 64];
             let mut block = [0u64; 8];
             let mut n = 0;

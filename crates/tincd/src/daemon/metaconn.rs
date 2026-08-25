@@ -22,6 +22,7 @@ use crate::{invitation_serve, script, socks};
 use crate::event::Io;
 use tinc_crypto::os_rng;
 use tinc_proto::Request;
+use tinc_sptps::Output;
 
 /// `Again`: caller should loop (kernel may have more). `Done`: stop.
 enum FeedDrain {
@@ -585,8 +586,6 @@ impl Daemon {
         id: ConnId,
         outs: Vec<tinc_sptps::Output>,
     ) -> bool {
-        use tinc_sptps::Output;
-
         // Our Sptps is callback-free, so branch here on `conn.invite`
         // for the invite-serve path.
         if self.conns.get(id).is_some_and(|c| c.invite.is_some()) {
@@ -892,7 +891,6 @@ impl Daemon {
         id: ConnId,
         outs: Vec<tinc_sptps::Output>,
     ) -> bool {
-        use tinc_sptps::Output;
         let mut needs_write = false;
 
         for o in outs {

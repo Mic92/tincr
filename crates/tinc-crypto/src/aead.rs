@@ -295,6 +295,7 @@ mod gcm {
     use super::TAG_LEN;
     use openssl_sys as ffi;
     use std::cell::RefCell;
+    use zeroize::Zeroize;
 
     /// Per-thread encrypt/decrypt contexts, reused across records.
     /// The last key is cached so steady-state records re-init IV only
@@ -341,7 +342,6 @@ mod gcm {
 
     impl Drop for Ctx {
         fn drop(&mut self) {
-            use zeroize::Zeroize;
             // SAFETY: owned non-null pointers, freed exactly once.
             unsafe {
                 ffi::EVP_CIPHER_CTX_free(self.enc);

@@ -226,6 +226,8 @@ fn open_append(path: &Path, mode: u32) -> Result<fs::File, CmdError> {
 mod tests {
     use super::*;
     use crate::testutil;
+    use std::os::unix::fs::PermissionsExt;
+    use tinc_conf::pem::read_pem;
 
     /// Nonexistent file → `Ok(false)`, no tmpfile left behind.
     #[test]
@@ -375,7 +377,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn disable_preserves_mode() {
-        use std::os::unix::fs::PermissionsExt;
         let (_dir, path) = testutil::scratch_file("f", "Ed25519PublicKey = x\n");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
         assert!(disable_old_keys(&path).unwrap());
@@ -404,7 +405,6 @@ mod tests {
     /// `#`-comments — they're not `-----BEGIN`).
     #[test]
     fn rotation_roundtrip() {
-        use tinc_conf::pem::read_pem;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ed25519_key.priv");
 

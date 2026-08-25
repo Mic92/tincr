@@ -3,6 +3,10 @@
 //! `send_record`/`receive` path.
 
 use crate::common::{Pair, SeedRng, wire, wires};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::atomic::Ordering::Relaxed;
+use tinc_crypto::chapoly::ChaPoly;
 use tinc_sptps::SptpsError;
 
 const HEADROOM: usize = 14;
@@ -164,9 +168,6 @@ fn alloc_seqnos_seal_with_seqno_byte_identical() {
 /// daemon's own next seal must continue from the shared counter.
 #[test]
 fn handle_based_seal_byte_identical() {
-    use std::sync::atomic::Ordering;
-    use tinc_crypto::chapoly::ChaPoly;
-
     let (mut a1, _b1) = pair();
     let (a2, mut b2) = pair();
 
@@ -235,9 +236,6 @@ fn handle_based_seal_byte_identical() {
 /// `u32::wrapping_add`.
 #[test]
 fn u64_truncate_is_u32_wrap() {
-    use std::sync::atomic::AtomicU64;
-    use std::sync::atomic::Ordering::Relaxed;
-
     let a = AtomicU64::new(u64::from(u32::MAX) - 2);
     let mut u: u32 = u32::MAX - 2;
 

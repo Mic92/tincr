@@ -13,7 +13,11 @@
 //! actually helps here: `cmd/init.rs` is self-contained, you can read
 //! it without paging through `cmd_dump`.
 
+use std::fs;
 use std::io;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 
 pub mod config;
@@ -105,8 +109,6 @@ impl From<crate::keypair::LoadError> for CmdError {
 pub(crate) fn makedir(path: &std::path::Path, mode: u32) -> Result<(), CmdError> {
     #[cfg(unix)]
     {
-        use std::fs;
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         match fs::DirBuilder::new().mode(mode).create(path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -163,7 +165,6 @@ pub(crate) fn open_nofollow(
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
         o.mode(mode)
             .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
     }
@@ -180,7 +181,6 @@ pub(crate) fn write_private_key(
     sk: &tinc_crypto::sign::SigningKey,
     kind: OpenKind,
 ) -> Result<(), CmdError> {
-    use std::io::Write;
     let f = open_nofollow(path, kind, 0o600)?;
     let mut w = std::io::BufWriter::new(f);
     tinc_conf::pem::write_pem(&mut w, crate::keypair::TY_PRIVATE, &sk.to_blob())

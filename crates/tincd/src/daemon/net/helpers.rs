@@ -165,6 +165,7 @@ pub(crate) fn gro_offer_or_write(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tunnel::TunnelState;
     use std::io;
 
     #[test]
@@ -194,7 +195,6 @@ mod tests {
 
     #[test]
     fn handle_udp_unreachable_clears_state_and_rate_limits() {
-        use crate::tunnel::TunnelState;
         let mut tunnels: IntHashMap<NodeId, TunnelState> = IntHashMap::default();
         let tunnel_handles: IntHashMap<NodeId, Arc<TunnelHandles>> = IntHashMap::default();
         let nid = NodeId(42);

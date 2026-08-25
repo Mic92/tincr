@@ -33,6 +33,7 @@ use crate::names::{Paths, check_id};
 // Row schemas are wire-level, shared with `info`/`top`/`tinc-auth`.
 // Re-exported so existing `cmd::dump::{NodeRow,…}` paths keep working.
 pub use crate::ctl::rows::{ConnRow, EdgeRow, NodeRow, StatusBit, SubnetRow, strip_weight};
+use tinc_crypto::invite::SLUG_PART_LEN;
 
 /// Which `dump` sub-verb.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,8 +139,6 @@ pub struct InviteRow {
 /// `Io` if the directory exists but readdir fails. ENOENT is not an
 /// error — exit 0 with empty Vec.
 pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
-    use tinc_crypto::invite::SLUG_PART_LEN;
-
     let dir = paths.invitations_dir();
 
     let entries = match fs::read_dir(&dir) {

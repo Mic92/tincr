@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use super::common::TmpGuard;
 use super::rig::{NetNs, Node, TunPair, enter_bwrap, ping};
+use std::io::Write as _;
 
 #[derive(Clone, Copy)]
 enum Impl {
@@ -124,7 +125,6 @@ fn tcponly(test_name: &str, alice: Impl, bob: Impl) {
 }
 
 fn append(path: &std::path::Path, text: &str) {
-    use std::io::Write as _;
     std::fs::OpenOptions::new()
         .append(true)
         .open(path)

@@ -23,6 +23,7 @@
 use crate::Request;
 use crate::addr::AddrStr;
 use crate::tok::{ParseError, Tok};
+use std::fmt::Write as _;
 
 // KEY_CHANGED
 
@@ -162,7 +163,6 @@ impl ReqKey {
     /// which the relay path guarantees) — mirrors `AnsKey::format`.
     #[must_use]
     pub fn format(&self) -> String {
-        use std::fmt::Write as _;
         let mut s = format!("{} {} {}", Request::ReqKey, self.from, self.to);
         if let Some(ReqKeyExt { reqno, payload }) = &self.ext {
             write!(s, " {reqno}").unwrap();
@@ -246,7 +246,6 @@ impl AnsKey {
     /// Relays append addr/port; we emit it inline when set.
     #[must_use]
     pub fn format(&self) -> String {
-        use std::fmt::Write as _;
         let mut s = format!(
             "{} {} {} {} {} {} {} {}",
             Request::AnsKey,

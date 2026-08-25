@@ -1,9 +1,9 @@
-use std::time::Duration;
-
 use nix::sys::signal::Signal;
+use std::time::Duration;
 
 use super::common::node::has_active_peer;
 use super::common::{Node, node_reachable, wait_for_file};
+use std::os::unix::fs::PermissionsExt;
 
 fn node_names(rows: &[String]) -> Vec<&str> {
     rows.iter()
@@ -113,8 +113,6 @@ fn ping_timeout_drops_frozen_peer_then_reconnects() {
 /// appears before tinc-up runs, so poll for the marker.
 #[test]
 fn tinc_up_gets_interface_and_name() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tmp!("tincup");
     let mut alice = Node::new(tmp.path(), "alice", 0xA9);
     alice.write_config_multi(&[], &[]);

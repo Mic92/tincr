@@ -69,6 +69,7 @@ use crate::cmd::{CmdError, io_err};
 use crate::keypair;
 use crate::names::{Paths, check_id};
 
+use std::fmt::Write as _;
 use tinc_crypto::b64;
 use tinc_crypto::sign::{PUBLIC_LEN, SIG_LEN, verify};
 
@@ -109,7 +110,6 @@ fn slurp(path: Option<&Path>) -> Result<Vec<u8>, CmdError> {
 /// No spaces in `name`, no ambiguity — but nobody parses the trailer
 /// anyway. It's signed-then-discarded.
 fn signed_message(data: &[u8], name: &str, t: i64) -> Vec<u8> {
-    use std::fmt::Write as _;
     // Preallocate. `data.len()` for the body + `1 + name.len() + 1
     // + 20` for the trailer (space + name + space + up to 20 digits
     // for an i64). Slightly over; `Vec` doesn't care.

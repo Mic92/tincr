@@ -9,6 +9,7 @@ use crate::cmd::{CmdError, io_err};
 use crate::names::{Paths, check_id};
 
 use super::finalize::parse_name_line;
+use tinc_crypto::invite::cookie_filename;
 
 /// What the daemon's `receive_invitation_sptps` does, minus daemon
 /// state.
@@ -34,8 +35,6 @@ pub(crate) fn server_receive_cookie(
     myname: &str,
     now: std::time::SystemTime,
 ) -> Result<(Vec<u8>, String, std::path::PathBuf), CmdError> {
-    use tinc_crypto::invite::cookie_filename;
-
     // Recover filename from cookie+key. KAT-tested in
     // tinc-crypto::invite — this is the same composition `cmd_invite`
     // used to *name* the file.

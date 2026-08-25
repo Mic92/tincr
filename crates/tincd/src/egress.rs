@@ -370,6 +370,7 @@ impl UdpEgress for Portable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::NodeId;
     use std::net::{SocketAddr, UdpSocket};
 
     /// `Portable::send_batch` with `count=1` produces the same bytes
@@ -482,7 +483,6 @@ mod tests {
     /// boundary and the wire is garbage.
     #[test]
     fn txbatch_coalesce_gates() {
-        use crate::graph::NodeId;
         let dst1 = SockAddr::from("127.0.0.1:1111".parse::<SocketAddr>().unwrap());
         let dst2 = SockAddr::from("127.0.0.1:2222".parse::<SocketAddr>().unwrap());
         let mut b = TxBatch::new(4096);
@@ -523,7 +523,6 @@ mod tests {
     /// is the end-to-end "batch construction → wire" check.
     #[test]
     fn txbatch_dense_packing_roundtrip() {
-        use crate::graph::NodeId;
         let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
         let dst = SockAddr::from(rx.local_addr().unwrap());
         let tx: Socket = UdpSocket::bind("127.0.0.1:0").unwrap().into();
@@ -570,7 +569,6 @@ mod tests {
     /// test for the death-spiral the throughput gate caught.
     #[test]
     fn txbatch_caps_at_udp_datagram_limit() {
-        use crate::graph::NodeId;
         let dst = SockAddr::from("127.0.0.1:1".parse::<SocketAddr>().unwrap());
         let mut b = TxBatch::new(70_000);
         let frame = [0u8; 1519]; // body+33 for body=1486 (MSS-ish)

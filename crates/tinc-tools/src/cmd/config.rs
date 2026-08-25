@@ -8,6 +8,7 @@ use tinc_conf::vars::{self, VarFlags};
 
 use super::{CmdError, TmpGuard, exchange, io_err};
 use crate::names::{self, Paths};
+use std::str::FromStr;
 
 /// The four operations after argv normalization; `get` with a value has
 /// already been coerced to `Set` before the file walk.
@@ -271,7 +272,6 @@ pub fn build_intent(
 /// Subnet value validation. Kept separate because it's the one place this
 /// module reaches into `tinc-proto`.
 fn validate_subnet(value: &str) -> Result<(), CmdError> {
-    use std::str::FromStr;
     let s = tinc_proto::Subnet::from_str(value)
         .map_err(|_| CmdError::BadInput(format!("Malformed subnet definition {value}")))?;
     // Host bits must be zero.

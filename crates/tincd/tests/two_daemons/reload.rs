@@ -1,11 +1,13 @@
-use std::time::Duration;
-
 use nix::sys::signal::Signal;
+use std::time::Duration;
 
 use super::common::node::has_subnet;
 use super::common::{
     Ctl, Node, poll_until, pubkey_from_seed, wait_for_file, write_ed25519_privkey,
 };
+use std::fmt::Write;
+use tinc_crypto::invite::{build_slug, cookie_filename};
+use tinc_crypto::sign::SigningKey;
 
 /// Rewrite `hosts/SELF` with `subnets` and SIGHUP. The sleep is for
 /// the reload's `mtime > last_check` comparison at second granularity.
@@ -13,7 +15,6 @@ fn reload_with_subnets(node: &Node, subnets: &[&str]) {
     std::thread::sleep(Duration::from_millis(1100));
     let mut host = format!("Port = {}\n", node.port);
     for subnet in subnets {
-        use std::fmt::Write;
         writeln!(host, "Subnet = {subnet}").unwrap();
     }
     std::fs::write(node.confbase.join("hosts").join(&node.name), host).unwrap();
@@ -53,9 +54,6 @@ fn sighup_subnet_changes_reach_peer() {
 /// invitation handshake, file transfer, key exchange, and single use.
 #[test]
 fn tinc_join_consumes_invitation() {
-    use tinc_crypto::invite::{build_slug, cookie_filename};
-    use tinc_crypto::sign::SigningKey;
-
     let tmp = tmp!("join");
     let mut alice = Node::new(tmp.path(), "alice", 0xAA);
     alice.write_config_multi(&[], &[]);

@@ -1,9 +1,10 @@
-use super::*;
-
 // TrafficRow::parse — the wire seam
 
 /// Daemon sends `"NAME N N N N"` after `recv_row` strips
 /// `"18 13 "`.
+use super::*;
+use std::cmp::Ordering::{Equal, Greater, Less};
+
 #[test]
 fn parse_traffic_row() {
     // Basic.
@@ -207,7 +208,6 @@ fn ns_rate(ipr: f32, ibr: f32, opr: f32, obr: f32) -> NodeStats {
 /// first. `b.cmp(&a)` is the negative-of-compare flip.
 #[test]
 fn compare_table() {
-    use std::cmp::Ordering::{Equal, Greater, Less};
     #[rustfmt::skip]
     let cases: &[(NodeStats, NodeStats, SortMode, bool, std::cmp::Ordering)] = &[
         //          (a,                       b,                       mode,                   cumul, expected)

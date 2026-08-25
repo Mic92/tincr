@@ -1,6 +1,7 @@
 //! The `tinc`/`tinc-auth` binaries as subprocesses; commands themselves
 //! are unit-tested in `src/cmd/`.
 
+use std::hash::{BuildHasher, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -206,7 +207,6 @@ impl Conf {
 }
 
 fn rand_cookie() -> u128 {
-    use std::hash::{BuildHasher, Hasher};
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
     hasher.write_u32(std::process::id());
     u128::from(hasher.finish())

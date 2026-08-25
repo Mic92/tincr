@@ -96,7 +96,6 @@ pub(crate) fn winsize() -> Winsize {
     // Types/constants come from `nix::libc` so this module has no
     // direct `libc` dependency — `nix` already pins the version.
     mod ioctl {
-        use nix::libc;
         nix::ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, libc::winsize);
     }
 
