@@ -306,19 +306,13 @@ fn sort_key(s: &NodeStats, mode: SortMode, cumulative: bool) -> f64 {
     }
 }
 
-// Rendering builds plain Strings with ANSI codes inline; three testable
-// pieces (render_header, render_row, render). Row 1 is intentionally blank:
-// the cursor parks there and the 's' key prompt overwrites it.
+// Rendering builds Strings with inline ANSI codes in three testable pieces.
+// Row 1 is intentionally blank: the cursor parks there and the 's' prompt
+// overwrites it.
 
-/// Rows 0-2: status line, blank row, reversed column headers.
-///
-/// The header bar is REVERSE + text + `CLEAR_EOL` + RESET: erasing while
-/// still in reverse fills the rest of the line with the reversed
-/// background (xterm/vte "background color erase"), giving the filled-bar
-/// look.
-///
-/// Returns one String with embedded `goto`; caller writes it in one
-/// syscall so there is no flicker between rows.
+/// Rows 0-2: status line, blank, reversed column headers. REVERSE + text +
+/// `CLEAR_EOL` + RESET fills the rest of the line reversed (background colour
+/// erase). One String so the caller writes it in one syscall without flicker.
 fn render_header(netname: Option<&str>, stats: &Stats) -> String {
     let netname = netname.unwrap_or("");
     let count = stats.nodes.len();
@@ -362,22 +356,10 @@ fn render_header(netname: Option<&str>, stats: &Stats) -> String {
     s
 }
 
-/// One body row: attribute prefix + name + four right-aligned columns.
-///
-/// Attribute logic:
-///
-/// | known | nonzero rate | attribute |
-/// |---|---|---|
-/// | true | true | BOLD (active traffic) |
-/// | true | false | NORMAL (idle but present) |
-/// | false | — | DIM (gone) |
-///
-/// "Nonzero rate" checks the packet rates (not bytes, not cumulative
-/// counters) because that's what changes when anything is happening.
-///
-/// `cumulative` flips the four numbers between counter and rate; both are
-/// scaled by `bscale`/`pscale` (the b/k/M/G keys). The u64→f32 cast in
-/// the cumulative path loses precision past 2^24, display-only.
+/// One body row: attribute prefix, name, four right-aligned columns. Known with
+/// nonzero packet rate → BOLD, known idle → NORMAL, gone → DIM. `cumulative`
+/// switches counters vs rates; both are scaled by `bscale`/`pscale`. The
+/// u64→f32 cast loses precision past 2^24, display only.
 #[expect(clippy::cast_precision_loss)] // Display-only.
 fn render_row(name: &str, s: &NodeStats, stats: &Stats, row: u16) -> String {
     let attr = if !s.known {
@@ -468,14 +450,9 @@ fn fetch<S: io::Read + io::Write>(ctl: &mut CtlSocket<S>) -> Result<Vec<TrafficR
     Ok(rows)
 }
 
-/// Mutates `stats` per the key. Returns `false` for `'q'`.
-///
-/// The `'s'` key prompts for a new delay via `RawMode::with_cooked`.
-/// Returns `Err` if the cooked-mode tcsetattr fails; caller breaks the
-/// loop and Drop restores the terminal.
-///
-/// `out` is where the prompt gets written: stdout in real use, `Vec<u8>`
-/// in tests.
+/// Apply one key to `stats`; `false` for `'q'`. `'s'` prompts for a new delay
+/// on `out` via `RawMode::with_cooked`; a tcsetattr failure is `Err` and the
+/// caller breaks (Drop restores the terminal).
 fn handle_key(
     key: u8,
     stats: &mut Stats,
@@ -569,14 +546,11 @@ const UNIT_KEYS: &[(u8, &str, f32, &str, f32)] = &[
     (b'G', "Gbyte", 1e-9, "Mpkt", 1e-6),
 ];
 
-/// The top loop: connect, enter raw mode, loop, exit cleanly.
+/// The top loop: connect, raw mode, loop, clean exit.
 ///
 /// # Errors
-/// `CmdError::BadInput` if the daemon's not running (connect
-/// fails) or sends garbage (parse failure). `RawMode::enter`
-/// failure (stdin not a tty, e.g. `tinc top < /dev/null`) also
-/// becomes `BadInput` — there's no good way to run top without
-/// a terminal, so it's a usage error.
+/// `BadInput` if the daemon isn't running or sends garbage, or if stdin isn't a
+/// tty (`RawMode::enter`); top without a terminal is a usage error.
 #[cfg(unix)]
 pub fn run(paths: &Paths, netname: Option<&str>) -> Result<(), CmdError> {
     // Connect before entering raw mode so a connect failure prints its

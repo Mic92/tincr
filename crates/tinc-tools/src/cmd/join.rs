@@ -105,15 +105,9 @@ const MAX_DATA: usize = 1 << 20;
 /// Socket read timeout, matching the C client's 5-second select timeout.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-// finalize_join — the testable seam
-
-/// Result of consuming an invitation blob. The pubkey goes back over
-/// SPTPS (type-1 record); the rest is informational.
-///
-/// Why this isn't `()`: `finalize_join` doesn't touch the SPTPS
-/// connection — that's a layer above. It returns what the SPTPS layer
-/// needs to send: `finalize_join` is pure filesystem work, the caller
-/// does the send.
+/// Result of consuming an invitation blob: the pubkey the SPTPS layer must send
+/// back (type-1 record) plus informational bits. `finalize_join` is pure
+/// filesystem work; the caller does the send.
 #[derive(Debug)]
 pub struct JoinResult {
     /// `Name = X` from chunk 1, line 1. The new node's name.
@@ -127,38 +121,22 @@ pub struct JoinResult {
     pub hosts_written: Vec<String>,
 }
 
-// cmd_join — the TCP+SPTPS shell
-
-/// `tinc join URL`.
-///
-/// `paths` should be a *fresh* confbase (no `tinc.conf`). We check
-/// via `finalize_join` (which re-checks), but doing it up front means
-/// failure happens *before* we open a TCP connection and burn a
-/// single-use cookie on the daemon side.
+/// `tinc join URL`. `paths` should be a fresh confbase; checked up front (and
+/// again in `finalize_join`) so we fail before connecting and burning the
+/// single-use cookie. One sequence sharing sockets, SPTPS pump and blob state.
 ///
 /// # Errors
-/// - `BadInput`: bad URL, daemon greeting wrong, `key_hash` mismatch,
-///   blob parse failed.
-/// - `Io`: connect/read/write failed, fs writes from `finalize_join`.
-///
-/// # Panics
-/// Only via `keypair::generate`'s entropy source.
-// Sequence of distinct steps sharing local state (sockets, SPTPS pump,
-// accumulated blob); the steps share too much state to split cleanly.
+/// `BadInput` (bad URL, wrong greeting, `key_hash` mismatch, blob parse) or
+/// `Io`.
 pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
     // Parse URL
     let parsed =
         parse_url(url).ok_or_else(|| CmdError::BadInput("Invalid invitation URL.".into()))?;
 
-    // Preflight: confbase must be fresh
-    // Do this before connecting — the cookie is single-use on the
-    // daemon side (rename to .used). If we connect, send cookie,
-    // daemon renames, then we fail on "tinc.conf exists" — the
-    // invitation is burned.
-    //
-    // makedirs(DIR_CONFDIR | DIR_CONFBASE) — created here (and
-    // `finalize_join` re-creates with HOSTS|CACHE). We need confbase
-    // to exist for the `access` check below.
+    // Preflight before connecting: the daemon renames the cookie to .used on
+    // receipt, so failing on "tinc.conf exists" afterwards would burn the
+    // invitation. Confbase (and confdir) are created here for the access check;
+    // `finalize_join` adds hosts/cache.
     if let Some(confdir) = &paths.confdir {
         makedir(confdir, 0o755)?;
     }
@@ -211,14 +189,9 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
     sock.write_all(greeting.as_bytes())
         .map_err(io_err("send"))?;
 
-    // IN line 1: "0 <daemon-name> 17.x\n" — daemon's send_id.
-    // IN line 2: "4 <invitation-pubkey-b64>\n" — daemon's ACK with key.
-    //
-    // `BufStream` would be cleaner but we need byte-level control
-    // for the SPTPS phase (any over-read past the second \n would
-    // eat SPTPS handshake bytes — that's the leftover after the two
-    // recvline calls). So: hand-rolled buffered reader that we can
-    // drain into the SPTPS pump.
+    // Line 1 is the daemon's ID (`0 NAME 17.x`), line 2 its ACK with the
+    // invitation pubkey. Hand-rolled buffered reader so any bytes read past the
+    // second `\n` can be handed to the SPTPS pump instead of lost.
     let mut buf = Vec::with_capacity(4096);
     let line1 = recv_line(&mut sock, &mut buf)?;
     let line2 = recv_line(&mut sock, &mut buf)?;
@@ -231,14 +204,9 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
     // Parse line 2. The fingerprint is everything after `"4 "`.
     let fingerprint = parse_greeting_line2(&line2)?;
 
-    // Verify key_hash
-    // The whole point of the URL's first 24 chars: prove the daemon
-    // holds the invitation key.
-    //
-    // `fingerprint_hash`, not `key_hash`: `key_hash` takes a raw
-    // pubkey and re-b64s it. The daemon sent us the b64 string directly;
-    // hash exactly what arrived — decoding and re-encoding could pick a
-    // different alphabet (`+/` vs `-_`) and the hash would differ.
+    // Verify the URL's key hash: proof the daemon holds the invitation key.
+    // `fingerprint_hash` over the b64 string exactly as received; decoding and
+    // re-encoding via `key_hash` could switch alphabets and change the hash.
     if fingerprint_hash(fingerprint) != parsed.key_hash {
         return Err(CmdError::BadInput(format!(
             "Peer has an invalid key. Please make sure you're using the correct URL.\n{fingerprint:?}"

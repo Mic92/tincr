@@ -233,22 +233,9 @@ impl NodeRow {
         s
     }
 
-    /// The DOT-format node line.
-    ///
-    /// Five-way color cascade by status:
-    ///
-    /// | condition (first match wins) | color | meaning |
-    /// |---|---|---|
-    /// | `host == "MYSELF"` | green + filled | self |
-    /// | `!reachable` | red | dead |
-    /// | `via != name` | orange | indirect (relayed) |
-    /// | `!validkey` | black | reachable but no key yet |
-    /// | `minmtu > 0` | green | UDP works (PMTU discovered) |
-    /// | (else) | black | TCP-only |
-    ///
-    /// `via != name` means this node's UDP traffic is relayed through
-    /// another node; `minmtu > 0` means PMTU discovery succeeded (direct
-    /// UDP works). `style = "filled"` only for MYSELF.
+    /// DOT node line. Colour by first match: `host == MYSELF` → green filled;
+    /// `!reachable` → red; `via != name` (UDP relayed) → orange; `!validkey` →
+    /// black; `minmtu > 0` (direct UDP works) → green; else black (TCP only).
     #[must_use]
     pub fn fmt_dot(&self) -> String {
         let myself = self.host == "MYSELF";
@@ -344,17 +331,10 @@ impl EdgeRow {
         )
     }
 
-    /// DOT edge line.
-    ///
-    /// `directed`: digraph mode (`->`). Graph mode (`--`)
-    /// deduplicates by `strcmp(from, to) > 0` — only emit one of
-    /// each pair. Returns `None` for the suppressed half in
-    /// undirected mode.
-    ///
-    /// The weight calculation `1 + 65536/weight` makes a weight-1
-    /// edge `w = 65537` (very strong) and a weight-500 edge `w =
-    /// 132` (weak). DOT layout engines use higher weight to keep
-    /// nodes closer.
+    /// DOT edge line. `directed` uses `->`; undirected (`--`) emits only
+    /// the half of each pair where `from > to` and returns `None` for the
+    /// other. Weight `1 + 65536/weight` makes low tinc weights strong DOT
+    /// edges, which layout engines keep close.
     #[must_use]
     pub fn fmt_dot(&self, directed: bool) -> Option<String> {
         // Undirected dedup: the daemon emits both A→B and B→A, so

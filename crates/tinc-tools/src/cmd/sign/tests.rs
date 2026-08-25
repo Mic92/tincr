@@ -97,14 +97,9 @@ fn verify_tampered_body() {
     assert_eq!(msg, "Invalid signature");
 }
 
-/// Tampered header time → "Invalid signature". The trailer
-/// (reconstructed from the header) is inside the signed message,
-/// so changing `t` in the header changes the trailer, which
-/// changes the message, which invalidates the sig.
-///
-/// This is the test that proves the trailer scheme works. Without
-/// the trailer, time is unsigned metadata and you could rewrite
-/// it freely.
+/// Tampered header time → invalid signature: the trailer reconstructed from the
+/// header is part of the signed message, so `t` isn't freely rewritable
+/// metadata. This is what the trailer scheme is for.
 #[test]
 fn verify_tampered_time() {
     let cd = ConfDir::with_name("alice").with_ed25519_key("alice");
@@ -126,15 +121,10 @@ fn verify_tampered_time() {
     assert_eq!(msg, "Invalid signature");
 }
 
-/// Tampered signer name → also rejected. With `Signer::Any`, the
-/// header's name *is* trusted to pick the host file — but the
-/// signature was made over the *original* trailer with the
-/// *original* name, so changing the name in the header changes
-/// the reconstructed trailer, sig fails.
-///
-/// (You'd also need a `hosts/evilname` file for the verify to
-/// even get to the crypto. We test with a name that *does* exist
-/// but has a different key — that's the realistic attack.)
+/// Tampered signer name → rejected too: with `Signer::Any` the header name
+/// picks the host file, but the signature covers the original trailer with the
+/// original name. Uses a name that exists with a different key, the realistic
+/// attack.
 #[test]
 fn verify_tampered_signer_name() {
     // Two nodes. alice signs; we tamper the header to say bob.
@@ -352,19 +342,10 @@ fn binary_body_roundtrip() {
     assert_eq!(v.body, data);
 }
 
-/// **Golden vector from C tinc's test suite** (`test/integration/
-/// cmd_sign_verify.py`): a blob produced with a fixed key and fixed time
-/// `1653397516`. If `verify_blob` accepts it, the format is
-/// byte-compatible — no C binary needed.
-///
-/// This proves, simultaneously:
-/// - The trailer format (` foo 1653397516`, leading space) matches
-/// - The header parse accepts what C tinc emits
-/// - tinc-b64 encoding matches (sig decodes to 64 bytes)
-/// - The Ed25519 verify matches (`tinc-crypto::sign::verify`)
-/// - `load_host_pubkey` parses the `Ed25519PublicKey =` line
-///
-/// If any one of those is wrong, this test fails.
+/// Golden vector from C tinc's `test/integration/cmd_sign_verify.py`: fixed
+/// key, time `1653397516`. Accepting it proves trailer format, header parse,
+/// tinc-b64, Ed25519 verify and `Ed25519PublicKey =` loading are all
+/// byte-compatible without a C binary.
 #[test]
 fn golden_upstream_vector() {
     // Transcribed from cmd_sign_verify.py. The PEM has leading/trailing

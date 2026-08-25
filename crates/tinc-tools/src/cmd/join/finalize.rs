@@ -88,38 +88,13 @@ const CHUNK2_DROP_KEYS: &[&str] = &[
     "PrivateKeyFile",
 ];
 
-/// Parse `data` and write a fresh confbase.
-///
-/// `data` is the invitation file body (what `cmd_invite` wrote, what
-/// the daemon's `receive_invitation_sptps` sends). Chunk 1 is the new
-/// node's bootstrap config, filtered through `VAR_SAFE`; chunks 2+
-/// are host files, separated by `Name = X` lines.
-///
-/// `force = false` → unsafe vars dropped with a warning (the default).
-/// `force = true` → unsafe vars accepted with a warning. Same gate
-/// as `cmd_import`'s `--force`.
-///
-/// Preconditions the caller must check (`cmd_join` does these before
-/// the SPTPS loop):
-/// - `paths.confbase` is writable (or creatable)
-/// - `paths.tinc_conf()` does not already exist
-///
-/// We re-check the second one because TOCTOU between `cmd_join`'s
-/// check and this call is possible (the SPTPS handshake takes
-/// nonzero time). But the first one is on the caller — if `makedir`
-/// fails here, you get a fs error mid-write, not a clean "no
-/// permission" up front.
+/// Parse the invitation body and write a fresh confbase: chunk 1 is our
+/// bootstrap config filtered through `VAR_SAFE` (unsafe vars dropped, or
+/// kept with a warning under `force`); chunks 2+ are peer host files.
+/// `tinc.conf` absence is re-checked here against TOCTOU.
 ///
 /// # Errors
-/// - `BadInput`: blob is malformed (no `Name = X` first line, invalid
-///   name, secondary chunk would clobber our own host file).
-/// - `Io`: any filesystem write.
-///
-/// # Panics
-/// Only via `keypair::generate`'s `OsRng::fill_bytes` if the OS
-/// entropy source is broken.
-// Sequence of distinct steps sharing local state (open file handles,
-// the line iterator).
+/// `BadInput` (no leading `Name`, bad name, self-clobbering chunk) or `Io`.
 pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResult, CmdError> {
     let mut created: Vec<PathBuf> = Vec::new();
     let r = finalize_join_inner(data, paths, force, &mut created);
@@ -298,16 +273,9 @@ fn write_chunk1<'a>(
             }
         }
 
-        // HOST vars → hosts/NAME, SERVER vars → tinc.conf.
-        // Dual-tagged (SERVER|HOST) go to hosts/NAME since
-        // `& VAR_HOST` matches — e.g. `Subnet` from the inviter
-        // goes to our host file (it's our subnet).
-        //
-        // We write `var.name` (canonical case from the table), not
-        // `key` (what the inviter wrote). The daemon's config reader
-        // is case-insensitive so this doesn't change behavior; it
-        // just normalizes the output. Same canonicalization as
-        // `cmd_set` will do.
+        // HOST vars → hosts/NAME, SERVER vars → tinc.conf; dual-tagged go to
+        // hosts/NAME (e.g. the inviter's `Subnet` for us). Written under the table's
+        // canonical name, which the case-insensitive reader treats the same.
         let target = if var.flags.contains(VarFlags::HOST) {
             &mut files.fh
         } else {
@@ -319,16 +287,10 @@ fn write_chunk1<'a>(
     Ok(boundary)
 }
 
-/// Walk chunks 2+ (peer host files, verbatim). Each chunk is
-/// `Name = X\n` then lines until the next `Name = X` or EOF.
-/// Returns the names of host files written, in order.
-///
-/// "Unfiltered" means no `variables[]` check — the host file is a
-/// *peer's* config; you don't filter what a peer publishes about
-/// themselves. (You DO filter what they tell you about YOUR config
-/// — that's chunk 1.) The exception is [`CHUNK2_DROP_KEYS`], the
-/// path/exec keys that would let a malicious peer entry pivot to
-/// code execution on our box.
+/// Write chunks 2+ (`Name = X` then lines until the next `Name` or EOF)
+/// verbatim as peer host files and return their names. No `variables[]` filter
+/// — a peer's own config is theirs to publish — except [`CHUNK2_DROP_KEYS`],
+/// the path/exec keys that would let a malicious entry run code here.
 fn write_host_chunks<'a>(
     lines: &mut Lines<'a>,
     paths: &Paths,
@@ -370,16 +332,9 @@ fn write_host_chunks<'a>(
                 continue;
             }
 
-            // Only a first token of exactly "Name" starts a new chunk;
-            // `Namespace = foo` passes through.
-            //
-            // We use `split_var` (the chunk-1 tokenizer) and check
-            // for "Name". Its `=` handling differs slightly from the
-            // strcspn check (split_var splits AT `=`, the strcspn
-            // here splits AT `\t =` so len includes chars before any
-            // of those). For `Name = X` and `Name=X`: both produce
-            // key="Name". Good enough — `cmd_invite` writes the
-            // canonical form.
+            // Only a first token of exactly `Name` starts a new chunk (`Namespace = foo`
+            // passes through). `split_var` splits at `=` slightly differently from C's
+            // strcspn, but both yield `Name` for the canonical form `cmd_invite` writes.
             if let Some((k, v)) = split_var(line) {
                 if k.eq_ignore_ascii_case("Name") {
                     boundary = Some((k, v));

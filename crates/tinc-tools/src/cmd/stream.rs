@@ -68,23 +68,10 @@ const LOG_DATA_MAX: usize = 1024;
 /// would alloc 4GiB without this.
 const PCAP_DATA_MAX: usize = 9018;
 
-/// Parse `"18 N len"` header. The shared header shape for both
-/// streams.
-///
-/// Returns `Some(len)` if header is well-formed and the request
-/// type matches. `None` for malformed or wrong type — the caller
-/// breaks (silent exit).
-///
-/// `kind`: which stream. The header echoes the subscription type —
-/// a `REQ_LOG` subscriber sees `"18 15 N"` headers, a `REQ_PCAP`
-/// subscriber sees `"18 14 N"`. Why check it: the daemon's
-/// connection mux means a bug COULD cross-send. Unlikely; defense.
-///
-/// `max`: per-stream size limit. `len > max → None`.
-///
-/// We parse `len` as `usize` for both streams — `parse::<usize>()`
-/// rejects negative and overflow. The wire is ASCII digits either
-/// way.
+/// Parse the `18 N len` header shared by both streams. `Some(len)` if
+/// well-formed, the request type matches `kind` (a log subscriber must not see
+/// pcap headers), and `len <= max`; `None` otherwise, and the caller exits
+/// silently.
 fn parse_header(line: &str, kind: CtlRequest, max: usize) -> Option<usize> {
     // `"18 15 7"`. Three space-separated ints.
     let mut it = line.split(' ');
@@ -110,32 +97,16 @@ fn parse_header(line: &str, kind: CtlRequest, max: usize) -> Option<usize> {
     Some(len)
 }
 
-// `tinc log [LEVEL]` — stream daemon's logger() output
-//
-// Subscribe with `(level, use_color)`, then loop: header, data,
-// write data + `\n` to stdout.
-//
-// `level` is the FILTER, not the daemon's debug level. The daemon
-// CLAMPs it into `c->log_level`, and checks `level > c->log_level
-// → continue` per-connection. `-1` (`DEBUG_UNSET`) means "use the
-// daemon's own debug level". Higher numbers = more verbose.
-//
-// `use_color`: pass-through to the daemon's `format_pretty`. Per-
-// subscriber: the daemon formats the same log line both colored
-// and uncolored if it has subscribers of both kinds.
+// `tinc log [LEVEL]`: subscribe with `(level, use_color)`, then per record
+// write data + `\n`. `level` is a per-subscriber filter clamped by the daemon,
+// not the daemon's debug level; `use_color` selects the daemon's coloured
+// formatting for this subscriber.
 
-/// `DEBUG_UNSET`. The "use daemon's level" sentinel.
+/// `DEBUG_UNSET`: use the daemon's own level.
 const DEBUG_UNSET: i32 = -1;
 
-/// Three checks: stdout is a tty, TERM is set, TERM isn't `"dumb"`.
-///
-/// Hard-coded stdout. The daemon writes log lines to our stdout
-/// via the socket; if we're piped (`tinc log | less`), color
-/// escapes look like garbage in less without `-R`.
-/// `isatty(stdout)` is false then → no color.
-///
-/// `NO_COLOR` is not honored; force color via a PTY (`script -c "tinc
-/// log"`) if needed.
+/// Colour only if stdout is a tty and TERM is set and not `dumb`: the daemon's
+/// escapes would be garbage in `tinc log | less`. `NO_COLOR` is not honoured.
 fn use_ansi_escapes_stdout() -> bool {
     if !io::stdout().is_terminal() {
         return false;
@@ -148,28 +119,13 @@ fn use_ansi_escapes_stdout() -> bool {
     }
 }
 
-/// The main loop. Generic over the output `Write` so the test can
-/// pass a `Vec`. Production passes stdout's lock.
-///
-/// `level`: the filter. `None` → `DEBUG_UNSET` (-1). `Some(n)` →
-/// the user's `tinc log 5`. The daemon CLAMPs out-of-range, so we
-/// don't validate.
-///
-/// `use_color`: precomputed by the caller (it's an isatty check on
-/// stdout, which the caller has). Passed in so the test doesn't
-/// fight with stdout's tty-ness.
-///
-/// Runs forever. Returns when:
-///   - daemon closes socket (`recv_line → None`): `Ok(())`, clean
-///   - I/O error mid-read: `Err(CtlError::Io(_))`
-///   - malformed header: `Ok(())`, clean (silent break)
+/// The log loop, generic over `out` for tests. `level` `None` → `DEBUG_UNSET`;
+/// `use_color` is precomputed by the caller (it owns stdout). Returns `Ok` when
+/// the daemon closes or a header is malformed.
 ///
 /// # Errors
-/// Socket I/O. The output Write's errors too — `tinc log | head`
-/// closes stdout after 10 lines, our `out.write_all()` gets EPIPE,
-/// we bubble it up. The binary's SIGPIPE-ignore means we DON'T die
-/// on the signal; we get the error and exit. (See the SIGPIPE
-/// section in the binary's main.)
+/// Socket I/O, or `out` errors such as EPIPE from `tinc log | head` (SIGPIPE is
+/// ignored in the binary, so we see the error and exit).
 pub fn log_loop<S, W>(
     ctl: &mut CtlSocket<S>,
     out: &mut W,
@@ -213,16 +169,9 @@ where
         // Mid-data EOF (daemon died mid-stream) bubbles up as an error.
         ctl.recv_data(&mut buf)?;
 
-        // The data is the FORMATTED log line (priority prefix,
-        // timestamp, message). It doesn't include a trailing `\n`
-        // — we add it. Then flush (line-buffered output for
-        // interactive viewing).
-        //
-        // `write_all` not `write`: partial writes happen (pipe
-        // full); `write_all` retries.
-        //
-        // EPIPE: the binary's `signal(SIGPIPE, SIG_IGN)` means we
-        // get the error not the signal. Bubble it; main exits.
+        // The data is the formatted log line without trailing `\n`; add it and flush
+        // for interactive viewing. `write_all` retries partial writes; EPIPE bubbles
+        // up and main exits.
         out.write_all(&buf).map_err(CtlError::Io)?;
         out.write_all(b"\n").map_err(CtlError::Io)?;
         out.flush().map_err(CtlError::Io)?;
@@ -231,16 +180,11 @@ where
     Ok(())
 }
 
-/// CLI entry: `tinc log [LEVEL]`.
-///
-/// `LEVEL` is parsed strictly: `tinc log abc` errors instead of silently
-/// meaning level 0.
-///
-/// The SIGINT handler is not here (see module doc). Ctrl-C kills
-/// the process; exit 130. Daemon doesn't care.
+/// `tinc log [LEVEL]`; LEVEL is parsed strictly (`abc` is an error, not 0). No
+/// SIGINT handler: Ctrl-C exits 130 and the daemon doesn't care.
 ///
 /// # Errors
-/// Daemon down (`connect`), socket I/O, EPIPE (`tinc log | head`).
+/// Daemon down, socket I/O, EPIPE.
 #[cfg(unix)]
 pub fn run_log(paths: &Paths, level: Option<i32>) -> Result<(), CmdError> {
     let mut ctl = CtlSocket::connect(paths)?;
@@ -259,51 +203,17 @@ pub fn run_log(paths: &Paths, level: Option<i32>) -> Result<(), CmdError> {
     Ok(log_loop(&mut ctl, &mut out, level, use_color)?)
 }
 
-// `tinc pcap [SNAPLEN]` — stream packet capture in libpcap format
-//
-// Subscribe with `snaplen`, write the libpcap global header, then
-// loop: tinc header, data, libpcap packet header + data to stdout.
-//
-// `snaplen`: max bytes per packet to capture. 0 = full packet.
-// Daemon clips. The repurposed `outmaclength` field is a hack — it
-// was the legacy MAC length, reused for pcap snaplen because every
-// connection has it and pcap subscribers don't use legacy crypto.
-//
-// Output is the libpcap "savefile" format (the original, not
-// pcapng). Magic `0xa1b2c3d4`, version 2.4, link-type 1
-// (Ethernet). Wireshark, tcpdump -r, every analyzer reads it.
-//
-// `tinc pcap | wireshark -k -i -` is the use case. Real-time
-// packet view of the VPN traffic. The daemon hands us raw Ethernet
-// frames (the same `vpn_packet_t` the routing engine sees).
+// `tinc pcap [SNAPLEN]`: subscribe with `snaplen` (0 = full packet; the daemon
+// clips), write the libpcap savefile header (magic `0xa1b2c3d4`, v2.4,
+// LINKTYPE_ETHERNET), then per record a pcap packet header plus the raw
+// Ethernet frame. `tinc pcap | wireshark -k -i -` is the use case.
 
-/// Libpcap global header. 24 bytes.
-///
-/// Field-by-field `to_ne_bytes()` rather than a `#[repr(C)]`
-/// struct + `bytemuck::bytes_of` (or unsafe `std::slice::from_raw_
-/// parts`). Our struct WOULD have the same layout (all-u32 + two
-/// u16, no padding holes), but per-field bytes is `forbid(unsafe)`-
-/// compliant and the once-per-session 24-byte write isn't perf-
-/// critical.
-///
-/// `snaplen`: from the user. 0 → defaults to `PCAP_DATA_MAX` (9018).
-/// The header records what the file PROMISES; the daemon enforces
-/// it.
-///
-/// Returns the 24 header bytes ready to write.
+/// Libpcap global header, 24 bytes, built field by field with `to_ne_bytes()`
+/// (no unsafe, not perf-critical). `snaplen` 0 records `PCAP_DATA_MAX`.
 fn pcap_global_header(snaplen: u32) -> [u8; 24] {
-    // Layout, in declaration order:
-    //   uint32_t magic       = 0xa1b2c3d4
-    //   uint16_t major       = 2
-    //   uint16_t minor       = 4
-    //   uint32_t tz_offset   = 0 (always; libpcap stores UTC)
-    //   uint32_t tz_accuracy = 0 (unused; legacy)
-    //   uint32_t snaplen
-    //   uint32_t ll_type     = 1 (LINKTYPE_ETHERNET)
-    //
-    // 4 + 2 + 2 + 4 + 4 + 4 + 4 = 24 bytes. No padding (the two
-    // u16 pack to one u32-aligned slot). Native-endian — see
-    // module doc "pcap headers: native-endian".
+    // magic u32, major u16 = 2, minor u16 = 4, tz_offset u32 = 0, tz_accuracy u32
+    // = 0, snaplen u32, ll_type u32 = 1; 24 bytes, no padding, native-endian
+    // (module doc).
     let magic: u32 = 0xa1b2_c3d4;
     let major: u16 = 2;
     let minor: u16 = 4;
@@ -329,31 +239,12 @@ fn pcap_global_header(snaplen: u32) -> [u8; 24] {
     h
 }
 
-/// Libpcap per-packet record header. 16 bytes.
-///
-/// ```text
-///   uint32_t tv_sec    — wall-clock seconds (gettimeofday)
-///   uint32_t tv_usec   — microseconds part
-///   uint32_t len       — captured bytes (after snaplen clip)
-///   uint32_t origlen   — original packet length on the wire
-/// ```
-///
-/// `len` and `origlen`: the daemon clips to `snaplen` before
-/// sending, so we receive `len` bytes and don't know the original.
-/// Both set to what we got. Wireshark shows "X bytes captured"
-/// with no truncation marker. Slightly wrong but the daemon would
-/// have to send origlen too for accuracy.
-///
-/// `tv_sec` is the LOW 32 bits of `time_t`. After 2106 (unsigned
-/// wraps later than 2038) this rolls over. Libpcap's 2038 problem;
-/// not ours. There's a microsecond-magic (`0xa1b2_3c4d`) for 64-bit
-/// timestamps but we don't use it.
-///
-/// Why we timestamp here (CLI-side) not daemon-side: the daemon's
-/// `send_pcap` doesn't include time. The CLI calls `gettimeofday`
-/// per-packet. The timestamp is "when the CLI received it," not
-/// "when the daemon routed it." Socket latency is ~10µs (localhost),
-/// well below the µs resolution. Good enough.
+/// Libpcap per-packet header, 16 bytes: `tv_sec`, `tv_usec`, `len`, `origlen`
+/// (u32 each). The daemon clips to snaplen without reporting the original
+/// length, so `len == origlen`. `tv_sec` is the low 32 bits of `time_t`
+/// (libpcap's 2106 problem). Timestamped CLI-side on receipt because the
+/// daemon's pcap records carry no time; localhost latency is below the µs
+/// resolution.
 #[expect(clippy::similar_names)] // tv_sec/tv_usec: libpcap struct field names, kept verbatim for grep
 fn pcap_packet_header(now: SystemTime, len: u32) -> [u8; 16] {
     // `unwrap_or_default`: `duration_since` errs if `now < EPOCH`
@@ -376,19 +267,13 @@ fn pcap_packet_header(now: SystemTime, len: u32) -> [u8; 16] {
     h
 }
 
-/// The main loop. Same `Write`-generic as `log_loop`.
-///
-/// `snaplen`: 0 = full packet. Passed to daemon and embedded in
-/// the global header. Daemon enforces; we record.
-///
-/// `now`: clock function. Production passes `SystemTime::now`;
-/// tests pass a fixed time. Per-packet call, not pre-loop — each
-/// packet gets its OWN timestamp.
-///
-/// Runs forever. Same exit conditions as `log_loop`.
+/// The pcap loop, `Write`-generic like `log_loop`. `snaplen` (0 = full) goes to
+/// the daemon and into the global header; `now` is called per packet
+/// (production `SystemTime::now`, tests fixed). Same exit conditions as
+/// `log_loop`.
 ///
 /// # Errors
-/// Socket I/O, output I/O. Malformed-header is `Ok(())` clean exit.
+/// Socket or output I/O; a malformed header is a clean `Ok(())`.
 pub fn pcap_loop<S, W, Clock>(
     ctl: &mut CtlSocket<S>,
     out: &mut W,
@@ -629,17 +514,9 @@ mod tests {
         (ctl, shared)
     }
 
-    /// Full `log_loop`: subscribe, two records, EOF.
-    ///
-    /// Daemon sends:
-    ///   - "18 15 5\n" + "Hello"
-    ///   - "18 15 5\n" + "World"
-    ///   - EOF (Cursor exhausted)
-    ///
-    /// Client should send: "18 15 -1 0\n" (subscribe, level=-1,
-    /// color=0).
-    ///
-    /// Output should be: "Hello\nWorld\n" (data + \n per record).
+    /// Full `log_loop`: daemon sends `18 15 5\n`+`Hello`, `18 15 5\n`+`World`, EOF.
+    /// Client must send `18 15 -1 0\n` (level -1, no colour) and output
+    /// `Hello\nWorld\n`.
     #[test]
     fn log_loop_two_records() {
         let mut wire = Vec::new();
@@ -806,12 +683,7 @@ mod tests {
         assert_eq!(out[57], b'B');
     }
 
-    // use_ansi_escapes_stdout — tested by inspection
-    //
-    // Can't unit-test `is_terminal()` without a PTY (cargo test's
-    // stdout is a pipe). The TERM check is testable but only if
-    // we factor it out, and the function is 6 lines. Integration
-    // tests (when `tinc log` runs against a real daemon) cover it
-    // implicitly: stdout is a pipe → no color → daemon receives
-    // `use_color=0` → log lines are unescaped.
+    // `use_ansi_escapes_stdout` isn't unit-tested: `is_terminal()` needs a PTY.
+    // Integration runs cover it implicitly (piped stdout → `use_color=0` →
+    // unescaped lines).
 }

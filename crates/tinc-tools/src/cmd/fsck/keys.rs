@@ -76,14 +76,8 @@ pub(super) fn check_keypairs(
     //   3. PEM-read `hosts/NAME` directly (default for #2)
     let pubkey = load_ec_pubkey(cfg, host_file);
 
-    // Coherence check
-    // Four-way matrix on (priv?, pub?). priv=None already returned
-    // above. Remaining:
-    //
-    //   pub=Some, match  → ok
-    //   pub=Some, !match → KeyMismatch, fixable
-    //   pub=None         → NoPublicKey, fixable
-    //
+    // Coherence: priv=None already returned. pub matches → ok; pub mismatches →
+    // KeyMismatch (fixable); pub missing → NoPublicKey (fixable).
     let priv_derived: &[u8; PUBLIC_LEN] = sk.public_key();
 
     match pubkey {
@@ -186,15 +180,8 @@ fn fix_public_key(
     }
 }
 
-// Phase 3: Key file mode
-
-/// Private key file mode check. Unix-only.
-///
-/// `& 077` check: any bits in group/other. `0600` passes, `0640`
-/// doesn't. Also checks `st_uid != getuid()` to decide whether to
-/// offer the fix — you can't `chmod` a file you don't own (without
-/// root). We push a `Finding` either way; the `uid_match` field
-/// gates the fix.
+/// Private key file mode check, Unix-only: any group/other bits (`& 0o77`)
+/// warn. `uid_match` (we own the file) gates whether the chmod fix is offered.
 #[cfg(unix)]
 fn check_key_mode(path: &Path, force: bool, findings: &mut Vec<Finding>) {
     // We already successfully opened this file (in `read_private`),

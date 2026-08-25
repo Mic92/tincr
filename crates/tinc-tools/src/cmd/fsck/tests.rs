@@ -131,16 +131,10 @@ fn private_key_file_config() {
     assert_eq!(count(&r, |f| matches!(f, Finding::NoPrivateKey { .. })), 0);
 }
 
-/// `hosts/NAME` deleted entirely → `ConfigReadFailed`. Phase 1
-/// (`parse_file(hosts/NAME)`) fails before the keypair check can
-/// run. C: `read_host_config` returns false → `success = false`
-/// → `if(success) check_keypairs` skipped. Same here.
-///
-/// (Initially I expected `NoPublicKey` here. Wrong: `NoPublicKey`
-/// is for "file exists but has no key", not "file is gone". The
-/// distinction matters because the suggestion differs — missing
-/// file is `tinc init`-level breakage, missing-key-in-file is
-/// a `--force` fix.)
+/// `hosts/NAME` deleted → `ConfigReadFailed`: phase 1 fails before the keypair
+/// check runs (as in C, where `check_keypairs` is skipped). Not `NoPublicKey`,
+/// which means the file exists without a key and is a `--force` fix rather than
+/// `tinc init`-level breakage.
 #[test]
 fn host_file_deleted() {
     let cd = ConfDir::bare();

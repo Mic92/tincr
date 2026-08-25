@@ -86,18 +86,10 @@ fn kind_needs_daemon() {
     assert!(!Kind::Invitations.needs_daemon());
 }
 
-// NodeRow parse: golden vector hand-computed from the daemon's dump
-// format with realistic values.
-
-/// The reference row. `recv_row` strips `18 3 `, so the body
-/// starts at `name`.
-///
-/// Values chosen for unambiguity:
-/// - `status = 0x12` → bit 1 set (validkey), bit 4 set
-///   (reachable). 0b10010.
-/// - `udp_ping_rtt = 1500` → `rtt 1.500` in output
-/// - `host = "10.0.0.1"`, port = "655" — the embedded `port`
-///   literal must split correctly.
+/// Reference node row (body after `recv_row` strips `18 3 `), hand-computed
+/// from the daemon's format. `status = 0x12` sets validkey (bit 1) and
+/// reachable (bit 4); `udp_ping_rtt = 1500` prints as `rtt 1.500`; host
+/// `10.0.0.1 port 655` exercises the embedded `port` literal.
 const NODE_BODY: &str = "alice 0a1b2c3d4e5f 10.0.0.1 port 655 \
     0 0 0 0 1000000c 12 bob alice 1 1518 1400 1518 1700000000 1500 \
     100 50000 200 100000";
@@ -220,17 +212,9 @@ fn node_fmt_plain_contract() {
     }
 }
 
-// DOT format: color cascade
-
-/// `fmt_dot` color cascade, an if-else-if chain in this order:
-///   1. MYSELF → green + filled
-///   2. !reachable → red
-///   3. via != name (indirect, UDP relayed) → orange
-///   4. !validkey → black
-///   5. minmtu > 0 (UDP works) → green
-///   6. fall-through (TCP only) → black
-///
-/// Order matters: MYSELF wins over !reachable (cascade row 7).
+/// `fmt_dot` colour cascade, first match wins: MYSELF → green filled;
+/// !reachable → red; via != name → orange; !validkey → black; minmtu > 0 →
+/// green; else black. MYSELF beating !reachable is row 7.
 #[test]
 fn node_dot_color_cascade() {
     #[rustfmt::skip]

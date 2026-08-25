@@ -47,18 +47,12 @@ fn connect(paths: &Paths) -> Result<CtlSocket<UnixStream>, CmdError> {
     CtlSocket::connect(paths).map_err(Into::into)
 }
 
-/// `cmd_pid`. The simplest command: connect, print the pid from
-/// greeting line 2, done. No CONTROL request sent at all — the
-/// greeting carries the pid.
-///
-/// Returns the pid; the binary prints it. Returning instead of
-/// printing lets the binary's `cmd_pid` adapter handle stdout, same
-/// pattern as `cmd_invite` returning the URL.
+/// `tinc pid`: connect and return the pid from greeting line 2; no request is
+/// sent. The binary prints it.
 ///
 /// # Errors
-/// `BadInput` (wrapping `CtlError`) if connect fails. Daemon down,
-/// pidfile missing, socket connect refused, greeting bad — all become
-/// "could not connect" with the specific message.
+/// `BadInput` wrapping the `CtlError` if connect fails (daemon down, pidfile
+/// missing, bad greeting).
 pub fn pid(paths: &Paths) -> Result<u32, CmdError> {
     let ctl = connect(paths)?;
     Ok(ctl.pid)
@@ -109,17 +103,12 @@ pub fn retry(paths: &Paths) -> Result<(), CmdError> {
     )
 }
 
-/// `cmd_stop`. Tell the daemon to exit. The daemon acks then
-/// `event_exit()`s; we drain until the socket closes.
-///
-/// The drain loop serves two purposes: (1) wait for the daemon to
-/// actually exit (so `tinc stop && tinc start` doesn't race), (2)
-/// consume the ack line we don't otherwise need. The second is why
-/// we don't use `recv_ack` — we don't check the ack, just drain.
+/// `tinc stop`: send STOP, then drain until the socket closes so `tinc stop &&
+/// tinc start` doesn't race the exiting daemon (the ack is consumed unchecked
+/// along the way).
 ///
 /// # Errors
-/// Connect failure. After STOP is sent, the daemon closing is the
-/// expected outcome — EOF is success, not error.
+/// Connect failure. EOF after STOP is success.
 pub fn stop(paths: &Paths) -> Result<(), CmdError> {
     let mut ctl = connect(paths)?;
     ctl.send(CtlRequest::Stop)?;
@@ -130,12 +119,8 @@ pub fn stop(paths: &Paths) -> Result<(), CmdError> {
     Ok(())
 }
 
-/// `cmd_debug`. Set the daemon's debug level. Returns the *previous*
-/// level — `REQ_SET_DEBUG` repurposes the ack's result int for this.
-///
-/// `level < 0` means "don't change, just query". `debug(paths, -1)`
-/// is a valid "what's the current level" call. If/when we add `tinc
-/// debug` without args, that's the implementation.
+/// `tinc debug N`: set the daemon's debug level, returning the previous one
+/// (the ack's result int). `level < 0` only queries.
 ///
 /// # Errors
 /// Connect failure or ack-shape mismatch.
@@ -146,17 +131,12 @@ pub fn debug(paths: &Paths, level: i32) -> Result<i32, CmdError> {
     ctl.recv_ack(CtlRequest::SetDebug).map_err(Into::into)
 }
 
-/// `cmd_disconnect`. Tell the daemon to drop its connection to
-/// `name`. Daemon-side: walk `connection_list`, terminate on
-/// matches, return `0` if found, `-2` if not.
-///
-/// Validates `name` with `check_id` before sending — a bogus name
-/// would just not match (return `-2`), but defense in depth.
+/// `tinc disconnect NAME`: ask the daemon to drop its connection to `name`.
+/// `name` is `check_id`'d first, though a bogus name would merely not match.
 ///
 /// # Errors
-/// `BadInput("Invalid name")` if `check_id` fails (before connect).
-/// Connect failure. `BadInput("Could not disconnect")` if daemon
-/// returns nonzero (node not found, or disconnect failed).
+/// `BadInput` for an invalid name, connect failure, or a nonzero daemon result
+/// (not found / failed).
 pub fn disconnect(paths: &Paths, name: &str) -> Result<(), CmdError> {
     // Validate first — don't waste a socket on a bad name.
     if !check_id(name) {

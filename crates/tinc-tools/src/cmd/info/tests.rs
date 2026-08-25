@@ -35,15 +35,9 @@ fn localtime_shape() {
     }
 }
 
-/// TZ=UTC pin: under UTC, the output is deterministic. We can't
-/// `setenv("TZ")` here (other tests might be touching libc tz
-/// state in parallel; `tzset()` is process-global). Instead: the
-/// integration test runs with `TZ=UTC` env on the SUBPROCESS,
-/// where it's safe.
-///
-/// This test just sanity-checks that the epoch (1) gives a 1970
-/// date in any TZ except UTC-12-or-further (which would be Dec
-/// 31 1969). The realistic TZ range is ±14h.
+/// `tzset()` is process-global, so TZ can't be pinned here; the integration
+/// test runs the subprocess under `TZ=UTC`. This only checks that epoch 1
+/// formats as a 1970 date, true for any realistic TZ (±14h).
 #[test]
 fn localtime_epoch_is_1970ish() {
     let s = fmt_localtime(86_400); // 1970-01-02 00:00:00 UTC
@@ -210,15 +204,9 @@ fn reachability_display_zero_rtt() {
     assert!(r.to_string().contains("RTT:          0.000"));
 }
 
-// NodeInfo::format — the full golden
-
-/// Build a known `NodeRow`, assert byte-exact output. This is the
-/// `diff <(tinc-c info bob) <(tinc-rs info bob)` test, in unit
-/// form. The values are chosen to exercise every line.
-///
-/// `last_state_change = 0` → `"never"`, dodging the TZ question.
-/// The TZ-dependent path is covered by the integration test
-/// (which runs the subprocess under `TZ=UTC`).
+/// Known `NodeRow` → byte-exact output exercising every line; the unit form of
+/// diffing against C tinc. `last_state_change = 0` prints `never`, leaving the
+/// TZ-dependent path to the `TZ=UTC` integration test.
 #[test]
 fn nodeinfo_format_golden() {
     // alice: reachable, validkey, sptps, udp. minmtu>0 → DirectUdp.
@@ -407,16 +395,9 @@ fn nodeinfo_traffic_double_space() {
 /// time, not at runtime.
 #[test]
 fn status_bits_match_node_h_order() {
-    // In declaration order:
-    //   bit 0: unused_active   (not used)
-    //   bit 1: validkey
-    //   bit 2: waitingforkey   (not printed)
-    //   bit 3: visited
-    //   bit 4: reachable
-    //   bit 5: indirect
-    //   bit 6: sptps
-    //   bit 7: udp_confirmed
-    //   bits 8-12: not printed by info
+    // Declaration order: bit0 unused, 1 validkey, 2 waitingforkey (not printed), 3
+    // visited, 4 reachable, 5 indirect, 6 sptps, 7 udp_confirmed, 8-12 not
+    // printed.
     assert_eq!(StatusBit::VALIDKEY.0, 1 << 1);
     assert_eq!(StatusBit::VISITED.0, 1 << 3);
     assert_eq!(StatusBit::REACHABLE.0, 1 << 4);

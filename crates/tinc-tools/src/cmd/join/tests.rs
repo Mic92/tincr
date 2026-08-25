@@ -321,15 +321,10 @@ fn finalize_self_clobber_is_case_insensitive() {
     assert!(!p.host_file("Bob").exists());
 }
 
-/// Secondary chunk with our own name → bail. Malicious inviter
-/// trying to clobber our host file.
-///
-/// The blob shape matters: `Name = bob\nName = bob\n...` does not
-/// trigger this — the second `Name = bob` matches `val == name`
-/// and is `continue`'d *inside chunk 1*. You can only get to the
-/// chunk-2 self-clobber check by first
-/// breaking chunk-1 on a *different* name. The attack vector is
-/// `chunk 2 = alice` (legit) then `chunk 3 = bob` (clobber).
+/// A later chunk naming us must bail (inviter trying to clobber our host file).
+/// `Name = bob` twice in a row doesn't reach that check — the repeat is
+/// swallowed inside chunk 1 — so the blob needs a different name (alice) in
+/// chunk 2 and bob in chunk 3.
 #[test]
 fn finalize_self_clobber_detected() {
     let cd = ConfDir::bare();
@@ -446,30 +441,11 @@ fn server_stub_single_use() {
     assert!(msg.contains("non-existing"));
 }
 
-// The CONTRACT TEST: full invite ↔ join roundtrip, in-process
-
-/// **The contract.** `invite()` writes a file → server stub reads
-/// it → SPTPS ping-pong → `finalize_join` writes a confbase →
-/// the confbase loads. No subprocess. No real socket. Two
-/// `Sptps` structs ping-ponging.
-///
-/// This is the proof that:
-/// 1. The invitation file format `cmd_invite` writes is the
-///    format `finalize_join` reads. (`build_invitation_file` ↔
-///    `finalize_join`'s parser agree on chunk boundaries,
-///    SAFE filter, etc.)
-/// 2. The SPTPS record-type protocol (0=data, 1=finalize,
-///    2=ack) works end-to-end with our SPTPS state machine.
-/// 3. The cookie→filename recovery in `server_receive_cookie`
-///    matches `cmd_invite`'s filename derivation. (Already KAT-
-///    tested in `tinc-crypto`, but this is the integration.)
-/// 4. The pubkey we send back is the one on disk.
-///
-/// What this DOESN'T test: the meta-greeting exchange, the TCP
-/// layer. Those need a real socket. The integration test in
-/// `tinc_cli.rs` (when the daemon stub gets a listen socket)
-/// will cover those. For now, the SPTPS layer + format layer
-/// are the high-value seams.
+/// The contract test: `invite()` writes a file, the server stub reads it, two
+/// `Sptps` structs ping-pong in-process, `finalize_join` writes a confbase, and
+/// it loads. Proves the invitation format, the 0/1/2 record protocol,
+/// cookie→filename recovery and the returned pubkey agree end to end; the
+/// TCP/meta-greeting layer is left to the CLI integration test.
 #[test]
 #[expect(
         // The test is long because it transcribes the full SPTPS
@@ -533,17 +509,10 @@ fn invite_join_roundtrip_in_process() {
         &mut os_rng(),
     );
 
-    // The pump
-    // Two unidirectional byte queues. `Output::Wire` from one
-    // side → enqueue → `receive()` on the other. Loop until both
-    // queues are empty and no new wire bytes were produced
-    // (steady state).
-    //
-    // State tracked across the loop, mirroring the C globals:
-    //   data: type-0 record accumulator (joiner side)
-    //   server_phase: what the server expects next
-    //   join_result: filled when type-1 arrives, used after loop
-    //   success: type-2 arrived
+    // The pump: two byte queues, `Output::Wire` from one side feeds `receive()` on
+    // the other until steady state. Tracked across iterations: `data` (type-0
+    // accumulator), `server_phase`, `join_result` (set on type-1), `success`
+    // (type-2 seen).
     let mut to_server: Vec<u8> = Vec::new();
     let mut to_joiner: Vec<u8> = Vec::new();
 

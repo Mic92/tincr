@@ -360,15 +360,9 @@ fn run(args: &Args, mut sock: Sock, mut s: Sptps) -> io::Result<()> {
             break;
         }
 
-        // Build the pollset fresh each iteration. `poll()` mutates
-        // `revents`; rebuilding is cleaner than clearing. Stack array
-        // [PollFd; 2] would be nicer but the optional second slot makes
-        // a `Vec` simpler than `MaybeUninit` gymnastics.
-        //
-        // The `BorrowedFd` from `sock.fd()` borrows `sock` immutably
-        // — fine, we don't `recv()` until after `poll()` returns and
-        // the PollFds are dropped. Re-borrow inside the `if sock_ready`
-        // block.
+        // Rebuild the pollset each iteration: `poll()` mutates `revents`, and the
+        // optional second slot makes a `Vec` simpler than a fixed array. The
+        // `BorrowedFd` from `sock.fd()` is dropped before we `recv()`.
         let stdin_polled = !readonly && established;
         let mut fds: Vec<PollFd> = Vec::with_capacity(2);
         fds.push(PollFd::new(sock.fd(), PollFlags::POLLIN));

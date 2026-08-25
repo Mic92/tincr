@@ -100,21 +100,10 @@ impl From<LoadError> for CmdError {
     }
 }
 
-/// `mkdir`, but EEXIST → chmod-and-succeed.
-///
-/// The chmod-on-exists is the surprising part. Why: if you previously
-/// made `/etc/tinc` with shell `mkdir` (mode 0777 from your umask),
-/// running `tinc init` should clamp it to 0755. Paranoia about
-/// overly-permissive existing dirs.
-///
-/// Not `create_dir_all` — we want explicit control over each level's
-/// mode (`confdir` 0755 vs `invitations/` 0700), and `create_dir_all`
-/// doesn't take a mode.
-///
-/// Shared by init (confbase tree) and invite (invitations/ at 0700).
-/// Lifted from init.rs when invite landed; the test
-/// (`init::tests::makedir_clamps_mode`) stayed where it was — it tests
-/// a property init depends on.
+/// `mkdir`, but on EEXIST chmod to `mode` and succeed, so `tinc init` clamps a
+/// pre-existing 0777 `/etc/tinc`. Not `create_dir_all`, which takes no mode;
+/// each level (confdir 0755, invitations/ 0700) is explicit. Shared by init and
+/// invite; tested in `init::tests::makedir_clamps_mode`.
 pub(crate) fn makedir(path: &Path, mode: u32) -> Result<(), CmdError> {
     #[cfg(unix)]
     {
@@ -197,15 +186,10 @@ pub(crate) fn create_nofollow(path: &Path) -> Result<File, CmdError> {
     open_nofollow(path, OpenKind::CreateTrunc, 0o666)
 }
 
-/// `<target><suffix>` write-then-rename RAII. `open()` creates the
-/// scratch file next to `target` (same directory → same filesystem →
-/// `rename(2)` is atomic), `commit()` renames it over the target, and
-/// `Drop` unlinks it on any error path so a `?` bail doesn't leave a
-/// stale `.tmp` behind.
-///
-/// Used by both `cmd::config` (suffix `.config.tmp`) and
-/// `cmd::genkey` (suffix `.tmp`); the suffix is the only thing the
-/// two callers disagree on.
+/// `<target><suffix>` write-then-rename RAII: `open()` creates the scratch file
+/// next to `target` (same filesystem, so `rename(2)` is atomic), `commit()`
+/// renames over it, `Drop` unlinks on any bail. Used by `cmd::config`
+/// (`.config.tmp`) and `cmd::genkey` (`.tmp`).
 pub(crate) struct TmpGuard {
     tmp: PathBuf,
     target: PathBuf,

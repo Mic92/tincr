@@ -75,17 +75,10 @@ use std::io::ErrorKind;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
-/// `get_my_name` — read `Name = X` from `tinc.conf`, expand `$HOST`.
-///
-/// Uses `tinc-conf` for tokenization. Reads the whole file, looks
-/// up `Name`, returns the first hit. `tinc.conf` is ~5 lines.
-///
-/// Returns the *post-expansion* name. `Name = $HOST` resolves.
+/// Read `Name = X` from `tinc.conf` and return it with `$HOST`/`$VAR` expanded.
 ///
 /// # Errors
-/// - `tinc.conf` doesn't exist or can't be read
-/// - No `Name =` line
-/// - `replace_name` fails (bad env var, gethostname failed, fails `check_id`)
+/// `tinc.conf` unreadable, no `Name`, or expansion fails (`replace_name`).
 pub fn get_my_name(paths: &Paths) -> Result<String, CmdError> {
     let tinc_conf = paths.tinc_conf();
 
@@ -147,11 +140,8 @@ fn is_name_line(line: &str) -> bool {
     tinc_conf::split_kv(line).0.eq_ignore_ascii_case("Name")
 }
 
-/// `cmd_export`. Just `get_my_name` then `export_one`.
-///
-/// Upstream's `if(!tty) fclose(stdout)` is dropped: Rust's
-/// `stdout().lock()` flushes on drop and process exit closes the
-/// fd. The peer sees EOF either way.
+/// `tinc export`: `get_my_name` then `export_one`. Stdout is flushed on drop,
+/// so the peer sees EOF without C's explicit `fclose`.
 ///
 /// # Errors
 /// `get_my_name` or `export_one` failed.
@@ -160,16 +150,12 @@ pub fn export(paths: &Paths, out: impl Write) -> Result<(), CmdError> {
     export_one(paths, &name, out)
 }
 
-/// `cmd_export_all`. Walk `hosts/`, export each, separator between.
-///
-/// **Ordering**: we sort. Upstream uses `readdir` order (filesystem-
-/// dependent). Sorting makes `tinc export-all > all.txt` diffable
-/// across machines and tests deterministic.
-///
-/// Best effort: one bad host file doesn't stop the whole export.
+/// `tinc export-all`: export every `hosts/` file with separators, sorted by
+/// name (C uses readdir order) so output is diffable and tests deterministic.
+/// One bad host file doesn't stop the rest.
 ///
 /// # Errors
-/// `hosts_dir` can't be opened. Per-file errors are accumulated.
+/// `hosts_dir` can't be opened; per-file errors are accumulated.
 pub fn export_all(paths: &Paths, mut out: impl Write) -> Result<(), CmdError> {
     let hosts_dir = paths.hosts_dir();
     let mut entries: Vec<String> = fs::read_dir(&hosts_dir)
@@ -217,57 +203,16 @@ pub fn export_all(paths: &Paths, mut out: impl Write) -> Result<(), CmdError> {
     }
 }
 
-// Import
-
-/// `cmd_import`. Read the export-blob format from `inp`, write
-/// `hosts/NAME` for each `Name = NAME` section.
-///
-/// `force`: if false, skip hosts whose file already exists (with a
-/// stderr warning). If true, truncate-and-overwrite.
-///
-/// Returns the count of files written; the caller maps count→exit.
-///
-/// ## The state machine
-///
-/// ```text
-///         ┌─ "Name = X" ─→ [open hosts/X, count++]
-///   line ─┤  "#---...#"  ─→ [skip]
-///         └─ anything else → [write to current file, or warn-once if none]
-/// ```
-///
-/// The "current file" can be `None` in two cases: junk before the
-/// first `Name =`, or a `Name =` whose file already exists (with
-/// `!force`). In both cases content lines are silently dropped.
-///
-/// ## Section header parse
-///
-/// Matches *only* the canonical `Name = X` form:
-/// - `Name = foo`      → "foo"
-/// - `Name =  foo`     → "foo" (skips leading whitespace)
-/// - `Name = foo bar`  → "foo" (stops at whitespace)
-/// - `Name=foo`        → no match (literal " " required)
-/// - `name = foo`      → no match (case-sensitive)
-/// - ` Name = foo`     → no match (no leading whitespace)
-///
-/// The export side always writes that exact form, so import only
-/// needs to match what export produces. A hand-edited blob with
-/// `Name=foo` won't import. Looser matching could change behavior
-/// on weird inputs (a host file containing `Name=something` as a
-/// *comment* would suddenly trigger a section boundary).
+/// `tinc import`: read the export blob from `inp`, write `hosts/NAME` per `Name
+/// = NAME` section (only that canonical form starts one; `#---#` lines are
+/// skipped), return the count. Without `force`, existing files are skipped with
+/// a warning and their lines dropped.
 ///
 /// # Errors
-/// - I/O writing a host file (not skip-because-exists; that's a warning)
-/// - `Name =` value fails `check_id`
-///
-/// # Panics
-/// Unreachable — `current_path` is `Some` whenever `out` is, by
-/// construction (set together, cleared together). The `.unwrap()`s
-/// document this invariant.
-//
+/// I/O writing a host file, or a `Name` failing `check_id`.
 pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, CmdError> {
-    let mut out: Option<BufWriter<fs::File>> = None;
+    let mut out: Option<(BufWriter<fs::File>, PathBuf)> = None;
     // For error messages. Set when `out` is.
-    let mut current_path: Option<PathBuf> = None;
     let mut count = 0usize;
     let mut firstline = true;
 
@@ -293,9 +238,8 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
 
             // Explicit flush so errors surface (BufWriter::drop
             // swallows errors).
-            if let Some(mut prev) = out.take() {
-                prev.flush()
-                    .map_err(io_err(current_path.as_ref().unwrap()))?;
+            if let Some((mut prev, prev_path)) = out.take() {
+                prev.flush().map_err(io_err(&prev_path))?;
             }
 
             let path = paths.host_file(name);
@@ -320,13 +264,11 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
                         path.display()
                     );
                     out = None;
-                    current_path = None;
                     continue;
                 }
                 Err(e) => return Err(io_err(&path)(e)),
             };
-            out = Some(BufWriter::new(f));
-            current_path = Some(path);
+            out = Some((BufWriter::new(f), path));
             count += 1;
             continue;
         }
@@ -345,13 +287,13 @@ pub fn import(paths: &Paths, inp: impl BufRead, force: bool) -> Result<usize, Cm
         }
 
         // Content → write to current file (silently dropped if none)
-        if let Some(f) = out.as_mut() {
-            writeln!(f, "{line}").map_err(io_err(current_path.as_ref().unwrap()))?;
+        if let Some((f, path)) = out.as_mut() {
+            writeln!(f, "{line}").map_err(io_err(&*path))?;
         }
     }
 
-    if let Some(mut f) = out {
-        f.flush().map_err(io_err(current_path.as_ref().unwrap()))?;
+    if let Some((mut f, path)) = out {
+        f.flush().map_err(io_err(&path))?;
     }
 
     Ok(count)

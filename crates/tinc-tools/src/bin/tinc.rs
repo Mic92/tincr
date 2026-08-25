@@ -76,31 +76,19 @@ enum Run {
 /// One row of the dispatch table. Name, handler, one-line help.
 struct CmdEntry {
     name: &'static str,
-    /// When `true`, `main()` calls `paths.resolve_runtime()` before
-    /// dispatch. The fs probe (`access(2)` on `/var/run/tinc.pid`)
-    /// only fires for commands that need it. Filesystem commands
-    /// like `init` and `export` never reach for `pidfile()`, so the
-    /// `Option<PathBuf>` stays `None` and the panic-on-unresolved
-    /// catches accidental use.
-    ///
-    /// Why a flag and not a second table: the handler signature is
-    /// the same. `connect()` takes `&Paths` and creates the socket
-    /// internally. Same shape, one table.
+    /// When `true`, `main()` calls `paths.resolve_runtime()` before dispatch, so
+    /// the pidfile probe only runs for commands that talk to the daemon;
+    /// filesystem-only commands leave it `None` and accidental `pidfile()` use
+    /// panics. A flag rather than a second table because the handler signature is
+    /// the same.
     needs_daemon: bool,
     run: Run,
     help: &'static str,
 }
 
-/// `tincctl.c`'s globals. The ones every command potentially reads,
-/// not the ones `make_names` writes (those are `Paths`).
-///
-/// In C these are bare globals — `bool force = false;` at file scope.
-/// Threading them as a struct means a command's signature *says*
-/// whether it cares (it takes `_: &Globals` if it doesn't).
-///
-/// Why not fold into `Paths`: `Paths` is path resolution; this is
-/// behavior toggles. Different lifetimes (a future shell mode resets
-/// `force` per-command but keeps `Paths`), different concerns.
+/// Per-invocation behaviour toggles every command may read (`--force` etc.),
+/// threaded explicitly so a command's signature says whether it cares. Separate
+/// from `Paths` (path resolution, different lifetime in a future shell mode).
 struct Globals {
     /// `--force`. Currently used by: `import`
     /// (overwrite existing), eventually `set` (allow obsolete vars).

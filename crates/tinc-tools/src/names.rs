@@ -55,14 +55,8 @@ const LOCALSTATEDIR: &str = match option_env!("TINC_LOCALSTATEDIR") {
     None => "/var",
 };
 
-/// All the paths a command needs.
-///
-/// These are the *input* paths — where to look for config. `init`
-/// writes here; `export` reads here.
-///
-/// `tinc_conf` and `hosts_dir` are derived from `confbase`. We
-/// precompute them as accessors because `paths.tinc_conf()` reads
-/// better at every call site than `paths.confbase.join("tinc.conf")`.
+/// All the input paths a command needs (where config lives).
+/// `tinc_conf()`/`hosts_dir()` are accessors derived from `confbase`.
 #[derive(Debug, Clone)]
 pub struct Paths {
     /// `confbase` — config root for this net. `/etc/tinc/NETNAME` or
@@ -72,31 +66,15 @@ pub struct Paths {
     /// `ed25519_key.priv`, `tinc-up` — all `confbase.join(...)`.
     pub confbase: PathBuf,
 
-    /// `pidfilename` — where the daemon writes its pid + control
-    /// cookie. The CLI reads this in `connect_tincd`.
-    ///
-    /// Only set when *resolved*. `for_cli()` doesn't resolve it (the
-    /// 4a commands don't need it). 5b commands call `resolve_runtime()`
-    /// which fills it via the LOCALSTATEDIR fallback dance.
-    ///
-    /// Why lazy: the resolution probes the filesystem. Commands like
-    /// `init` and `export` shouldn't be doing fs probes for state
-    /// they don't use. We make the dependency explicit.
-    ///
-    /// `Option<PathBuf>` so `pidfile()` can panic with a clear
-    /// message if you forgot `resolve_runtime()`. Better than a
-    /// silent `confbase/pid` default that masks a missing call.
+    /// Where the daemon writes its pid and control cookie. `None` until
+    /// `resolve_runtime()`, which probes the filesystem; filesystem-only commands
+    /// never call it, and `pidfile()` panics on `None` so a forgotten call is loud
+    /// rather than a silent wrong default.
     pidfile: Option<PathBuf>,
 
-    /// `confdir` — `/etc/tinc`, the *parent* dir. `makedirs(DIR_CONFDIR)`
-    /// creates this when `confbase` was derived from netname (so
-    /// `/etc/tinc` needs to exist before `/etc/tinc/NETNAME` can).
-    /// When `--config` was given, this is `None` — we don't know what
-    /// the parent should be, and the user said where to look, so we
-    /// trust the path exists or `mkdir(confbase)` will fail loudly.
-    ///
-    /// Modeled as `Option` rather than store a path we'll never use
-    /// plus a flag saying not to use it.
+    /// `/etc/tinc`, the parent dir, created before `/etc/tinc/NETNAME` when
+    /// confbase came from a netname. `None` when `--config` was given: the user
+    /// named the confbase and its parent is their business.
     pub confdir: Option<PathBuf>,
 }
 
@@ -162,33 +140,11 @@ impl Paths {
         }
     }
 
-    /// Resolve `pidfilename` and (implicitly) `unixsocketname`. Idempotent.
-    ///
-    /// **Probe-first-then-fall-back**: try `/var/run/tinc.X.pid`,
-    /// and only fall back to `confbase/pid` if the system path doesn't
-    /// exist *but* the confbase one does. The asymmetry matters:
-    ///
-    /// | /var/run/X.pid | confbase/pid | resolved to     |
-    /// |----------------|--------------|-----------------|
-    /// | exists         | (any)        | /var/run/X.pid  |
-    /// | missing        | exists       | confbase/pid    |
-    /// | missing        | missing      | /var/run/X.pid  |
-    ///
-    /// The bottom row is the surprise: if *neither* exists, we return
-    /// the LOCALSTATEDIR path, not confbase. The rationale: if no
-    /// daemon is running anywhere, the error message should say
-    /// `/var/run/...` (where a daemon *should* write) not
-    /// `confbase/pid` (the fallback for unwritable /var/run).
-    ///
-    /// Why this is `&mut self` not a constructor: the resolution
-    /// `access(2)`s the filesystem. Mutating an existing `Paths`
-    /// after the cheap-construction means the test idiom stays
-    /// `PathsInput { confbase: ..., ..Default::default() }` →
-    /// `for_cli()` and only the 5b tests add `.resolve_runtime()`.
-    ///
-    /// `identname` (the `tinc.NETNAME` bit) is derived here from
-    /// `netname`. We don't store it — only one consumer. When syslog
-    /// lands, lift it.
+    /// Resolve `pidfilename` (and implicitly the socket name); idempotent.
+    /// `/var/run/tinc[.NET].pid` if it exists; else `confbase/pid` if *that*
+    /// exists; else the `/var/run` path anyway, so a no-daemon error names the
+    /// place a daemon should have written. `&mut self` rather than a constructor
+    /// keeps `for_cli()` probe-free for tests and filesystem-only commands.
     pub fn resolve_runtime(&mut self, input: &PathsInput) {
         // --pidfile wins. No probing.
         if let Some(explicit) = &input.pidfile {
@@ -238,20 +194,10 @@ impl Paths {
             .expect("pidfile() called before resolve_runtime()")
     }
 
-    /// `unixsocketname`. Derived from `pidfilename` by string surgery.
-    ///
-    /// The rule: `foo.pid` → `foo.socket`; anything else gets
-    /// `.socket` appended. Case-sensitive, exactly 4 trailing bytes.
-    /// `Foo.PID` does not match → `Foo.PID.socket`. Must match the
-    /// daemon's derivation exactly — a socket-path mismatch is a silent
-    /// connect failure.
-    ///
-    /// Why derived not stored: it's pure (no fs probe), and storing
-    /// it would mean two `Option`s that are always `Some`/`None`
-    /// together. One source of truth.
-    ///
-    /// Returns `PathBuf` not `&Path` because the surgery allocates.
-    /// Called once per process (in `connect_tincd`), so no caching.
+    /// Control socket path, derived from `pidfilename`: `foo.pid` → `foo.socket`
+    /// (case-sensitive, exactly `.pid`), anything else gets `.socket` appended.
+    /// Must match the daemon's derivation exactly or connect fails silently. Pure,
+    /// so not stored.
     ///
     /// # Panics
     /// Same as `pidfile()`.
@@ -266,15 +212,9 @@ impl Paths {
         // `> 4` not `>= 4` — a file named exactly `.pid` (len=4)
         // doesn't match. Unlikely but preserved.
         if bytes.len() > 4 && bytes.ends_with(b".pid") {
-            // Slice off the .pid, append .socket. Can't `with_extension`
-            // because that would turn `tinc.myvpn.pid` into
-            // `tinc.socket` (drops everything after the last dot).
-            // We want exactly the last 4 bytes replaced.
-            //
-            // Safety: `bytes[..len-4]` is a valid encoded substring
-            // because we sliced at an ASCII boundary (`.` is ASCII,
-            // `pid` is ASCII). Same constraint as the from_utf8-at-
-            // ASCII-byte rule in `tinc-conf::parse`.
+            // Replace exactly the trailing `.pid`; `with_extension` would turn
+            // `tinc.myvpn.pid` into `tinc.socket`. Slicing at `len-4` is a valid boundary
+            // since `.pid` is ASCII.
             let stem = &bytes[..bytes.len() - 4];
             // SAFETY: stem is a prefix of valid encoded bytes,
             // truncated at an ASCII byte boundary. The forbid(unsafe)
@@ -314,14 +254,9 @@ impl Paths {
         self.confbase.join("hosts")
     }
 
-    /// `confdir` materialized. `self.confdir` is `Option` (None when
-    /// `--config` was given, because makedirs doesn't need the parent
-    /// then). But `cmd_network` reads `confdir` regardless — `tinc
-    /// -c /foo network` lists `/etc/tinc/*/tinc.conf` not `/foo/../*`
-    /// (`-c` points at one confbase, not a parent-of-confbases).
-    ///
-    /// `Some(x)` → `x`, `None` → `CONFDIR/tinc`. Only `cmd_network`
-    /// calls it; the `Option` field is the right model for makedirs.
+    /// `confdir` for `cmd_network`, which lists `/etc/tinc/*/tinc.conf` even under
+    /// `-c` (that names one confbase, not a parent of confbases): `Some(x)` → `x`,
+    /// `None` → `CONFDIR/tinc`.
     #[must_use]
     pub fn confdir_always(&self) -> PathBuf {
         self.confdir
@@ -378,64 +313,28 @@ impl Paths {
     }
 }
 
-/// `check_id` — node names must be `[A-Za-z0-9_]+`, nonempty.
-///
-/// We pin to ASCII explicitly; same as the `ascii_fold` decision in
-/// `tinc-conf::parse`.
-///
-/// This isn't just a sanity check — it's load-bearing security. Node
-/// names go into filesystem paths (`hosts/NAME`, scripts) and into
-/// the wire protocol's space-separated tokens. A name with `/` would
-/// be a path traversal; a name with ` ` would break wire parsing. The
-/// charset restriction is the one thing standing between "node name
-/// from a peer" and "arbitrary attacker-controlled string in a
-/// `format!` that becomes a path".
+/// Node names must be nonempty ASCII `[A-Za-z0-9_]+`. Load-bearing security,
+/// not just hygiene: names become filesystem paths (`hosts/NAME`, scripts) and
+/// space-separated wire tokens, so this charset is what keeps a peer-supplied
+/// name from being a path traversal or a parse break.
 pub use tinc_conf::name::check_id;
 
-/// `replace_name` — expand `$HOST`/`$FOO` in `Name = ...` values, then
-/// `check_id`.
-///
-/// ## What this is for
-///
-/// `tinc.conf` can say `Name = $HOST` to mean "use the machine's
-/// hostname as the node name". Or `Name = $MYTINCNAME` for an
-/// arbitrary env var. The `$HOST` form is special-cased: if env var
-/// `HOST` isn't set, fall through to `gethostname(2)`.
-///
-/// After expansion, non-alnum characters get squashed to `_` (a
-/// hostname like `my-laptop.local` becomes `my_laptop_local`). Then
-/// `check_id` runs as a final gate — which after squashing can only
-/// fail on empty string.
-///
-/// ## Why this is in `names.rs` not `cmd/exchange.rs`
-///
-/// First consumer is `get_my_name` (`cmd/exchange.rs`). The daemon
-/// also calls this from setup — same code path: read `Name` from
-/// config, expand, validate. Shared infrastructure goes here.
-///
-/// ## Why `Result<String, String>` not `Option`
-///
-/// Three distinct error messages: "env var X does not exist", "could
-/// not get hostname", "invalid name". `Option` would lose that.
+/// Expand `Name = $HOST` / `$VAR` and validate: `$HOST` falls back to
+/// `gethostname(2)`; non-alnum characters become `_` (`my-laptop.local` →
+/// `my_laptop_local`); then `check_id`. Shared by the CLI's `get_my_name` and
+/// the daemon's setup.
 ///
 /// # Errors
-/// - `$FOO` (not `$HOST`) and env var `FOO` is unset
-/// - `$HOST`, env var `HOST` unset, *and* `gethostname` fails
-/// - Result fails `check_id` (empty after squashing)
+/// `$VAR` unset; `$HOST` unset and `gethostname` fails; empty after squashing.
 #[cfg(unix)]
 pub fn replace_name(raw: &str) -> Result<String, String> {
     replace_name_with(raw, |k| env::var(k).ok())
 }
 
-/// Core of `replace_name`, parameterized over env lookup so tests don't
-/// have to mutate process-global env (`set_var` is `unsafe` in edition
-/// 2024 — racy under multithreaded test runners). Production calls go
-/// through the wrapper above with the real `std::env::var`.
-///
-/// Delegates to the shared `tinc_conf::name::expand_name` so the CLI
-/// and the daemon agree on the result — previously this kept the
-/// domain part (`my-host.lan` → `my_host_lan`) while the daemon
-/// truncated (`my_host`), and exchanged host files mismatched.
+/// Core of `replace_name` with injectable env lookup (tests must not `set_var`
+/// under a threaded runner). Delegates to `tinc_conf::name::expand_name` so CLI
+/// and daemon agree — they once differed on truncating at the first dot, and
+/// exchanged host files mismatched.
 #[cfg(unix)]
 fn replace_name_with(raw: &str, env: impl Fn(&str) -> Option<String>) -> Result<String, String> {
     tinc_conf::name::expand_name(raw, env, || {

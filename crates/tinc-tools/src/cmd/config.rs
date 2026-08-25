@@ -126,23 +126,13 @@ pub struct ConfigCmd<'a> {
     pub force: bool,
 }
 
-/// Validate the variable, decide which file to edit, apply the
-/// action coercions.
-///
-/// `paths` is needed because HOST-only vars with no explicit node resolve
-/// to `hosts/$(get_my_name)`, which requires reading `tinc.conf`.
-///
-/// `cmd.force` gates: unknown vars, obsolete vars, server-var-in-hostfile.
+/// Validate the variable, pick the file to edit, apply the action coercions.
+/// HOST-only vars without a node resolve to `hosts/$(get_my_name)`, hence
+/// `paths`. `cmd.force` admits unknown/obsolete vars and server vars in host
+/// files. Only `Subnet` values are syntax-checked.
 ///
 /// # Errors
-/// Obsolete without force, not-host without force, unknown without force,
-/// `get_my_name` failed, `check_id` on node failed, set/add without value.
-///
-/// # Subnet validation
-///
-/// When `variable == "Subnet"` and a value is given, malformed or
-/// non-canonical subnets are rejected early. Subnet is the only variable
-/// whose value format the CLI validates; everything else is written blindly.
+/// Bad var without force, `get_my_name`/`check_id` failure, set without value.
 pub fn build_intent(
     paths: &Paths,
     cmd: &ConfigCmd<'_>,
@@ -308,19 +298,12 @@ pub fn run_get(path: &Path, variable: &str) -> Result<Vec<String>, CmdError> {
     Ok(found)
 }
 
-/// `Set`/`Add`/`Del`: scan + transform + write tmpfile + rename.
-///
-/// `intent.action` must not be `Get` — call `run_get` for that.
-///
-/// # Panics
-/// If `intent.action == Get`.
+/// `Set`/`Add`/`Del` (never `Get`; use `run_get`): scan, transform, write
+/// tmpfile, rename. Returns the per-line `Removing` warnings. `Set`/`Add`
+/// append when nothing matched.
 ///
 /// # Errors
-/// Read failure, write failure, rename failure, or a `Del` that matched
-/// zero lines. `Set` and `Add` never fail at the walk stage — if no match
-/// exists, they append.
-///
-/// Returns the per-line `Removing` warnings.
+/// Read/write/rename failure, or a `Del` that matched nothing.
 pub fn run_edit(path: &Path, intent: &Intent) -> Result<Vec<Warning>, CmdError> {
     debug_assert_ne!(intent.action, Action::Get, "use run_get for Get");
 
@@ -338,16 +321,11 @@ pub fn run_edit(path: &Path, intent: &Intent) -> Result<Vec<Warning>, CmdError> 
         // None → not a key=val line (blank/comment/PEM)
         let parsed = split_line(line);
 
-        let matched = parsed
-            .as_ref()
-            .is_some_and(|(k, _)| k.eq_ignore_ascii_case(&intent.variable));
-
-        if matched {
-            // Safe: matched implies parsed.is_some().
-            let (_, line_val) = parsed.unwrap();
-
+        if let Some((_, line_val)) =
+            parsed.filter(|(k, _)| k.eq_ignore_ascii_case(&intent.variable))
+        {
             match intent.action {
-                Action::Get => unreachable!("debug_assert above"),
+                Action::Get => {}
 
                 // DEL: the `continue` is the delete. Value filter is
                 // case-insensitive.
@@ -439,15 +417,9 @@ fn tmpfile_werr(e: io::Error) -> CmdError {
     }
 }
 
-/// Parse a config-file line into `(key, val)`.
-///
-/// Input still carries its trailing `\n` (from `split_inclusive`), so
-/// trailing whitespace is stripped here. Returns `None` for blank and
-/// empty-key lines.
-///
-/// PEM blocks: a `-----BEGIN PUBLIC KEY-----` line tokenizes as
-/// `key = "-----BEGIN"`, which never matches a variable name and thus
-/// falls through to copy-verbatim.
+/// Parse a config-file line (still carrying its `\n`) into `(key, val)`; `None`
+/// for blank or empty-key lines. A PEM `-----BEGIN ...` line tokenizes as key
+/// `-----BEGIN`, matches no variable, and is copied verbatim.
 fn split_line(line: &str) -> Option<(&str, &str)> {
     let (key, val) = tinc_conf::split_kv(line.trim_end_matches(['\t', '\r', '\n', ' ']));
     if key.is_empty() {
@@ -467,28 +439,13 @@ pub enum ConfigOutput {
     Edited,
 }
 
-/// The config command end-to-end.
-///
-/// `joined` is the rejoined argv tail (`args.join(" ")`); the binary
-/// adapter does the joining so this function takes one string.
-///
-/// The opportunistic reload after an edit is a binary concern; this
-/// function is filesystem-only.
+/// The config command end-to-end on `joined` (the argv tail as one string);
+/// filesystem-only, the reload is the binary's job. `get Port` without a node
+/// prefers the runtime port from the pidfile (with `Port = 0` only it knows),
+/// so `paths` must be `resolve_runtime()`d.
 ///
 /// # Errors
-/// Validation failure (unknown var without force, etc.), file missing,
-/// write error, `Del` matched nothing.
-///
-/// # `get Port` special case
-///
-/// If asking for `Port` with no explicit node and the pidfile is readable,
-/// the *runtime* port from the pidfile is returned instead of the configured
-/// one — with `Port = 0` the daemon picks a free port and only the pidfile
-/// knows it. If the pidfile is missing, fall back to scanning the config.
-/// A stale pidfile therefore gives a stale port.
-///
-/// `paths` must have `resolve_runtime` called so the pidfile path is
-/// available; that's why the binary marks the config commands `needs_daemon`.
+/// Validation failure, file missing, write error, `Del` matched nothing.
 pub fn run(
     paths: &Paths,
     raw_action: Action,

@@ -50,23 +50,12 @@ use std::fs;
 use std::fs::File;
 use std::path::PathBuf;
 
-// List
-
-/// Scan `confdir`, emit network names.
-///
-/// Separate from `run()` so tests can pass an arbitrary dir
-/// (the real `confdir_always()` is `/etc/tinc`, which the test
-/// runner can't write to). Writes to `out` for the same reason.
-///
-/// Returns the COUNT for tests; the CLI surface drops it.
+/// List network names under `confdir` to `out`; returns the count for tests.
+/// Both are parameters because the real confdir is `/etc/tinc`.
 ///
 /// # Errors
-/// `read_dir` failing — `Io { path: confdir, err }`. Missing
-/// `/etc/tinc` is `ENOENT` here.
-///
-/// `write_all` failing — also `Io`, with `<stdout>` sentinel path.
-/// SIGPIPE if piped to `head` becomes EPIPE; we stop. Upstream
-/// keeps printing into the void; ours is stricter. Fine.
+/// `Io` from `read_dir` (including a missing confdir) or from writing (EPIPE
+/// when piped to `head`; we stop where C keeps printing).
 pub(crate) fn list(confdir: &Path, out: &mut impl Write) -> Result<usize, CmdError> {
     // Collect first, sort, then print. The number of networks on a
     // host is single-digit; the buffer is negligible.
@@ -130,15 +119,10 @@ pub(crate) fn list(confdir: &Path, out: &mut impl Write) -> Result<usize, CmdErr
     Ok(found.len())
 }
 
-// CLI entry
-
-/// `tinc network [NAME]`. List mode or error-with-advice.
-///
-/// `arg`: `None` → list. `Some(name)` → would-be-switch.
+/// `tinc network [NAME]`: `None` lists, `Some` is the unsupported switch mode.
 ///
 /// # Errors
-/// `BadInput` for the switch-mode (with "use -n NAME" message). `Io`
-/// for `read_dir` failures.
+/// `BadInput` advising `-n NAME` for switch mode; `Io` for `read_dir`.
 pub fn run(paths: &Paths, arg: Option<&str>) -> Result<(), CmdError> {
     if let Some(name) = arg {
         // Switch mode is rejected: without an interactive shell it would
