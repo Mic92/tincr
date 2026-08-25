@@ -178,9 +178,8 @@ impl Daemon {
         let now = self.timers.now();
         let expired: Vec<NodeId> = self
             .punches
-            .iter()
-            .filter(|(_, e)| punch::is_expired(&e.state, now))
-            .map(|(&nid, _)| nid)
+            .extract_if(|_, e| punch::is_expired(&e.state, now))
+            .map(|(nid, _)| nid)
             .collect();
         for nid in expired {
             self.clear_punch(nid);

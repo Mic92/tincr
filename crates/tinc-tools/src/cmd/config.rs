@@ -310,7 +310,7 @@ pub fn run_edit(path: &Path, intent: &Intent) -> Result<Vec<Warning>, CmdError> 
     let contents = fs::read_to_string(path).map_err(io_err(path))?;
 
     // Tmpfile is cleaned up on `?` via the RAII guard.
-    let (guard, mut tf) = TmpGuard::open(path, ".config.tmp")?;
+    let (guard, mut tf) = TmpGuard::open(path, "config.tmp")?;
 
     let mut already_set = false; // Set wrote its one line
     let mut removed_any = false; // Del matched something

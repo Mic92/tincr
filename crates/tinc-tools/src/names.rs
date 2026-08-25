@@ -231,14 +231,10 @@ impl Paths {
                 // Windows uses different path resolution via registry.
                 // Stub the type-check.
                 let _ = stem;
-                let mut s = pid.as_os_str().to_owned();
-                s.push(".socket");
-                PathBuf::from(s)
+                pid.with_added_extension("socket")
             }
         } else {
-            let mut s = pid.as_os_str().to_owned();
-            s.push(".socket");
-            PathBuf::from(s)
+            pid.with_added_extension("socket")
         }
     }
 

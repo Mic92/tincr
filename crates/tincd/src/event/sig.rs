@@ -33,7 +33,6 @@
 
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use std::ptr;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 #[cfg(not(any(
@@ -89,7 +88,7 @@ extern "C" fn handler(signum: libc::c_int) {
     // signal-context audit trivial.
     #[expect(unsafe_code)]
     unsafe {
-        libc::write(fd, ptr::addr_of!(byte).cast(), 1);
+        libc::write(fd, (&raw const byte).cast(), 1);
     }
 }
 
