@@ -5,6 +5,7 @@ use super::{ConnId, Daemon};
 use std::io;
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, OwnedFd};
+use std::time::Duration;
 use std::time::SystemTime;
 
 use crate::conn::{Connection, FeedResult, SptpsEvent};
@@ -1060,5 +1061,81 @@ impl Daemon {
             "invitation-accepted",
             script::execute(&self.confbase, "invitation-accepted", &env, None),
         );
+    }
+}
+
+impl Daemon {
+    /// `io_set` `ReadWrite` for any conn with nonempty outbuf. Device-read
+    /// / udp-recv paths queue on meta-conns without a `ConnId` in scope.
+    /// A sweep; tracking touched `ConnId`s would be O(dirty).
+    pub(super) fn maybe_set_write_any(&mut self) {
+        let dirty: Vec<ConnId> = self
+            .conns
+            .iter()
+            .filter(|(_, c)| !c.outbuf.is_empty())
+            .map(|(id, _)| id)
+            .collect();
+        for id in dirty {
+            if let Some(io_id) = self.conns[id].io_id
+                && let Err(e) = self.ev.set(io_id, Io::ReadWrite)
+            {
+                log::error!(target: "tincd::conn",
+                                "io_set failed for {id:?}: {e}");
+                self.terminate(id);
+            }
+        }
+    }
+
+    /// Walk conns with `log_level`, send each log line. We drain the
+    /// thread-local tap buffer once per event-loop turn.
+    ///
+    /// Wire shape: newline-terminated header `"18 15 <len>"`, then
+    /// raw body bytes (no `\n`). CLI does `recvline()` for the
+    /// header, `recvdata(len)` for the body.
+    pub(super) fn flush_log_tap(&mut self) {
+        let drained = crate::log_tap::drain();
+        if drained.is_empty() {
+            return;
+        }
+        // Snapshot log-conn ids: send() borrows `&mut conn`.
+        let log_conns: Vec<_> = self
+            .conns
+            .iter()
+            .filter_map(|(id, c)| c.log_level.map(|lv| (id, lv)))
+            .collect();
+        if log_conns.is_empty() {
+            // Gate is open but no log conns (race: REQ_LOG arrived
+            // and the conn died in the same turn). Drop on the floor.
+            return;
+        }
+        let now = self.timers.now();
+        let mut nw = false;
+        for (level, msg) in &drained {
+            for &(id, conn_level) in &log_conns {
+                // `Level` ordering: Error < Warn < Info < Debug <
+                // Trace. `*level <= conn_level` = "at least as
+                // important as the conn wants".
+                if *level > conn_level {
+                    continue;
+                }
+                let Some(conn) = self.conns.get_mut(id) else {
+                    continue;
+                };
+                // Refresh idle-reap window while we're actively streaming.
+                conn.last_ping_time = now + Duration::from_hours(1);
+                // Header line; send() appends `\n`. Then raw body,
+                // no newline.
+                nw |= conn.send(format_args!(
+                    "{} {} {}",
+                    tinc_proto::Request::Control,
+                    crate::dispatch::REQ_LOG,
+                    msg.len()
+                ));
+                nw |= conn.send_raw(msg.as_bytes());
+            }
+        }
+        if nw {
+            self.maybe_set_write_any();
+        }
     }
 }
