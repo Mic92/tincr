@@ -20,20 +20,13 @@ use std::os::fd::{AsRawFd, BorrowedFd};
 /// writes nothing back. Not in libc.
 pub const TUNSETSTEERINGEBPF: libc::c_ulong = 0x8004_54e0;
 
-/// Attach (`prog_fd >= 0`) or detach (`prog_fd = -1`) a steering prog.
-///
-/// In the automq design only `prog_fd = -1` is ever passed. The
-/// signature accepts any `i32` so the test (which probes the ioctl
-/// path with garbage fds for `EBADF`) doesn't need a separate shim.
+/// Attach (`prog_fd >= 0`) or detach (`-1`) a TUN steering prog; automq only
+/// ever detaches, but any `i32` is accepted so the test can probe the ioctl
+/// with garbage fds. Detaching with nothing attached succeeds
+/// (`__tun_set_ebpf(NULL)` is idempotent).
 ///
 /// # Errors
-///
-/// - `EBADF`: `prog_fd >= 0` but not an open fd.
-/// - `EINVAL`: `prog_fd` refers to a non-`SOCKET_FILTER` BPF prog.
-/// - `EFAULT`: bad user pointer (impossible — stack ref).
-///
-/// `prog_fd = -1` on a TUN with no prog attached: succeeds (kernel
-/// `__tun_set_ebpf(NULL)` is idempotent).
+/// `EBADF` (not an open fd), `EINVAL` (not a `SOCKET_FILTER` prog).
 #[expect(unsafe_code)]
 pub fn tunsetsteeringebpf(tun_fd: BorrowedFd<'_>, prog_fd: i32) -> io::Result<()> {
     let mut prog_fd = prog_fd; // kernel reads via copy_from_user

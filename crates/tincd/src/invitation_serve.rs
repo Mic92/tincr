@@ -77,15 +77,12 @@ fn io_err(path: &Path) -> impl Fn(io::Error) -> ServeError + '_ {
     }
 }
 
-/// `read_invitation_key` (`keys.c` analog). Load
-/// `confbase/invitations/ed25519_key.priv`.
-///
-/// `Ok(None)` if the file doesn't exist (no invites yet). `Err` for
-/// read/parse failures (corrupt — operator needs to know).
+/// Load `confbase/invitations/ed25519_key.priv`. `Ok(None)` if absent (no
+/// invites yet).
 ///
 /// # Errors
-/// `Io` for fs failures other than ENOENT; `BadInvitationFile` for
-/// PEM parse failures.
+/// `Io` for failures other than ENOENT; `BadInvitationFile` for PEM parse
+/// failures (the operator needs to know).
 pub(crate) fn read_invitation_key(confbase: &Path) -> Result<Option<SigningKey>, ServeError> {
     let path = confbase.join("invitations").join("ed25519_key.priv");
     let f = match File::open(&path) {
@@ -126,14 +123,12 @@ fn parse_name_line(line: &str) -> Option<&str> {
     }
 }
 
-/// `receive_invitation_sptps` type-0 handler. Returns
-/// `(file_contents, invited_name, used_path)`.
+/// Type-0 (cookie) handler: returns `(file_contents, invited_name, used_path)`.
 ///
 /// # Errors
-/// - `NonExisting`: rename ENOENT. Single-use is enforced BY the
-///   atomic rename (no check-then-rename TOCTOU).
-/// - `Expired`: `.used` file left in place (evidence; C same).
-/// - `BadInvitationFile`: rename already happened; C doesn't undo.
+/// `NonExisting` (rename ENOENT; single use is enforced by the atomic rename),
+/// `Expired` (`.used` file kept as evidence), `BadInvitationFile` (rename
+/// already happened, not undone; C same).
 pub(crate) fn serve_cookie(
     confbase: &Path,
     inv_key: &SigningKey,

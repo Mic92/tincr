@@ -20,15 +20,9 @@ use std::time::SystemTime;
 
 use tinc_proto::Subnet;
 
-/// Result of diffing old subnets against new config.
-///
-/// ## Subnet identity includes weight
-///
-/// `Subnet`'s derived `Eq`/`Hash` includes the `weight` field. So
-/// `10.0.0.0/24 weight 5` ≠ `10.0.0.0/24 weight 10`. Changing a
-/// weight in the config is remove-old + add-new. `subnet_compare_*`
-/// includes weight in the key, so `lookup_subnet` won't find the
-/// old entry when weight changed → falls through to the add path.
+/// Result of diffing old subnets against new config. `Subnet`'s `Eq`/`Hash`
+/// include weight, so changing a weight is remove-old plus add-new, matching C
+/// where weight is part of the compare key.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct SubnetDiff {
     /// New in config, not in current set. → `subnet_add` +
@@ -40,16 +34,9 @@ pub(crate) struct SubnetDiff {
     // No "kept" field — caller doesn't need to act on those.
 }
 
-/// The subnet mark-sweep.
-///
-/// `current`: subnets owned by `myself` right now.
-/// `from_config`: subnets parsed from the re-read `Subnet =` lines
-///   in `hosts/NAME`.
-///
-/// Ordering of `added`/`removed`: `HashSet::difference` iteration
-/// order — non-deterministic across runs. Doesn't matter (each
-/// subnet is independent; the C is splay-tree iter order, also just
-/// "some deterministic order").
+/// Subnet mark-sweep: `current` is what `myself` owns now, `from_config` the
+/// re-read `Subnet =` lines. `added`/`removed` come out in `HashSet` order;
+/// each subnet is independent so order is irrelevant.
 #[must_use]
 pub(crate) fn diff_subnets<S: BuildHasher>(
     current: &HashSet<Subnet, S>,
@@ -61,21 +48,10 @@ pub(crate) fn diff_subnets<S: BuildHasher>(
     }
 }
 
-/// `try_outgoing_connections` mark-sweep + re-kick.
-///
-/// `current`: `ConnectTo` names with active outgoings.
-/// `from_config`: `ConnectTo =` lines in re-read tinc.conf.
-///
-/// Returns `(to_add, to_remove)`. `to_add` → daemon calls
-/// `setup_outgoing_connection`. `to_remove` → daemon terminates the
-/// outgoing (and its conn if connected).
-///
-/// The C marks every outgoing `outgoing->aip = NULL` (the "address
-/// iterator pointer" — `NULL` means "stale"), then the config-read
-/// clears it for survivors. Same pattern.
-///
-/// Ordering: `BTreeSet::difference` — deterministic, sorted. Node
-/// names are `[A-Za-z0-9_]+` so byte-lex == ASCII-lex.
+/// `ConnectTo` mark-sweep: `current` are names with active outgoings,
+/// `from_config` the re-read lines. Returns `(to_add, to_remove)`; the daemon
+/// sets up or terminates accordingly (C marks all stale then clears survivors,
+/// same effect). `BTreeSet` order, deterministic.
 #[must_use]
 pub(crate) fn diff_connect_to(
     current: &BTreeSet<String>,
@@ -86,32 +62,13 @@ pub(crate) fn diff_connect_to(
     (to_add, to_remove)
 }
 
-/// Which conns need terminating because their hosts/ file changed
-/// since last reload.
-///
-/// `conns`: active connection names (excluding control conns —
-///   caller filters).
-/// `host_mtimes`: `(name, mtime)` for each conn whose `hosts/{name}`
-///   exists. The daemon does the `stat`; this function decides.
-///   Missing hosts/ file → conn IS in `conns` but NOT in
-///   `host_mtimes`; that's a TERMINATE (the operator deleted the
-///   file → revoke).
-/// `last_check`: `last_config_check` from previous reload (or
-///   daemon start).
-///
-/// `if(stat(fname, &s) || s.st_mtime > last_config_check)`: the `||`
-/// means stat-failed (ENOENT, deleted) OR newer. Both terminate.
-///
-/// ## `>` not `>=` — one-second granularity
-///
-/// `s.st_mtime > last_config_check`: strict greater-than. `st_mtime`
-/// is seconds. So if you
-/// reload twice in the same wall-clock second, a file written
-/// *between* the reloads has `mtime == last_check` and does NOT
-/// trigger. The C has this issue too. We replicate it: changing the
-/// comparison to `>=` would terminate every conn on every reload
-/// (every hosts/ file's mtime is `>=` daemon start time on a fresh
-/// install). Don't fix.
+/// Which conns to terminate because their hosts/ file changed since
+/// `last_check`. `host_mtimes` has `(name, mtime)` for each conn whose file
+/// exists; a conn absent from it had its file deleted and is terminated too
+/// (revocation), matching C's `stat() || mtime > last`. Strictly `>` at
+/// one-second granularity, so a file written in the same second as the previous
+/// reload is missed; `>=` would instead terminate every conn on every reload of
+/// a fresh install. Kept as C has it.
 #[must_use]
 pub(crate) fn conns_to_terminate(
     conns: &[String],

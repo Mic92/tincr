@@ -60,19 +60,9 @@ impl SeenRequests {
         false
     }
 
-    /// Evict entries older than `max_age`. Returns `(deleted, left)`
-    /// for the debug log: `"Aging past requests: deleted %d, left
-    /// %d"`.
-    ///
-    /// C condition is `p->firstseen + pinginterval <= now.tv_sec`
-    ///; we keep the `<=` boundary: an entry exactly
-    /// `max_age` old is evicted.
-    ///
-    /// `saturating_duration_since` not `duration_since`: an entry
-    /// inserted at `t1` with `age()` later called with `t0 < t1`
-    /// would panic. The daemon won't do this (both `now`s come from
-    /// `timers.now()`, monotonic) but future timestamps shouldn't
-    /// crash either — they just don't expire.
+    /// Evict entries at least `max_age` old (C's `<=` boundary) and return
+    /// `(deleted, left)` for the debug log. `saturating_duration_since` so an entry
+    /// stamped later than `now` simply doesn't expire instead of panicking.
     pub(crate) fn age(&mut self, now: Instant, max_age: Duration) -> (usize, usize) {
         let before = self.cache.len();
         self.cache.retain(|_, firstseen| {

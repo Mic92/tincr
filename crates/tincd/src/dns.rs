@@ -228,15 +228,9 @@ fn parse_query(dns: &[u8]) -> Option<Result<ParsedQuery<'_>, (u16, bool, u16)>> 
         return Some(Err((id, rd, RCODE_FORMERR)));
     }
 
-    // QNAME: walk length-prefixed labels.
-    // RFC 1035 §4.1.2: "a domain name represented as a sequence of
-    // labels, where each label consists of a length octet followed
-    // by that number of octets. The domain name terminates with the
-    // zero length octet."
-    //
-    // Compression pointers (top two bits of length = 11) shouldn't
-    // appear in a QUESTION qname (there's nothing earlier to point
-    // to). If we see one, FORMERR.
+    // QNAME: length-prefixed labels terminated by a zero octet (RFC 1035 §4.1.2).
+    // A compression pointer (top bits 11) has nothing earlier to point at in a
+    // question, so FORMERR.
     let mut pos = DNS_HDR_LEN;
     let mut labels: Vec<&[u8]> = Vec::with_capacity(4);
     let qname_start = pos;
@@ -356,20 +350,10 @@ fn encode_name(name: &str) -> Vec<u8> {
     out
 }
 
-// Answer builder.
-
-/// Build the DNS response payload (header + question + answers).
-/// Separate from the IP/UDP wrapping so unit tests can poke it
-/// without crafting full ethernet frames.
-///
-/// `subnets` is read-only; the daemon's `subnet_tree` is the live
-/// table (DNS sees the same view as `route()`). No staleness — every
-/// query is a fresh walk.
-///
-/// `myname` is OUR node name. We answer for ourselves too: `dig
-/// alice.tinc.internal` from alice resolves to alice's own /32. The
-/// alternative (filter myself out) breaks `ssh $(hostname)` and is
-/// surprising.
+/// Build the DNS response payload (header, question, answers); the IP/UDP wrap
+/// is separate so tests needn't craft frames. `subnets` is the daemon's live
+/// table, so DNS sees what `route()` sees. We answer for `myname` too:
+/// filtering ourselves out would break `ssh $(hostname)`.
 #[must_use]
 pub(crate) fn answer(
     dns: &[u8],
@@ -448,17 +432,10 @@ pub(crate) fn answer(
                 _ => {}
             }
         }
-        // Found the name but no records of the requested type:
-        // that's NOERROR with ANCOUNT=0 (RFC 2308 "NODATA"), not
-        // NXDOMAIN. NXDOMAIN means "the name doesn't exist". A node
-        // with only a v4 /32 queried for AAAA is "name exists, no
-        // AAAA" — different cache behavior in resolved.
-        //
-        // BUT: we don't track "does this node exist" separately from
-        // "does it have subnets" (a node with zero subnets is
-        // unreachable anyway). Approximate: NXDOMAIN when the node
-        // doesn't appear in `subnets` at all (including under the
-        // wrong qtype); NODATA otherwise. Close enough.
+        // Name found but no record of the requested type is NOERROR/ANCOUNT=0 (RFC
+        // 2308 NODATA), not NXDOMAIN; resolvers cache the two differently. Node
+        // existence isn't tracked apart from subnets, so approximate: NXDOMAIN if the
+        // node has no subnets at all, NODATA otherwise.
         if answers.is_empty() {
             // Second walk to distinguish NX from NODATA: did we see
             // the node at all (any subnet, any family)? Compare
@@ -562,15 +539,10 @@ fn build_rr(name_wire: &[u8], rtype: u16, rdata: &[u8]) -> Vec<u8> {
     rr
 }
 
-/// Header-only or header+question error response.
-///
-/// The echoed question section must include the original QTYPE —
-/// dig 9.20 validates `QNAME/QTYPE/QCLASS` of the echoed question
-/// against what it sent and rejects on mismatch ("Question section
-/// mismatch: got x/TYPE0/IN"). Older resolvers tolerated qtype=0.
-/// Caught by the NixOS test (real dig); the bwrap'd netns test was
-/// silently `SKIP`ping (`--tmpfs /run` wiped /run/current-system/sw,
-/// where dig lives on NixOS).
+/// Header-only or header+question error response. The echoed question must
+/// carry the original QTYPE: dig 9.20 validates it and rejects `TYPE0`. Caught
+/// by the NixOS test with real dig; the bwrap netns test had been skipping
+/// because `--tmpfs /run` hid dig.
 fn build_error(id: u16, rd: bool, rcode: u16, qname_wire: &[u8], qtype: u16) -> Vec<u8> {
     // Reuse the full builder with zero answers — same wire shape.
     // qname_wire empty → QDCOUNT=0 (the FORMERR case where we
@@ -613,17 +585,13 @@ fn build_response(
     out
 }
 
-// IP/UDP wrap.
-//
-// Builds the full eth+IP+UDP+DNS reply frame for `device.write()`.
-// Same shape as `icmp.rs::build_v4_unreachable` — fresh `Vec`, not
-// in-place mutation. DNS fires once per `getaddrinfo()`, not per
-// data packet; alloc doesn't matter.
+// IP/UDP wrap: the full eth+IP+UDP+DNS reply frame for `device.write()`, a
+// fresh `Vec` like `icmp.rs` (once per `getaddrinfo()`, allocation is
+// irrelevant).
 
-/// Push a 14-byte ethernet header onto `out` with src/dst MACs
-/// swapped from `original` (or zeroed when `original` is too short).
-/// Shared by `wrap_v4`/`wrap_v6`; the eth header is throwaway in TUN
-/// mode but `device.write` expects the full frame.
+/// Push a 14-byte ethernet header with MACs swapped from `original` (zeroed if
+/// too short). Shared by `wrap_v4`/`wrap_v6`; throwaway in TUN mode but
+/// `device.write` expects a full frame.
 fn write_eth_swap(out: &mut Vec<u8>, original: &[u8], ethertype: u16) {
     if original.len() >= ETHER_SIZE {
         out.extend_from_slice(&original[6..12]); // dst ← orig src
@@ -654,17 +622,9 @@ fn build_udp(dns_reply: &[u8], dst_port: u16, pseudo_ck: u16) -> [u8; UDP_SIZE] 
     udp
 }
 
-/// Wrap a DNS response in eth+IPv4+UDP. The eth header is throwaway
-/// (TUN mode strips it), but `device.write` expects the full frame
-/// (`route()`'s framing). MACs swapped from `original` per the
-/// `icmp.rs` convention.
-///
-/// UDP checksum: optional in IPv4 (RFC 768: "if the computed
-/// checksum is zero, it is transmitted as all ones [...] An all
-/// zero transmitted checksum value means that the transmitter
-/// generated no checksum"). The Linux kernel accepts zero on RX. We
-/// compute it anyway — three more `inet_checksum` calls is cheap and
-/// it's mandatory in IPv6, so the code is shared.
+/// Wrap a DNS response in eth+IPv4+UDP (`route()`'s framing; MACs swapped as in
+/// `icmp.rs`). The UDP checksum is optional in IPv4 (RFC 768) but computed
+/// anyway: cheap, mandatory in IPv6, and the code is shared.
 #[must_use]
 pub(crate) fn wrap_v4(
     original: &[u8],

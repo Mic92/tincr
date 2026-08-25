@@ -34,29 +34,13 @@ pub(crate) struct SealOk {
 /// `TxBatch::take()` returned — caller dispatches `on_emsgsize`.
 pub(crate) type SealErr = (NodeId, u16);
 
-/// Seal every chunk strided into `scratch_in`, stage into `batch`,
-/// ship-on-full, final-ship at the end. One `ChaPoly` per super (key
-/// copy + state init); seqno-per-chunk varies.
-///
-/// `lens[i]` is the FRAME length of chunk i (eth header included);
-/// chunks are at `scratch_in[i*stride .. i*stride + lens[i]]`.
-/// `tso_split` writes `[eth:14 ‖ ip]` per slot; the slow path strips
-/// at the seal site (`sptps.rs:24` offset=14, Router mode); we strip
-/// here. [`tx_probe`](super::tx_probe) gates `slowpath_all` on
-/// `!= Router`, so offset is always 14.
-///
-/// `tx_scratch` is cleared+reused per chunk — same buffer the slow
-/// path uses (`dp.tx_scratch`), so no new alloc.
+/// Seal each chunk at `scratch_in[i*stride..][..lens[i]]` (eth header
+/// included, stripped here; Router offset is always 14), stage into
+/// `batch`, ship when full and at the end. One `ChaPoly` per super;
+/// `tx_scratch` is the slow path's buffer. `prefix` must be 12 bytes.
 ///
 /// # Errors
-/// `EMSGSIZE` from `send_batch` — PMTU shrank under us. The batch is
-/// reset (`ship` always resets on take). EMSGSIZE may have happened
-/// mid-super: frames before it shipped fine, frames after it never
-/// sealed. Same loss profile as `ship_tx_batch`; inner-TCP retransmits.
-///
-/// # Panics
-/// `tx_scratch.len() != 16` at the `seal_into` call — i.e. `prefix`
-/// isn't 12 bytes. It always is (`TxTarget.prefix: [u8; 12]`).
+/// `EMSGSIZE` from `send_batch` (PMTU shrank mid-super; TCP retransmits).
 #[expect(clippy::cast_possible_truncation)] // body_len ≤ MTU < u16::MAX
 pub(crate) fn seal_super(
     target: &TxTarget,

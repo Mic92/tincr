@@ -32,20 +32,13 @@ const NOTIFY_SOCKET: &str = "NOTIFY_SOCKET";
 /// Env var systemd sets to the watchdog timeout in microseconds.
 const WATCHDOG_USEC: &str = "WATCHDOG_USEC";
 
-/// Send a raw notification state string to systemd.
-///
-/// `state` is the literal datagram body, e.g. `"READY=1"`. If
-/// `NOTIFY_SOCKET` is unset, returns `Ok(())` and does nothing — that
-/// is the documented contract, not an error.
-///
-/// Supports both pathname sockets and Linux abstract sockets (path
-/// starting with `@`, mapped to a leading NUL byte on the wire).
+/// Send a raw notification (`READY=1` etc.) to systemd. Unset `NOTIFY_SOCKET`
+/// is `Ok(())` by contract. Pathname and abstract (`@` → leading NUL) sockets
+/// both work.
 ///
 /// # Errors
-///
-/// Any I/O failure binding the local socket or sending the datagram. In
-/// practice callers should ignore these (see module docs); the typed
-/// wrappers below already do.
+/// I/O binding or sending; callers should ignore them (module doc), and the
+/// typed wrappers do.
 pub fn notify(state: &str) -> io::Result<()> {
     let Some(path) = env::var_os(NOTIFY_SOCKET) else {
         return Ok(());
@@ -118,16 +111,10 @@ pub fn notify_watchdog() {
     let _ = notify("WATCHDOG=1");
 }
 
-/// If systemd armed a watchdog (`WATCHDOG_USEC` is set and parses as a
-/// positive integer), return the interval at which we should ping. Per
-/// standard practice (and the C impl), this is **half** the timeout, so
-/// a single missed ping doesn't kill the service.
-///
-/// Returns `None` if not under systemd watchdog, in which case the caller
-/// must not arm a timer. Unlike libsystemd's `sd_watchdog_enabled` we
-/// don't check `WATCHDOG_PID` against `getpid()`; tinc never forks a
-/// supervised child that would inherit a stale value, so the simpler
-/// check is correct here.
+/// If systemd armed a watchdog (`WATCHDOG_USEC` positive), the ping interval:
+/// half the timeout so one missed ping isn't fatal. `None` means don't arm a
+/// timer. `WATCHDOG_PID` isn't checked; tinc never forks a supervised child
+/// that could inherit a stale value.
 #[must_use]
 pub fn watchdog_interval() -> Option<Duration> {
     parse_watchdog_usec(env::var(WATCHDOG_USEC).ok().as_deref())

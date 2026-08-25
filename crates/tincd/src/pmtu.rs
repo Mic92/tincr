@@ -114,17 +114,11 @@ pub(crate) enum PmtuAction {
 }
 
 impl PmtuState {
-    /// Fresh state at the start of discovery.
-    ///
-    /// `initial_maxmtu`: from `choose_initial_maxmtu`
-    /// (`getsockopt(IP_MTU)`). With it, PMTU converges in ~1 RTT.
-    /// Without it (kernel lacks `IP_MTU`, or `socket()/connect()`
-    /// fails), pass `MTU` and convergence takes ~10 probes (~3.3s at
-    /// 333ms cadence) — `dispatch_route_result` gates the frag-needed
-    /// check on `via_mtu != 0` during that window so we don't send
-    /// bogus ICMP claiming MTU 576.
-    /// (That ICMP poisoned the kernel's per-dst PMTU cache for 10
-    /// minutes)
+    /// Fresh discovery state. `initial_maxmtu` comes from `choose_initial_maxmtu`
+    /// (kernel `IP_MTU`) and lets PMTU converge in ~1 RTT; without it pass `MTU`
+    /// and expect ~10 probes (~3.3s), during which `dispatch_route_result`
+    /// suppresses frag-needed ICMP (`via_mtu != 0`) so the kernel's per-destination
+    /// cache isn't poisoned with 576.
     #[must_use]
     pub(crate) const fn new(now: Instant, initial_maxmtu: u16) -> Self {
         Self {
@@ -298,33 +292,19 @@ impl PmtuState {
         };
     }
 
-    /// Meta-channel probe ack (`MTU_INFO` 4th field, tincr extension).
-    /// Like [`Self::on_probe_reply`] minus RTT — no UDP packet came back.
-    ///
-    /// `len` is peer-supplied: clamp to `MTU` so a hostile peer can't
-    /// push minmtu/maxmtu past the link ceiling (blackhole) or to
-    /// `u16::MAX` (the `maxmtu+1` increase-detector would wrap).
-    ///
-    /// Returns `false` (no-op) when no probe is outstanding
-    /// (`ping_sent`): an unsolicited ack must not flip
-    /// `udp_confirmed` — same gate that protects
-    /// [`Self::on_probe_reply`]'s RTT arm.
+    /// Meta-channel probe ack (`MTU_INFO` 4th field, tincr extension):
+    /// [`Self::on_probe_reply`] without RTT. `len` is peer-supplied and clamped to
+    /// `MTU` so it can't push min/maxmtu past the link or wrap the `maxmtu+1`
+    /// detector. Returns `false` when no probe is outstanding, so an unsolicited
+    /// ack can't set `udp_confirmed`.
     pub(crate) fn on_meta_ack(&mut self, len: u16, now: Instant) -> bool {
         let len = len.min(MTU);
-        // Steady-state confirmation as in on_probe_reply. Without
-        // this an asymmetric-UDP peer (UDP replies filtered, only
-        // meta-acks reach us) never rewinds Revalidate→Steady and
-        // falls through to Lost every cycle even though the ack
-        // proves maxmtu still fits.
-        //
-        // Runs before the `ping_sent` gate: the maxmtu probe is sent
-        // by `tick()` (which does not set `ping_sent`), and the peer's
-        // ack is debounced by `mtu_info_interval`, so the one ack that
-        // carries `len ≥ maxmtu` may well arrive while no try_udp
-        // keepalive is outstanding. That's fine — rewinding to Steady
-        // at the *current* maxmtu grants the peer nothing it didn't
-        // already have (we're already Fixed at that mtu); the gate
-        // below is what guards `udp_confirmed`/`minmtu` inflation.
+        // Steady-state confirmation as in on_probe_reply, so a peer whose UDP replies
+        // are filtered (only meta-acks reach us) still rewinds Revalidate→Steady
+        // instead of cycling through Lost. Deliberately before the `ping_sent` gate:
+        // the maxmtu probe from `tick()` doesn't set `ping_sent` and the ack is
+        // debounced, and rewinding to Steady at the current maxmtu grants nothing new;
+        // the gate below still guards `udp_confirmed`/`minmtu`.
         if self.phase.is_fixed() && len >= self.maxmtu {
             self.phase = PmtuPhase::Steady;
             self.mtu_ping_sent = now;
@@ -452,15 +432,11 @@ impl PmtuState {
     }
 }
 
-/// Exponential probe-size formula.
-///
-/// Exponential (not linear) because too-large probes vanish silently;
-/// concentrate near `minmtu` where replies happen. Last probe per
-/// 8-cycle is `minmtu+1` (guaranteed progress).
-///
-/// The 0.97 multiplier (when `maxmtu == MTU`) is hand-tuned: probe #0
-/// → 1329, then probe #1 → 1407 — just below typical tinc MTUs. Two
-/// probes, done.
+/// Exponential probe sizing: oversized probes vanish silently, so concentrate
+/// near `minmtu` where replies come back; the last probe of each 8-cycle is
+/// `minmtu+1` for guaranteed progress. The 0.97 factor at `maxmtu == MTU` is
+/// hand-tuned so probes 0 and 1 land at 1329 and 1407, bracketing typical tinc
+/// MTUs in two shots.
 #[expect(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,

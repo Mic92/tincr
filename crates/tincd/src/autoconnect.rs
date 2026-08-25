@@ -54,31 +54,19 @@ pub(crate) enum AutoAction {
     /// terminate its conn. `origin` echoed back so the daemon can
     /// stamp `last_auto_dropped` only for shortcuts.
     Disconnect { name: String, origin: OutOrigin },
-    /// Cancel a between-retries pending outgoing.
-    ///
-    /// `ConnectTo`-seeded slots are not exempt (same as C tinc):
-    /// once we hit ≥3 active conns, a `ConnectTo` target that is
-    /// currently unreachable stops being retried until SIGHUP re-reads
-    /// the config. SIGALRM (`retry()`) only resets backoff on
-    /// *existing* slots, so it does not resurrect the entry either.
-    /// `OutOrigin` is plumbed so this can be tightened later.
+    /// Cancel a between-retries pending outgoing. `ConnectTo`-seeded slots are not
+    /// exempt (as in C): at ≥3 active conns an unreachable `ConnectTo` target stops
+    /// being retried until SIGHUP; SIGALRM only resets backoff on existing slots.
+    /// `OutOrigin` is plumbed so this can be tightened.
     CancelPending { name: String },
     /// Nothing to do this tick.
     Noop,
 }
 
-/// Snapshot of one node's state. The daemon builds this from `Graph`
-/// + `nodes` + `dp.tunnels` + `conns`.
-///
-/// ## `has_address`
-///
-/// Set by the daemon for nodes whose `hosts/NAME` has `Address =`.
-/// For this module it's just a `bool`.
-///
-/// ## `edge_count` is per-node, not per-connection
-///
-/// The *peer's* edge count from the gossiped graph. Dropping our conn
-/// to a peer with `edge_count < 2` would isolate it.
+/// Snapshot of one node's state, built by the daemon from graph, `nodes`,
+/// tunnels and conns. `has_address`: its `hosts/NAME` has `Address =`.
+/// `edge_count` is the peer's gossiped edge count, per node: dropping our conn
+/// to a peer with fewer than 2 edges would isolate it.
 #[derive(Debug, Clone)]
 pub(crate) struct NodeSnapshot {
     pub name: String,
@@ -122,38 +110,13 @@ pub(crate) struct OutgoingSnapshot {
     pub age: Duration,
 }
 
-/// Tunables. Not user-configurable — the struct exists so unit tests
-/// can isolate the classic autoconnect branches (`d_shortcut=0`) and
-/// probe band edges. The daemon always passes [`ShortcutKnobs::default`].
-///
-/// ## How the defaults were computed
-///
-/// `tools/autoconnect-sim` runs a discrete-time model of [`decide`]
-/// over N∈{30,100,300} nodes × P(UDP-broken)∈{0.05,0.2,0.5} × Zipf
-/// ON/OFF traffic, 20 seeds, 1h sim, 1305 parameter cells. Full
-/// Pareto table and sensitivity analysis in
-/// `tools/autoconnect-sim/REPORT.md`. Summary:
-///
-/// | knob       | value | why                                         |
-/// | ---------- | ----- | ------------------------------------------- |
-/// | `D_LO`     | 3     | Bollobás 1981: min k for a.a.s. k-connected random regular |
-/// | `D_SHORTCUT`| 2    | 1 strands the 2nd-hottest pair; 3 buys ≤4% hops for +6% flood |
-/// | `D_HI`     | 6     | 1.22× flood vs 1.28× at 7; meets ≤1.2× target |
-/// | `RELAY_HI` | 32 KiB/s | conv 2.2 vs 3.0 ticks at 64k; osc still <0.005/min/node |
-/// | `RELAY_LO` | 4 KiB/s  | keep 8× ratio; flat sensitivity        |
-/// | `BACKOFF`  | 60 s  | flat 30..120; matches gossipsub PRUNE-backoff |
-/// | `α` (EWMA) | 0.3   | flat 0.2..0.5; τ≈15s at the 5s tick     |
-///
-/// Worst-case oscillation across the entire sweep is 0.012
-/// changes/min/node (target was ≤0.2); convergence to 1-hop is 2.2
-/// ticks (~11s, target ≤30s). The Pareto front is shallow — every
-/// `d_shortcut>0` cell meets all targets — so there is no user-facing
-/// trade-off worth a config knob. `AutoConnect=no` is the off-switch.
-///
-/// The sim also surfaces the one limit no knob can fix: shortcuts can
-/// only dial peers with `has_address`, so a NAT-ed hot destination
-/// stays multi-hop. Mitigated in practice by the reverse flow
-/// triggering a dial-back from the NAT-ed side.
+/// Tunables, fixed; the struct lets tests isolate classic branches
+/// (`d_shortcut=0`) and probe band edges. Defaults from
+/// `tools/autoconnect-sim` (see its REPORT.md): `D_LO` 3, `D_SHORTCUT` 2,
+/// `D_HI` 6, `RELAY_HI/LO` 32/4 KiB/s, `BACKOFF` 60s, EWMA α 0.3 — worst
+/// oscillation 0.012 changes/min/node, 1-hop convergence ~11s, and a Pareto
+/// front too flat to justify a knob beyond `AutoConnect=no`. Shortcuts
+/// need `has_address`; a NAT-ed hot peer stays multi-hop unless it dials back.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ShortcutKnobs {
     pub d_lo: usize,
@@ -188,32 +151,13 @@ impl Default for ShortcutKnobs {
     }
 }
 
-/// `do_autoconnect`.
-///
-/// # Arguments
-///
-/// - `myself_name` — skip `n == myself`.
-/// - `nodes` — all known nodes, including indirect/unreachable. May
-///   include `myself` (filtered). Order matters for
-///   `connect_to_unreachable` index-picking (the daemon sorts by name
-///   so picks are deterministic).
-/// - `active_outgoing_conns` — outgoing conns past-ACK. Inbound conns
-///   are someone else's choice; we don't unilaterally close them.
-/// - `pending_outgoings` — `Outgoing` slots with no live conn
-///   (between retries or pre-ACK).
-/// - `now` — for `backoff_until` comparison only.
-///
-/// # The `connect_to_unreachable` back-off
-///
-/// The random index ranges over all nodes, including ineligible ones;
-/// landing on an ineligible node is an immediate `Noop`. That is the
-/// back-off: P(connect) = `eligible_unreachable / all_nodes`. Don't
-/// "fix" it by filtering first.
-///
-/// # `make_new_connection` already-pending → `Noop`
-///
-/// If the random pick is already in `pending_outgoings`, return
-/// `Noop` (don't duplicate, don't re-roll).
+/// `do_autoconnect`. `nodes` is every known node (`myself` filtered),
+/// sorted by name for deterministic index picks; `active_outgoing_conns`
+/// are ours past ACK (inbound conns aren't ours to close);
+/// `pending_outgoings` are slots without a live conn. The random index
+/// deliberately spans all nodes: an ineligible pick is `Noop`, making
+/// P(connect) = eligible/all — that is the back-off. A pick already
+/// pending is also `Noop`, no re-roll.
 #[must_use]
 pub(crate) fn decide(
     myself_name: &str,

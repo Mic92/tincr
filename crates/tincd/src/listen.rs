@@ -23,14 +23,9 @@ use crate::set_nosigpipe;
 use nix::sys::socket::{setsockopt, sockopt};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-/// Per-listener socket options driven by config keys. Threaded from
-/// `daemon.rs` setup through `open_listeners` so the socket-creation
-/// helpers stay free of config-tree dependencies.
-///
-/// All fields except `bind_to_interface` are best-effort: setsockopt
-/// failure logs and continues (no return-value check on `SO_MARK`,
-/// warn-only on the
-/// buffer ones).
+/// Per-listener socket options from config, threaded through `open_listeners`
+/// so the socket helpers stay config-free. All but `bind_to_interface` are
+/// best-effort: failure logs and continues.
 #[derive(Debug, Clone)]
 pub struct SockOpts {
     /// UDP `SO_RCVBUF`. Default 1MB (kernel default on Linux is
@@ -272,16 +267,12 @@ fn apply_common_sockopts(
     Ok(())
 }
 
-/// Open one TCP listener: socket, sockopts, bind, listen.
-///
-/// Backlog is 3. tinc isn't a high-QPS server; 3 pending accepts is
-/// plenty.
+/// Open one TCP listener: socket, sockopts, bind, listen (backlog 3; tinc isn't
+/// high-QPS).
 ///
 /// # Errors
-/// `socket`/`bind`/`listen` errors. `setsockopt` failures are LOGGED
-/// but not propagated (`set_reuse_address` failing means `bind` will
-/// fail too if the addr is in use; let `bind` produce the user-visible
-/// error).
+/// `socket`/`bind`/`listen`. `setsockopt` failures are logged only; if
+/// `SO_REUSEADDR` mattered, `bind` produces the user-visible error.
 fn setup_tcp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
     let domain = Domain::from(i32::from(addr.family()));
     // `Socket::new` sets `SOCK_CLOEXEC` on Linux/BSD atomically.
@@ -298,31 +289,13 @@ fn setup_tcp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
     Ok(s)
 }
 
-/// systemd socket activation. Consume `n` TCP fds at
-/// `start_fd..start_fd+n`, open a matching UDP socket for each
-/// (systemd only hands us TCP; the protocol pairs TCP+UDP on the same
-/// address, so we open UDP ourselves).
-///
-/// **The fds are inherited, not opened.** They were `bind()`d and
-/// `listen()`d by systemd. We just adopt them. `getsockname` tells
-/// us what address systemd picked (we don't get to choose).
-///
-/// `bindto = false` for all: socket-activated listeners aren't
-/// `BindToAddress` (which would mean "use this as outgoing-dial
-/// source addr too").
-///
-/// `start_fd` is `SD_LISTEN_FDS_START` (= 3) in production; the
-/// parameter exists so unit tests can use a high fd and avoid
-/// fd-3 races (nextest may share processes within a test binary;
-/// fd 3 could be anything). Production callers use
-/// [`adopt_listeners`].
+/// systemd socket activation: adopt `n` bound, listening TCP fds at
+/// `start_fd..` (`SD_LISTEN_FDS_START` in production, see
+/// [`adopt_listeners`]; tests use a high fd), learn their addresses via
+/// `getsockname`, open a matching UDP socket for each. `bindto = false`.
 ///
 /// # Errors
-/// - `n > MAXSOCKETS`: hard error.
-/// - `getsockname` failure: hard error. The fd
-///   isn't a socket, or it's closed, or it's something we can't
-///   handle (`AF_UNIX`).
-/// - `setup_udp` failure: hard error.
+/// `n > MAXSOCKETS`, `getsockname` failure, or `setup_udp` failure.
 pub(crate) fn adopt_listeners_from(
     start_fd: RawFd,
     n: usize,
@@ -423,18 +396,12 @@ pub(crate) fn adopt_listeners(n: usize, opts: &SockOpts) -> io::Result<Vec<Liste
     adopt_listeners_from(SD_LISTEN_FDS_START, n, opts)
 }
 
-/// Open one UDP socket.
-///
-/// Same shape as TCP but no `listen` and more sockopts (broadcast for
-/// `LocalDiscovery`, buffer sizes, PMTU).
-///
-/// `O_NONBLOCK` is set here, unlike TCP listeners (the listener fd
-/// doesn't need non-blocking — `accept` blocking is fine because we
-/// only call it when epoll says ready). UDP `recvfrom` is the data
-/// path; non-blocking is mandatory.
+/// Open one UDP socket: like TCP without `listen`, plus broadcast
+/// (`LocalDiscovery`), buffer sizes and PMTU sockopts. `O_NONBLOCK` is set here
+/// (the data path needs it; TCP listeners only `accept` when epoll says so).
 ///
 /// # Errors
-/// `socket`/`bind` errors. `setsockopt` warnings logged.
+/// `socket`/`bind`; `setsockopt` problems are logged.
 fn setup_udp(addr: &SockAddr, opts: &SockOpts, v6only: bool) -> io::Result<Socket> {
     let domain = Domain::from(i32::from(addr.family()));
     let s = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
@@ -481,17 +448,12 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts, v6only: bool) -> io::Result<Socke
     Ok(s)
 }
 
-/// The no-config default: try both wildcard addresses directly (no
-/// resolver), one v4 listener and one v6 listener on `port`.
-///
-/// `family` filters which to try.
-///
-/// Returns 0, 1, or 2 listeners. Zero is an error in the caller; we
-/// let the caller check.
+/// No-config default: one v4 and one v6 wildcard listener on `port`, filtered
+/// by `family`, no resolver. Returns 0-2 listeners; bind failures warn and
+/// skip, and an empty result is the caller's error to raise.
 ///
 /// # Errors
-/// Never returns `Err` — bind failures are warnings + skip. The "no
-/// listeners" case is the caller's problem (returns empty Vec).
+/// Never.
 #[must_use]
 pub(crate) fn open_listeners(port: u16, family: AddrFamily, opts: &SockOpts) -> Vec<Listener> {
     let mut listeners = Vec::with_capacity(2);
@@ -531,15 +493,10 @@ fn assign_static_port(mut addr: SocketAddr, reuse_port: Option<u16>) -> Option<S
     }
 }
 
-/// Try `setup` with the port stolen from an already-bound socket; on
-/// failure, fall back to the original `addr` (port 0 → fresh
-/// ephemeral).
-///
-/// Why fallback: with `Port=0` and multiple `BindToAddress` lines,
-/// the first listener picks ephemeral X. The second listener
-/// (different IP) usually CAN reuse X (different (addr,port) tuple),
-/// but if X happens to be taken on that interface, we'd rather get
-/// a working listener on a different port than no listener at all.
+/// Try `setup` with the port of an already-bound socket; on failure fall back
+/// to `addr` as given (port 0 → fresh ephemeral). With `Port=0` and several
+/// `BindToAddress` lines the later listeners usually can share the first one's
+/// port, but a working listener on another port beats none.
 fn bind_reusing_port<F>(addr: SocketAddr, reuse_port: Option<u16>, setup: F) -> io::Result<Socket>
 where
     F: Fn(&SockAddr) -> io::Result<Socket>,
@@ -556,19 +513,11 @@ where
     setup(&SockAddr::from(addr))
 }
 
-/// One TCP+UDP pair on `addr`. Either both succeed or neither is kept
-/// (TCP succeeds, UDP fails → close TCP, skip).
-///
-/// `reuse_port`: with `Port=0`, the first listener gets a kernel
-/// port. Subsequent calls pass that port here so the whole daemon
-/// converges on one port across all listeners (and TCP/UDP within
-/// a pair). After the first TCP bind, `from_fd = tcp_fd` so UDP
-/// reuses the just-assigned TCP port.
-///
-/// `bindto`: stored on the result, see `Listener.bindto`.
-///
-/// Public for `daemon.rs`'s `BindToAddress` walk; the wildcard
-/// default still goes through `open_listeners`.
+/// One TCP+UDP pair on `addr`; both or neither. `reuse_port` carries the first
+/// listener's kernel-assigned port so the daemon converges on one port across
+/// listeners, and within a pair UDP reuses the TCP port just bound. `bindto` is
+/// stored on the result. Public for the `BindToAddress` walk; the wildcard
+/// default uses `open_listeners`.
 #[must_use]
 pub(crate) fn open_listener_pair(
     addr: SocketAddr,
@@ -653,21 +602,13 @@ pub(crate) fn open_udp_siblings(
     (0..extra).map(|_| setup_udp(&addr, opts, true)).collect()
 }
 
-/// Set an accepted fd's options: NONBLOCK + NODELAY. TOS/TCLASS/MARK
-/// deferred — see module doc.
-///
-/// Called from `handle_new_meta_connection` after `accept` returns.
-/// The listener's options DON'T inherit to the accepted fd (NONBLOCK
-/// in particular doesn't; it's why we do it again here).
-///
-/// Consumes `Socket`, returns `OwnedFd`. The conversion strips
-/// socket2's wrapper; daemon.rs's `Connection` wants raw bytes via
-/// `libc::read`/`write`, doesn't need the wrapper.
+/// Configure an accepted fd: NONBLOCK (not inherited from the listener) and
+/// NODELAY; TOS/TCLASS/MARK are deferred (module doc). Returns the bare
+/// `OwnedFd` the daemon's `Connection` wants.
 ///
 /// # Errors
-/// `set_nonblocking` failing means the fd is broken; propagate.
-/// `set_nodelay` failing is a warn — the connection works without it,
-/// just with Nagle latency. The return value is ignored.
+/// `set_nonblocking` failure (fd is broken). `set_nodelay` failure only warns;
+/// the conn works with Nagle latency.
 pub(crate) fn configure_tcp(s: Socket) -> io::Result<OwnedFd> {
     // The conn read path is non-blocking.
     s.set_nonblocking(true)?;
@@ -712,23 +653,11 @@ pub(crate) const fn is_local(sa: &SocketAddr) -> bool {
     }
 }
 
-/// Build the pidfile address string.
-///
-/// Take the first listener's bound addr, map `0.0.0.0` → `127.0.0.1`
-/// and `::` → `::1` (a CLI on the same host needs a connectable addr,
-/// not the wildcard), format as `"HOST port PORT"`. The CLI's pidfile
-/// parser (`tinc-tools/ctl.rs`) splits on `" port "`.
-///
-/// Why the unspecified→loopback mapping: the daemon binds `0.0.0.0`
-/// (all interfaces). The CLI reads the pidfile, connects. `connect(
-/// 0.0.0.0, port)` is undefined (Linux interprets it as 127.0.0.1
-/// but BSD doesn't). We patch it.
-///
-/// On systems where v6 binds first (depends on getaddrinfo ordering,
-/// which depends on /etc/gai.conf), `listeners[0]` is the v6 entry.
-/// We bind v4 first deterministically, so `listeners[0]` is always
-/// v4 IF v4 is enabled. If `AddressFamily = ipv6`, it's v6. The
-/// mapping handles both.
+/// Pidfile address string `HOST port PORT` from the first listener, mapping
+/// `0.0.0.0` → `127.0.0.1` and `::` → `::1` because the CLI needs something
+/// connectable and `connect(0.0.0.0)` is only loopback on Linux. v4 is bound
+/// first, so `listeners[0]` is v4 unless `AddressFamily = ipv6`; the mapping
+/// handles both.
 #[must_use]
 pub(crate) fn pidfile_addr(listeners: &[Listener]) -> String {
     // No listeners: caller will error separately; fall back to

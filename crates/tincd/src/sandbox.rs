@@ -111,21 +111,11 @@ pub enum Action {
     UseNewPaths,
 }
 
-/// Paths the daemon needs after `enter()`. `Option<_>` for paths
-/// that may be unset (logfile when logging to stderr; device
-/// when `DeviceType=dummy`).
-///
-/// Constructed in `main()` because that's where confbase/pidfile/
-/// socket/logfile already live (`Args`). Device path is
-/// hard-coded `/dev/net/tun` on Linux — `tinc-device::DEFAULT_
-/// DEVICE` is a private const but every Linux backend opens that
-/// one path.
-///
-/// Relative paths are resolved by `path_beneath_rules` against the
-/// daemon's cwd at ruleset-build time. `main()` chdir'd to confbase
-/// (`main.rs:983`); confbase as a relative path
-/// would resolve to itself. We pass absolutes anyway (`main()` has
-/// them) so the chroot interaction is the only path-semantics gotcha.
+/// Paths the daemon needs after `enter()`; `Option` where a path may be unset
+/// (stderr logging, dummy device). Built in `main()`, which already has
+/// confbase/pidfile/socket/logfile; the device is `/dev/net/tun` on Linux.
+/// `path_beneath_rules` resolves relative paths against cwd (confbase by then),
+/// so we pass absolutes and only chroot changes path semantics.
 #[derive(Debug, Clone)]
 pub struct Paths {
     /// `/etc/tinc/<net>/`. `r` at high, `rx` at normal. Subdirs
@@ -173,28 +163,18 @@ pub fn can(action: Action) -> bool {
     }
 }
 
-/// `sandbox_enter`. One-shot.
-///
-/// `chrooted`: upstream's `chrooted()` checks `!confbase`; we
-/// take it as a flag because `main()` knows whether `-R` was set.
-/// When chrooted: skip the Landlock ruleset (paths inside the jail
-/// don't match the build-time absolute paths) but still record the
-/// level so `can(StartProcesses)` gates correctly.
+/// Enter the sandbox; one-shot. `chrooted` (`-R`) skips the Landlock
+/// ruleset (its absolute paths don't exist in the jail) but records the
+/// level so `can(StartProcesses)` gates.
 ///
 /// # Errors
-///
-/// At `Level::High` when Landlock is unavailable (kernel <5.13,
-/// LSM not enabled, or non-Linux target). At `Normal` and `None`,
-/// never fails — `Normal` on a too-old kernel
-/// logs a warning and degrades to no-op.
-///
-/// # Panics
-///
-/// Called twice. C asserts `!entered`. The state machine
-/// is one-shot; a second call is a bug in `main()`.
+/// At `Level::High` when Landlock is unavailable (`Normal` only warns),
+/// or if called twice.
 pub fn enter(level: Level, paths: &Paths, chrooted: bool) -> Result<(), String> {
     let prev = STATE.swap(level as u8 | ENTERED_BIT, Ordering::Relaxed);
-    assert_eq!(prev & ENTERED_BIT, 0, "sandbox::enter called twice");
+    if prev & ENTERED_BIT != 0 {
+        return Err("sandbox::enter called twice".into());
+    }
 
     if level == Level::None {
         log::debug!(target: "tincd", "Sandbox is disabled");
@@ -210,14 +190,11 @@ pub fn enter(level: Level, paths: &Paths, chrooted: bool) -> Result<(), String> 
     enter_impl(level, paths)
 }
 
-/// Pure data: which paths get which Landlock access bits, in the
-/// order `restrict_self` consumes them. Computed by `discover_paths`,
-/// consumed by `build_and_apply_ruleset`. Split out so the path-set
-/// logic is unit-testable without invoking the syscall.
-///
-/// Field order matches `add_rules` order in apply (preserved for
-/// partial-rule fallback semantics on older kernels — `restrict_self`
-/// is one-shot and rules merge in addition order).
+/// Which paths get which Landlock access bits, in the order `restrict_self`
+/// consumes them (rules merge in addition order, which matters for partial
+/// fallback on older kernels). Computed by `discover_paths`, applied by
+/// `build_and_apply_ruleset`; split so the path set is unit-testable without
+/// the syscall.
 #[cfg(target_os = "linux")]
 struct SandboxPaths {
     /// `confbase` root: `rd` only, never exec (see hosts/ leak note).
@@ -324,14 +301,10 @@ fn discover_paths(level: Level, paths: &Paths) -> SandboxPaths {
 /// pre-split body.
 #[cfg(target_os = "linux")]
 fn build_and_apply_ruleset(p: SandboxPaths, level: Level) -> Result<(), String> {
-    // ABI V1 = kernel 5.13 (June 2021). Everything we need
-    // (Execute, ReadFile, WriteFile, ReadDir, Make*, Remove*) is
-    // V1. V3 adds Truncate which `addrcache.rs::save` (`fs::write`
-    // → `O_TRUNC`) needs, but `from_all(V1)` doesn't HANDLE
-    // Truncate so it stays unrestricted on V1/V2 kernels —
-    // best-effort is the right shape. The crate's `Ruleset::
-    // default()` does best-effort compat: kernel-too-old →
-    // `RulesetStatus::NotEnforced`, no error.
+    // ABI V1 (kernel 5.13) has everything we need. V3 adds Truncate, which
+    // `addrcache.rs::save` uses; `from_all(V1)` doesn't handle it so it stays
+    // unrestricted on V1/V2. `Ruleset::default()` is best-effort: too old a kernel
+    // yields `NotEnforced`, not an error.
     let abi = ABI::V1;
     let access_all = AccessFs::from_all(abi);
     // Read-only without Execute (`from_read` would include it).
@@ -349,15 +322,10 @@ fn build_and_apply_ruleset(p: SandboxPaths, level: Level) -> Result<(), String> 
         | AccessFs::RemoveFile
         | AccessFs::RemoveDir;
 
-    // path_beneath_rules SILENTLY SKIPS paths it can't open
-    // (`fs.rs:613` `Err(_) => None`). Pre-create confbase subdirs
-    // and pre-create $STATE_DIRECTORY/addrcache so the rules apply.
-    // `makedirs(DIR_CACHE | DIR_HOSTS | DIR_INVITATIONS)`: lazy
-    // mkdir after restrict_self would need MakeDir on confbase
-    // itself, which we don't grant.
-    // /dev/* entries (the tun device) are char devices, not dirs;
-    // skip them. Everything else in `rwc` is a directory we want
-    // to ensure exists (addrcache, invitations, $STATE_DIRECTORY).
+    // `path_beneath_rules` silently skips paths it can't open, so pre-create the
+    // confbase subdirs and `$STATE_DIRECTORY/addrcache` now; creating them lazily
+    // later would need MakeDir on confbase, which isn't granted. `/dev/*` entries
+    // are char devices and skipped.
     let dirs_to_create =
         iter::once(&p.hosts).chain(p.rwc.iter().filter(|d| !d.starts_with("/dev/")));
     for d in dirs_to_create {
@@ -484,18 +452,11 @@ mod tests {
         assert_eq!(Level::parse("garbage"), Err("garbage"));
     }
 
-    /// `can()` before `enter()` always returns true. tinc-up and
-    /// the subnet-up loop in `Daemon::setup` run before `main()`
-    /// calls `enter()`; they must not be gated.
-    ///
-    /// nextest per-process model means each #[test] is its own
-    /// process, so STATE is fresh. (cargo test without nextest
-    /// runs tests in threads of one process — STATE would leak.
-    /// AGENTS.md mandates nextest.)
-    /// Discovery half is pure: same input → same path set, no I/O.
-    /// Pins the field-by-field shape so an accidental refactor
-    /// (e.g. dropping `$STATE_DIRECTORY`, reordering scripts) trips a
-    /// test rather than a runtime EACCES.
+    /// `can()` before `enter()` is always true: tinc-up and subnet-up run from
+    /// `Daemon::setup` before `main()` enters the sandbox. STATE is per-process,
+    /// fresh under nextest. The discovery half is pure; pin its field-by-field
+    /// shape so dropping `$STATE_DIRECTORY` or reordering scripts fails a test
+    /// rather than EACCES at runtime.
     #[cfg(target_os = "linux")]
     #[test]
     fn discover_paths_normal_shape() {

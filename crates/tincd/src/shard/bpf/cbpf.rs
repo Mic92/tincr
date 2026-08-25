@@ -95,39 +95,21 @@ const BPF_A: u16 = 0x10;
 /// The reuseport prog sees post-UDP-header bytes.
 const SRC_ID6_OFFSET: u32 = 6;
 
-/// Build and attach the cBPF prog. The `n_shards` divisor is baked
-/// into the prog's `MOD` instruction — re-attach on shard count change
-/// (which only happens at daemon startup; `TINCD_SHARDS` is read once).
-///
-/// Attaches to the first socket in the group. The reuseport group
-/// shares one prog (`reuseport_attach_prog` stores it on the
-/// `sock_reuseport` struct, not per-socket). Socket 0 must already
-/// be bound (the group exists at first bind).
+/// Build and attach the cBPF prog with `n_shards` baked into its `MOD`
+/// (fixed at startup). Attached to socket 0, which must be bound already:
+/// the reuseport group shares one prog (stored on `sock_reuseport`). Never
+/// `EPERM`; this is the unprivileged `SO_ATTACH_FILTER` path.
 ///
 /// # Errors
-///
-/// - `EINVAL`: socket not in a reuseport group (forgot `SO_REUSEPORT`
-///   before bind).
-/// - `ENOMEM`: prog copy alloc failed (3 insns × 8 bytes; won't happen).
-///
-/// Never `EPERM`: cBPF attach goes through `sk_attach_filter`, the
-/// same path as `SO_ATTACH_FILTER` (libpcap, tcpdump). Unprivileged
-/// since forever.
+/// `EINVAL` if the socket isn't in a reuseport group.
 pub fn attach_reuseport_id6(sock0_fd: BorrowedFd<'_>, n_shards: u32) -> io::Result<()> {
     debug_assert!(n_shards > 0 && n_shards <= 256, "shard count out of range");
 
-    // Three instructions. The kernel's `pskb_pull` already moved
-    // past UDP header (sock_reuseport.c:512); offset 6 is src_id6[0].
-    //
-    // BPF_LD|BPF_W|BPF_ABS: A = ntohl(*(u32*)(pkt + k)). Yes, ntohl —
-    // BPF_ABS for word/halfword does network-to-host conversion
-    // (`net/core/filter.c:bpf_convert_filter`, the BPF_LD|BPF_W case
-    // emits `bswap` on little-endian). For our purpose (modulo) the
-    // byte order doesn't matter — `(x % n) == (bswap(x) % n)` is
-    // FALSE in general, but the DISTRIBUTION is identical because
-    // both `x` and `bswap(x)` are uniform when the input is. We
-    // don't care which shard a particular peer lands on, only that
-    // it's deterministic and uniform.
+    // Three instructions. The kernel already pulled past the UDP header
+    // (sock_reuseport.c:512), so offset 6 is src_id6[0]. `BPF_LD|BPF_W|BPF_ABS`
+    // loads with ntohl (`bpf_convert_filter` emits a bswap on LE); for a modulo
+    // over uniform input the distribution is the same either way, and we only need
+    // deterministic and uniform.
     let mut filter = [
         libc::sock_filter {
             code: BPF_LD | BPF_W | BPF_ABS,
@@ -169,18 +151,12 @@ pub fn attach_reuseport_id6(sock0_fd: BorrowedFd<'_>, n_shards: u32) -> io::Resu
     Ok(())
 }
 
-/// N reuseport sockets, all bound to `addr`, prog attached to socket 0.
-/// Socket k receives packets where `src_id6[0..4] % N == k`.
-///
-/// Consumes `addr` as `(ip, port)` instead of `SocketAddr` to keep
-/// `std::net` out of the type signature — `tincd`'s listener setup
-/// already has the parts.
+/// N reuseport sockets bound to `(ip, port)`, prog on socket 0; socket k
+/// receives packets with `src_id6[0..4] % N == k`.
 ///
 /// # Errors
-///
-/// `EADDRINUSE` if `port` is taken by a non-reuseport socket.
-/// Propagated from `attach_reuseport_id6` if socket 0's bind didn't
-/// create a group (shouldn't happen — we set `SO_REUSEPORT` first).
+/// `EADDRINUSE` if the port is held by a non-reuseport socket; anything from
+/// `attach_reuseport_id6`.
 pub fn open_reuseport_group(ip: IpAddr, port: u16, n: u32) -> io::Result<ReuseportGroup> {
     debug_assert!(n > 0 && n <= 256);
 

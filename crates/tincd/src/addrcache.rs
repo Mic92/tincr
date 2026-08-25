@@ -233,19 +233,13 @@ impl AddressCache {
         self.resolved.clear();
     }
 
-    /// Persist tier 1. Best-effort; the in-memory cache is
-    /// authoritative for the running daemon.
-    ///
-    /// Atomic: write to a sibling temp file, `fsync`, `rename` over
-    /// the target. A crash mid-write leaves either the old file or a
-    /// stray `*.tmp` (a different inode; `load` only ever opens the
-    /// final path) — never a truncated cache. `rename(2)` replaces a
-    /// symlink rather than following it, so a remote-supplied node
-    /// name can't redirect the write.
+    /// Persist tier 1, best-effort; memory stays authoritative. Temp file,
+    /// fsync, rename: a crash leaves the old file or a stray `.tmp`, never a
+    /// truncated cache, and `rename(2)` replaces rather than follows a
+    /// symlink a peer-chosen name might plant.
     ///
     /// # Errors
-    /// `create_dir_all` / `open` / `write_all` / `rename` failures
-    /// (read-only confbase, disk full).
+    /// `create_dir_all`/`open`/`write_all`/`rename` failure.
     pub(crate) fn save(&self) -> io::Result<()> {
         match self.serialize() {
             Some((path, bytes)) => write_atomic(&path, &bytes),

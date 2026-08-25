@@ -59,24 +59,11 @@ const IPPROTO_ICMPV6: u8 = 58;
 /// `IP_MSS - ip_size - icmp_size` = 576−20−8.
 pub(crate) const V4_QUOTE_CAP: usize = IP_MSS - IP_SIZE - ICMP_SIZE; // 548
 
-/// Build an `ICMPv4` error packet (RFC 792).
-///
-/// `original` is the full ethernet frame as read from the TUN
-/// (eth hdr + IP hdr + payload). Returns a new ethernet frame:
-/// the original eth hdr with MACs swapped, then a new IP hdr
-/// (proto=1 ICMP, TTL=255, src↔dst), then ICMP hdr (type, code),
-/// then up to [`V4_QUOTE_CAP`] bytes of the original IP datagram.
-///
-/// `frag_mtu`: `Some(mtu)` for `(DEST_UNREACH, FRAG_NEEDED)` —
-/// fills `icmp.nextmtu`. `None` otherwise. Taken as a parameter so
-/// the caller can decide.
-///
-/// Returns `None` if `original` is too short to contain an eth +
-/// IPv4 header.
-///
-/// `src_override`: `Some(addr)` overrides the ICMP packet's IP source
-/// (TTL-exceeded case; the caller discovers the local address).
-/// `None` = use original-dst.
+/// Build an `ICMPv4` error (RFC 792) from the full ethernet frame `original`:
+/// eth header with MACs swapped, new IP header (proto ICMP, TTL 255, src↔dst or
+/// `src_override` for the TTL-exceeded case), ICMP header, then up to
+/// [`V4_QUOTE_CAP`] bytes of the original datagram. `frag_mtu` fills `nextmtu`
+/// for `FRAG_NEEDED`. `None` if `original` is shorter than eth + IPv4 header.
 #[must_use]
 pub(crate) fn build_v4_unreachable(
     original: &[u8],
@@ -144,21 +131,10 @@ pub(crate) fn build_v4_unreachable(
 /// `IP_MSS - ip6_size - icmp6_size` = 576−40−8.
 pub(crate) const V6_QUOTE_CAP: usize = IP_MSS - IP6_SIZE - ICMP6_SIZE; // 528
 
-/// Build an `ICMPv6` error packet (RFC 4443).
-///
-/// Same shape as [`build_v4_unreachable`] but the `ICMPv6` checksum
-/// includes a pseudo-header (RFC 4443 §2.3 → RFC 2460 §8.1):
-/// src/dst addrs + upper-layer length + next-hdr.
-/// Uses [`Ipv6Pseudo`].
-///
-/// `pkt_too_big_mtu`: `Some(mtu)` for `ICMP6_PACKET_TOO_BIG` —
-/// fills `icmp6.icmp6_mtu`.
-///
-/// Returns `None` if `original` is too short for eth + IPv6 hdr.
-///
-/// `src_override`: `Some(addr)` overrides the ICMP packet's IPv6
-/// source (TTL-exceeded case; the caller discovers the local address).
-/// `None` = use original-dst.
+/// Build an `ICMPv6` error (RFC 4443); as [`build_v4_unreachable`] but the
+/// checksum covers the [`Ipv6Pseudo`] header. `pkt_too_big_mtu` fills
+/// `icmp6_mtu`; `src_override` replaces the source for TTL-exceeded. `None` if
+/// `original` is shorter than eth + IPv6 header.
 #[must_use]
 pub(crate) fn build_v6_unreachable(
     original: &[u8],

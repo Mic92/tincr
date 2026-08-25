@@ -56,16 +56,9 @@ static PIPE_WR: AtomicI32 = AtomicI32::new(-1);
 /// ALRM(14), TERM(15). 32 is plenty.
 const NSIG_TABLE: usize = 32;
 
-/// Self-pipe + signal dispatch table.
-///
-/// Generic over `W: Copy` — the daemon's `enum SignalWhat`, same
-/// pattern as `IoWhat`/`TimerWhat`. The daemon defines:
-///
-/// ```ignore
-/// enum SignalWhat { Reload, Exit, Retry }
-/// ```
-///
-/// and registers `(SIGHUP, Reload)`, `(SIGTERM, Exit)`, etc.
+/// Self-pipe plus signal dispatch table, generic over the daemon's `W: Copy`
+/// tag (`enum SignalWhat { Reload, Exit, Retry }` registered as `(SIGHUP,
+/// Reload)` etc.), like `IoWhat`/`TimerWhat`.
 pub(crate) struct SelfPipe<W> {
     /// Read end. Registered with the `EventLoop` for `Io::Read`.
     /// When `turn()` reports it readable, daemon calls `drain()`.
@@ -90,14 +83,10 @@ extern "C" fn handler(signum: libc::c_int) {
     }
     #[expect(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // NSIG < 256
     let byte = signum as u8;
-    // SAFETY: write(2) is async-signal-safe (POSIX.1). fd is a
-    // valid pipe write-end (set in new() before this handler was
-    // installed; never closed while handler is installed). The
-    // pointer is to a stack local. Length is 1.
-    //
-    // Intentionally raw `libc::write`, not `nix::unistd::write`: this
-    // is signal-handler context. nix's wrapper is thin, but staying
-    // on the bare syscall keeps the async-signal-safety audit trivial.
+    // SAFETY: write(2) is async-signal-safe; the fd is the pipe write end set in
+    // new() before the handler was installed and never closed while it is; one
+    // byte from a stack local. Raw `libc::write` rather than nix keeps the
+    // signal-context audit trivial.
     #[expect(unsafe_code)]
     unsafe {
         libc::write(fd, ptr::addr_of!(byte).cast(), 1);
@@ -105,24 +94,16 @@ extern "C" fn handler(signum: libc::c_int) {
 }
 
 impl<W: Copy> SelfPipe<W> {
-    /// Creates the pipe, stashes the write fd in `PIPE_WR` for the
-    /// handler. Does not
-    /// register with the event loop — caller does that with `read_
-    /// fd()` + `EventLoop::add`.
-    ///
-    /// # Panics
-    /// If a `SelfPipe` already exists (`PIPE_WR` is set). The C
-    /// Multiple self-pipes don't make sense (one global handler per signal).
+    /// Create the pipe and stash the write fd in `PIPE_WR`.
     ///
     /// # Errors
-    /// Returns the underlying I/O error if `pipe2(O_CLOEXEC)` fails.
+    /// `pipe2(O_CLOEXEC)` failure.
+    ///
+    /// # Panics
+    /// If a `SelfPipe` already exists.
     pub(crate) fn new() -> io::Result<Self> {
-        // STRICTER: O_CLOEXEC. Without it the pipe leaks into spawned
-        // script children — they'd just have an extra unused fd, but
-        // it's untidy.
         let (rd, wr) = Self::pipe_cloexec()?;
 
-        // "already initialized?" singleton check.
         let prev = PIPE_WR.swap(wr.as_raw_fd(), Ordering::Relaxed);
         assert_eq!(prev, -1, "SelfPipe already exists — singleton");
 
@@ -176,14 +157,13 @@ impl<W: Copy> SelfPipe<W> {
         self.wr.as_fd()
     }
 
-    /// Install the handler for `signum` and record `what`.
-    /// `sigaction(SA_RESTART)`, not `signal()` — see module doc.
+    /// Install the `SA_RESTART` handler for `signum` and record `what`.
     ///
     /// # Errors
-    /// Returns the underlying I/O error if `sigaction` fails.
+    /// `sigaction` failure.
     ///
     /// # Panics
-    /// If `signum >= 32` (real-time signals; tincd doesn't use them).
+    /// `signum >= 32` (real-time signals are unused).
     pub(crate) fn add(&mut self, signum: i32, what: W) -> io::Result<()> {
         let idx = usize::try_from(signum).expect("signum negative");
         assert!(idx < NSIG_TABLE, "signum {signum} >= {NSIG_TABLE}");
@@ -315,14 +295,9 @@ mod tests {
         let _sp2: SelfPipe<Sig> = SelfPipe::new().unwrap();
     }
 
-    /// drain on empty pipe returns immediately (read returns 0 or
-    /// EAGAIN — actually, blocking pipe with no data BLOCKS. We
-    /// rely on epoll telling us it's readable first. This test
-    /// would hang without that contract. So: don't test "drain on
-    /// empty"; the contract is "drain after `turn()` says READ").
-    ///
-    /// Instead test: drain doesn't OVER-read. Write 1 byte; drain
-    /// returns 1 element; pipe is empty.
+    /// A blocking pipe with no data blocks, so drain relies on `turn()` reporting
+    /// READ first and "drain on empty" isn't testable. Test instead that drain
+    /// doesn't over-read: one byte written, one element returned, pipe empty.
     #[test]
     fn drain_reads_exactly_pending() {
         let _g = SERIAL.lock().unwrap();

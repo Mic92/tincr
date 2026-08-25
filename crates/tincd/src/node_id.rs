@@ -95,20 +95,11 @@ impl fmt::Debug for NodeId6 {
     }
 }
 
-/// `node_id_tree`. We use a `HashMap`. The reverse index (`by_node`)
-/// replaces the inline `n->id` field — `graph::Node`
-/// doesn't carry it, so we keep a side table.
-///
-/// ## Collisions
-///
-/// 48 bits, SHA-512 is uniform. Birthday bound is ~16M nodes before
-/// 50% collision probability. Upstream does not handle this:
-/// `splay_insert` returns NULL on duplicate key and the return is
-/// ignored. A second node with the same ID just doesn't get indexed, so UDP packets from it fall through to `try_mac`.
-///
-/// We diverge slightly: insert-overwrites + WARN. Either way a real
-/// collision means a misconfigured (or hostile) network; the WARN is
-/// the operator-visible breadcrumb the C lacks.
+/// 6-byte node id ↔ `NodeId` maps (the reverse replaces C's inline `n->id`). 48
+/// bits of SHA-512 put the birthday bound at ~16M nodes; C ignores a duplicate
+/// insert so the second node just isn't indexed. We overwrite and WARN, giving
+/// the operator a breadcrumb for what is a misconfigured or hostile mesh either
+/// way.
 #[derive(Default, Clone)]
 pub struct NodeId6Table {
     // IntHashMap: NodeId6 is 48 bits of SHA-512 output (already
@@ -127,17 +118,11 @@ impl NodeId6Table {
         Self::default()
     }
 
-    /// Computes the ID from `name` and indexes both directions. Called alongside `lookup_or_add_node`
-    /// — every node the daemon learns about (from `ADD_EDGE`, from
-    /// config, from invite) gets an entry here.
-    ///
-    /// On collision (different `NodeId`, same `NodeId6`): overwrites
-    /// and logs WARN. The C silently drops; we make it loud. The old
-    /// `by_node` entry for the displaced node is left dangling — its
-    /// `id_of()` still returns the (now-reassigned) ID. That's fine:
-    /// `id_of` is for the send path, and we'll still write a valid ID
-    /// into outgoing packets. The receive path is what's ambiguous,
-    /// and that ambiguity is inherent to a 48-bit hash, not our bug.
+    /// Compute the id from `name` and index both directions; called for every node
+    /// the daemon learns of. On collision (same `NodeId6`, different node)
+    /// overwrite and WARN where C silently drops. The displaced node's `by_node`
+    /// entry is left; `id_of` still yields a valid id for sending, and receive-side
+    /// ambiguity is inherent to a 48-bit hash.
     pub fn add(&mut self, name: &str, node: NodeId) {
         let id6 = NodeId6::from_name(name);
         self.insert_raw(id6, node, name);
@@ -177,14 +162,9 @@ impl NodeId6Table {
         self.by_node.get(&node).copied()
     }
 
-    /// Called when a node leaves the mesh. Removes both directions.
-    ///
-    /// If a collision had displaced this node from `by_id`, the
-    /// `by_id.remove` is a no-op on the wrong key — but we look up
-    /// via `by_node` first, so we remove the right `by_id` entry
-    /// (which may now belong to the *colliding* node). That's a
-    /// second-order collision mess; in practice, with <16M nodes,
-    /// this code path is dead.
+    /// Node left the mesh: remove both directions, looking up `by_node` first so
+    /// the right `by_id` key is removed even after a collision displaced it (which
+    /// below ~16M nodes never happens).
     pub fn remove(&mut self, node: NodeId) {
         if let Some(id6) = self.by_node.remove(&node) {
             // Only remove from by_id if it still points to us.
@@ -298,16 +278,10 @@ mod tests {
         assert_eq!(t.len(), 1);
     }
 
-    /// Two distinct graph slots, manually mapped to the same 6-byte
-    /// ID via `insert_raw` (we're not finding a real SHA-512
-    /// collision in a unit test). Second insert overwrites; both
-    /// `by_node` entries persist; removing the displaced node does
-    /// not yank the survivor's `by_id` entry.
-    ///
-    /// We don't capture the WARN log here — `log` crate test capture
-    /// needs `testing_logger` or similar, not in our dev-deps. The
-    /// overwrite *behavior* is what we assert; the WARN is best-
-    /// effort operator UX.
+    /// Two graph slots forced onto one 6-byte id via `insert_raw`: the second
+    /// insert overwrites, both `by_node` entries persist, and removing the
+    /// displaced node leaves the survivor's `by_id` entry. The WARN isn't captured
+    /// (no test logger); the overwrite behaviour is what's asserted.
     #[test]
     fn table_collision_overwrites() {
         let mut t = NodeId6Table::new();

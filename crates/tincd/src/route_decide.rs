@@ -311,18 +311,9 @@ pub(crate) fn decrement_ttl(data: &mut [u8]) -> TtlResult {
     }
 }
 
-// extract_tos
-
-/// Read the inner packet's TOS/TC byte for `PriorityInheritance`.
-///
-/// v4: `DATA[15]` — 14 (eth) + 1 (ver/ihl) = byte 15 is the TOS
-/// field (RFC 791 §3.1). v6: traffic class straddles bytes 14/15:
-/// `(DATA[14] & 0x0f) << 4 | DATA[15] >> 4` (RFC 8200 §3, the
-/// 4-bit version field eats the high nibble of byte 14).
-///
-/// `None` for non-IP ethertype or short frame — caller leaves
-/// priority at 0. Only set `packet->priority` when ethertype+length
-/// both pass.
+/// The inner packet's TOS/TC byte for `PriorityInheritance`: v4 byte 15 (RFC
+/// 791); v6 `(b14 & 0x0f) << 4 | b15 >> 4` (RFC 8200, traffic class straddles
+/// the version nibble). `None` for non-IP or short frames, leaving priority 0.
 #[must_use]
 pub(crate) fn extract_tos(data: &[u8]) -> Option<u8> {
     if data.len() < ETHER_SIZE {

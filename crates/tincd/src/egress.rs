@@ -32,16 +32,10 @@ pub(crate) mod macos;
 /// doesn't silently overflow the kernel limit.
 pub(crate) const UDP_MAX_SEGMENTS: u16 = 128;
 
-/// `udp_sendmsg` rejects `len > 0xFFFF` with `EMSGSIZE` before the
-/// GSO branch even runs — this is the UDP datagram-length field cap, not a path-MTU thing. The cmsg parse
-/// happens after, so the kernel never learns we wanted GSO; it just
-/// sees a too-big plain send. The daemon's `EMSGSIZE` handler then
-/// shrinks PMTU thinking it's a path-MTU failure → death spiral.
-/// `can_coalesce` must cap below this. Conservative: leave headroom
-/// for the outer UDP+IP headers (28 bytes IPv4, 48 IPv6) the kernel
-/// adds to `len` before the comparison. (Willem's `UDP_SEGMENT` design
-/// expects ~64 KB super-packets; the practical cap is here, not the
-/// 128-segment one.)
+/// `udp_sendmsg` rejects `len > 0xFFFF` with `EMSGSIZE` before it even parses
+/// the GSO cmsg, and the daemon would misread that as a path-MTU failure and
+/// shrink PMTU into a death spiral. So `can_coalesce` caps total bytes here,
+/// leaving room for the outer UDP+IP headers the kernel adds before comparing.
 const BATCH_MAX_BYTES: usize = 0xFFFF - 48;
 
 /// `TxBatch::buf` warm capacity: one max run (`can_coalesce` caps at
@@ -83,44 +77,22 @@ pub(crate) struct EgressBatch<'a> {
 /// Ship batches. `Portable` is the baseline; `linux::Fast` is the
 /// `UDP_SEGMENT` impl.
 pub(crate) trait UdpEgress: Send {
-    /// Ship a batch: `count` UDP datagrams to `dst`. Same wire
-    /// result on every impl; the kernel-side mechanism differs.
+    /// Ship `count` UDP datagrams to `dst`; same wire result on every impl.
     ///
     /// # Errors
-    /// `io::Error` from `sendto`/`sendmsg`. `WouldBlock` (UDP
-    /// sndbuf full) and `EMSGSIZE` (stride > PMTU) are the daemon's
-    /// concern — `Portable` surfaces them per-chunk; `linux::Fast`
-    /// surfaces them per-batch. The daemon's PMTU machinery handles
-    /// `EMSGSIZE` either way (`net.rs:1934`).
+    /// `sendto`/`sendmsg` errors. `WouldBlock` and `EMSGSIZE` surface per chunk
+    /// from `Portable` and per batch from `linux::Fast`; the daemon's PMTU
+    /// machinery handles `EMSGSIZE` either way.
     fn send_batch(&mut self, b: &EgressBatch<'_>) -> io::Result<()>;
 }
 
-/// TX batch accumulator. The daemon stages encrypted frames here
-/// during the `on_device_read` drain loop, then ships the run
-/// in one `EgressBatch` after the loop. The "no TX batch exists
-/// today" problem from `mt-crypto-findings.md` Finding 1 — this is
-/// CREATING the batch.
-///
-/// ## Dense packing, not arena slots
-///
-/// Frames are appended at `[count*stride .. count*stride + len]`,
-/// not at fixed STRIDE-sized slots. `UDP_SEGMENT` splits at
-/// `gso_size` boundaries; a gap between frames
-/// would land in the previous datagram's tail. The buffer is the
-/// wire layout.
-///
-/// `stride` is the encrypted-frame size of the first frame in the
-/// run. Subsequent frames must match (`can_coalesce` checks). The
-/// SPTPS overhead is fixed (+33: `mt-kernel-findings.md`), so a TCP
-/// burst at one MSS produces same-size encrypted frames.
-///
-/// ## One run at a time
-///
-/// Tailscale's `coalesceMessages` builds a `Vec<run>`; we keep one
-/// run and flush on mismatch. Simpler, and the common case (iperf3
-/// TCP burst to one peer) is one run anyway. Multi-peer interleave
-/// degrades to per-change flushes — still fewer syscalls than per-
-/// frame, never worse than the unbatched path.
+/// TX batch accumulator: frames staged during the `on_device_read` drain
+/// are shipped as one `EgressBatch` afterwards. Densely packed at
+/// `[count*stride..][..len]` since `UDP_SEGMENT` splits at `gso_size`
+/// boundaries; the buffer is the wire layout. `stride` is the first frame's
+/// encrypted size and later frames must match (`can_coalesce`; SPTPS adds a
+/// fixed 33 so one MSS burst yields equal frames). One run at a time,
+/// flushed on mismatch — never worse than unbatched.
 pub(crate) struct TxBatch {
     /// Dense-packed encrypted frames. Capacity sized for one drain
     /// pass at MTU+overhead; never reallocs after warmup.
@@ -211,14 +183,10 @@ impl TxBatch {
         };
         self.sock == sock
             && self.count < UDP_MAX_SEGMENTS
-            // Total bytes after this stage ≤ the UDP datagram cap.
-            // `udp_sendmsg` rejects `len > 0xFFFF` before the GSO
-            // cmsg parse — it sees the whole iovec as
-            // one too-big plain send. At MTU≈1500 + 33 overhead this
-            // caps batches at ~43 frames; the "43 same-MSS segments"
-            // from `mt-kernel-findings.md` fit exactly (not a
-            // coincidence: 64KB / MSS ≈ 43 is HOW the inner-TCP
-            // burst was sized in the first place).
+            // Total bytes after this stage must stay under the UDP datagram cap;
+            // `udp_sendmsg` rejects `len > 0xFFFF` before the GSO cmsg parse. At
+            // MTU≈1500+33 that is ~43 frames, which is also how a 64KB inner-TCP burst
+            // segments.
             && self.buf.len() + usize::from(frame_len) <= BATCH_MAX_BYTES
             // Short tail already staged: run is closed. The kernel
             // splits at stride; a short frame followed by a full
@@ -374,14 +342,9 @@ mod tests {
     use crate::graph::NodeId;
     use std::net::{SocketAddr, UdpSocket};
 
-    /// `Portable::send_batch` with `count=1` produces the same bytes
-    /// on the wire as a direct `send_to`. The seam-transparency
-    /// invariant: if this fails, the
-    /// abstraction changed semantics and all 1210 tests are suspect.
-    ///
-    /// Uses a real loopback UDP pair — same kernel path as
-    /// production, no mock. The `recv_from` on the other end sees
-    /// exactly what `net.rs:1930` would have sent.
+    /// `Portable::send_batch` with `count=1` puts the same bytes on the wire as a
+    /// direct `send_to`: the seam-transparency invariant everything else relies on.
+    /// Real loopback UDP pair, no mock.
     #[test]
     fn portable_count_1_is_one_sendto() {
         // Receiver: bind ephemeral, learn the port.
@@ -560,14 +523,10 @@ mod tests {
         assert_eq!(&buf[..n], b"short");
     }
 
-    /// `BATCH_MAX_BYTES` cap: a 44th frame at stride=1519 (MTU+33,
-    /// the SPTPS on-wire size for a full-MSS inner-TCP segment) does
-    /// not coalesce — 43×1519 = 65317 fits the UDP datagram cap,
-    /// 44×1519 = 66836 doesn't. The kernel rejects
-    /// the latter with `EMSGSIZE` before the GSO cmsg parse, the
-    /// daemon's PMTU machinery shrinks `maxmtu` thinking it's a
-    /// path-MTU failure, and the next batch goes TCP. Regression
-    /// test for the death-spiral the throughput gate caught.
+    /// `BATCH_MAX_BYTES`: a 44th frame at stride 1519 (MTU+33) must not coalesce,
+    /// since 44×1519 exceeds the UDP datagram cap. The kernel's `EMSGSIZE` would be
+    /// misread as path-MTU failure, `maxmtu` shrunk and the next batch sent via TCP
+    /// — the death spiral the throughput gate caught.
     #[test]
     fn txbatch_caps_at_udp_datagram_limit() {
         let dst = SockAddr::from("127.0.0.1:1".parse::<SocketAddr>().unwrap());

@@ -54,17 +54,12 @@ use tinc_crypto::os_rng;
 pub(crate) const COOKIE_BYTES: usize = 32;
 pub(crate) const COOKIE_HEX_LEN: usize = COOKIE_BYTES * 2;
 
-/// `randomize` + `bin2hex`. The cookie is the auth secret; reading
-/// it from the pidfile is how `tinc` proves it's allowed to control
-/// the daemon. The pidfile is mode 0600 = filesystem-based auth,
-/// same model as ssh-agent's socket.
-///
-/// `bin2hex` uses lowercase. `format!("{:02x}")` matches.
+/// Random cookie, lowercase hex. Reading it from the 0600 pidfile is how `tinc`
+/// proves it may control the daemon (filesystem auth, like ssh-agent's socket).
 ///
 /// # Panics
-/// Only via `OsRng::fill_bytes`, only if `/dev/urandom` (or
-/// `getrandom(2)`) is unavailable. At that point the daemon can't
-/// generate session keys either; aborting is correct.
+/// Only if the OS RNG is unavailable, at which point session keys can't be
+/// generated either.
 #[must_use]
 pub(crate) fn generate_cookie() -> String {
     let mut bytes = [0u8; COOKIE_BYTES];
@@ -76,23 +71,13 @@ pub(crate) fn generate_cookie() -> String {
     hex
 }
 
-/// `write_pidfile`. The format is:
-///
-/// ```text
-/// <pid> <cookie> <host> port <port>\n
-/// ```
-///
-/// `tinc-tools::Pidfile::read` parses this. The `fscanf` format is
-/// `"%20d %64s %128s port %128s"` — `port` is a literal in the
-/// format string, so the address is written as `127.0.0.1 port 655`.
-///
-/// Mode 0600 via `OpenOptions::mode`. See module doc for why this
-/// is sufficient (umask only removes bits).
+/// Write the pidfile: `<pid> <cookie> <host> port <port>\n`, mode 0600 (umask
+/// can only remove bits). `port` is a literal token, so the address reads
+/// `127.0.0.1 port 655`; `tinc-tools::Pidfile::read` parses it.
 ///
 /// # Errors
-/// `io::Error` from create/write. Permission denied (running as
-/// non-root, pidfile path is in `/var/run`) is the common one; the
-/// caller logs and exits.
+/// create/write failure, typically permission denied on `/var/run` as non-root;
+/// the caller logs and exits.
 pub(crate) fn write_pidfile(path: &Path, cookie: &str, address: &str) -> io::Result<()> {
     // create+truncate is `fopen("w")`. O_NOFOLLOW: this runs as root
     // pre-privdrop; following a planted symlink would be an
@@ -116,17 +101,11 @@ pub(crate) fn write_pidfile(path: &Path, cookie: &str, address: &str) -> io::Res
     Ok(())
 }
 
-/// `init_control` unix socket bits. socket → connect-probe → unlink
-/// → bind → chmod → listen.
-///
-/// The connect-probe: before unlinking the stale socket file, try
-/// connecting to it. If connect succeeds, there's a live daemon
-/// already listening — REFUSE to start. This is the "second tincd"
-/// guard. If connect fails (`ECONNREFUSED` =
-/// stale socket file from a crashed daemon), unlink and proceed.
-///
-/// Returns the listener; caller does `EventLoop::add(fd, READ,
-/// IoWhat::UnixListener)`.
+/// Control socket: socket, connect-probe, unlink, bind, chmod, listen. The
+/// probe is the second-tincd guard: if connecting to the existing path succeeds
+/// a daemon is live and we refuse to start; `ECONNREFUSED` means a stale file
+/// from a crash, so unlink and proceed. The caller registers the listener with
+/// the event loop.
 pub(crate) struct ControlSocket {
     listener: UnixListener,
     /// Kept so `drop` can unlink. `exit_control` unlinks both
@@ -188,18 +167,9 @@ impl ControlSocket {
         // Backstop in case the umask bracket is ever refactored away.
         fs::set_permissions(path, Permissions::from_mode(0o700)).map_err(BindError::Io)?;
 
-        // listen.
-        // `UnixListener::bind` already calls `listen()` internally
-        // with backlog 128 (std's default). The
-        // backlog is "max pending accept() queue length"; 128 is
-        // fine, control connections are rare.
-
-        // nonblocking.
-        // epoll is level-triggered; the listener fd needs O_NONBLOCK
-        // so accept() returns EWOULDBLOCK when the queue is empty
-        // instead of blocking the loop. C doesn't set this — it
-        // relies on accept-only-when-epoll-says-READ, which works
-        // but is fragile under spurious wakeups. We're stricter.
+        // `UnixListener::bind` already listened (backlog 128, plenty). Set O_NONBLOCK
+        // so accept() returns EWOULDBLOCK on an empty queue instead of blocking the
+        // loop on a spurious wakeup; C relies on epoll alone.
         listener.set_nonblocking(true).map_err(BindError::Io)?;
 
         Ok(Self {
@@ -208,22 +178,13 @@ impl ControlSocket {
         })
     }
 
-    /// `accept()` wrapper. Non-blocking; returns `WouldBlock` if no
-    /// connection pending (spurious wakeup).
-    ///
-    /// `handle_new_unix_connection` does `accept()` and constructs a
-    /// `connection_t`. We do just the `accept()` part — connection
-    /// construction is the daemon's job
-    /// (it owns the slotmap).
-    ///
-    /// The accepted stream is set non-blocking before return —
-    /// `Connection::feed` does `read()` and expects EWOULDBLOCK on
-    /// empty.
+    /// Non-blocking `accept()`; the daemon constructs the connection (it owns the
+    /// slotmap). The accepted stream is made non-blocking since `Connection::feed`
+    /// expects EWOULDBLOCK on empty.
     ///
     /// # Errors
-    /// `io::Error` from `accept()`. `WouldBlock` is normal (spurious
-    /// wakeup or another thread raced us — but we're single-threaded).
-    /// Anything else is an actual problem.
+    /// `accept()` errors. `WouldBlock` is a normal spurious wakeup; anything else
+    /// is real.
     pub(crate) fn accept(&self) -> io::Result<UnixStream> {
         let (stream, _addr) = self.listener.accept()?;
         // O_NONBLOCK on the new fd. accept4(SOCK_NONBLOCK) would
@@ -345,14 +306,9 @@ mod tests {
         drop(third);
     }
 
-    /// Stale socket file from a crashed daemon: bind succeeds. The
-    /// connect-probe gets ECONNREFUSED, unlink clears it.
-    ///
-    /// Simulating a crash: bind a raw `UnixListener`, drop it. std
-    /// closes the fd but does not unlink the socket file (the kernel
-    /// has no listener, the file is just a path-layer artifact).
-    /// `ControlSocket::bind`'s connect-probe sees ECONNREFUSED,
-    /// unlinks, re-binds.
+    /// Stale socket file from a crashed daemon: bind a raw `UnixListener` and drop
+    /// it (std closes the fd but leaves the path). `ControlSocket::bind`'s probe
+    /// gets ECONNREFUSED, unlinks, re-binds.
     #[test]
     fn stale_socket_recovered() {
         let dir = tmpdir("stale");

@@ -50,23 +50,10 @@ impl Fast {
 
 impl UdpEgress for Fast {
     fn send_batch(&mut self, b: &EgressBatch<'_>) -> io::Result<()> {
-        // count=1: skip the cmsg entirely. Two reasons:
-        //
-        // (a) Kernel's `udp_send_skb` GSO branch only fires when
-        //     `datalen > gso_size`. With `count=1` and `last_len ≤
-        //     stride`, `datalen ≤ gso_size` — the kernel skips GSO
-        //     and does a plain send anyway. The cmsg parse is pure
-        //     overhead.
-        //
-        // (b) The common case. `on_device_read` only arms the batch
-        //     for `drain count > 1`. A single ICMP, ARP, control
-        //     frame falls through to immediate-send with `count=1`.
-        //     Don't tax the mundane case for the iperf3 case.
-        //
-        // socket2's `send_to` is one `sendto` syscall, no allocs.
-        // `frames[..last_len]`: `count=1` means `frames.len() ==
-        // last_len` for a properly built batch, but slicing makes
-        // the invariant local.
+        // count=1: skip the cmsg. The kernel's GSO branch only fires for `datalen >
+        // gso_size` anyway, and this is the common case (single ICMP/ARP/control
+        // frame; the batch is only armed for drains >1). `frames[..last_len]` makes
+        // the `frames.len() == last_len` invariant local.
         if b.count == 1 {
             return self
                 .sock
@@ -74,32 +61,13 @@ impl UdpEgress for Fast {
                 .map(|_| ());
         }
 
-        // The GSO path. One iovec spanning the whole dense-packed
-        // run; kernel reads it in one `copy_from_iter`, splits at
-        // `b.stride`. Last segment may be shorter (Willem's commit
-        // msg explicitly allows it).
-        //
-        // `b.frames` is exactly `(count-1)*stride + last_len` bytes
-        // — the daemon's `TxBatch::stage` packed them densely. NO
-        // gaps, no padding; the kernel's split-at-stride math
-        // depends on this.
-        //
-        // Hard limits the daemon already respects:
-        //   - `gso_size + iphdr + udphdr ≤ PMTU` else `EMSGSIZE`.
-        //     `stride` is `body+33` where body ≤ `relay.minmtu`; the
-        //     PMTU machinery set `minmtu` from probe replies, so
-        //     `stride` fits. EMSGSIZE here means PMTU shrank mid-
-        //     flight (rare; the daemon's `on_emsgsize` shrinks
-        //     `maxmtu` and the next batch is smaller).
-        //   - `count ≤ UDP_MAX_SEGMENTS = 128` else `EINVAL`.
-        //     `DEVICE_DRAIN_CAP = 64` caps it; the daemon never
-        //     builds a batch wider than one drain pass.
-        //   - `sk_no_check_tx == 0`. We never set `SO_NO_CHECK`.
-
-        // `EgressBatch::dst` is a `socket2::SockAddr` (cached on the
-        // hot path). nix wants a `SockaddrLike`; round-trip via
-        // `std::net::SocketAddr` — UDP egress is always IP, so
-        // `as_socket()` is `Some`. Stack-only, no alloc.
+        // GSO path: one iovec over the dense run, split by the kernel at `b.stride`;
+        // the last segment may be shorter. `b.frames` is exactly `(count-1)*stride +
+        // last_len` with no gaps, which the split depends on. The daemon already keeps
+        // `stride` within PMTU (EMSGSIZE here means it shrank mid-flight and
+        // `on_emsgsize` handles it), `count ≤ DEVICE_DRAIN_CAP < UDP_MAX_SEGMENTS`,
+        // and never sets `SO_NO_CHECK`. `dst` is a cached `socket2::SockAddr`,
+        // converted via `std::net::SocketAddr` for nix on the stack.
         let dst = SockaddrStorage::from(
             b.dst
                 .as_socket()
@@ -171,15 +139,9 @@ mod tests {
         assert_eq!(&buf[..n], payload);
     }
 
-    /// One `sendmsg` with `UDP_SEGMENT` cmsg produces N datagrams.
-    /// Hits the real kernel GSO path
-    /// (`udp_send_skb` → `__udp_gso_segment`); loopback has no NIC
-    /// USO so this exercises the SOFTWARE split, which is the path
-    /// most deployments hit anyway.
-    ///
-    /// Asserts: 3 datagrams arrive, in order, with correct payloads.
-    /// The kernel split at `stride` boundaries, so each datagram is
-    /// exactly the slice we packed.
+    /// One `sendmsg` with `UDP_SEGMENT` yields N datagrams via the kernel's
+    /// software split (`__udp_gso_segment`; loopback has no USO, like most
+    /// deployments). Asserts 3 arrive in order, each exactly the slice packed.
     #[test]
     fn fast_gso_splits_at_stride() {
         let rx = UdpSocket::bind("127.0.0.1:0").unwrap();

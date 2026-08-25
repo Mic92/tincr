@@ -38,20 +38,10 @@ pub enum BroadcastMode {
     Direct,
 }
 
-/// MST broadcast: filter active conns to those whose edge is in the
-/// MST, EXCEPT the one the packet arrived
-/// on (`c != from->nexthop->connection`).
-///
-/// Generic over `(ConnId, EdgeId)` pairs — daemon builds from its
-/// `nodes` map (`NodeState{conn, edge}`).
-///
-/// `mst` is the `Vec<EdgeId>` from `crate::graph::mst()`. Convert to a
-/// set for O(1) membership; ≤ conn count elements so `HashSet` is fine.
-///
-/// `from_conn`: the connection the packet ARRIVED on
-/// (`from->nexthop->connection`). `None` for locally-originated
-/// broadcasts (`from == myself`; `if(from != myself)` already
-/// gave us a copy).
+/// MST broadcast: active conns whose edge is in the MST, except `from_conn`,
+/// the one the packet arrived on (`None` when we originated it). Generic over
+/// `(ConnId, EdgeId)` pairs the daemon builds from `nodes`; `mst` from
+/// `graph::mst()` is turned into a set for O(1) membership.
 pub(crate) fn mst_targets<C, E>(
     active_conns: impl Iterator<Item = (C, E)>,
     mst: &[E],
@@ -74,14 +64,9 @@ where
         .collect()
 }
 
-/// Direct broadcast: nodes we can reach in one hop (`via == myself &&
-/// nexthop == n`, or `via == n` = self-relay = direct). Only when we
-/// originated (`from_is_self`); empty otherwise.
-///
-/// Generic over a node-view tuple `(NodeId, via, nexthop)`. Daemon
-/// builds from `last_routes`.
-///
-/// Never includes ourselves; the send to ourselves already happened.
+/// Direct broadcast: nodes one hop away (`via == myself && nexthop == n`, or
+/// `via == n`), and only when we originated (`from_is_self`). Generic over
+/// `(NodeId, via, nexthop)` from `last_routes`. Never includes ourselves.
 pub(crate) fn direct_targets<N>(
     nodes: impl Iterator<Item = (N, Option<N>, Option<N>)>,
     myself: N,

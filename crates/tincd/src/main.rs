@@ -684,16 +684,10 @@ fn resolve_sandbox_level(confbase: &Path, cmdline: &Config) -> Result<sandbox::L
     Ok(sandbox::Level::None)
 }
 
-/// systemd socket activation env-var parse.
-///
-/// The `LISTEN_PID == getpid()` check is the security gate: a stale
-/// `LISTEN_FDS=N` inherited from a wrapper would otherwise make us
-/// adopt fds 3..N+3 as listen sockets when they're actually log
-/// files / pipes / garbage.
-///
-/// Returns `Some(n)` only when both PID matches and `LISTEN_FDS` is
-/// a positive count. Env values are passed in (rather than read
-/// here) so tests can avoid `unsafe { set_var }`.
+/// systemd socket activation env parse: `Some(n)` only if `LISTEN_PID` is our
+/// pid and `LISTEN_FDS` is a positive count. The pid check stops a stale
+/// `LISTEN_FDS` inherited through a wrapper from making us adopt random fds as
+/// listeners. Values are passed in so tests avoid `set_var`.
 fn check_socket_activation(
     listen_pid: Option<String>,
     listen_fds: Option<String>,

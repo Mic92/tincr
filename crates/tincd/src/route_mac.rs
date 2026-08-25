@@ -38,17 +38,10 @@ pub(crate) enum LearnAction {
     Refresh(Mac),
 }
 
-/// `route_mac`. `frame` includes the real eth header (TAP). Unknown
-/// dest →
-/// `Broadcast`, not `Unreachable` — switches flood.
-///
-/// `from_myself`: gates learning. `source`: for the
-/// loop check (we have the table here, unlike `route_ipv4`).
-/// `myself`: gates the `FMODE_OFF/decrement_ttl` deferrals.
-/// `resolve`: `None` → Broadcast (stale gossip safe default).
-///
-/// # Panics
-/// Never; `try_into` is length-checked. Clippy doc note.
+/// Switch-mode routing on a TAP frame with its real eth header; an unknown
+/// destination is `Broadcast` (flood), not `Unreachable`. `from_myself` gates
+/// learning, `source` feeds the loop check, `myself` the `FMODE_OFF`/TTL
+/// deferrals; `resolve` returning `None` (stale gossip) also broadcasts.
 #[must_use]
 pub(crate) fn route_mac<T, S: BuildHasher>(
     frame: &[u8],

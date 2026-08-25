@@ -61,17 +61,11 @@ pub(crate) fn read_host_config(confbase: &Path, name: &str) -> Arc<Config> {
     cfg
 }
 
-/// `SPTPSCipher` from a host config. `None` if absent (caller falls
-/// back to the global default). Logs and returns `None` on an unknown
-/// value rather than erroring: a per-peer host file is often synced
-/// from a peer running a newer tincr, and refusing to start over an
-/// unrecognised cipher name would be worse than the documented
-/// mismatch failure (`BadSig`).
-///
-/// Emits the hardware-AES warning **once per process** the first time
-/// AES-256-GCM is selected on a CPU without AES-NI/PMULL — cheaper
-/// than scanning every host file at startup, and still fires before
-/// any traffic flows.
+/// `SPTPSCipher` from a host config; `None` if absent (global default applies).
+/// An unknown value logs and yields `None` rather than an error: host files get
+/// synced from peers on newer versions, and refusing to start is worse than the
+/// documented `BadSig` mismatch. The no-hardware-AES warning fires once per
+/// process, the first time AES-256-GCM is selected.
 #[must_use]
 pub(crate) fn read_sptps_cipher(host_config: &Config, name: &str) -> Option<SptpsAead> {
     let e = host_config.lookup("SPTPSCipher").next()?;
@@ -114,19 +108,9 @@ const TY_PUBLIC: &str = "ED25519 PUBLIC KEY";
 /// sign::SigningKey::from_blob` takes this.
 const PRIVATE_BLOB_LEN: usize = 96;
 
-// Public-key b64
-
-/// `ecdsa_set_base64_public_key`. Decode 43 b64 chars → 32 bytes.
-///
-/// The C checks `strlen(p) != 43` first, then `b64decode != 32`. We
-/// could let `b64::decode` reject everything (wrong length → wrong
-/// output length → arr fail), but matching the C's two-step makes the
-/// log lines distinguishable: "Invalid size 42" vs "Invalid format".
-/// One length, one decode.
-///
-/// 43 because `ceil(32 * 4/3) = 43` — tinc's b64 doesn't pad. The
-/// exported pubkey is always exactly 43 chars (`ecdsa_get_base64_
-/// public_key` writes 44 bytes incl NUL → 43 char string).
+/// Decode a 43-char unpadded b64 public key to 32 bytes. Length is checked
+/// before decoding, as in C, so the log distinguishes "Invalid size 42" from
+/// "Invalid format".
 fn pubkey_from_b64(p: &str) -> Option<[u8; PUBLIC_LEN]> {
     if p.len() != 43 {
         log::debug!(target: "tincd::keys",
@@ -228,21 +212,11 @@ pub(crate) fn read_ecdsa_private_key(
     Ok(SigningKey::from_blob(&arr))
 }
 
-// Peer public key
-
-/// `read_ecdsa_public_key`. Three sources in order:
-///
-/// 1. `Ed25519PublicKey` inline b64 (`tinc init` writes)
-/// 2. `Ed25519PublicKeyFile` explicit path
-/// 3. `hosts/NAME` PEM block (`cmd_exchange` writes)
-///
-/// `host_config` is the peer's; caller already loaded it. Returns
-/// `None` on failure: the caller rejects the peer (legacy protocol
-/// is not supported).
-///
-/// Source-order subtlety: if `hosts/NAME` has both the var and a
-/// PEM block, the var wins silently (early return). No consistency
-/// check; ported faithfully.
+/// The peer's Ed25519 public key from its already-loaded host config: inline
+/// `Ed25519PublicKey` (as `tinc init` writes), else `Ed25519PublicKeyFile`,
+/// else the PEM block in `hosts/NAME` (as export writes). The first source
+/// found wins with no cross-check, as in C. `None` makes the caller reject the
+/// peer; legacy RSA is unsupported.
 #[must_use]
 pub(crate) fn read_ecdsa_public_key(
     host_config: &Config,
@@ -441,19 +415,9 @@ mod tests {
         assert!(msg.contains("No such file or directory"), "msg: {msg}");
     }
 
-    /// Mode 644 → warning. Mode 600 → no warning.
-    /// `s.st_mode & ~0100700u`.
-    ///
-    /// We can't capture log output easily without a mock logger, so:
-    /// test the CONDITION (`mode & !0o100_700 != 0`) directly. If
-    /// the condition is right and the `if` is right (one line, hard
-    /// to get wrong), the warn fires. The integration test will see
-    /// the log line in stderr.
-    ///
-    /// Per the module doc: the C mask is over-broad. Pin the cases
-    /// that matter (group/other read) and a false-positive case
-    /// (setgid bit — weird but not actually insecure) to document
-    /// that we MATCH the C bug.
+    /// Mode 644 warns, 600 doesn't; test the condition `mode & !0o100_700 != 0`
+    /// directly since log capture needs a mock logger. The C mask is over-broad
+    /// (setgid trips it); pin that we match it.
     #[test]
     fn priv_perm_condition() {
         let path = Path::new("/run/key");
@@ -642,15 +606,10 @@ mod tests {
         assert_eq!(loaded, pk);
     }
 
-    /// `hosts/NAME` exists but has no PEM and no inline var:
-    /// `read_pem` returns `PemError::NotFound`, mapped to None
-    /// silently.
-    ///
-    /// This is the "fresh `tinc init` followed by manual `hosts/peer`
-    /// edit" case. The user added Port/Subnet but forgot the key.
-    /// `id_h` will log "Peer X had unknown identity" — that's the
-    /// useful error. Logging "PEM not found in hosts/peer" first
-    /// would be noise.
+    /// `hosts/NAME` with no PEM and no inline key: `NotFound` maps to `None`
+    /// silently. That's the "edited hosts/peer but forgot the key" case; `id_h`'s
+    /// "unknown identity" is the useful error, a PEM-not-found line first would be
+    /// noise.
     #[test]
     fn pub_no_key_silent_none() {
         let tmp = TmpDir::new("pub-nokey");
