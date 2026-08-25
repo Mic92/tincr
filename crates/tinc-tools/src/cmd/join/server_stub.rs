@@ -9,6 +9,11 @@ use crate::cmd::{CmdError, io_err};
 use crate::names::{Paths, check_id};
 
 use super::finalize::parse_name_line;
+use crate::cmd::invite::EXPIRY;
+use std::io::ErrorKind;
+use std::path::PathBuf;
+use std::str;
+use std::time::SystemTime;
 use tinc_crypto::invite::cookie_filename;
 
 /// What the daemon's `receive_invitation_sptps` does, minus daemon
@@ -33,8 +38,8 @@ pub(crate) fn server_receive_cookie(
     inv_key: &SigningKey,
     cookie: &[u8; COOKIE_LEN],
     myname: &str,
-    now: std::time::SystemTime,
-) -> Result<(Vec<u8>, String, std::path::PathBuf), CmdError> {
+    now: SystemTime,
+) -> Result<(Vec<u8>, String, PathBuf), CmdError> {
     // Recover filename from cookie+key. KAT-tested in
     // tinc-crypto::invite — this is the same composition `cmd_invite`
     // used to *name* the file.
@@ -48,7 +53,7 @@ pub(crate) fn server_receive_cookie(
     // .used file sits there as evidence. (The expiry sweep skips it:
     // 24 chars + ".used" = 29, doesn't match the 24-char filter.)
     fs::rename(&inv_path, &used_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
+        if e.kind() == ErrorKind::NotFound {
             CmdError::BadInput("non-existing invitation".into())
         } else {
             CmdError::Io {
@@ -65,9 +70,7 @@ pub(crate) fn server_receive_cookie(
     let mtime = meta
         .modified()
         .map_err(|_| CmdError::BadInput("cannot read mtime".into()))?;
-    let deadline = now
-        .checked_sub(crate::cmd::invite::EXPIRY)
-        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let deadline = now.checked_sub(EXPIRY).unwrap_or(SystemTime::UNIX_EPOCH);
     if mtime < deadline {
         return Err(CmdError::BadInput("expired invitation".into()));
     }
@@ -80,7 +83,7 @@ pub(crate) fn server_receive_cookie(
         .iter()
         .position(|&b| b == b'\n')
         .map_or(&contents[..], |i| &contents[..i]);
-    let first_line = std::str::from_utf8(first_line)
+    let first_line = str::from_utf8(first_line)
         .map_err(|_| CmdError::BadInput("Invalid invitation file".into()))?;
 
     // `!*buf || !*name || strcasecmp(buf, "Name") || !check_id(name)

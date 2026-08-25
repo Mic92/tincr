@@ -17,6 +17,8 @@
 
 #![cfg(unix)]
 
+use std::env;
+use std::ffi::OsStr;
 use std::io;
 #[cfg(target_os = "linux")]
 use std::os::linux::net::SocketAddrExt;
@@ -45,7 +47,7 @@ const WATCHDOG_USEC: &str = "WATCHDOG_USEC";
 /// practice callers should ignore these (see module docs); the typed
 /// wrappers below already do.
 pub fn notify(state: &str) -> io::Result<()> {
-    let Some(path) = std::env::var_os(NOTIFY_SOCKET) else {
+    let Some(path) = env::var_os(NOTIFY_SOCKET) else {
         return Ok(());
     };
     notify_to(&path, state)
@@ -53,7 +55,7 @@ pub fn notify(state: &str) -> io::Result<()> {
 
 /// Core send, factored out so tests can target a socket directly without
 /// the inherent unsafety of mutating process env from multiple threads.
-fn notify_to(path: &std::ffi::OsStr, state: &str) -> io::Result<()> {
+fn notify_to(path: &OsStr, state: &str) -> io::Result<()> {
     let bytes = path.as_bytes();
 
     // sd_notify(3): the path must be absolute or abstract. Reject
@@ -128,7 +130,7 @@ pub fn notify_watchdog() {
 /// check is correct here.
 #[must_use]
 pub fn watchdog_interval() -> Option<Duration> {
-    parse_watchdog_usec(std::env::var(WATCHDOG_USEC).ok().as_deref())
+    parse_watchdog_usec(env::var(WATCHDOG_USEC).ok().as_deref())
 }
 
 /// Pure parse step, split out so tests don't have to mutate process env
@@ -146,7 +148,9 @@ fn parse_watchdog_usec(raw: Option<&str>) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
     use std::ffi::OsString;
+    use std::fs;
     #[cfg(target_os = "linux")]
     use std::os::unix::ffi::OsStringExt;
 
@@ -157,7 +161,7 @@ mod tests {
     struct Unlink(OsString);
     impl Drop for Unlink {
         fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
+            let _ = fs::remove_file(&self.0);
         }
     }
 
@@ -225,7 +229,7 @@ mod tests {
 
     #[test]
     fn relative_path_is_rejected() {
-        let err = notify_to(std::ffi::OsStr::new("relative/path"), "READY=1").unwrap_err();
+        let err = notify_to(OsStr::new("relative/path"), "READY=1").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 

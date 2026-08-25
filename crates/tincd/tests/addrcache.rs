@@ -2,6 +2,7 @@
 //! has no `Address =`. Unit tests cover the file format; this covers
 //! that a real handshake populates it and a real restart uses it.
 
+use std::fs;
 use std::time::Duration;
 
 #[macro_use]
@@ -31,7 +32,7 @@ fn restart_dials_from_cache() {
 
     // The listener must not cache the dialer's ephemeral source port.
     terminate(&mut bob);
-    if let Ok(bob_cache) = std::fs::read_to_string(bob.confbase.join("addrcache").join("alice")) {
+    if let Ok(bob_cache) = fs::read_to_string(bob.confbase.join("addrcache").join("alice")) {
         assert!(
             bob_cache.lines().skip(1).all(str::is_empty),
             "{bob_cache:?}"

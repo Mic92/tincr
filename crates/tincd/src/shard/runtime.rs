@@ -15,12 +15,19 @@ use crate::daemon::{DaemonSettings, RoutingMode};
 use super::{bpf, worker};
 #[cfg(target_os = "linux")]
 use crate::daemon::{IoWhat, ListenerSlot};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::egress::UdpEgress;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::egress::linux::Fast;
 #[cfg(target_os = "linux")]
 use crate::event::{EventLoop, Io};
 #[cfg(target_os = "linux")]
 use crate::listen::{SockOpts, open_udp_siblings};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::io;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
+use std::thread;
 #[cfg(target_os = "linux")]
 use tinc_device::Device;
 
@@ -30,7 +37,7 @@ pub(crate) fn resolve(settings: &DaemonSettings, config: &Config) -> usize {
     if !cfg!(target_os = "linux") {
         return 1;
     }
-    let auto = || std::thread::available_parallelism().map_or(1, |p| p.get().min(4));
+    let auto = || thread::available_parallelism().map_or(1, |p| p.get().min(4));
     let n = settings.shards.map_or_else(auto, usize::from);
     if n <= 1 {
         return 1;
@@ -107,7 +114,7 @@ pub(crate) fn spawn_all(
     listeners: &[ListenerSlot],
     opts: &SockOpts,
     ev: &mut EventLoop<IoWhat>,
-) -> std::io::Result<ShardRuntime> {
+) -> io::Result<ShardRuntime> {
     debug_assert_eq!(tuns.len(), n - 1);
 
     // Attach the steering prog only after the whole group is bound so
@@ -129,10 +136,10 @@ pub(crate) fn spawn_all(
             .iter()
             .map(|fd| {
                 let s = socket2::Socket::from(fd.try_clone()?);
-                let e = crate::egress::linux::Fast::new(&s)?;
-                Ok(Box::new(e) as Box<dyn crate::egress::UdpEgress + Send>)
+                let e = Fast::new(&s)?;
+                Ok(Box::new(e) as Box<dyn UdpEgress + Send>)
             })
-            .collect::<std::io::Result<Vec<_>>>()?;
+            .collect::<io::Result<Vec<_>>>()?;
         workers.push(worker::spawn(k + 1, udp, egress, tun));
     }
     for (i, w) in workers.iter().enumerate() {

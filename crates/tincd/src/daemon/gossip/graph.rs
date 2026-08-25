@@ -5,6 +5,7 @@ use crate::daemon::Daemon;
 
 use crate::graph::{Transition, run_graph};
 use crate::local_addr;
+use std::sync::Arc;
 
 impl Daemon {
     /// sssp + diff + mst.
@@ -15,7 +16,7 @@ impl Daemon {
         let (transitions, mst, routes) = run_graph(&mut self.graph, self.myself, &self.last_routes);
         // Side-table for dump_nodes. Swap-whole: sssp built a fresh Vec.
         // Old Arc drops here (refcount 1, single-thread).
-        self.last_routes = std::sync::Arc::new(routes);
+        self.last_routes = Arc::new(routes);
         // Snapshot refresh: must happen before the transition loop's
         // BecameUnreachable arm clears tunnel_handles, but after the
         // BFS so routes are post-sssp. The transition loop only

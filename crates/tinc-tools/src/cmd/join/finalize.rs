@@ -16,6 +16,11 @@ use crate::keypair;
 use crate::names::{Paths, check_id};
 
 use super::JoinResult;
+use crate::cmd;
+use crate::cmd::init;
+use crate::cmd::invite::SEPARATOR;
+use std::str;
+use std::str::Lines;
 
 /// Open file handles plus their on-disk paths produced by
 /// [`OpenFiles::new`]. Bundles the two long-lived writers so chunk
@@ -116,7 +121,7 @@ const CHUNK2_DROP_KEYS: &[&str] = &[
 // Sequence of distinct steps sharing local state (open file handles,
 // the line iterator).
 pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResult, CmdError> {
-    let mut created: Vec<std::path::PathBuf> = Vec::new();
+    let mut created: Vec<PathBuf> = Vec::new();
     let r = finalize_join_inner(data, paths, force, &mut created);
     if r.is_err() {
         // Best-effort rollback of files this run created.
@@ -139,7 +144,7 @@ fn finalize_join_inner(
     // Why not `&str` parameter: the SPTPS receive path delivers
     // `Vec<u8>` (it doesn't know the payload is text). The
     // bytes→str is the SPTPS↔config boundary.
-    let data = std::str::from_utf8(data)
+    let data = str::from_utf8(data)
         .map_err(|_| CmdError::BadInput("Invitation data is not valid UTF-8".into()))?;
     let mut lines = data.lines();
     let name = parse_blob_header(&mut lines)?;
@@ -154,7 +159,7 @@ fn finalize_join_inner(
     let pubkey_b64 = generate_node_key(paths, &mut files, created)?;
 
     // Write tinc-up placeholder (shared with `init`)
-    if let Some(p) = crate::cmd::init::write_tinc_up_placeholder(paths)? {
+    if let Some(p) = init::write_tinc_up_placeholder(paths)? {
         created.push(p);
     }
 
@@ -170,7 +175,7 @@ fn finalize_join_inner(
 /// The invitation format is rigid: `Name = X` must be line 1 (not merely
 /// present somewhere). `invite.rs:build_invitation_file` emits `Name`
 /// first; the contract test pins this.
-fn parse_blob_header(lines: &mut std::str::Lines<'_>) -> Result<String, CmdError> {
+fn parse_blob_header(lines: &mut Lines<'_>) -> Result<String, CmdError> {
     let first = lines
         .next()
         .ok_or_else(|| CmdError::BadInput("No Name found in invitation!".into()))?;
@@ -219,7 +224,7 @@ fn makedirs(paths: &Paths) -> Result<(), CmdError> {
 /// The boundary's `&str` borrows from the same `data` that backs
 /// `lines`, so the lifetime threads cleanly back to the caller.
 fn write_chunk1<'a>(
-    lines: &mut std::str::Lines<'a>,
+    lines: &mut Lines<'a>,
     files: &mut OpenFiles,
     name: &str,
     force: bool,
@@ -325,7 +330,7 @@ fn write_chunk1<'a>(
 /// path/exec keys that would let a malicious peer entry pivot to
 /// code execution on our box.
 fn write_host_chunks<'a>(
-    lines: &mut std::str::Lines<'a>,
+    lines: &mut Lines<'a>,
     paths: &Paths,
     name: &str,
     mut boundary: Option<(&'a str, &'a str)>,
@@ -361,7 +366,7 @@ fn write_host_chunks<'a>(
             // Exact match — the separator. (Regular `#` comments are
             // not skipped here, unlike chunk 1. The host file is
             // verbatim.)
-            if line == crate::cmd::invite::SEPARATOR {
+            if line == SEPARATOR {
                 continue;
             }
 
@@ -412,7 +417,7 @@ fn generate_node_key(
     let pubkey_b64 = b64::encode(sk.public_key());
 
     let priv_path = paths.ed25519_private();
-    crate::cmd::write_private_key(&priv_path, &sk, OpenKind::CreateExcl)?;
+    cmd::write_private_key(&priv_path, &sk, OpenKind::CreateExcl)?;
     created.push(priv_path);
 
     writeln!(files.fh, "Ed25519PublicKey = {pubkey_b64}").map_err(io_err(&files.host_file_path))?;

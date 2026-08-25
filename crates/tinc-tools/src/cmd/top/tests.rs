@@ -3,6 +3,7 @@
 /// Daemon sends `"NAME N N N N"` after `recv_row` strips
 /// `"18 13 "`.
 use super::*;
+use std::cmp;
 use std::cmp::Ordering::{Equal, Greater, Less};
 
 #[test]
@@ -209,7 +210,7 @@ fn ns_rate(ipr: f32, ibr: f32, opr: f32, obr: f32) -> NodeStats {
 #[test]
 fn compare_table() {
     #[rustfmt::skip]
-    let cases: &[(NodeStats, NodeStats, SortMode, bool, std::cmp::Ordering)] = &[
+    let cases: &[(NodeStats, NodeStats, SortMode, bool, cmp::Ordering)] = &[
         //          (a,                       b,                       mode,                   cumul, expected)
         // InPackets cumulative: heavy comes before light → Less.
         (ns(1000,0,0,0),          ns(100,0,0,0),           SortMode::InPackets,    true,  Less),

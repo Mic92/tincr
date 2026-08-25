@@ -36,13 +36,14 @@
 use crate::cmd::CmdError;
 use crate::ctl::{CtlRequest, CtlSocket};
 use crate::names::{Paths, check_id};
+use std::os::unix::net::UnixStream;
 
 /// Connect with a useful "daemon not running" message. We return
 /// the error and let the binary print.
 ///
 /// `paths` must already be `resolve_runtime()`d. The panic from
 /// `pidfile()` is the assertion that the binary did its job.
-fn connect(paths: &Paths) -> Result<CtlSocket<std::os::unix::net::UnixStream>, CmdError> {
+fn connect(paths: &Paths) -> Result<CtlSocket<UnixStream>, CmdError> {
     CtlSocket::connect(paths).map_err(Into::into)
 }
 
@@ -178,6 +179,8 @@ pub fn disconnect(paths: &Paths, name: &str) -> Result<(), CmdError> {
 mod tests {
     use super::*;
     use crate::ctl::CtlSocket;
+    use crate::ctl::tests;
+    use crate::names::PathsInput;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     use std::thread;
@@ -188,7 +191,7 @@ mod tests {
     where
         F: FnOnce(&mut BufReader<&UnixStream>, &mut &UnixStream) + Send + 'static,
     {
-        crate::ctl::tests::fake_daemon(theirs, &"a".repeat(64), 4242, serve)
+        tests::fake_daemon(theirs, &"a".repeat(64), 4242, serve)
     }
 
     /// `reload` happy path: result=0 → Ok.
@@ -280,7 +283,7 @@ mod tests {
         // Don't resolve_runtime — if disconnect() reaches for the
         // socket on this input, the panic from `pidfile()` will
         // (correctly) fail the test.
-        let paths = Paths::for_cli(&crate::names::PathsInput {
+        let paths = Paths::for_cli(&PathsInput {
             confbase: Some("/tmp/never-touched".into()),
             ..Default::default()
         });

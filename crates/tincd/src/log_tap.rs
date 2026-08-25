@@ -38,6 +38,7 @@
 #![forbid(unsafe_code)]
 
 use std::cell::RefCell;
+use std::mem;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 /// Gate. `enabled()` checks this before formatting.
@@ -180,7 +181,7 @@ pub fn init(inner: env_logger::Logger) {
 /// next turn doesn't re-allocate.
 #[must_use]
 pub fn drain() -> Vec<(log::Level, String)> {
-    TAP.with_borrow_mut(std::mem::take)
+    TAP.with_borrow_mut(mem::take)
 }
 
 /// Gate control. Daemon calls `set_active(true)` when the first

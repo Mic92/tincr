@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use crate::route_decide::RouteResult;
+use std::hash::BuildHasher;
 
 /// Ethernet header length. We check this here (we're `pub`).
 pub(crate) const ETH_HDR_LEN: usize = 14;
@@ -49,7 +50,7 @@ pub(crate) enum LearnAction {
 /// # Panics
 /// Never; `try_into` is length-checked. Clippy doc note.
 #[must_use]
-pub(crate) fn route_mac<T, S: std::hash::BuildHasher>(
+pub(crate) fn route_mac<T, S: BuildHasher>(
     frame: &[u8],
     from_myself: bool,
     source: &str,

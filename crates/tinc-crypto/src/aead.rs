@@ -33,6 +33,7 @@
 //! [`hw_aes_available`] lets the daemon warn at startup.
 
 use crate::chapoly::{ChaPoly, KEY_LEN, OpenError, TAG_LEN};
+use std::arch;
 
 /// Which AEAD an SPTPS session seals records with.
 ///
@@ -122,13 +123,11 @@ pub fn hw_aes_available() -> bool {
     #[cfg(target_arch = "aarch64")]
     {
         // PMULL is the GHASH half; AES alone isn't enough.
-        std::arch::is_aarch64_feature_detected!("aes")
-            && std::arch::is_aarch64_feature_detected!("pmull")
+        arch::is_aarch64_feature_detected!("aes") && arch::is_aarch64_feature_detected!("pmull")
     }
     #[cfg(target_arch = "x86_64")]
     {
-        std::arch::is_x86_feature_detected!("aes")
-            && std::arch::is_x86_feature_detected!("pclmulqdq")
+        arch::is_x86_feature_detected!("aes") && arch::is_x86_feature_detected!("pclmulqdq")
     }
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
@@ -295,6 +294,7 @@ mod gcm {
     use super::TAG_LEN;
     use openssl_sys as ffi;
     use std::cell::RefCell;
+    use std::ptr;
     use zeroize::Zeroize;
 
     /// Per-thread encrypt/decrypt contexts, reused across records.
@@ -318,15 +318,15 @@ mod gcm {
                 let ok = ffi::EVP_EncryptInit_ex(
                     enc,
                     ffi::EVP_aes_256_gcm(),
-                    std::ptr::null_mut(),
-                    std::ptr::null(),
-                    std::ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null(),
+                    ptr::null(),
                 ) & ffi::EVP_DecryptInit_ex(
                     dec,
                     ffi::EVP_aes_256_gcm(),
-                    std::ptr::null_mut(),
-                    std::ptr::null(),
-                    std::ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null(),
+                    ptr::null(),
                 );
                 assert_eq!(ok, 1, "EVP_aes_256_gcm bind");
                 Self {
@@ -374,13 +374,9 @@ mod gcm {
             let ok = unsafe {
                 ffi::EVP_EncryptInit_ex(
                     c.enc,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    if fresh {
-                        key.as_ptr()
-                    } else {
-                        std::ptr::null()
-                    },
+                    ptr::null(),
+                    ptr::null_mut(),
+                    if fresh { key.as_ptr() } else { ptr::null() },
                     iv.as_ptr(),
                 ) & ffi::EVP_EncryptUpdate(c.enc, buf.as_mut_ptr(), &raw mut n, buf.as_ptr(), len)
                     & ffi::EVP_EncryptFinal_ex(c.enc, buf.as_mut_ptr(), &raw mut n)
@@ -413,13 +409,9 @@ mod gcm {
             unsafe {
                 let ok = ffi::EVP_DecryptInit_ex(
                     c.dec,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    if fresh {
-                        key.as_ptr()
-                    } else {
-                        std::ptr::null()
-                    },
+                    ptr::null(),
+                    ptr::null_mut(),
+                    if fresh { key.as_ptr() } else { ptr::null() },
                     iv.as_ptr(),
                 ) & ffi::EVP_DecryptUpdate(
                     c.dec,

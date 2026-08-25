@@ -5,6 +5,7 @@
 //! We don't register `EPOLLPRI`/`EPOLLRDHUP`/oneshot — peer-close is
 //! detected via `read() → 0`, same as C tinc.
 
+use super::Io;
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::time::Duration;
@@ -26,15 +27,15 @@ pub(super) fn create() -> io::Result<Poller> {
 }
 
 /// Level-triggered (no `EPOLLET`), same as C tinc.
-fn interest_to_flags(i: super::Io) -> EpollFlags {
+fn interest_to_flags(i: Io) -> EpollFlags {
     match i {
-        super::Io::Read => EpollFlags::EPOLLIN,
-        super::Io::Write => EpollFlags::EPOLLOUT,
-        super::Io::ReadWrite => EpollFlags::EPOLLIN | EpollFlags::EPOLLOUT,
+        Io::Read => EpollFlags::EPOLLIN,
+        Io::Write => EpollFlags::EPOLLOUT,
+        Io::ReadWrite => EpollFlags::EPOLLIN | EpollFlags::EPOLLOUT,
     }
 }
 
-pub(super) fn add(ep: &Poller, fd: BorrowedFd<'_>, token: usize, i: super::Io) -> io::Result<()> {
+pub(super) fn add(ep: &Poller, fd: BorrowedFd<'_>, token: usize, i: Io) -> io::Result<()> {
     let ev = EpollEvent::new(interest_to_flags(i), token as u64);
     Ok(ep.add(fd, ev)?)
 }
@@ -59,7 +60,7 @@ fn epoll_ctl_raw(
     Ok(epoll_ctl(ep.0.as_raw_fd(), op, fd, ev)?)
 }
 
-pub(super) fn modify(ep: &Poller, fd: RawFd, token: usize, i: super::Io) -> io::Result<()> {
+pub(super) fn modify(ep: &Poller, fd: RawFd, token: usize, i: Io) -> io::Result<()> {
     let mut ev = EpollEvent::new(interest_to_flags(i), token as u64);
     epoll_ctl_raw(ep, EpollOp::EpollCtlMod, fd, Some(&mut ev))
 }

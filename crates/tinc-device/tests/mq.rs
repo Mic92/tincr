@@ -15,6 +15,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use std::env;
+use std::fs;
+use std::io;
+use std::net::Shutdown;
+use std::net::TcpListener;
+use std::net::TcpStream;
+use std::path::Path;
+use std::thread;
+use std::thread::JoinHandle;
 use tinc_device::{Device, DeviceConfig, Mode, Tun, VNET_HDR_LEN};
 
 const GSO_NONE: u8 = 0;
@@ -23,7 +32,7 @@ const GSO_TCPV4: u8 = 1;
 /// See `tincd/tests/netns/rig.rs` for the flag rationale; copied
 /// because test helpers cannot be shared across crates.
 fn enter_netns(test_name: &str) -> bool {
-    if std::env::var_os("BWRAP_INNER").is_some() {
+    if env::var_os("BWRAP_INNER").is_some() {
         run_ip(&["link", "set", "lo", "up"]);
         return true;
     }
@@ -47,11 +56,11 @@ fn enter_netns(test_name: &str) -> bool {
         }
         Ok(_) => {}
     }
-    if !std::path::Path::new("/dev/net/tun").exists() {
+    if !Path::new("/dev/net/tun").exists() {
         eprintln!("SKIP {test_name}: /dev/net/tun missing");
         return false;
     }
-    let self_exe = std::fs::read_link("/proc/self/exe").unwrap();
+    let self_exe = fs::read_link("/proc/self/exe").unwrap();
     let status = Command::new("bwrap")
         .args(["--unshare-net", "--unshare-user"])
         .args(["--cap-add", "CAP_NET_ADMIN", "--cap-add", "CAP_NET_RAW"])
@@ -61,7 +70,7 @@ fn enter_netns(test_name: &str) -> bool {
         .args(["--dev-bind", "/dev/null", "/dev/null"])
         .args(["--dev-bind", "/dev/urandom", "/dev/urandom"])
         .args(["--proc", "/proc", "--tmpfs", "/run"])
-        .args(if std::path::Path::new("/run/current-system").exists() {
+        .args(if Path::new("/run/current-system").exists() {
             &["--ro-bind", "/run/current-system", "/run/current-system"][..]
         } else {
             &[]
@@ -92,12 +101,8 @@ fn config(iface: &str) -> DeviceConfig {
 /// `(gso_type, gso_size, csum_start, ip_version, frame_len)` per frame.
 type Capture = Arc<Mutex<Vec<(u8, u16, u16, u8, usize)>>>;
 
-fn spawn_echo(
-    fds: Vec<OwnedFd>,
-    stop: Arc<AtomicBool>,
-    capture: Capture,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
+fn spawn_echo(fds: Vec<OwnedFd>, stop: Arc<AtomicBool>, capture: Capture) -> JoinHandle<()> {
+    thread::spawn(move || {
         let mut buf = vec![0u8; 70_000];
         while !stop.load(Ordering::Relaxed) {
             for fd in &fds {
@@ -132,7 +137,7 @@ fn spawn_echo(
                 }
                 let _ = nix::unistd::write(fd, &buf[..len]);
             }
-            std::thread::sleep(Duration::from_micros(100));
+            thread::sleep(Duration::from_micros(100));
         }
     })
 }
@@ -159,30 +164,29 @@ fn mq_vnet_hdr_on_all_queues() {
     let capture = Capture::default();
     let echo = spawn_echo(echo_fds, stop.clone(), capture.clone());
 
-    let listener = std::net::TcpListener::bind("10.77.0.1:19999").unwrap();
+    let listener = TcpListener::bind("10.77.0.1:19999").unwrap();
     listener.set_nonblocking(true).unwrap();
     let listener_stop = stop.clone();
-    let listener_thread = std::thread::spawn(move || {
+    let listener_thread = thread::spawn(move || {
         let mut buf = [0u8; 8192];
         while !listener_stop.load(Ordering::Relaxed) {
             if let Ok((mut stream, _)) = listener.accept() {
                 let _ = stream.set_nonblocking(false);
                 while stream.read(&mut buf).is_ok_and(|n| n > 0) {}
             }
-            std::thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(10));
         }
     });
 
-    std::thread::sleep(Duration::from_millis(100));
-    if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
-        &"10.77.0.2:19999".parse().unwrap(),
-        Duration::from_secs(3),
-    ) {
+    thread::sleep(Duration::from_millis(100));
+    if let Ok(mut stream) =
+        TcpStream::connect_timeout(&"10.77.0.2:19999".parse().unwrap(), Duration::from_secs(3))
+    {
         let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
-        let _ = std::io::Write::write_all(&mut stream, &vec![0xAB; 64 * 1024]);
-        std::thread::sleep(Duration::from_millis(200));
-        let _ = stream.shutdown(std::net::Shutdown::Write);
-        std::thread::sleep(Duration::from_millis(100));
+        let _ = io::Write::write_all(&mut stream, &vec![0xAB; 64 * 1024]);
+        thread::sleep(Duration::from_millis(200));
+        let _ = stream.shutdown(Shutdown::Write);
+        thread::sleep(Duration::from_millis(100));
     }
     stop.store(true, Ordering::Relaxed);
     echo.join().unwrap();

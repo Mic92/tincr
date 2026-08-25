@@ -5,6 +5,8 @@
 
 use proptest::prelude::{ProptestConfig, any, proptest};
 
+use std::panic;
+use std::panic::AssertUnwindSafe;
 use tinc_proto::msg::{
     AddEdge, AnsKey, DelEdge, KeyChanged, MtuInfo, ReqKey, SptpsPacket, SubnetMsg, TcpPacket,
     UdpInfo,
@@ -13,7 +15,7 @@ use tinc_proto::{MAX_STRING, Request, Subnet, check_id};
 
 fn probe<T, E>(what: &str, line: &str, want_ok: bool, parse: impl FnOnce(&str) -> Result<T, E>) {
     // So a panic names the input.
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse(line)));
+    let r = panic::catch_unwind(AssertUnwindSafe(|| parse(line)));
     match r {
         Err(p) => panic!("{what}: PANIC on {line:?}: {p:?}"),
         Ok(r) => assert_eq!(
@@ -40,7 +42,7 @@ fn request_peek_garbage() {
         "12\tfoo",     // tab not space (peek requires b' ' exactly)
         "𝟙𝟚 unicode-digits",
     ] {
-        let r = std::panic::catch_unwind(|| Request::peek(s));
+        let r = panic::catch_unwind(|| Request::peek(s));
         assert!(matches!(r, Ok(None)), "peek({s:?}) = {r:?}");
     }
 }

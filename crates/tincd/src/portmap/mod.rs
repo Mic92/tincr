@@ -60,6 +60,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use rand_core::Rng;
+use std::net::UdpSocket;
+use std::sync::mpsc;
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::Sender;
+use std::thread;
+use std::thread::Builder;
+use std::thread::JoinHandle;
 use tinc_crypto::os_rng;
 
 /// `UPnP = yes | udponly | no` — same values as C tinc.
@@ -198,9 +205,9 @@ pub(crate) enum PortmapEvent {
 
 /// Lives on `Daemon`. `tick()` is the non-blocking drain.
 pub(crate) struct Portmapper {
-    rx: std::sync::mpsc::Receiver<PortmapEvent>,
+    rx: Receiver<PortmapEvent>,
     stop: Arc<AtomicBool>,
-    join: Option<std::thread::JoinHandle<()>>,
+    join: Option<JoinHandle<()>>,
 }
 
 impl Portmapper {
@@ -221,10 +228,10 @@ impl Portmapper {
         refresh: Duration,
         discover_wait: Duration,
     ) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = Arc::clone(&stop);
-        let join = std::thread::Builder::new()
+        let join = Builder::new()
             .name("tinc-portmap".into())
             .spawn(move || worker(local_port, mode, refresh, discover_wait, &tx, &stop2))
             .expect("portmap thread spawn");
@@ -388,7 +395,7 @@ fn check_ext(ext: SocketAddr, via: &str) -> Result<SocketAddr, String> {
 /// Kernel route lookup: which of our addresses would source a packet
 /// to `peer`? `connect(2)` on a UDP socket does this without sending.
 fn local_ip_towards(peer: IpAddr) -> Option<Ipv4Addr> {
-    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    let s = UdpSocket::bind("0.0.0.0:0").ok()?;
     s.connect((peer, 1)).ok()?;
     match s.local_addr().ok()?.ip() {
         IpAddr::V4(v4) => Some(v4),
@@ -411,7 +418,7 @@ fn worker(
     mode: UpnpMode,
     refresh: Duration,
     discover_wait: Duration,
-    tx: &std::sync::mpsc::Sender<PortmapEvent>,
+    tx: &Sender<PortmapEvent>,
     stop: &AtomicBool,
 ) {
     if !(mode.wants_tcp() || mode.wants_udp()) {
@@ -555,7 +562,7 @@ fn worker(
             if stop.load(Ordering::Relaxed) {
                 return;
             }
-            std::thread::sleep(Duration::from_secs(1).min(until - Instant::now()));
+            thread::sleep(Duration::from_secs(1).min(until - Instant::now()));
         }
     }
 }

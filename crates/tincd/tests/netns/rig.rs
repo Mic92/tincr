@@ -7,6 +7,8 @@ use super::common::linux::{
 };
 pub(crate) use super::common::node::Node;
 use super::common::{TmpGuard, node_status, poll_until, try_poll};
+use std::env;
+use std::path::Path;
 
 /// Re-exec this test inside bwrap and set up the standard two-TUN
 /// topology. `Some` only in the inner (sandboxed) pass.
@@ -19,7 +21,7 @@ pub(crate) fn enter_netns(test_name: &str) -> Option<NetNs> {
 /// fresh user+net namespace, assert it passed, return `false`.
 /// Inner pass (`BWRAP_INNER` set): bring `lo` up, return `true`.
 pub(crate) fn enter_bwrap(test_name: &str) -> bool {
-    if std::env::var_os("BWRAP_INNER").is_some() {
+    if env::var_os("BWRAP_INNER").is_some() {
         bwrap_inner_init();
         return true;
     }
@@ -189,7 +191,7 @@ impl NetNs {
     }
 }
 
-pub(crate) fn tun_node(dir: &std::path::Path, name: &str, seed: u8, iface: &str) -> Node {
+pub(crate) fn tun_node(dir: &Path, name: &str, seed: u8, iface: &str) -> Node {
     let host = if name == "alice" { 1 } else { 2 };
     Node::new(dir, name, seed)
         .iface(iface)

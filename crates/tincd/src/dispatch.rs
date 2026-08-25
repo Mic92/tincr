@@ -14,7 +14,12 @@ use tinc_proto::request::{PROT_MAJOR, PROT_MINOR};
 use tinc_sptps::{Framing, Output, Role, Sptps, SptpsKex, SptpsLabel};
 
 use crate::conn::Connection;
+use crate::daemon;
+use crate::keys;
 use crate::keys::read_ecdsa_public_key;
+use std::fmt;
+use std::str;
+use std::time::Duration;
 use subtle::ConstantTimeEq;
 
 bitflags::bitflags! {
@@ -171,9 +176,9 @@ impl CtlReq {
     }
 }
 
-impl std::fmt::Display for CtlReq {
+impl fmt::Display for CtlReq {
     /// Wire format: bare integer. `"{REQ_DUMP_NODES}"` → `"3"`.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", *self as i32)
     }
 }
@@ -284,7 +289,7 @@ pub(crate) fn check_gate(conn: &Connection, line: &[u8]) -> Result<Request, Disp
         .next()
         .filter(|t| !t.is_empty())
         .ok_or(DispatchError::UnknownRequest)?;
-    let s = std::str::from_utf8(first).map_err(|_| DispatchError::UnknownRequest)?;
+    let s = str::from_utf8(first).map_err(|_| DispatchError::UnknownRequest)?;
     let reqno: i32 = s.parse().map_err(|_| DispatchError::UnknownRequest)?;
 
     let req = Request::from_id(reqno).ok_or(DispatchError::UnknownRequest)?;
@@ -434,7 +439,7 @@ fn id_peer(
     ctx: &IdCtx<'_>,
     rng: &mut impl rand_core::CryptoRng,
 ) -> Result<IdOk, DispatchError> {
-    let name = std::str::from_utf8(name_tok)
+    let name = str::from_utf8(name_tok)
         .ok()
         .filter(|s| check_id(s))
         .ok_or_else(|| {
@@ -556,7 +561,7 @@ fn parse_id_line(line: &[u8]) -> Result<(&[u8], u8, u8), DispatchError> {
         .ok_or_else(|| DispatchError::BadId("no name token".into()))?;
     let ver = toks
         .next()
-        .and_then(|t| std::str::from_utf8(t).ok())
+        .and_then(|t| str::from_utf8(t).ok())
         .ok_or_else(|| DispatchError::BadId("no version token".into()))?;
     let mut parts = ver.splitn(2, '.');
     let major = parts
@@ -584,7 +589,7 @@ fn id_control(
     conn.allow_request = Some(Request::Control);
     // Push last_ping_time an hour ahead so the ping sweep skips
     // control connections.
-    conn.last_ping_time = now + std::time::Duration::from_hours(1);
+    conn.last_ping_time = now + Duration::from_hours(1);
     conn.name = "<control>".to_string();
 
     let needs_write = conn.send(format_args!(
@@ -623,7 +628,7 @@ fn id_invitation(
 
     // Decode the joiner's throwaway pubkey (not their node identity —
     // that's the later type-1 record).
-    let throwaway: [u8; PUBLIC_LEN] = std::str::from_utf8(throwaway_b64)
+    let throwaway: [u8; PUBLIC_LEN] = str::from_utf8(throwaway_b64)
         .ok()
         .and_then(tinc_crypto::b64::decode)
         .filter(|v| v.len() == PUBLIC_LEN)
@@ -685,7 +690,7 @@ fn load_peer_host_config(
     ctx: &IdCtx<'_>,
     name: &str,
 ) -> Option<[u8; PUBLIC_LEN]> {
-    let host_config = crate::keys::read_host_config(ctx.confbase, name);
+    let host_config = keys::read_host_config(ctx.confbase, name);
     // Parse failure doesn't doom us yet — read_ecdsa_public_key can
     // still fall back to the raw PEM file below.
 
@@ -714,8 +719,7 @@ fn load_peer_host_config(
     // global parse if its own setting was bad; a bad per-peer value
     // surfaces as a `BadSig` against a correctly-configured peer,
     // which is the documented mismatch failure mode).
-    conn.sptps_cipher =
-        crate::keys::read_sptps_cipher(&host_config, name).unwrap_or(ctx.sptps_cipher);
+    conn.sptps_cipher = keys::read_sptps_cipher(&host_config, name).unwrap_or(ctx.sptps_cipher);
     let host_pmtu = host_config
         .lookup("PMTU")
         .next()
@@ -730,12 +734,11 @@ fn load_peer_host_config(
     // Per-host override; tinc.conf default if absent. Warn-and-
     // default on parse error: a malformed `hosts/PEER` shouldn't be
     // fatal at handshake time (it wasn't for any other key above).
-    conn.sptps_kex =
-        crate::daemon::read_sptps_kex(&host_config, ctx.sptps_kex).unwrap_or_else(|v| {
-            log::warn!(target: "tincd::auth",
+    conn.sptps_kex = daemon::read_sptps_kex(&host_config, ctx.sptps_kex).unwrap_or_else(|v| {
+        log::warn!(target: "tincd::auth",
                        "hosts/{name}: SPTPSKex = {v}: invalid, using {}", ctx.sptps_kex);
-            ctx.sptps_kex
-        });
+        ctx.sptps_kex
+    });
 
     ecdsa
 }
@@ -825,18 +828,18 @@ pub(crate) fn parse_ack(line: &[u8]) -> Result<AckParsed, DispatchError> {
     let _reqno = toks.next();
     let port = toks
         .next()
-        .and_then(|t| std::str::from_utf8(t).ok())
+        .and_then(|t| str::from_utf8(t).ok())
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or_else(|| DispatchError::BadAck("bad port".into()))?;
     let weight = toks
         .next()
-        .and_then(|t| std::str::from_utf8(t).ok())
+        .and_then(|t| str::from_utf8(t).ok())
         .and_then(|s| s.parse::<i32>().ok())
         .ok_or_else(|| DispatchError::BadAck("bad weight".into()))?
         .max(0); // negative weight would bias MST/nexthop tie-breaks
     let options = toks // hex
         .next()
-        .and_then(|t| std::str::from_utf8(t).ok())
+        .and_then(|t| str::from_utf8(t).ok())
         .and_then(|s| u32::from_str_radix(s, 16).ok())
         .ok_or_else(|| DispatchError::BadAck("bad options".into()))?;
 
@@ -857,7 +860,7 @@ fn parse_body<T, E>(
     err: fn(String) -> DispatchError,
     parse: impl FnOnce(&str) -> Result<T, E>,
 ) -> Result<T, DispatchError> {
-    let s = std::str::from_utf8(body).map_err(|_| err("not UTF-8".into()))?;
+    let s = str::from_utf8(body).map_err(|_| err("not UTF-8".into()))?;
     parse(s).map_err(|_| err("parse failed".into()))
 }
 
@@ -871,8 +874,7 @@ pub(crate) fn parse_key_msg<'a, T, E>(
     what: &str,
     parse: impl FnOnce(&'a str) -> Result<T, E>,
 ) -> Result<(&'a str, T), DispatchError> {
-    let s = std::str::from_utf8(body)
-        .map_err(|_| DispatchError::BadKey(format!("non-UTF-8 {what}")))?;
+    let s = str::from_utf8(body).map_err(|_| DispatchError::BadKey(format!("non-UTF-8 {what}")))?;
     let m = parse(s).map_err(|_| DispatchError::BadKey(format!("{what} parse failed")))?;
     Ok((s, m))
 }
@@ -932,7 +934,7 @@ fn nth_token(line: &[u8], n: usize) -> Option<&str> {
     line.split(|&b| b.is_ascii_whitespace())
         .filter(|t| !t.is_empty())
         .nth(n)
-        .and_then(|t| std::str::from_utf8(t).ok())
+        .and_then(|t| str::from_utf8(t).ok())
 }
 
 /// Handle a CONTROL line: `"18 <subtype> [args...]"`.

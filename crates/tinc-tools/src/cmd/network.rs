@@ -46,6 +46,9 @@ use crate::names::Paths;
 
 use super::CmdError;
 use super::io_err;
+use std::fs;
+use std::fs::File;
+use std::path::PathBuf;
 
 // List
 
@@ -69,7 +72,7 @@ pub(crate) fn list(confdir: &Path, out: &mut impl Write) -> Result<usize, CmdErr
     // host is single-digit; the buffer is negligible.
     let mut found: Vec<String> = Vec::new();
 
-    let entries = std::fs::read_dir(confdir).map_err(io_err(confdir))?;
+    let entries = fs::read_dir(confdir).map_err(io_err(confdir))?;
     for ent in entries {
         // Per-entry I/O error. Rare (the dir moved out from under
         // us mid-iteration?). We propagate.
@@ -99,7 +102,7 @@ pub(crate) fn list(confdir: &Path, out: &mut impl Write) -> Result<usize, CmdErr
         // (`access(R_OK)` checks REAL uid, `open()` checks EFFECTIVE
         // uid; we're not setuid so same answer.)
         let probe = confdir.join(&name).join("tinc.conf");
-        if std::fs::File::open(&probe).is_ok() {
+        if File::open(&probe).is_ok() {
             // Lossy conversion: a non-UTF-8 dir name in `confdir`
             // is "someone mkdir'd a weird name," not a tinc-created
             // network (netname validation is ASCII-only). The lossy
@@ -119,7 +122,7 @@ pub(crate) fn list(confdir: &Path, out: &mut impl Write) -> Result<usize, CmdErr
         writeln!(out, "{name}").map_err(|e| CmdError::Io {
             // `<stdout>` sentinel — the write failure isn't a
             // file path failure. SIGPIPE → EPIPE → here.
-            path: std::path::PathBuf::from("<stdout>"),
+            path: PathBuf::from("<stdout>"),
             err: e,
         })?;
     }
@@ -169,6 +172,10 @@ pub fn run(paths: &Paths, arg: Option<&str>) -> Result<(), CmdError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::names::Paths;
+    use crate::names::PathsInput;
+    use std::fs;
+    use std::fs::Permissions;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
@@ -189,8 +196,8 @@ mod tests {
     /// this for reading; content doesn't matter.
     fn mknet(dir: &Path, name: &str) {
         let d = dir.join(name);
-        std::fs::create_dir(&d).unwrap();
-        std::fs::write(d.join("tinc.conf"), "").unwrap();
+        fs::create_dir(&d).unwrap();
+        fs::write(d.join("tinc.conf"), "").unwrap();
     }
 
     // list — the readdir scan
@@ -228,7 +235,7 @@ mod tests {
     fn list_anonymous_network() {
         let d = tmpdir("anon");
         // Top-level tinc.conf → `.`
-        std::fs::write(d.path().join("tinc.conf"), "").unwrap();
+        fs::write(d.path().join("tinc.conf"), "").unwrap();
         mknet(d.path(), "vpn");
 
         let mut out = Vec::new();
@@ -263,7 +270,7 @@ mod tests {
         let d = tmpdir("notinc");
         mknet(d.path(), "real");
         // `garbage` exists but has no tinc.conf.
-        std::fs::create_dir(d.path().join("garbage")).unwrap();
+        fs::create_dir(d.path().join("garbage")).unwrap();
 
         let mut out = Vec::new();
         let n = list(d.path(), &mut out).unwrap();
@@ -278,8 +285,8 @@ mod tests {
     fn list_skip_regular_files() {
         let d = tmpdir("files");
         mknet(d.path(), "vpn");
-        std::fs::write(d.path().join("README"), "hi").unwrap();
-        std::fs::write(d.path().join("backup.tar"), "").unwrap();
+        fs::write(d.path().join("README"), "hi").unwrap();
+        fs::write(d.path().join("backup.tar"), "").unwrap();
 
         let mut out = Vec::new();
         let n = list(d.path(), &mut out).unwrap();
@@ -309,7 +316,7 @@ mod tests {
         mknet(d.path(), "noread");
         // Strip all perms. `set_permissions` is `chmod`.
         let target = d.path().join("noread").join("tinc.conf");
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+        fs::set_permissions(&target, Permissions::from_mode(0o000)).unwrap();
 
         let mut out = Vec::new();
         let n = list(d.path(), &mut out).unwrap();
@@ -322,7 +329,7 @@ mod tests {
         // PARENT dir. The file's own perms don't block unlink.
         // But restore anyway; principle of least surprise for
         // future-you reading test failures.)
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&target, Permissions::from_mode(0o644)).unwrap();
     }
 
     /// Nonexistent `confdir` → `Io` error.
@@ -338,7 +345,7 @@ mod tests {
     /// `tinc network NAME` → error with `-n` advice.
     #[test]
     fn run_switch_rejected() {
-        let p = crate::names::Paths::for_cli(&crate::names::PathsInput {
+        let p = Paths::for_cli(&PathsInput {
             confbase: Some(PathBuf::from("/tmp/test")),
             ..Default::default()
         });
@@ -355,7 +362,7 @@ mod tests {
     /// without -n is how you reach it.
     #[test]
     fn run_switch_dot_different_advice() {
-        let p = crate::names::Paths::for_cli(&crate::names::PathsInput {
+        let p = Paths::for_cli(&PathsInput {
             confbase: Some(PathBuf::from("/tmp/test")),
             ..Default::default()
         });

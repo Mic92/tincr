@@ -64,6 +64,10 @@ use crate::cmd::{CmdError, io_err};
 use crate::keypair;
 use crate::names::Paths;
 
+use super::OpenKind;
+use super::TmpGuard;
+use super::open_nofollow;
+use super::write_private_key;
 use tinc_crypto::b64;
 
 /// `cmd_generate_ed25519_keys`. We require the name; see module doc.
@@ -96,7 +100,7 @@ pub fn run(paths: &Paths) -> Result<(), CmdError> {
 
     // Append private (PEM). 0600 is create-mode only; rotation
     // keeps whatever `disable_old_keys` preserved.
-    super::write_private_key(&priv_path, &sk, super::OpenKind::Append)?;
+    write_private_key(&priv_path, &sk, OpenKind::Append)?;
 
     // Append public (config line, LSB-first b64)
     {
@@ -137,7 +141,7 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
         .map(|m| m.permissions())
         .map_err(io_err(path))?;
 
-    let (tmp_guard, w) = super::TmpGuard::open(path, ".tmp")?;
+    let (tmp_guard, w) = TmpGuard::open(path, ".tmp")?;
     let tmp_path = tmp_guard.tmp_path().to_path_buf();
 
     // Copy with #-prefixing
@@ -217,7 +221,7 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
 /// If the file already exists (e.g. a user-hardened 0400 private key),
 /// its permissions are respected rather than being flipped back to 0600.
 fn open_append(path: &Path, mode: u32) -> Result<fs::File, CmdError> {
-    super::open_nofollow(path, super::OpenKind::Append, mode)
+    open_nofollow(path, OpenKind::Append, mode)
 }
 
 // Tests
@@ -225,6 +229,8 @@ fn open_append(path: &Path, mode: u32) -> Result<fs::File, CmdError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd;
+    use crate::cmd::OpenKind;
     use crate::testutil;
     use std::os::unix::fs::PermissionsExt;
     use tinc_conf::pem::read_pem;
@@ -412,7 +418,7 @@ mod tests {
         let sk1 = keypair::generate();
         {
             disable_old_keys(&path).unwrap(); // no-op (file doesn't exist)
-            crate::cmd::write_private_key(&path, &sk1, crate::cmd::OpenKind::Append).unwrap();
+            cmd::write_private_key(&path, &sk1, OpenKind::Append).unwrap();
         }
         // File has one PEM block.
         let blob1 = read_pem(fs::File::open(&path).unwrap(), keypair::TY_PRIVATE, 96).unwrap();
@@ -422,7 +428,7 @@ mod tests {
         let sk2 = keypair::generate();
         {
             assert!(disable_old_keys(&path).unwrap()); // sk1's block disabled
-            crate::cmd::write_private_key(&path, &sk2, crate::cmd::OpenKind::Append).unwrap();
+            cmd::write_private_key(&path, &sk2, OpenKind::Append).unwrap();
         }
 
         // File now has #-block then live block. read_pem gets the live one.

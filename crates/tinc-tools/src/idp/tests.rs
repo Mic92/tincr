@@ -3,6 +3,7 @@ use rsa::RsaPublicKey;
 use rsa::pkcs1v15::{Signature, VerifyingKey};
 use rsa::signature::Verifier;
 use std::sync::OnceLock;
+use std::sync::PoisonError;
 
 const NOW: u64 = 1_700_000_000;
 
@@ -278,10 +279,7 @@ fn sweep_drops_expired_state() {
     let code = authorize_code(&idp, "");
     let _ = body_json(&idp.token(&token_body(&code), None, NOW));
     idp.sweep(NOW + 2 * DEFAULT_ACCESS_TOKEN_TTL.as_secs());
-    let st = idp
-        .state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let st = idp.state.lock().unwrap_or_else(PoisonError::into_inner);
     assert!(st.codes.is_empty());
     assert!(st.tokens.is_empty());
 }

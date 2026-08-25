@@ -10,7 +10,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
 
+use crate::addrcache;
 use crate::script::{self, ScriptEnv, ScriptResult};
+use std::io;
+use std::sync::PoisonError;
+use std::thread::Builder;
 
 /// Bounded so a hung script can't make a flapping mesh eat RAM.
 /// Sized for ~200 nodes × (host-up + per-node + subnet-up).
@@ -51,13 +55,10 @@ impl ScriptWorker {
     /// # Panics
     /// If the OS refuses to spawn the worker thread on first call.
     pub(crate) fn submit(&self, job: Job) {
-        let mut guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let (tx, _) = guard.get_or_insert_with(|| {
             let (tx, rx) = sync_channel(QUEUE_CAP);
-            let handle = std::thread::Builder::new()
+            let handle = Builder::new()
                 .name("tinc-script".into())
                 .spawn(move || run(&rx))
                 .expect("spawn script worker thread");
@@ -98,7 +99,7 @@ fn run(rx: &Receiver<Job>) {
                 );
             }
             Job::WriteFile { path, bytes } => {
-                if let Err(e) = crate::addrcache::write_atomic(&path, &bytes) {
+                if let Err(e) = addrcache::write_atomic(&path, &bytes) {
                     log::debug!(target: "tincd::conn",
                         "address cache save failed: {e}");
                 }
@@ -109,7 +110,7 @@ fn run(rx: &Receiver<Job>) {
 
 /// Same shape as `Daemon::log_script`; duplicated because the worker
 /// has no `Daemon`.
-fn log_script(name: &str, r: std::io::Result<ScriptResult>) {
+fn log_script(name: &str, r: io::Result<ScriptResult>) {
     match r {
         Ok(ScriptResult::NotFound | ScriptResult::Ok) => {}
         Ok(ScriptResult::Sandboxed) => {
@@ -128,20 +129,23 @@ fn log_script(name: &str, r: std::io::Result<ScriptResult>) {
 mod tests {
     use super::*;
 
+    use crate::testutil;
+    use std::fs;
+    use std::fs::Permissions;
     use std::os::unix::fs::PermissionsExt;
 
     /// FIFO ordering + Drop drains: the property user scripts rely on.
     #[test]
     fn fifo_and_drain_on_drop() {
-        let dir = crate::testutil::tmpdir("scriptworker");
+        let dir = testutil::tmpdir("scriptworker");
         let out = dir.join("out");
         let s = dir.join("hook");
-        std::fs::write(
+        fs::write(
             &s,
             format!("#!/bin/sh\nprintf '%s' \"$N\" >> '{}'\n", out.display()),
         )
         .unwrap();
-        std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&s, Permissions::from_mode(0o755)).unwrap();
 
         let w = ScriptWorker::new();
         for i in 0..5 {

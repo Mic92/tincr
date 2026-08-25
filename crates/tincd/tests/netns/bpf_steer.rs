@@ -15,6 +15,15 @@ use tincd::shard::bpf::{open_reuseport_group, tunsetsteeringebpf};
 
 use super::common::linux::run_ip;
 use super::rig::enter_bwrap;
+use std::io;
+use std::net;
+use std::net::Ipv4Addr;
+use std::net::Shutdown;
+use std::net::TcpListener;
+use std::net::TcpStream;
+use std::net::UdpSocket;
+use std::thread;
+use std::thread::JoinHandle;
 
 /// The attached program is `ntohl(*(u32*)(payload+6)) % N`, i.e. the
 /// first four bytes of `src_id6` in `[dst_id6][src_id6]...`. With those
@@ -29,11 +38,11 @@ fn cbpf_steers_by_src_id6() {
         return;
     }
 
-    let group = open_reuseport_group(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), PORT, SOCKETS)
+    let group = open_reuseport_group(IpAddr::V4(Ipv4Addr::LOCALHOST), PORT, SOCKETS)
         .expect("open_reuseport_group");
     assert_eq!(group.socks.len(), SOCKETS as usize);
 
-    let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
     sender.connect(("127.0.0.1", PORT)).unwrap();
     for i in 0..PACKETS {
         let mut packet = [0u8; 13];
@@ -42,7 +51,7 @@ fn cbpf_steers_by_src_id6() {
         packet[12] = i;
         sender.send(&packet).unwrap();
     }
-    std::thread::sleep(Duration::from_millis(50));
+    thread::sleep(Duration::from_millis(50));
 
     let mut total = 0;
     let mut misrouted = Vec::new();
@@ -80,7 +89,7 @@ fn cbpf_steers_by_src_id6() {
 struct HairpinEcho {
     stop: Arc<AtomicBool>,
     reads_per_queue: Arc<[AtomicU32; 2]>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl HairpinEcho {
@@ -94,7 +103,7 @@ impl HairpinEcho {
         let thread = {
             let stop = stop.clone();
             let reads_per_queue = reads_per_queue.clone();
-            std::thread::spawn(move || {
+            thread::spawn(move || {
                 let mut buf = vec![0u8; 70_000];
                 while !stop.load(Ordering::Relaxed) {
                     for (index, fd) in queues.iter().enumerate() {
@@ -117,7 +126,7 @@ impl HairpinEcho {
                         let out = &queues[write_queue.unwrap_or(index)];
                         let _ = nix::unistd::write(out, &buf[..len]);
                     }
-                    std::thread::sleep(Duration::from_micros(50));
+                    thread::sleep(Duration::from_micros(50));
                 }
             })
         };
@@ -159,32 +168,32 @@ fn open_tun_mq(iface: &str) -> Vec<Tun> {
 /// Push `bytes` over TCP from a connect to .2:`port` into a listener on
 /// .1:`port` through the hairpin.
 fn drive_tcp(port: u16, bytes: usize) {
-    let listener = std::net::TcpListener::bind(("10.77.0.1", port)).unwrap();
+    let listener = TcpListener::bind(("10.77.0.1", port)).unwrap();
     listener.set_nonblocking(true).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let acceptor = {
         let stop = stop.clone();
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             let mut buf = [0u8; 8192];
             while !stop.load(Ordering::Relaxed) {
                 if let Ok((mut stream, _)) = listener.accept() {
                     let _ = stream.set_nonblocking(false);
                     while stream.read(&mut buf).is_ok_and(|len| len > 0) {}
                 }
-                std::thread::sleep(Duration::from_millis(5));
+                thread::sleep(Duration::from_millis(5));
             }
         })
     };
-    std::thread::sleep(Duration::from_millis(50));
-    let mut stream = std::net::TcpStream::connect_timeout(
-        &std::net::SocketAddr::from(([10, 77, 0, 2], port)),
+    thread::sleep(Duration::from_millis(50));
+    let mut stream = TcpStream::connect_timeout(
+        &net::SocketAddr::from(([10, 77, 0, 2], port)),
         Duration::from_secs(3),
     )
     .expect("TCP handshake through hairpin");
     let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
-    let _ = std::io::Write::write_all(&mut stream, &vec![0xABu8; bytes]);
-    std::thread::sleep(Duration::from_millis(150));
-    let _ = stream.shutdown(std::net::Shutdown::Both);
+    let _ = io::Write::write_all(&mut stream, &vec![0xABu8; bytes]);
+    thread::sleep(Duration::from_millis(150));
+    let _ = stream.shutdown(Shutdown::Both);
     stop.store(true, Ordering::Relaxed);
     acceptor.join().unwrap();
 }
@@ -203,7 +212,7 @@ fn automq_learns_from_write() {
     // TSO collapses 64K into few segments; a second flow pads the
     // sample.
     drive_tcp(19994, 256 * 1024);
-    std::thread::sleep(Duration::from_millis(100));
+    thread::sleep(Duration::from_millis(100));
     let [on_queue0, on_queue1] = echo.counts();
     drop(echo);
 
@@ -226,7 +235,7 @@ fn automq_cold_miss_converges() {
     drive_tcp(19992, 32 * 1024);
     let flow_a = echo.counts();
     drive_tcp(19993, 32 * 1024);
-    std::thread::sleep(Duration::from_millis(100));
+    thread::sleep(Duration::from_millis(100));
     let total = echo.counts();
     drop(echo);
     let flow_b = [total[0] - flow_a[0], total[1] - flow_a[1]];

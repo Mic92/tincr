@@ -6,7 +6,11 @@ use std::time::{Duration, Instant};
 use super::common::node::has_subnet;
 use super::common::{Node, node_reachable, node_status, node_traffic, poll_until};
 use super::fd_tunnel::{mk_ipv4_pkt, read_fd_nb, sockpair_datagram, write_fd};
+use std::fs::OpenOptions;
 use std::io::Write;
+use std::iter;
+use std::net::UdpSocket;
+use std::thread;
 
 /// Write all three configs and start mid, bob, alice in that order.
 /// hosts/ tweaks must happen via `edit_hosts` because configs are
@@ -37,7 +41,7 @@ fn start_hub(
 }
 
 fn append_host_line(node: &Node, host: &str, line: &str) {
-    let mut file = std::fs::OpenOptions::new()
+    let mut file = OpenOptions::new()
         .append(true)
         .open(node.confbase.join("hosts").join(host))
         .unwrap();
@@ -112,7 +116,7 @@ fn relays_via_mid() {
     let packet = mk_ipv4_pkt([10, 0, 0, 1], [10, 0, 0, 2], b"relayed via mid");
     poll_until(Duration::from_secs(5), || {
         write_fd(&alice_dev, &packet);
-        std::iter::from_fn(|| read_fd_nb(&bob_dev)).find(|received| *received == packet)
+        iter::from_fn(|| read_fd_nb(&bob_dev)).find(|received| *received == packet)
     });
 
     let nodes = alice_ctl.dump(3);
@@ -155,7 +159,7 @@ fn tunnelserver_isolates_spokes() {
     // Let gossip settle: two identical dumps 50ms apart.
     let alice_nodes = poll_until(Duration::from_secs(5), || {
         let first = alice_ctl.dump(3);
-        std::thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(50));
         (first == alice_ctl.dump(3) && first.len() >= 2).then_some(first)
     });
     assert_eq!(reachable_count(&alice_nodes), 2, "{alice_nodes:?}");
@@ -199,7 +203,7 @@ fn strictsubnets_ignores_gossip_until_hosts_file_agrees() {
     });
     let alice_subnets = poll_until(Duration::from_secs(5), || {
         let first = alice_ctl.dump(5);
-        std::thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(50));
         (first == alice_ctl.dump(5)).then_some(first)
     });
     assert!(
@@ -249,11 +253,11 @@ fn mid_does_not_relay_for_spoofed_udp_sender() {
     spoof.extend_from_slice(tincd::node_id::NodeId6::from_name("bob").as_bytes());
     spoof.extend_from_slice(tincd::node_id::NodeId6::from_name("alice").as_bytes());
     spoof.extend_from_slice(&[0xAA; 100]);
-    std::net::UdpSocket::bind("127.0.0.1:0")
+    UdpSocket::bind("127.0.0.1:0")
         .unwrap()
         .send_to(&spoof, mid.tcp_addr())
         .unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    thread::sleep(Duration::from_millis(200));
     assert_eq!(bob_in_packets(), before, "spoofed packet reached bob");
 
     let mid_log = mid.stop();
@@ -317,11 +321,10 @@ fn forwarding_off_drops_transit() {
     let mut alice_got_unreachable = false;
     while Instant::now() < deadline {
         write_fd(&alice_dev, &transit);
-        bob_got_transit |=
-            std::iter::from_fn(|| read_fd_nb(&bob_dev)).any(|r| r.ends_with(payload));
-        alice_got_unreachable |= std::iter::from_fn(|| read_fd_nb(&alice_dev))
+        bob_got_transit |= iter::from_fn(|| read_fd_nb(&bob_dev)).any(|r| r.ends_with(payload));
+        alice_got_unreachable |= iter::from_fn(|| read_fd_nb(&alice_dev))
             .any(|r| r[0] == 0x45 && r.get(9) == Some(&1) && r.get(20) == Some(&3));
-        std::thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(50));
     }
     let mid_log = mid.stop();
     assert!(!bob_got_transit, "mid forwarded transit:\n{mid_log}");

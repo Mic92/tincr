@@ -14,6 +14,7 @@
 //! during the scan because later checks may read the changed state.
 
 use Finding as F;
+use std::io::ErrorKind;
 
 mod conf;
 mod display;
@@ -254,10 +255,10 @@ pub fn run(paths: &Paths, force: bool) -> Result<Report, CmdError> {
         // get_my_name already wraps the error; we re-probe to
         // distinguish ENOENT from EACCES from no-Name.
         match fs::metadata(&tinc_conf) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(e) if e.kind() == ErrorKind::NotFound => {
                 findings.push(Finding::TincConfMissing);
             }
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
                 findings.push(Finding::TincConfDenied {
                     running_as_root: is_root(),
                 });

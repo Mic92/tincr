@@ -34,7 +34,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use crate::daemon::NodeState;
+use crate::graph::Graph;
 use crate::graph::NodeId;
+use crate::inthash::IntHashMap;
 
 /// Per-nid dense entry. Indexed by `NodeId.0` (slab index, never deleted in
 /// tincd, so dead slots stay `None`). Same layout discipline as `last_routes`.
@@ -197,9 +200,9 @@ impl NodeView {
     /// Dense vec sizing: same indexing invariant as `last_routes`.
     #[must_use]
     pub(crate) fn build(
-        graph: &crate::graph::Graph,
+        graph: &Graph,
         node_ids: &HashMap<String, NodeId>,
-        nodes: &crate::inthash::IntHashMap<NodeId, crate::daemon::NodeState>,
+        nodes: &IntHashMap<NodeId, NodeState>,
         n_nodes: usize,
     ) -> Self {
         // One alloc for the name interning. `node_ids` is the source of
@@ -262,6 +265,7 @@ const _: () = {
 mod tests {
     use super::*;
     use crate::daemon::NodeState;
+    use crate::dispatch::ConnOptions;
     use crate::graph::Graph;
     use crate::inthash::IntHashMap;
 
@@ -304,7 +308,7 @@ mod tests {
                 conn: None,
                 edge_addr: Some("10.0.0.2:655".parse().unwrap()),
                 edge_weight: 0,
-                edge_options: crate::dispatch::ConnOptions::empty(),
+                edge_options: ConnOptions::empty(),
             },
         );
 

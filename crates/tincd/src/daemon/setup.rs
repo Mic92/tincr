@@ -45,11 +45,40 @@ use crate::seen::SeenRequests;
 use crate::shard::runtime::{ShardRuntime, resolve as resolve_shards};
 use crate::subnet_tree::SubnetTree;
 
+use super::DataPlane;
+use super::intervals::HOUSEKEEP_SWEEP;
+use super::intervals::PERIODIC_TICK;
 use super::settings::{
     DaemonSettings, RoutingMode, load_settings, parse_bind_addr, parse_connect_to_from_config,
     parse_subnets_from_config,
 };
 use super::{Daemon, IoWhat, ListenerSlot, SetupError, SignalWhat, TimerWhat, net};
+use crate::addrcache::AddressCache;
+use crate::bgresolve::DnsWorker;
+use crate::control::BindError;
+use crate::dns::DnsConfig;
+use crate::egress::TxBatch;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::egress::linux::Fast;
+#[cfg(target_os = "macos")]
+use crate::egress::macos::Fast;
+use crate::keys;
+use crate::listen;
+use crate::outgoing::OutOrigin;
+use crate::portmap::Portmapper;
+use crate::portmap::UpnpMode;
+use crate::scriptworker::ScriptWorker;
+use crate::sd_notify;
+use crate::shard::TxSnapshot;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::shard::runtime;
+use crate::tunnel::MTU;
+use std::env;
+use std::fs;
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
+use std::sync::Arc;
 
 /// For each `BindToAddress` line then each `ListenAddress` line,
 /// resolve and create listener pair(s). If neither key is present,
@@ -102,10 +131,10 @@ fn build_listeners(
             // Synthesize wildcard addrs directly; skips the resolver.
             if host == "*" {
                 if family.try_v4() {
-                    try_addr((std::net::Ipv4Addr::UNSPECIFIED, p).into(), bindto);
+                    try_addr((Ipv4Addr::UNSPECIFIED, p).into(), bindto);
                 }
                 if family.try_v6() {
-                    try_addr((std::net::Ipv6Addr::UNSPECIFIED, p).into(), bindto);
+                    try_addr((Ipv6Addr::UNSPECIFIED, p).into(), bindto);
                 }
                 continue;
             }
@@ -151,7 +180,7 @@ fn build_listeners(
 fn expand_name(name: &str) -> Result<String, String> {
     tinc_conf::name::expand_name(
         name,
-        |k| std::env::var(k).ok(),
+        |k| env::var(k).ok(),
         || {
             nix::unistd::gethostname()
                 .map(|h| h.to_string_lossy().into_owned())
@@ -357,13 +386,11 @@ fn register_listeners(
         // the listener fd).
         #[cfg(any(target_os = "linux", target_os = "android"))]
         let egress: Box<dyn UdpEgress> = Box::new(
-            crate::egress::linux::Fast::new(&l.udp)
-                .map_err(|e| SetupError::io("dup UDP socket for egress", e))?,
+            Fast::new(&l.udp).map_err(|e| SetupError::io("dup UDP socket for egress", e))?,
         );
         #[cfg(target_os = "macos")]
         let egress: Box<dyn UdpEgress> = Box::new(
-            crate::egress::macos::Fast::new(&l.udp)
-                .map_err(|e| SetupError::io("dup UDP socket for egress", e))?,
+            Fast::new(&l.udp).map_err(|e| SetupError::io("dup UDP socket for egress", e))?,
         );
         #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
         let egress: Box<dyn UdpEgress> = Box::new(
@@ -396,7 +423,7 @@ pub(super) fn read_daemon_config(
         .map(tinc_conf::Entry::get_str)
         .ok_or_else(|| SetupError::Config("Name for tinc daemon required!".into()))?;
     let name = expand_name(name).map_err(SetupError::Config)?;
-    let host = crate::keys::read_host_config(confbase, &name);
+    let host = keys::read_host_config(confbase, &name);
     if host.entries().is_empty() {
         log::warn!(target: "tincd", "hosts/{name} empty or unreadable, using defaults");
     }
@@ -405,7 +432,7 @@ pub(super) fn read_daemon_config(
 }
 
 pub(super) fn load_aliases(confbase: &Path) -> HashMap<String, String> {
-    let mut nodes: Vec<String> = std::fs::read_dir(confbase.join("hosts"))
+    let mut nodes: Vec<String> = fs::read_dir(confbase.join("hosts"))
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok()?.file_name().into_string().ok())
@@ -414,7 +441,7 @@ pub(super) fn load_aliases(confbase: &Path) -> HashMap<String, String> {
     nodes.sort();
     let mut aliases = HashMap::new();
     for node in &nodes {
-        for e in crate::keys::read_host_config(confbase, node).lookup("Alias") {
+        for e in keys::read_host_config(confbase, node).lookup("Alias") {
             let alias = e.value.trim_matches('.').to_ascii_lowercase();
             let problem = if alias.is_empty() || alias.contains('.') {
                 "invalid"
@@ -439,13 +466,13 @@ pub(super) fn load_aliases(confbase: &Path) -> HashMap<String, String> {
 fn load_dns_config(
     config: &tinc_conf::Config,
     confbase: &Path,
-) -> Result<Option<crate::dns::DnsConfig>, SetupError> {
+) -> Result<Option<DnsConfig>, SetupError> {
     let mut a4 = None;
     let mut a6 = None;
     for e in config.lookup("DNSAddress") {
-        match e.get_str().parse::<std::net::IpAddr>() {
-            Ok(std::net::IpAddr::V4(v)) => a4 = Some(v),
-            Ok(std::net::IpAddr::V6(v)) => a6 = Some(v),
+        match e.get_str().parse::<IpAddr>() {
+            Ok(IpAddr::V4(v)) => a4 = Some(v),
+            Ok(IpAddr::V6(v)) => a6 = Some(v),
             Err(_) => {
                 return Err(SetupError::Config(format!(
                     "DNSAddress = {}: not a valid IP address",
@@ -471,7 +498,7 @@ fn load_dns_config(
             if !aliases.is_empty() {
                 log::info!(target: "tincd::dns", "{} aliases loaded", aliases.len());
             }
-            Ok(Some(crate::dns::DnsConfig {
+            Ok(Some(DnsConfig {
                 dns_addr4: a4,
                 dns_addr6: a6,
                 suffix,
@@ -508,14 +535,14 @@ fn register_timers(
     // Re-arms +10s. The eviction window is `pinginterval` (the
     // cache key TTL); the timer's 10s is just the sweep frequency.
     let age_timer = timers.add(TimerWhat::AgePastRequests);
-    timers.set(age_timer, super::intervals::HOUSEKEEP_SWEEP);
+    timers.set(age_timer, HOUSEKEEP_SWEEP);
 
     // periodic timer
     // Arm +5s directly: no contradictions exist at setup, counters
     // are zero, an immediate first call would just halve sleeptime
     // (10 → 5 → floored to 10) and re-arm.
     let periodictimer = timers.add(TimerWhat::Periodic);
-    timers.set(periodictimer, super::intervals::PERIODIC_TICK);
+    timers.set(periodictimer, PERIODIC_TICK);
 
     // keyexpire timer
     // Arm unconditionally: SPTPS needs the rekey to bound the
@@ -708,7 +735,7 @@ impl Daemon {
         // Driven from the event loop, not a free thread: a hung
         // loop must stop pinging so systemd's WatchdogSec actually
         // catches a wedge. No-op when WATCHDOG_USEC unset.
-        let watchdog = crate::sd_notify::watchdog_interval().map(|iv| {
+        let watchdog = sd_notify::watchdog_interval().map(|iv| {
             let tid = timers.add(TimerWhat::Watchdog);
             timers.set(tid, iv);
             (tid, iv)
@@ -721,7 +748,7 @@ impl Daemon {
         // Empty result is a hard error: the daemon can't function
         // without at least one listener.
         let listeners = if let Some(n) = socket_activation {
-            crate::listen::adopt_listeners(n, &settings.sockopts)
+            listen::adopt_listeners(n, &settings.sockopts)
                 .map_err(|e| SetupError::Config(format!("socket activation: {e}")))?
         } else {
             build_listeners(
@@ -752,7 +779,7 @@ impl Daemon {
 
         #[cfg(target_os = "linux")]
         let shard_runtime = if n_shards > 1 {
-            crate::shard::runtime::spawn_all(
+            runtime::spawn_all(
                 n_shards,
                 shard_tuns,
                 &listener_slots,
@@ -773,11 +800,11 @@ impl Daemon {
         // Bind (the AlreadyRunning check) before writing the pidfile,
         // so a second tincd fails before clobbering the live cookie.
         let control = ControlSocket::bind(socket).map_err(|e| match e {
-            crate::control::BindError::AlreadyRunning => SetupError::Config(format!(
+            BindError::AlreadyRunning => SetupError::Config(format!(
                 "Control socket {} already in use",
                 socket.display()
             )),
-            crate::control::BindError::Io(err) => {
+            BindError::Io(err) => {
                 SetupError::io(format!("bind control socket {}", socket.display()), err)
             }
         })?;
@@ -858,16 +885,16 @@ impl Daemon {
             seen: SeenRequests::new(),
             nodes: IntHashMap::default(),
             edge_addrs: HashMap::new(),
-            dp: super::DataPlane {
+            dp: DataPlane {
                 tunnels: IntHashMap::default(),
                 choose_udp_x: 0,
                 compressor: compress::Compressor::new(),
                 tx_priority: 0,
                 tx_scratch: Vec::with_capacity(
-                    12 + usize::from(crate::tunnel::MTU) + tinc_sptps::DATAGRAM_OVERHEAD,
+                    12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD,
                 ),
-                rx_scratch: Vec::with_capacity(14 + usize::from(crate::tunnel::MTU)),
-                rx_fast_scratch: Vec::with_capacity(14 + usize::from(crate::tunnel::MTU)),
+                rx_scratch: Vec::with_capacity(14 + usize::from(MTU)),
+                rx_fast_scratch: Vec::with_capacity(14 + usize::from(MTU)),
                 udp_rx_batch: Some(net::UdpRxBatch::new()),
                 gro_bucket: None,
                 gro_bucket_spare: Some(GroBucket::new()),
@@ -887,7 +914,7 @@ impl Daemon {
                 tso_scratch: None,
                 tso_lens: vec![0usize; net::DEVICE_DRAIN_CAP].into_boxed_slice(),
                 // ~64KB once. The stage gate is `tx_batch_live`.
-                tx_batch: crate::egress::TxBatch::default(),
+                tx_batch: TxBatch::default(),
                 tx_batch_live: false,
             },
             id6_table,
@@ -902,7 +929,7 @@ impl Daemon {
             // well under the `2*30` suspend-detect threshold.
             last_periodic_run_time: timers.now(),
             iface,
-            script_worker: crate::scriptworker::ScriptWorker::new(),
+            script_worker: ScriptWorker::new(),
             overwrite_mac,
             mymac,
             device_errors: 0,
@@ -916,7 +943,7 @@ impl Daemon {
             punch_redials: HashMap::new(),
             shortcut_backoff: HashMap::new(),
             last_autoconnect_tick: None,
-            last_routes: std::sync::Arc::new(Vec::new()),
+            last_routes: Arc::new(Vec::new()),
             last_mst: Vec::new(),
             mac_table: HashMap::new(),
             mac_leases: mac_lease::MacLeases::default(),
@@ -942,7 +969,7 @@ impl Daemon {
             watchdog,
             running: true,
             any_pcap: false,
-            dns_worker: crate::bgresolve::DnsWorker::spawn(),
+            dns_worker: DnsWorker::spawn(),
             dns_hints: HashMap::new(),
             proxy_addrs: Vec::new(),
             #[cfg(feature = "upnp")]
@@ -965,11 +992,10 @@ impl Daemon {
             // ADD_EDGE arriving via some other path can find it.
             daemon.lookup_or_add_node(&peer);
             let config_addrs = resolve_config_addrs(&daemon.confbase, &peer);
-            let addr_cache =
-                crate::addrcache::AddressCache::open(&daemon.confbase, &peer, config_addrs);
+            let addr_cache = AddressCache::open(&daemon.confbase, &peer, config_addrs);
             let oid = daemon.outgoings.insert(Outgoing {
                 node_name: peer,
-                origin: crate::outgoing::OutOrigin::ConfigConnectTo,
+                origin: OutOrigin::ConfigConnectTo,
                 timeout: 0,
                 addr_cache,
             });
@@ -993,13 +1019,13 @@ impl Daemon {
         // port); spawned early so the first refresh runs while tinc-up
         // is still configuring the iface.
         #[cfg(feature = "upnp")]
-        if daemon.settings.upnp != crate::portmap::UpnpMode::No {
+        if daemon.settings.upnp != UpnpMode::No {
             log::info!(target: "tincd::portmap",
                        "PCP/UPnP port mapping enabled \
                         (port {}, mode {:?}, refresh {}s)",
                        daemon.my_udp_port, daemon.settings.upnp,
                        daemon.settings.upnp_refresh_period);
-            daemon.portmapper = Some(crate::portmap::Portmapper::spawn(
+            daemon.portmapper = Some(Portmapper::spawn(
                 daemon.my_udp_port,
                 daemon.settings.upnp,
                 Duration::from_secs(u64::from(daemon.settings.upnp_refresh_period)),
@@ -1042,7 +1068,7 @@ impl Daemon {
             id6_prefix[..6].copy_from_slice(NodeId6::NULL.as_bytes());
             id6_prefix[6..].copy_from_slice(src_id6.as_bytes());
 
-            crate::shard::TxSnapshot {
+            TxSnapshot {
                 // any_pcap not folded — it flips at runtime via
                 // `tinc pcap` (metaconn.rs sets, route.rs recomputes
                 // on conn drop). Checked live at the call site
@@ -1070,10 +1096,10 @@ impl Daemon {
                 // mostly for symmetry — first packet doesn't arrive
                 // until handshake done, by which time refresh_graph
                 // has run at least once.
-                id6: std::sync::Arc::new(daemon.id6_table.clone()),
-                routes: std::sync::Arc::clone(&daemon.last_routes),
-                subnets: std::sync::Arc::new(daemon.subnets.clone()),
-                ns: std::sync::Arc::default(),
+                id6: Arc::new(daemon.id6_table.clone()),
+                routes: Arc::clone(&daemon.last_routes),
+                subnets: Arc::new(daemon.subnets.clone()),
+                ns: Arc::default(),
                 tunnels: IntHashMap::default(),
             }
         });
@@ -1087,14 +1113,20 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use nix::sys::socket::{ControlMessage, MsgFlags, sendmsg};
+    use std::env;
+    use std::fs;
     #[cfg(unix)]
     use std::io::IoSlice;
     #[cfg(unix)]
     use std::os::fd::AsRawFd;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     use std::os::linux::net::SocketAddrExt;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    use std::os::unix::net;
     #[cfg(unix)]
     use std::os::unix::net::UnixListener;
+    use std::thread;
+    use std::thread::JoinHandle;
 
     /// Construct a Config from `key = value` lines. Test-only.
     fn cfg_from(lines: &[&str]) -> tinc_conf::Config {
@@ -1112,13 +1144,13 @@ mod tests {
     fn aliases_collisions() {
         let dir = tempfile::tempdir().unwrap();
         let hosts = dir.path().join("hosts");
-        std::fs::create_dir(&hosts).unwrap();
-        std::fs::write(
+        fs::create_dir(&hosts).unwrap();
+        fs::write(
             hosts.join("alice"),
             "Alias = web\nAlias = bob\nAlias = Db\n",
         )
         .unwrap();
-        std::fs::write(hosts.join("bob"), "Alias = db\nAlias = mail\n").unwrap();
+        fs::write(hosts.join("bob"), "Alias = db\nAlias = mail\n").unwrap();
 
         let a = load_aliases(dir.path());
         // node name wins, duplicate goes to sorted-first alice
@@ -1131,8 +1163,8 @@ mod tests {
 
     /// Serve one fd via `SCM_RIGHTS`, like the app after `establish()`.
     #[cfg(unix)]
-    fn serve_fd_once(listener: UnixListener) -> std::thread::JoinHandle<()> {
-        std::thread::spawn(move || {
+    fn serve_fd_once(listener: UnixListener) -> JoinHandle<()> {
+        thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let (_keep, give) = nix::unistd::pipe().unwrap();
             let iov = [IoSlice::new(b"X")];
@@ -1163,7 +1195,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn device_fd_from_abstract_socket() {
         let name = format!("tincr-test-{}", std::process::id());
-        let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+        let addr = net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
         let listener = UnixListener::bind_addr(&addr).unwrap();
         let srv = serve_fd_once(listener);
 
@@ -1266,9 +1298,9 @@ mod tests {
         // default, so no concurrent env readers.
         #[expect(unsafe_code)]
         unsafe {
-            std::env::set_var("TINC_TEST_NAME_PLAIN", "alpha42");
-            std::env::set_var("TINC_TEST_NAME_DOTTED", "host.local");
-            std::env::set_var("TINC_TEST_NAME_DASHED", "my-host");
+            env::set_var("TINC_TEST_NAME_PLAIN", "alpha42");
+            env::set_var("TINC_TEST_NAME_DOTTED", "host.local");
+            env::set_var("TINC_TEST_NAME_DASHED", "my-host");
         }
         assert_eq!(expand_name("$TINC_TEST_NAME_PLAIN").unwrap(), "alpha42");
         // Dot truncated (domain stripped); dash squashed to `_`.

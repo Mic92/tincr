@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
 use nix::sys::time::TimeSpec;
+use std::thread;
 use tinc_device::{BsdTun, Device, DeviceArena, DrainResult};
 
 fn ifconfig(iface: &str, local: &str, peer: &str) {
@@ -44,7 +45,7 @@ fn drain_until(dev: &mut BsdTun, want: usize) -> Vec<Vec<u8>> {
                     }
                 }
             }
-            DrainResult::Empty => std::thread::sleep(Duration::from_millis(5)),
+            DrainResult::Empty => thread::sleep(Duration::from_millis(5)),
             r @ DrainResult::Super { .. } => panic!("unexpected {r:?}"),
         }
     }

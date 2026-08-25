@@ -3,7 +3,11 @@ use std::time::Duration;
 
 use super::common::node::has_active_peer;
 use super::common::{Node, node_reachable, wait_for_file};
+use std::fs;
+use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
+use std::thread;
+use std::time::Instant;
 
 fn node_names(rows: &[String]) -> Vec<&str> {
     rows.iter()
@@ -96,7 +100,7 @@ fn ping_timeout_drops_frozen_peer_then_reconnects() {
     alice.start_dialing(&mut bob);
 
     for _ in 0..10 {
-        std::thread::sleep(Duration::from_millis(500));
+        thread::sleep(Duration::from_millis(500));
         assert!(
             bob.has_active_peer("alice"),
             "PONG not clearing pinged bit?"
@@ -118,7 +122,7 @@ fn tinc_up_gets_interface_and_name() {
     alice.write_config_multi(&[], &[]);
     let marker = tmp.path().join("tinc-up-ran");
     let script = alice.confbase.join("tinc-up");
-    std::fs::write(
+    fs::write(
         &script,
         format!(
             "#!/bin/sh\necho \"iface=$INTERFACE name=$NAME\" > '{}'\n",
@@ -126,7 +130,7 @@ fn tinc_up_gets_interface_and_name() {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&script, Permissions::from_mode(0o755)).unwrap();
 
     alice.start();
     assert!(
@@ -148,12 +152,12 @@ fn hosts_dir_populates_graph() {
     let mut alice = Node::new(tmp.path(), "alice", 0xA9).with_conf("AutoConnect = no\n");
     let bob = Node::new(tmp.path(), "bob", 0xB9);
     alice.write_config(&bob, false);
-    std::fs::write(
+    fs::write(
         alice.confbase.join("hosts/carol"),
         "Address = 127.0.0.1 1\n",
     )
     .unwrap();
-    std::fs::write(alice.confbase.join("hosts/.swp"), "garbage\n").unwrap();
+    fs::write(alice.confbase.join("hosts/.swp"), "garbage\n").unwrap();
 
     alice.start();
     let nodes = alice.ctl().dump(3);
@@ -194,7 +198,7 @@ fn autoconnect_converges_to_three() {
             .filter(|peer| has_active_peer(&conns, &peer.name))
             .count()
     };
-    let deadline = std::time::Instant::now() + Duration::from_secs(25);
+    let deadline = Instant::now() + Duration::from_secs(25);
     while active_peers() < 3 {
         assert!(
             std::time::Instant::now() < deadline,
@@ -207,7 +211,7 @@ fn autoconnect_converges_to_three() {
                 logs
             })
         );
-        std::thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(alice.stop().matches("Autoconnecting to ").count(), 3);
 }

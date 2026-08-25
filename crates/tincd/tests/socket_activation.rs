@@ -2,6 +2,12 @@
 //! Self-skips when it is missing or predates `--now` (systemd 258;
 //! without it tincd is only exec'd on the first connection).
 
+use std::env;
+use std::fs;
+use std::net::TcpListener;
+use std::net::TcpStream;
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -9,11 +15,11 @@ use std::time::Duration;
 mod common;
 use common::{ChildWithLog, tincd_bin, wait_for_file, write_ed25519_privkey};
 
-fn activator() -> Option<std::path::PathBuf> {
-    let bin = std::env::var_os("PATH")?
+fn activator() -> Option<PathBuf> {
+    let bin = env::var_os("PATH")?
         .to_str()?
         .split(':')
-        .map(|dir| std::path::Path::new(dir).join("systemd-socket-activate"))
+        .map(|dir| Path::new(dir).join("systemd-socket-activate"))
         .find(|path| path.is_file())?;
     let help = Command::new(&bin).arg("--help").output().ok()?;
     if !String::from_utf8_lossy(&help.stdout).contains("--now") {
@@ -25,20 +31,20 @@ fn activator() -> Option<std::path::PathBuf> {
 
 /// The activator cannot bind port 0, so pick a free one and retry if
 /// it got taken in between.
-fn spawn_activated(activator: &std::path::Path, tmp: &common::TmpGuard) -> (ChildWithLog, u16) {
+fn spawn_activated(activator: &Path, tmp: &common::TmpGuard) -> (ChildWithLog, u16) {
     let (confbase, pidfile, socket) = tmp.std_paths();
-    std::fs::create_dir_all(confbase.join("hosts")).unwrap();
-    std::fs::write(
+    fs::create_dir_all(confbase.join("hosts")).unwrap();
+    fs::write(
         confbase.join("tinc.conf"),
         "Name = testnode\nDeviceType = dummy\nAddressFamily = ipv4\n",
     )
     .unwrap();
     // Must be ignored in favour of the inherited listener.
-    std::fs::write(confbase.join("hosts").join("testnode"), "Port = 0\n").unwrap();
+    fs::write(confbase.join("hosts").join("testnode"), "Port = 0\n").unwrap();
     write_ed25519_privkey(&confbase, &[0x42; 32]);
 
     for _ in 0..5 {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
+        let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
@@ -88,7 +94,7 @@ fn adopts_listener_and_stays_foreground() {
     let (_, pidfile, _) = tmp.std_paths();
 
     let addr = ([127, 0, 0, 1], port).into();
-    std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)).expect("connect");
+    TcpStream::connect_timeout(&addr, Duration::from_secs(2)).expect("connect");
     assert_eq!(common::read_tcp_addr(&pidfile), addr);
     assert!(child.wait_exit(Duration::ZERO).is_none(), "detached");
     let log = child.kill_and_log();

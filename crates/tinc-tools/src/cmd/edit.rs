@@ -37,6 +37,9 @@ use crate::ctl::{CtlRequest, CtlSocket};
 use crate::names::{Paths, check_id};
 
 use super::CmdError;
+use std::env;
+use std::io;
+use std::process::ExitStatus;
 
 /// Files that live directly in `confbase` (not under `hosts/`): tinc.conf
 /// plus the network/subnet/host hook scripts. The dash in `tinc-up` is why
@@ -102,8 +105,8 @@ pub(crate) fn resolve(paths: &Paths, input: &str) -> Result<PathBuf, CmdError> {
 fn pick_editor() -> OsString {
     // An empty `EDITOR=` counts as set and later fails to spawn; that
     // error is the user's to fix.
-    std::env::var_os("VISUAL")
-        .or_else(|| std::env::var_os("EDITOR"))
+    env::var_os("VISUAL")
+        .or_else(|| env::var_os("EDITOR"))
         .unwrap_or_else(|| OsString::from("vi"))
 }
 
@@ -122,7 +125,7 @@ fn pick_editor() -> OsString {
 ///
 /// # Errors
 /// I/O errors from spawning `sh` itself.
-fn spawn_editor(editor: &OsString, file: &PathBuf) -> std::io::Result<std::process::ExitStatus> {
+fn spawn_editor(editor: &OsString, file: &PathBuf) -> io::Result<ExitStatus> {
     // `$TINC_EDITOR` unquoted → word-split (flags allowed); `"$@"` quoted →
     // filename stays one word. `exec` so the editor replaces the shell and
     // we wait on it directly.

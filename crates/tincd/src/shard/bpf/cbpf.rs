@@ -78,6 +78,7 @@ use std::net::SocketAddr;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use socket2::{Domain, Protocol, Socket, Type};
+use std::net::IpAddr;
 
 // cBPF opcodes — `linux/bpf_common.h`.
 const BPF_LD: u16 = 0x00;
@@ -180,7 +181,7 @@ pub fn attach_reuseport_id6(sock0_fd: BorrowedFd<'_>, n_shards: u32) -> io::Resu
 /// `EADDRINUSE` if `port` is taken by a non-reuseport socket.
 /// Propagated from `attach_reuseport_id6` if socket 0's bind didn't
 /// create a group (shouldn't happen — we set `SO_REUSEPORT` first).
-pub fn open_reuseport_group(ip: std::net::IpAddr, port: u16, n: u32) -> io::Result<ReuseportGroup> {
+pub fn open_reuseport_group(ip: IpAddr, port: u16, n: u32) -> io::Result<ReuseportGroup> {
     debug_assert!(n > 0 && n <= 256);
 
     let addr = SocketAddr::new(ip, port);
@@ -223,5 +224,5 @@ pub fn open_reuseport_group(ip: std::net::IpAddr, port: u16, n: u32) -> io::Resu
 pub struct ReuseportGroup {
     /// Index k = shard k. The cBPF prog returns `src_id6[0..4] % N`;
     /// `reuse->socks[that]` is `socks[that]` (bind order).
-    pub socks: Vec<std::os::fd::OwnedFd>,
+    pub socks: Vec<OwnedFd>,
 }

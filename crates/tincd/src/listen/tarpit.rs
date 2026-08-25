@@ -170,6 +170,7 @@ impl Tarpit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::net::{Ipv6Addr, SocketAddrV4, SocketAddrV6};
     use std::time::Duration;
 
@@ -399,7 +400,7 @@ mod tests {
     /// each genuinely close on drop. `OwnedFd::try_clone` returns a
     /// fresh fd (dup).
     fn nullfd() -> OwnedFd {
-        std::fs::File::open("/dev/null").unwrap().into()
+        File::open("/dev/null").unwrap().into()
     }
 
     /// The ring wraps at 10. 11th eviction closes the 1st.

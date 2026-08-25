@@ -5,8 +5,11 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::fs;
+use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[macro_use]
@@ -32,7 +35,7 @@ struct Event {
     env: HashMap<String, String>,
 }
 
-struct ScriptLog(std::path::PathBuf);
+struct ScriptLog(PathBuf);
 
 impl ScriptLog {
     /// Installs every script kind (plus `hosts/{peer}-up/-down`) into
@@ -56,15 +59,15 @@ impl ScriptLog {
         }
         for name in names {
             let path = node.confbase.join(name);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, &body).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &body).unwrap();
+            fs::set_permissions(&path, Permissions::from_mode(0o755)).unwrap();
         }
         Self(log)
     }
 
     fn events(&self) -> Vec<Event> {
-        std::fs::read_to_string(&self.0)
+        fs::read_to_string(&self.0)
             .unwrap_or_default()
             .lines()
             .map(|line| {

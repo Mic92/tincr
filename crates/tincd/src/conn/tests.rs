@@ -3,6 +3,7 @@
 use super::*;
 use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
 use nix::unistd::write;
+use std::fs::File;
 use tinc_crypto::os_rng;
 use tinc_crypto::sign::SigningKey;
 use tinc_sptps::{Framing, Output, Role};
@@ -171,7 +172,7 @@ fn maxbufsize_matches_c() {
 // Connection::send.
 
 fn devnull() -> OwnedFd {
-    std::fs::File::open("/dev/null").unwrap().into()
+    File::open("/dev/null").unwrap().into()
 }
 
 #[test]

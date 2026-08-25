@@ -15,6 +15,7 @@ use crate::outgoing::{self, PunchSock};
 use crate::punch::{self, PunchAction, PunchState};
 use rand_core::Rng;
 use socket2::Domain;
+use std::time::Instant;
 use tinc_crypto::os_rng;
 use tinc_proto::Request;
 use tinc_proto::msg::ReqKeyExt;
@@ -140,7 +141,7 @@ impl Daemon {
         &mut self,
         from_nid: NodeId,
         from_name: &str,
-        now: std::time::Instant,
+        now: Instant,
         peer_addrs: Vec<SocketAddr>,
     ) -> Option<(PunchState, Vec<PunchAction>)> {
         let (my_addrs, socks) = self.punch_prepare()?;

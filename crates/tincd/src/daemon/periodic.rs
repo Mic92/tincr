@@ -17,8 +17,15 @@ use crate::outgoing::{Outgoing, resolve_config_addrs};
 use crate::script::{ScriptEnv, ScriptResult};
 use crate::{invitation_serve, reload, script};
 
+use super::setup;
+use crate::addrcache::AddressCache;
 use crate::graph::NodeId;
+use crate::listen::AddrFamily;
+use crate::outgoing::OutOrigin;
 use crate::portmap::PortmapEvent;
+use crate::scriptworker::Job;
+use crate::tunnel;
+use std::fs;
 use tinc_proto::msg::SubnetMsg;
 use tinc_proto::{Request, Subnet};
 
@@ -185,7 +192,7 @@ impl Daemon {
                 .sptps
                 .as_deref()
                 .is_some_and(tinc_sptps::Sptps::rekey_due);
-            if crate::tunnel::periodic_rekey_due(
+            if tunnel::periodic_rekey_due(
                 tunnel.status.validkey,
                 tunnel.status.waitingforkey,
                 rekey_due,
@@ -217,7 +224,7 @@ impl Daemon {
         let keylifetime = Duration::from_secs(u64::from(self.settings.keylifetime));
         for tunnel in self.dp.tunnels.values_mut() {
             if tunnel.prev_sptps.is_some()
-                && crate::tunnel::should_reap_prev_sptps(
+                && tunnel::should_reap_prev_sptps(
                     tunnel.status.validkey,
                     tunnel.last_req_key,
                     tunnel.prev_sptps_installed_at,
@@ -411,7 +418,7 @@ impl Daemon {
     }
 
     fn submit_script(&self, name: String, env: ScriptEnv) {
-        self.script_worker.submit(crate::scriptworker::Job::Script {
+        self.script_worker.submit(Job::Script {
             confbase: self.confbase.clone(),
             name,
             env,
@@ -578,7 +585,7 @@ impl Daemon {
     /// not reloadable: Port, `AddressFamily`, `DeviceType` (need re-bind/
     /// re-open). Not-yet: Compression, Forwarding.
     pub(super) fn reload_configuration(&mut self) -> bool {
-        let config = match super::setup::read_daemon_config(&self.confbase, &self.cmdline_conf) {
+        let config = match setup::read_daemon_config(&self.confbase, &self.cmdline_conf) {
             Ok((c, _)) => c,
             Err(e) => {
                 log::error!(target: "tincd",
@@ -605,7 +612,7 @@ impl Daemon {
                 warn("Port");
             }
             if let Some(af) = lookup("AddressFamily")
-                && crate::listen::AddrFamily::from_config(&af) != Some(self.settings.addressfamily)
+                && AddrFamily::from_config(&af) != Some(self.settings.addressfamily)
             {
                 warn("AddressFamily");
             }
@@ -628,7 +635,7 @@ impl Daemon {
         apply_reloadable_settings(&config, &mut self.settings);
 
         if let Some(dns) = &mut self.dns {
-            dns.aliases = super::setup::load_aliases(&self.confbase);
+            dns.aliases = setup::load_aliases(&self.confbase);
         }
 
         // Operator may have run `tinc invite` since boot.
@@ -730,11 +737,10 @@ impl Daemon {
         for peer in to_add {
             self.lookup_or_add_node(&peer);
             let config_addrs = resolve_config_addrs(&self.confbase, &peer);
-            let addr_cache =
-                crate::addrcache::AddressCache::open(&self.confbase, &peer, config_addrs);
+            let addr_cache = AddressCache::open(&self.confbase, &peer, config_addrs);
             let oid = self.outgoings.insert(Outgoing {
                 node_name: peer,
-                origin: crate::outgoing::OutOrigin::ConfigConnectTo,
+                origin: OutOrigin::ConfigConnectTo,
                 timeout: 0,
                 addr_cache,
             });
@@ -754,7 +760,7 @@ impl Daemon {
             .iter()
             .filter_map(|name| {
                 let path = self.confbase.join("hosts").join(name);
-                std::fs::metadata(&path)
+                fs::metadata(&path)
                     .and_then(|m| m.modified())
                     .ok()
                     .map(|mt| (name.clone(), mt))

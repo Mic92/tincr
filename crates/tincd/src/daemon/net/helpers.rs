@@ -14,6 +14,8 @@ use crate::shard::TunnelHandles;
 use crate::tunnel::TunnelState;
 
 use super::ListenerSlot;
+use crate::daemon::Daemon;
+use std::io;
 
 /// Re-warn cadence for [`handle_udp_unreachable`].
 const UDP_UNREACHABLE_WARN_INTERVAL: Duration = Duration::from_mins(1);
@@ -53,7 +55,7 @@ pub(super) fn confirm_udp_addr(
 /// Returns `true` for `sendmsg` errnos meaning "destination not
 /// locally routable" (`ENETUNREACH`, `EHOSTUNREACH`, `EAFNOSUPPORT`,
 /// `EADDRNOTAVAIL`).
-pub(super) fn is_udp_unreachable_errno(e: &std::io::Error) -> bool {
+pub(super) fn is_udp_unreachable_errno(e: &io::Error) -> bool {
     let Some(raw) = e.raw_os_error() else {
         return false;
     };
@@ -72,7 +74,7 @@ pub(super) fn handle_udp_unreachable(
     tunnel_handles: &IntHashMap<NodeId, Arc<TunnelHandles>>,
     relay_nid: NodeId,
     relay_name: &str,
-    err: &std::io::Error,
+    err: &io::Error,
     now: Instant,
 ) {
     let warn_now = if let Some(tunnel) = tunnels.get_mut(&relay_nid) {
@@ -117,7 +119,7 @@ pub(super) fn handle_udp_emsgsize(
     };
     let relay_name = graph.node(relay_nid).map_or("<gone>", |n| n.name.as_str());
     for a in p.on_emsgsize(origlen) {
-        crate::daemon::Daemon::log_pmtu_action(relay_name, &a);
+        Daemon::log_pmtu_action(relay_name, &a);
     }
 }
 

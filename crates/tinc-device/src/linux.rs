@@ -31,11 +31,14 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd};
 
+use crate::assert_read_buf;
+use crate::drain_via_read;
 use crate::ether::{ETH_HLEN, from_ip_nibble, set_etherheader};
 use crate::tso::{VNET_HDR_LEN, VirtioNetHdr, gso_none_checksum};
 use crate::{
     Device, DeviceArena, DeviceConfig, DrainResult, GsoType, MTU, Mac, Mode, read_fd, write_fd,
 };
+use std::mem;
 use std::os::unix::fs::OpenOptionsExt;
 
 /// The kernel's TUN/TAP multiplexer. Opening it doesn't give you a
@@ -329,7 +332,7 @@ fn pack_ifr_name(iface: Option<&str>) -> io::Result<[libc::c_char; libc::IFNAMSI
 #[expect(unsafe_code)]
 fn ifreq_with_name(ifr_name: [libc::c_char; libc::IFNAMSIZ]) -> libc::ifreq {
     // SAFETY: see fn comment.
-    let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
+    let mut ifr: libc::ifreq = unsafe { mem::zeroed() };
     ifr.ifr_name = ifr_name;
     ifr
 }
@@ -513,7 +516,7 @@ impl Device for Tun {
         );
 
         // `IFF_NO_PI` → no `tun_pi` prefix; raw ethernet at [0..].
-        crate::assert_read_buf(buf, "TAP");
+        assert_read_buf(buf, "TAP");
         let dst = &mut buf[..MTU];
         let n = read_fd(self.fd.as_fd(), dst)?;
         if n == 0 {
@@ -616,7 +619,7 @@ impl Device for Tun {
         if self.mode == Mode::Tap {
             // TAP has no vnet_hdr (see `Tun::open` flags) — use the
             // trait-default read()-loop body.
-            return crate::drain_via_read(self, arena, cap);
+            return drain_via_read(self, arena, cap);
         }
 
         // TUN: vnet_hdr path

@@ -18,6 +18,12 @@ use std::net::SocketAddr;
 use super::{UDP_RX_BATCH, UDP_RX_BUFSZ, UdpRxBatch};
 use crate::darwin_x::{MsghdrX, recvmsg_x, zeroed_boxed_array};
 use crate::listen::unmap;
+use std::io;
+use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
+use std::net::SocketAddrV6;
+use std::os::fd::RawFd;
+use std::ptr;
 
 /// Persistent `msghdr_x` / iovec / `sockaddr_storage` arrays. Same
 /// shape as `egress::macos::Fast` but with per-slot address storage.
@@ -55,7 +61,7 @@ impl Scratch {
 /// `recvfrom` loop" (latched `ENOSYS`); the caller then runs the
 /// portable phase-1 so behaviour is byte-identical.
 pub(super) fn phase1(
-    fd: std::os::fd::RawFd,
+    fd: RawFd,
     batch: &mut UdpRxBatch,
     meta: &mut [(u16, Option<SocketAddr>); UDP_RX_BATCH],
 ) -> Option<usize> {
@@ -80,7 +86,7 @@ pub(super) fn phase1(
             msg_iovlen: 1,
             // No cmsgs: avoids the 10.15 `msg_controllen` quirk and
             // we don't need pktinfo on the listener.
-            msg_control: std::ptr::null_mut(),
+            msg_control: ptr::null_mut(),
             msg_controllen: 0,
             msg_flags: 0,
             msg_datalen: 0,
@@ -95,7 +101,7 @@ pub(super) fn phase1(
     // `MSG_DONTWAIT` is one of the two flags `recvmsg_x` accepts.
     let ret = unsafe { recvmsg_x(fd, x.hdrs.as_mut_ptr(), cnt, libc::MSG_DONTWAIT) };
     if ret < 0 {
-        let err = std::io::Error::last_os_error();
+        let err = io::Error::last_os_error();
         return match err.raw_os_error() {
             Some(libc::EAGAIN) => Some(0),
             Some(libc::ENOSYS) => {
@@ -135,20 +141,20 @@ fn ss_to_socketaddr(ss: &libc::sockaddr_storage, len: libc::socklen_t) -> Option
     unsafe {
         match libc::c_int::from(ss.ss_family) {
             libc::AF_INET if len as usize >= size_of::<libc::sockaddr_in>() => {
-                let sin = std::ptr::from_ref(ss)
+                let sin = ptr::from_ref(ss)
                     .cast::<libc::sockaddr_in>()
                     .read_unaligned();
                 Some(SocketAddr::new(
-                    std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)).into(),
+                    Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)).into(),
                     u16::from_be(sin.sin_port),
                 ))
             }
             libc::AF_INET6 if len as usize >= size_of::<libc::sockaddr_in6>() => {
-                let sin6 = std::ptr::from_ref(ss)
+                let sin6 = ptr::from_ref(ss)
                     .cast::<libc::sockaddr_in6>()
                     .read_unaligned();
-                Some(SocketAddr::V6(std::net::SocketAddrV6::new(
-                    std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr),
+                Some(SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::from(sin6.sin6_addr.s6_addr),
                     u16::from_be(sin6.sin6_port),
                     sin6.sin6_flowinfo,
                     sin6.sin6_scope_id,

@@ -1,11 +1,22 @@
 //! The `tinc`/`tinc-auth` binaries as subprocesses; commands themselves
 //! are unit-tested in `src/cmd/`.
 
+use std::collections::hash_map::RandomState;
+use std::env;
+use std::fs;
 use std::hash::{BuildHasher, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::Shutdown;
+use std::os::unix::net::UnixListener;
 use std::os::unix::net::UnixStream;
+use std::panic;
 use std::path::{Path, PathBuf};
+use std::process;
+use std::process::Child;
 use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
+use std::thread;
+use std::thread::JoinHandle;
 
 mod argv;
 mod auth_http;
@@ -33,7 +44,7 @@ pub(crate) fn bin(name: &str) -> PathBuf {
     var.map_or_else(
         // target/{profile}/deps/<test> → target/{profile}/<name>
         || {
-            let exe = std::env::current_exe().unwrap();
+            let exe = env::current_exe().unwrap();
             exe.parent().unwrap().parent().unwrap().join(name)
         },
         PathBuf::from,
@@ -113,7 +124,7 @@ pub(crate) struct Conf {
 impl Conf {
     pub fn bare() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("vpn")).unwrap();
+        fs::create_dir(dir.path().join("vpn")).unwrap();
         Self { dir }
     }
 
@@ -144,12 +155,11 @@ impl Conf {
     }
 
     pub fn read(&self, relative: &str) -> String {
-        std::fs::read_to_string(self.base().join(relative))
-            .unwrap_or_else(|e| panic!("{relative}: {e}"))
+        fs::read_to_string(self.base().join(relative)).unwrap_or_else(|e| panic!("{relative}: {e}"))
     }
 
     pub fn write(&self, relative: &str, contents: &str) {
-        std::fs::write(self.base().join(relative), contents).unwrap();
+        fs::write(self.base().join(relative), contents).unwrap();
     }
 
     /// `tinc -c BASE --pidfile PIDFILE ARGS`.
@@ -166,25 +176,22 @@ impl Conf {
     }
 
     /// Pidfile names this process so `kill(pid, 0)` succeeds.
-    fn listen(&self) -> (std::os::unix::net::UnixListener, String) {
+    fn listen(&self) -> (UnixListener, String) {
         let cookie = format!("{:064x}", rand_cookie());
-        std::fs::write(
+        fs::write(
             self.pidfile(),
             format!("{} {cookie} 127.0.0.1 port 655\n", std::process::id()),
         )
         .unwrap();
         let socket = self.dir.path().join("tinc.socket");
-        let _ = std::fs::remove_file(&socket);
-        (
-            std::os::unix::net::UnixListener::bind(socket).unwrap(),
-            cookie,
-        )
+        let _ = fs::remove_file(&socket);
+        (UnixListener::bind(socket).unwrap(), cookie)
     }
 
     /// One scripted control connection; `finish()` propagates panics.
     pub fn serve(&self, script: impl FnOnce(&mut CtlConn) + Send + 'static) -> FakeDaemon {
         let (listener, cookie) = self.listen();
-        let thread = std::thread::spawn(move || {
+        let thread = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut conn = CtlConn::greet(stream, &cookie);
             script(&mut conn);
@@ -195,29 +202,29 @@ impl Conf {
     /// Every connection, for `tinc-auth`. Detached.
     pub fn serve_forever(&self, script: impl Fn(&mut CtlConn) + Send + Sync + 'static) {
         let (listener, cookie) = self.listen();
-        let script = std::sync::Arc::new(script);
-        std::thread::spawn(move || {
+        let script = Arc::new(script);
+        thread::spawn(move || {
             while let Ok((stream, _)) = listener.accept() {
                 let cookie = cookie.clone();
                 let script = script.clone();
-                std::thread::spawn(move || script(&mut CtlConn::greet(stream, &cookie)));
+                thread::spawn(move || script(&mut CtlConn::greet(stream, &cookie)));
             }
         });
     }
 }
 
 fn rand_cookie() -> u128 {
-    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    hasher.write_u32(std::process::id());
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u32(process::id());
     u128::from(hasher.finish())
 }
 
-pub(crate) struct FakeDaemon(Option<std::thread::JoinHandle<()>>);
+pub(crate) struct FakeDaemon(Option<JoinHandle<()>>);
 
 impl FakeDaemon {
     pub fn finish(mut self) {
         if let Err(panic) = self.0.take().unwrap().join() {
-            std::panic::resume_unwind(panic);
+            panic::resume_unwind(panic);
         }
     }
 }
@@ -270,12 +277,12 @@ impl CtlConn {
     }
 
     pub fn close(&mut self) {
-        self.writer.shutdown(std::net::Shutdown::Write).unwrap();
+        self.writer.shutdown(Shutdown::Write).unwrap();
     }
 }
 
 /// `tinc-auth` child, killed on drop.
-pub(crate) struct AuthDaemon(std::process::Child);
+pub(crate) struct AuthDaemon(Child);
 
 impl Drop for AuthDaemon {
     fn drop(&mut self) {

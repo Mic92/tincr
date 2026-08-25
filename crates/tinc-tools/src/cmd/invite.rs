@@ -59,8 +59,12 @@ use zeroize::Zeroizing;
 use crate::keypair;
 use crate::names::{Paths, check_id};
 
+use super::OpenKind;
 use super::exchange::get_my_name;
+use super::open_nofollow;
+use super::write_private_key;
 use super::{CmdError, io_err, makedir};
+use std::fmt;
 
 /// Invitation expiry: one week (604800s).
 ///
@@ -287,12 +291,12 @@ fn sweep_expired(inv_dir: &Path, now: SystemTime) -> Result<u32, CmdError> {
 ///
 /// Not `O_EXCL` — we just unlinked it (or it didn't exist).
 fn write_invitation_key(path: &Path, sk: &SigningKey) -> Result<(), CmdError> {
-    super::write_private_key(path, sk, super::OpenKind::CreateTrunc)
+    write_private_key(path, sk, OpenKind::CreateTrunc)
 }
 
 /// Write the invitation file at 0600 with `O_EXCL`.
 fn write_invitation_file(path: &Path, body: &str) -> Result<(), CmdError> {
-    let mut f = super::open_nofollow(path, super::OpenKind::CreateExcl, 0o600)?;
+    let mut f = open_nofollow(path, OpenKind::CreateExcl, 0o600)?;
     f.write_all(body.as_bytes()).map_err(io_err(path))
 }
 
@@ -529,11 +533,11 @@ struct AddressPort {
     port: String,
 }
 
-impl std::fmt::Display for AddressPort {
+impl fmt::Display for AddressPort {
     /// The colon check is a "is this IPv6" heuristic; hostnames
     /// can't contain colons, IPv4 can't, only IPv6 literals do.
     /// `[::1]:655` not `::1:655` (ambiguous).
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.host.contains(':') {
             write!(f, "[{}]:{}", self.host, self.port)
         } else {
@@ -548,6 +552,7 @@ impl std::fmt::Display for AddressPort {
 mod tests {
     use super::*;
     use crate::cmd::init;
+    use crate::testutil;
     use crate::testutil::ConfDir;
     use std::os::unix::fs::PermissionsExt;
 
@@ -571,7 +576,7 @@ mod tests {
     #[test]
     fn copy_host_table() {
         let case = |input: &str, port: &str, expected: &str| {
-            let (_dir, f) = crate::testutil::scratch_file("h", input);
+            let (_dir, f) = testutil::scratch_file("h", input);
             let mut out = String::new();
             copy_host_replacing_port(&f, port, &mut out).unwrap();
             assert_eq!(out, expected, "input: {input:?} port: {port:?}");

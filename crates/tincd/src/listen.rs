@@ -10,12 +10,16 @@
 //! Deferred: `IP_TOS`/`IPV6_TCLASS`.
 
 use std::io;
+#[cfg(all(test, any(target_os = "linux", target_os = "android")))]
+use std::mem;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 #[cfg(test)]
 use std::os::fd::IntoRawFd;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
 use crate::bind_to_interface;
+use crate::platform;
+use crate::set_nosigpipe;
 use nix::sys::socket::{setsockopt, sockopt};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
@@ -116,7 +120,7 @@ pub(crate) fn get_int_sockopt(
     // truncation: size_of::<c_int>() == 4, fits socklen_t.
     #[expect(unsafe_code, clippy::cast_possible_truncation)]
     let rc = unsafe {
-        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let mut len = mem::size_of::<libc::c_int>() as libc::socklen_t;
         libc::getsockopt(
             fd.as_raw_fd(),
             level,
@@ -282,7 +286,7 @@ fn setup_tcp(addr: &SockAddr, opts: &SockOpts) -> io::Result<Socket> {
     let domain = Domain::from(i32::from(addr.family()));
     // `Socket::new` sets `SOCK_CLOEXEC` on Linux/BSD atomically.
     let s = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-    crate::set_nosigpipe(&s);
+    set_nosigpipe(&s);
 
     apply_common_sockopts(&s, domain, opts, "", true)?;
 
@@ -448,7 +452,7 @@ fn setup_udp(addr: &SockAddr, opts: &SockOpts, v6only: bool) -> io::Result<Socke
         log::warn!(target: "tincd::net", "SO_BROADCAST: {e}");
     }
 
-    crate::platform::set_udp_dontfrag(&s, domain == Domain::IPV6);
+    platform::set_udp_dontfrag(&s, domain == Domain::IPV6);
 
     // SO_RCVBUF/SO_SNDBUF via `set_udp_buffer`. Default 1MB each.
     // Best-effort.

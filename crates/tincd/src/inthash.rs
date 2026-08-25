@@ -117,6 +117,7 @@ pub(crate) type IntHashMap<K, V> = HashMap<K, V, BuildHasherDefault<IntHasher>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::hash::{BuildHasher, Hash};
 
     #[test]
@@ -130,8 +131,7 @@ mod tests {
         hashes.dedup();
         assert_eq!(hashes.len(), 1000, "no collisions in 0..1000");
         // Tag-byte distribution: should not all be the same.
-        let tags: std::collections::HashSet<u8> =
-            (0u32..128).map(|i| (bh.hash_one(i) >> 57) as u8).collect();
+        let tags: HashSet<u8> = (0u32..128).map(|i| (bh.hash_one(i) >> 57) as u8).collect();
         assert!(
             tags.len() > 50,
             "tag bytes well-distributed: {}",

@@ -6,16 +6,19 @@
 )]
 #![allow(dead_code)] // each bench uses a subset
 
+use std::env;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 
 use super::node::Node;
 use super::{TmpGuard, node_status, tincd_at};
 
 pub fn c_tincd_bin() -> Option<PathBuf> {
-    std::env::var_os("TINC_C_TINCD").map(PathBuf::from)
+    env::var_os("TINC_C_TINCD").map(PathBuf::from)
 }
 
 pub fn iperf3_available() -> bool {
@@ -28,7 +31,7 @@ pub fn iperf3_available() -> bool {
 }
 
 pub fn perf_enabled() -> bool {
-    std::env::var_os("TINCD_PERF").is_some()
+    env::var_os("TINCD_PERF").is_some()
 }
 
 #[derive(Clone)]
@@ -68,7 +71,7 @@ impl Impl {
 pub fn bench_conf(ping_timeout: u32) -> String {
     let ping_timeout = if perf_enabled() { 5 } else { ping_timeout };
     let mut conf = format!("PingTimeout = {ping_timeout}\n");
-    if let Ok(cipher) = std::env::var("TINCD_BENCH_SPTPS_CIPHER") {
+    if let Ok(cipher) = env::var("TINCD_BENCH_SPTPS_CIPHER") {
         writeln!(conf, "SPTPSCipher = {cipher}").unwrap();
     }
     conf
@@ -105,14 +108,14 @@ impl Tunnel {
         timeout: Duration,
         mut check: impl FnMut(&[String], &[String]) -> bool,
     ) {
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = Instant::now() + timeout;
         while !check(&self.alice.ctl().dump(3), &self.bob.ctl().dump(3)) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "{what} timed out\n{}",
                 self.logs()
             );
-            std::thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(50));
         }
     }
 

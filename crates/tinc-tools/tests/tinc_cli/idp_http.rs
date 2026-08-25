@@ -4,6 +4,7 @@
 
 use super::{AuthDaemon, Conf, HttpResponse};
 use base64::Engine;
+use std::fs;
 use std::io::Write;
 use std::net::TcpStream;
 
@@ -19,15 +20,15 @@ fn serve_subnets(conf: &Conf) {
 fn start_idp(conf: &Conf) -> (AuthDaemon, u16) {
     conf.write("tinc.conf", "Name = alice\n");
     let clients = conf.dir().join("clients.json");
-    std::fs::write(
+    fs::write(
         &clients,
         r#"[{"id":"app","secret":"hunter2","redirect_uris":["http://app.mesh/cb"]}]"#,
     )
     .unwrap();
     let groups = conf.dir().join("groups.json");
-    std::fs::write(&groups, r#"{"ajones":["admin"]}"#).unwrap();
+    fs::write(&groups, r#"{"ajones":["admin"]}"#).unwrap();
     let map = conf.dir().join("map.json");
-    std::fs::write(&map, r#"{"alice":"ajones"}"#).unwrap();
+    fs::write(&map, r#"{"alice":"ajones"}"#).unwrap();
     let mut idp = AuthDaemon::spawn(
         conf,
         &[
@@ -167,7 +168,7 @@ fn idp_refuses_foreign_bind() {
     serve_subnets(&conf);
     conf.write("tinc.conf", "Name = alice\n");
     let clients = conf.dir().join("clients.json");
-    std::fs::write(&clients, "[]").unwrap();
+    fs::write(&clients, "[]").unwrap();
     AuthDaemon::spawn(
         &conf,
         &[

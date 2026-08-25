@@ -15,6 +15,10 @@ use crate::tunnel::MTU;
 use crate::{broadcast, compress, mac_lease};
 
 use super::SetupError;
+use crate::daemon::UpnpMode;
+use crate::keys;
+use crate::sandbox;
+use crate::sandbox::Action;
 
 /// Look up boolean config key `$key` and assign into `$field` on
 /// success. Parse failures are logged inside [`get_bool`] and the
@@ -275,7 +279,7 @@ pub struct DaemonSettings {
     /// `UPnP = yes|udponly|no`. When
     /// not `No`, spawns a background thread that asks the LAN gateway
     /// (NAT-PMP first, then UPnP-IGD) to DNAT our listener port. Default off. Non-reloadable.
-    pub upnp: crate::daemon::UpnpMode,
+    pub upnp: UpnpMode,
     /// `UPnPDiscoverWait`. SSDP M-SEARCH wait. Default 5s.
     pub upnp_discover_wait: u32,
     /// `UPnPRefreshPeriod`. Re-add the mapping every N seconds;
@@ -364,7 +368,7 @@ impl Default for DaemonSettings {
             global_weight: None,
             sptps_kex: tinc_sptps::SptpsKex::default(),
             device_standby: false,
-            upnp: crate::daemon::UpnpMode::No,
+            upnp: UpnpMode::No,
             upnp_discover_wait: 5,
             upnp_refresh_period: 60,
         }
@@ -396,7 +400,7 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
             Some(a) => {
                 settings.sptps_cipher = a;
                 if a == tinc_sptps::SptpsAead::Aes256Gcm {
-                    crate::keys::warn_aes_no_hw_once();
+                    keys::warn_aes_no_hw_once();
                 }
             }
             None => log::error!(target: "tincd::conf",
@@ -433,9 +437,7 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
         .lookup("ScriptsInterpreter")
         .next()
         .map(|e| e.get_str().to_owned());
-    if new_interp == settings.scripts_interpreter
-        || crate::sandbox::can(crate::sandbox::Action::UseNewPaths)
-    {
+    if new_interp == settings.scripts_interpreter || sandbox::can(Action::UseNewPaths) {
         settings.scripts_interpreter = new_interp;
     } else {
         log::warn!(target: "tincd",
@@ -740,7 +742,7 @@ pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings
 
     // UPnP. Non-reloadable (thread spawned once at setup).
     if let Some(e) = config.lookup("UPnP").next() {
-        match crate::daemon::UpnpMode::from_config(e.get_str()) {
+        match UpnpMode::from_config(e.get_str()) {
             Some(m) => settings.upnp = m,
             None => {
                 return Err(SetupError::Config(format!(

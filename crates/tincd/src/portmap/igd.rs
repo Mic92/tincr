@@ -17,6 +17,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, UdpSocket}
 use std::time::{Duration, Instant};
 
 use super::Proto;
+use std::io::ErrorKind;
 use std::io::ErrorKind::{TimedOut, WouldBlock};
 
 /// SSDP search request. `MX:2` = routers may delay reply ≤2s.
@@ -279,7 +280,7 @@ fn http_roundtrip(addr: SocketAddrV4, req: &str) -> Result<String, String> {
                     break;
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
             Err(e)
                 if matches!(
                     e.kind(),

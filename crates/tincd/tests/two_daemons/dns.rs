@@ -10,6 +10,8 @@ use std::time::Duration;
 
 use super::common::{Node, poll_until};
 use super::fd_tunnel::{mk_ipv4_pkt, read_fd_nb, sockpair_datagram, write_fd};
+use std::fs;
+use std::os::fd::OwnedFd;
 
 // RFC 1035 helpers; the lib's copies are `#[cfg(test)]`-private.
 const TYPE_A: u16 = 1;
@@ -66,7 +68,7 @@ fn mk_ipv6_pkt(src: Ipv6Addr, dst: Ipv6Addr, payload: &[u8]) -> Vec<u8> {
 
 /// No peer, so the first datagram back is the reply (or an ICMP error
 /// if the intercept missed, which the IP header asserts catch).
-fn roundtrip(device: &std::os::fd::OwnedFd, packet: &[u8]) -> Vec<u8> {
+fn roundtrip(device: &OwnedFd, packet: &[u8]) -> Vec<u8> {
     write_fd(device, packet);
     poll_until(Duration::from_secs(5), || read_fd_nb(device))
 }
@@ -95,7 +97,7 @@ fn dns_stub_answers_a_ptr_aaaa_and_nxdomain() {
     alice.write_config(&bob, false);
     // bob never runs; his subnets come from hosts/ via StrictSubnets.
     let bob_pub = tinc_crypto::b64::encode(&bob.pubkey());
-    std::fs::write(
+    fs::write(
         alice.confbase.join("hosts").join("bob"),
         format!(
             "Ed25519PublicKey = {bob_pub}\n\

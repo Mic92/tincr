@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use super::common::KillOnDrop;
 use super::rig::{TunPair, enter_netns, ping, tun_node};
+use std::path::Path;
+use std::thread;
 
 #[test]
 fn real_tun_ping() {
@@ -86,7 +88,7 @@ fn tso_ingest_stream_integrity() {
         .status()
         .expect("spawn dd");
     assert!(status.success());
-    let sha256 = |path: &std::path::Path| {
+    let sha256 = |path: &Path| {
         let out = Command::new("sha256sum").arg(path).output().unwrap();
         String::from_utf8_lossy(&out.stdout)
             .split_whitespace()
@@ -110,7 +112,7 @@ fn tso_ingest_stream_integrity() {
             .spawn()
             .expect("spawn receiver"),
     );
-    std::thread::sleep(Duration::from_millis(200));
+    thread::sleep(Duration::from_millis(200));
     let sender = Command::new("socat")
         .arg("-u")
         .arg(format!("FILE:{}", data_path.display()))

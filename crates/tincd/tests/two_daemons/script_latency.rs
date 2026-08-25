@@ -6,13 +6,19 @@ use std::time::{Duration, Instant};
 
 use super::common::poll_until;
 use super::fd_tunnel::{FdPair, mk_ipv4_pkt, read_fd_nb, write_fd};
+use std::env;
+use std::fs;
+use std::fs::Permissions;
+use std::path::Path;
+use std::path::PathBuf;
+use std::thread;
 
 /// Scripts get a fixed PATH that lacks coreutils on NixOS.
-fn sleep_binary() -> std::path::PathBuf {
-    std::env::var("PATH")
+fn sleep_binary() -> PathBuf {
+    env::var("PATH")
         .unwrap_or_default()
         .split(':')
-        .map(|dir| std::path::Path::new(dir).join("sleep"))
+        .map(|dir| Path::new(dir).join("sleep"))
         .find(|candidate| candidate.is_file())
         .unwrap_or_else(|| "/bin/sleep".into())
 }
@@ -24,7 +30,7 @@ fn slow_host_up_does_not_stall_forwarding() {
     // bob would tear the conn down and hide the latency.
     let pair = FdPair::new(tmp.path(), "PingTimeout = 10\n", "PingTimeout = 10\n");
     let host_up = pair.alice.confbase.join("host-up");
-    std::fs::write(
+    fs::write(
         &host_up,
         format!(
             "#!/bin/sh\nexec {} 2 </dev/null >/dev/null 2>&1\n",
@@ -32,7 +38,7 @@ fn slow_host_up_does_not_stall_forwarding() {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&host_up, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&host_up, Permissions::from_mode(0o755)).unwrap();
     // start() polls bob too, who has no scripts and answers at once
     // while alice is busy firing host-up.
     let pair = pair.start();
@@ -49,7 +55,7 @@ fn slow_host_up_does_not_stall_forwarding() {
         let received = poll_until(Duration::from_secs(5), || read_fd_nb(&pair.bob_dev));
         assert!(received.ends_with(&[probe; 8]));
         max_latency = max_latency.max(sent.elapsed());
-        std::thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(50));
     }
     assert!(
         max_latency < Duration::from_millis(500),

@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::local_addr;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -162,7 +163,7 @@ fn parse_addrlist(s: &str) -> Vec<SocketAddr> {
     s.split(',')
         .filter_map(|tok| {
             let (addr, port) = tok.rsplit_once('_')?;
-            crate::local_addr::parse_addr_port(addr, port)
+            local_addr::parse_addr_port(addr, port)
         })
         .collect()
 }
@@ -173,7 +174,7 @@ fn format_addrlist(addrs: &[SocketAddr]) -> String {
         .iter()
         .take(4)
         .map(|sa| {
-            let (a, p) = crate::local_addr::format_addr_port(sa);
+            let (a, p) = local_addr::format_addr_port(sa);
             format!("{a}_{p}")
         })
         .collect::<Vec<_>>()

@@ -18,6 +18,11 @@
 
 use std::collections::HashSet;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::sync::mpsc;
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::Sender;
+use std::thread::Builder;
+use std::thread::JoinHandle;
 
 /// What a resolve is *for*. The worker doesn't care — it just runs
 /// `getaddrinfo` over `hosts` — but the daemon needs to route the
@@ -52,14 +57,14 @@ pub(crate) struct DnsRes {
 /// (we don't `.join()` on `Drop`; a hung `getaddrinfo` would wedge
 /// shutdown).
 pub(crate) struct DnsWorker {
-    req_tx: std::sync::mpsc::Sender<DnsReq>,
-    res_rx: std::sync::mpsc::Receiver<DnsRes>,
+    req_tx: Sender<DnsReq>,
+    res_rx: Receiver<DnsRes>,
     /// Tags with a request queued or running. Dedup: each retry round
     /// re-enters via `setup_outgoing_connection`, and a slow resolver
     /// (the very case this thread exists for) would otherwise let
     /// requests stack unboundedly.
     inflight: HashSet<DnsTag>,
-    _join: std::thread::JoinHandle<()>,
+    _join: JoinHandle<()>,
 }
 
 impl DnsWorker {
@@ -68,9 +73,9 @@ impl DnsWorker {
     /// at daemon setup anyway.
     #[must_use]
     pub(crate) fn spawn() -> Self {
-        let (req_tx, req_rx) = std::sync::mpsc::channel::<DnsReq>();
-        let (res_tx, res_rx) = std::sync::mpsc::channel::<DnsRes>();
-        let join = std::thread::Builder::new()
+        let (req_tx, req_rx) = mpsc::channel::<DnsReq>();
+        let (res_tx, res_rx) = mpsc::channel::<DnsRes>();
+        let join = Builder::new()
             .name("tinc-dns".into())
             .spawn(move || {
                 while let Ok(DnsReq { tag, hosts }) = req_rx.recv() {
@@ -124,6 +129,7 @@ impl DnsWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
     use std::time::{Duration, Instant};
 
     fn drain_until(w: &mut DnsWorker, want: usize, deadline: Duration) -> Vec<DnsRes> {
@@ -131,7 +137,7 @@ mod tests {
         let end = Instant::now() + deadline;
         while out.len() < want && Instant::now() < end {
             out.extend(w.drain());
-            std::thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(10));
         }
         out
     }
@@ -172,7 +178,7 @@ mod tests {
         w.request(tag.clone(), hosts.clone()); // dedup'd
         let mut res = drain_until(&mut w, 1, Duration::from_secs(5));
         // Give a hypothetical second result a moment to land.
-        std::thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(50));
         res.extend(w.drain());
         assert_eq!(res.len(), 1, "duplicate request should have been dropped");
         // Gate cleared: a fresh request is accepted.

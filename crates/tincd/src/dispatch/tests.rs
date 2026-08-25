@@ -1,10 +1,17 @@
 /// `/dev/null` fd; handlers don't touch the fd, just need a valid conn.
 use super::*;
 use GateExpect::{Ok, Unauthorized, UnknownRequest};
+use std::env;
+use std::fs;
+use std::fs::File;
 use std::os::fd::OwnedFd;
+use std::path::PathBuf;
+use std::str;
+use std::sync::OnceLock;
+use std::thread;
 
 fn nullfd() -> OwnedFd {
-    OwnedFd::from(std::fs::File::open("/dev/null").unwrap())
+    OwnedFd::from(File::open("/dev/null").unwrap())
 }
 
 fn mkconn() -> Connection {
@@ -22,7 +29,7 @@ fn mkctl() -> Connection {
 /// for `'static` lifetime. `confbase="."` → pubkey load fails;
 /// tests reaching it use `PeerSetup`.
 fn mkctx(cookie: &str) -> IdCtx<'_> {
-    static DUMMY_KEY: std::sync::OnceLock<SigningKey> = std::sync::OnceLock::new();
+    static DUMMY_KEY: OnceLock<SigningKey> = OnceLock::new();
     let mykey = DUMMY_KEY.get_or_init(|| SigningKey::from_seed(&[0x99; 32]));
     IdCtx {
         cookie,
@@ -175,16 +182,16 @@ fn id_early_rejects() {
 
 /// Tempdir + hosts/ layout for peer-branch tests.
 struct PeerSetup {
-    tmp: std::path::PathBuf,
+    tmp: PathBuf,
 }
 impl PeerSetup {
     fn new(tag: &str, peer_name: &str, peer_pub: &[u8; 32]) -> Self {
-        let tid = std::thread::current().id();
-        let tmp = std::env::temp_dir().join(format!("tincd-proto-{tag}-{tid:?}"));
-        std::fs::create_dir_all(tmp.join("hosts")).unwrap();
+        let tid = thread::current().id();
+        let tmp = env::temp_dir().join(format!("tincd-proto-{tag}-{tid:?}"));
+        fs::create_dir_all(tmp.join("hosts")).unwrap();
         // Inline b64 (read_ecdsa_public_key source 1).
         let b64 = tinc_crypto::b64::encode(peer_pub);
-        std::fs::write(
+        fs::write(
             tmp.join("hosts").join(peer_name),
             format!("Ed25519PublicKey = {b64}\n"),
         )
@@ -211,7 +218,7 @@ fn peer_ctx<'a>(setup: &'a PeerSetup, mykey: &'a SigningKey, cookie: &'a str) ->
 }
 impl Drop for PeerSetup {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.tmp);
+        let _ = fs::remove_dir_all(&self.tmp);
     }
 }
 
@@ -674,7 +681,7 @@ fn send_ack_per_host_tcponly_clears_pmtu() {
     // ClampMSS unaffected (default on).
     assert!(c.options.contains(ConnOptions::CLAMP_MSS));
     // Wire bits: 0x0b = INDIRECT|TCPONLY|CLAMP_MSS, not 0x0c.
-    let line = std::str::from_utf8(c.outbuf.live()).unwrap();
+    let line = str::from_utf8(c.outbuf.live()).unwrap();
     assert!(line.ends_with(" 700000b\n"), "got {line:?}");
 }
 
@@ -729,7 +736,7 @@ fn send_ack_per_host_weight() {
     let now = c.start;
     send_ack(&mut c, 655, myself_options_default(), None, now);
     assert_eq!(c.estimated_weight, 42);
-    let line = std::str::from_utf8(c.outbuf.live()).unwrap();
+    let line = str::from_utf8(c.outbuf.live()).unwrap();
     // "4 655 42 700000c\n"
     assert!(line.contains(" 42 "), "got {line:?}");
 }
@@ -744,7 +751,7 @@ fn send_ack_global_weight_fallback() {
     let now = c.start;
     send_ack(&mut c, 655, myself_options_default(), Some(50), now);
     assert_eq!(c.estimated_weight, 50); // global wins over RTT
-    let line = std::str::from_utf8(c.outbuf.live()).unwrap();
+    let line = str::from_utf8(c.outbuf.live()).unwrap();
     assert!(line.contains(" 50 "), "got {line:?}");
 }
 

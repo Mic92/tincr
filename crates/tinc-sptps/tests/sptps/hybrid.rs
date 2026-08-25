@@ -2,6 +2,7 @@
 //! hybrid correctness is pinned here rather than in `vs_c.rs`.
 
 use crate::common::{NoRng, Pair, SeedRng, keypair, record, wire};
+use std::time::Instant;
 use tinc_crypto::hybrid::CT_LEN;
 use tinc_crypto::sign::SigningKey;
 use tinc_sptps::{Framing, KEX_LEN, KEX_LEN_HYBRID, Output, Role, Sptps, SptpsError, SptpsKex};
@@ -171,7 +172,7 @@ fn hybrid_records_fit_meta_protocol() {
 #[test]
 fn handshake_latency_report() {
     let time = |pair: Pair| {
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         for _ in 0..16 {
             pair.handshake();
         }

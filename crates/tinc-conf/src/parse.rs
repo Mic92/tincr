@@ -1,7 +1,11 @@
 //! `parse_config_line`, `read_config_file`, the config tree.
 
 use std::cmp::Ordering;
+use std::error;
 use std::fmt;
+use std::fs;
+use std::fs::File;
+use std::io;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
@@ -31,7 +35,7 @@ impl fmt::Display for ParseError {
     }
 }
 
-impl std::error::Error for ParseError {}
+impl error::Error for ParseError {}
 
 /// Provenance: where an entry came from. Determines lookup priority
 /// (cmdline beats file) and diagnostic phrasing.
@@ -154,7 +158,7 @@ fn ascii_fold(s: &str) -> String {
 /// results are discarded (the caller gets nothing).
 pub fn parse_file(path: impl AsRef<Path>) -> Result<Vec<Entry>, ReadError> {
     let path = path.as_ref();
-    let f = std::fs::File::open(path).map_err(|e| ReadError::Io {
+    let f = File::open(path).map_err(|e| ReadError::Io {
         path: path.to_owned(),
         err: e,
     })?;
@@ -255,7 +259,7 @@ pub enum ReadError {
     Io {
         path: PathBuf,
         #[source]
-        err: std::io::Error,
+        err: io::Error,
     },
     /// `parse_config_line` returned NULL.
     #[error("{0}")]
@@ -480,7 +484,7 @@ pub fn read_server_config(confbase: impl AsRef<Path>) -> Result<Config, ReadErro
     // Tightening this would refuse configs that have worked for
     // years; fsck can warn separately if it wants.
     let conf_d = confbase.join("conf.d");
-    let Ok(rd) = std::fs::read_dir(&conf_d) else {
+    let Ok(rd) = fs::read_dir(&conf_d) else {
         return Ok(cfg);
     };
 
@@ -546,6 +550,8 @@ fn compare_entries(a: &Entry, b: &Entry) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::fs;
 
     fn s() -> Source {
         Source::File {
@@ -851,9 +857,9 @@ more garbage
         fn new(tag: &str) -> Self {
             // Unique by test name + thread id. Tests run parallel by
             // default; a fixed name races.
-            let p = std::env::temp_dir()
-                .join(format!("tinc_conf_{tag}_{:?}", std::thread::current().id()));
-            std::fs::create_dir_all(&p).unwrap();
+            let p =
+                env::temp_dir().join(format!("tinc_conf_{tag}_{:?}", std::thread::current().id()));
+            fs::create_dir_all(&p).unwrap();
             Self(p)
         }
         fn join(&self, rel: &str) -> PathBuf {
@@ -862,12 +868,12 @@ more garbage
     }
     impl Drop for Td {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            let _ = fs::remove_dir_all(&self.0);
         }
     }
 
     fn write(path: impl AsRef<Path>, content: &str) {
-        std::fs::write(path, content).unwrap();
+        fs::write(path, content).unwrap();
     }
 
     /// The common case: just tinc.conf, no conf.d/. Matches every
@@ -903,7 +909,7 @@ more garbage
     fn server_confd_merged() {
         let td = Td::new("merged");
         write(td.join("tinc.conf"), "Name = alice\nConnectTo = bob\n");
-        std::fs::create_dir(td.join("conf.d")).unwrap();
+        fs::create_dir(td.join("conf.d")).unwrap();
         write(td.join("conf.d/10-one.conf"), "ConnectTo = carol\n");
         write(td.join("conf.d/20-two.conf"), "ConnectTo = dave\n");
 
@@ -927,7 +933,7 @@ more garbage
     fn server_confd_filter() {
         let td = Td::new("filter");
         write(td.join("tinc.conf"), "Name = alice\n");
-        std::fs::create_dir(td.join("conf.d")).unwrap();
+        fs::create_dir(td.join("conf.d")).unwrap();
         write(td.join("conf.d/real.conf"), "Port = 655\n");
         write(td.join("conf.d/backup.conf.bak"), "Port = 999\n");
         write(td.join("conf.d/README"), "Port = 888\n");
@@ -946,7 +952,7 @@ more garbage
     fn server_confd_empty() {
         let td = Td::new("empty");
         write(td.join("tinc.conf"), "Name = alice\n");
-        std::fs::create_dir(td.join("conf.d")).unwrap();
+        fs::create_dir(td.join("conf.d")).unwrap();
 
         let cfg = read_server_config(&td.0).unwrap();
         assert_eq!(cfg.entries().len(), 1);
@@ -959,7 +965,7 @@ more garbage
     fn server_confd_one_bad() {
         let td = Td::new("one_bad");
         write(td.join("tinc.conf"), "Name = alice\n");
-        std::fs::create_dir(td.join("conf.d")).unwrap();
+        fs::create_dir(td.join("conf.d")).unwrap();
         write(td.join("conf.d/10-good.conf"), "Port = 655\n");
         // Missing value — parse error.
         write(td.join("conf.d/20-bad.conf"), "Port\n");
@@ -981,7 +987,7 @@ more garbage
     fn server_confd_head_bug_not_ported() {
         let td = Td::new("head_bug");
         write(td.join("tinc.conf"), "Name = alice\n");
-        std::fs::create_dir(td.join("conf.d")).unwrap();
+        fs::create_dir(td.join("conf.d")).unwrap();
         write(td.join("conf.d/a.conf"), "Port = 655\n");
 
         let cfg = read_server_config(&td.0).unwrap();

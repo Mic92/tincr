@@ -6,6 +6,7 @@ use Finding as F;
 use std::io::Write;
 use tinc_crypto::b64;
 
+use crate::cmd::init;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -13,7 +14,7 @@ use std::os::unix::fs::PermissionsExt;
 /// the full dir tree + keys. Unit-test scope; the binary is for
 /// integration tests.
 fn init(paths: &Paths, name: &str) {
-    crate::cmd::init::run(paths, name).unwrap();
+    init::run(paths, name).unwrap();
 }
 
 /// Count findings matching a predicate. Shorter than the

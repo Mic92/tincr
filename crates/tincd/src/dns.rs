@@ -28,6 +28,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use zerocopy::IntoBytes;
 
+use crate::packet::ETH_P_IP;
 use crate::packet::{Ipv4Hdr, Ipv4Pseudo, Ipv6Hdr, Ipv6Pseudo, inet_checksum};
 use crate::subnet_tree::SubnetTree;
 use tinc_proto::Subnet;
@@ -675,7 +676,7 @@ pub(crate) fn wrap_v4(
     let total = ETHER_SIZE + IP4_SIZE + UDP_SIZE + dns_reply.len();
     let mut out = Vec::with_capacity(total);
 
-    write_eth_swap(&mut out, original, crate::packet::ETH_P_IP);
+    write_eth_swap(&mut out, original, ETH_P_IP);
 
     // IPv4. Same builder pattern as `icmp.rs`.
     let mut ip = Ipv4Hdr::default();
@@ -751,6 +752,7 @@ pub(crate) fn wrap_v6(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packet::ETH_P_IP;
 
     fn cfg() -> DnsConfig {
         DnsConfig {
@@ -1062,7 +1064,7 @@ mod tests {
 
     fn mk_udp4(dst: Ipv4Addr, dport: u16, payload: &[u8]) -> Vec<u8> {
         let mut p = vec![0u8; ETHER_SIZE + IP4_SIZE + UDP_SIZE];
-        p[12..14].copy_from_slice(&crate::packet::ETH_P_IP.to_be_bytes());
+        p[12..14].copy_from_slice(&ETH_P_IP.to_be_bytes());
         p[ETHER_SIZE] = 0x45;
         p[ETHER_SIZE + 9] = IPPROTO_UDP;
         // src

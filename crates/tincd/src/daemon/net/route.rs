@@ -6,7 +6,14 @@ use crate::route_decide::{self, RouteResult, TtlResult, route};
 use crate::tunnel::{MTU, TunnelState};
 use crate::{broadcast, mss, route_mac};
 
+use super::icmp::IcmpKind;
+use crate::daemon::intervals::HOUSEKEEP_SWEEP;
+use crate::dispatch::OPTION_CLAMP_MSS;
+use crate::dns;
+use crate::fragment;
 use crate::graph::{EdgeId, NodeId};
+use crate::packet::ETH_P_ARP;
+use crate::packet::ETH_P_IP;
 use tinc_proto::{Request, Subnet};
 
 /// Cap on locally-learned MAC subnets (switch mode).
@@ -52,8 +59,7 @@ impl Daemon {
         // eth, returned above). `handle_arp` does its own subnet
         // lookup so handle it before `route()` (which would return
         // `Unsupported{"arp"}`).
-        if data.len() >= 14 && u16::from_be_bytes([data[12], data[13]]) == crate::packet::ETH_P_ARP
-        {
+        if data.len() >= 14 && u16::from_be_bytes([data[12], data[13]]) == ETH_P_ARP {
             return nw | self.handle_arp(data, from);
         }
 
@@ -221,8 +227,7 @@ impl Daemon {
         // (defensive).
         if arm_timer && self.age_subnets_timer.is_none() {
             let tid = self.timers.add(TimerWhat::AgeSubnets);
-            self.timers
-                .set(tid, crate::daemon::intervals::HOUSEKEEP_SWEEP);
+            self.timers.set(tid, HOUSEKEEP_SWEEP);
             self.age_subnets_timer = Some(tid);
         }
 
@@ -323,7 +328,7 @@ impl Daemon {
                 icmp_code,
             } => self.emit_icmp(
                 data,
-                super::icmp::IcmpKind::Unreach {
+                IcmpKind::Unreach {
                     t: icmp_type,
                     c: icmp_code,
                     discover_src: false,
@@ -392,7 +397,7 @@ impl Daemon {
                          to {to} (we are not a relay)");
             if self.settings.routing_mode == RoutingMode::Router {
                 let ethertype = u16::from_be_bytes([data[12], data[13]]);
-                let (t, c) = if ethertype == crate::packet::ETH_P_IP {
+                let (t, c) = if ethertype == ETH_P_IP {
                     (route_decide::ICMP_DEST_UNREACH, route_decide::ICMP_NET_ANO)
                 } else {
                     (
@@ -402,7 +407,7 @@ impl Daemon {
                 };
                 return self.emit_icmp(
                     data,
-                    super::icmp::IcmpKind::Unreach {
+                    IcmpKind::Unreach {
                         t,
                         c,
                         discover_src: false,
@@ -445,7 +450,7 @@ impl Daemon {
         // directonly — operator opts out of relay.
         if self.settings.directonly && to_nid != via_nid {
             let ethertype = u16::from_be_bytes([data[12], data[13]]);
-            let (t, c) = if ethertype == crate::packet::ETH_P_IP {
+            let (t, c) = if ethertype == ETH_P_IP {
                 (route_decide::ICMP_DEST_UNREACH, route_decide::ICMP_NET_ANO)
             } else {
                 (
@@ -455,7 +460,7 @@ impl Daemon {
             };
             return self.emit_icmp(
                 data,
-                super::icmp::IcmpKind::Unreach {
+                IcmpKind::Unreach {
                     t,
                     c,
                     discover_src: false,
@@ -478,14 +483,10 @@ impl Daemon {
         // packets/crypto/syscalls for the same bytes.
         if via_nid != self.myself && via_mtu != 0 {
             let ethertype = u16::from_be_bytes([data[12], data[13]]);
-            let floor: u16 = if ethertype == crate::packet::ETH_P_IP {
-                590
-            } else {
-                1294
-            };
+            let floor: u16 = if ethertype == ETH_P_IP { 590 } else { 1294 };
             let limit = via_mtu.max(floor);
             if data.len() > usize::from(limit) {
-                if ethertype == crate::packet::ETH_P_IP {
+                if ethertype == ETH_P_IP {
                     // DF flag (data.len()>590 ⇒ [20] in bounds).
                     let df_set = data[20] & 0x40 != 0;
                     if df_set {
@@ -493,7 +494,7 @@ impl Daemon {
                         // so sub never wraps.
                         return self.emit_icmp(
                             data,
-                            super::icmp::IcmpKind::FragNeeded { mtu: limit - 14 },
+                            IcmpKind::FragNeeded { mtu: limit - 14 },
                             from,
                         );
                     }
@@ -501,7 +502,7 @@ impl Daemon {
                     // Rare path (modern OS sets DF on TCP)
                     // but UDP without DF through narrow-
                     // MTU relay needs this.
-                    let Some(frags) = crate::fragment::fragment_v4(data, limit) else {
+                    let Some(frags) = fragment::fragment_v4(data, limit) else {
                         log::debug!(target: "tincd::net",
                             "fragment_v4: malformed input, dropping");
                         return false;
@@ -527,7 +528,7 @@ impl Daemon {
                 // v6: no in-transit frag (RFC 8200 §5).
                 return self.emit_icmp(
                     data,
-                    super::icmp::IcmpKind::TooBigV6 {
+                    IcmpKind::TooBigV6 {
                         mtu: u32::from(limit - 14),
                     },
                     from,
@@ -535,7 +536,7 @@ impl Daemon {
             }
         }
 
-        if via_options & crate::dispatch::OPTION_CLAMP_MSS != 0 {
+        if via_options & OPTION_CLAMP_MSS != 0 {
             let mtu = via_mtu.min(MTU);
             let _ = mss::clamp(data, mtu);
         }
@@ -554,7 +555,7 @@ impl Daemon {
                 } => {
                     return self.emit_icmp(
                         data,
-                        super::icmp::IcmpKind::Unreach {
+                        IcmpKind::Unreach {
                             t: icmp_type,
                             c: icmp_code,
                             discover_src: true,
@@ -613,9 +614,9 @@ impl Daemon {
         // v4 path. `match_v4` does the full eth+IP+UDP+port check;
         // None means "not for us" — fall through to v6 then route().
         let hit = if let Some(dns_ip) = cfg.dns_addr4
-            && let Some((src, sport, dns)) = crate::dns::match_v4(data, dns_ip)
+            && let Some((src, sport, dns)) = dns::match_v4(data, dns_ip)
         {
-            let Some(reply) = crate::dns::answer(dns, &cfg, &self.subnets, &self.name) else {
+            let Some(reply) = dns::answer(dns, &cfg, &self.subnets, &self.name) else {
                 // Malformed past header recovery (truncated ID, or
                 // QR bit set = reflection attempt). Drop silently.
                 // not route() — it'd Forward{to:myself} (the magic IP
@@ -624,7 +625,7 @@ impl Daemon {
                 self.dns = Some(cfg);
                 return true;
             };
-            let mut frame = crate::dns::wrap_v4(data, &reply, dns_ip, src, sport);
+            let mut frame = dns::wrap_v4(data, &reply, dns_ip, src, sport);
             log::debug!(target: "tincd::dns",
                         "reply {} bytes to {src}:{sport}", reply.len());
             if let Err(e) = self.device.write(&mut frame) {
@@ -636,13 +637,13 @@ impl Daemon {
         // v6 path. Same shape; UDP checksum is mandatory here
         // (RFC 8200 §8.1) — wrap_v6 always computes it.
         else if let Some(dns_ip) = cfg.dns_addr6
-            && let Some((src, sport, dns)) = crate::dns::match_v6(data, &dns_ip)
+            && let Some((src, sport, dns)) = dns::match_v6(data, &dns_ip)
         {
-            let Some(reply) = crate::dns::answer(dns, &cfg, &self.subnets, &self.name) else {
+            let Some(reply) = dns::answer(dns, &cfg, &self.subnets, &self.name) else {
                 self.dns = Some(cfg);
                 return true;
             };
-            let mut frame = crate::dns::wrap_v6(data, &reply, &dns_ip, &src, sport);
+            let mut frame = dns::wrap_v6(data, &reply, &dns_ip, &src, sport);
             log::debug!(target: "tincd::dns",
                         "reply {} bytes to [{src}]:{sport}", reply.len());
             if let Err(e) = self.device.write(&mut frame) {

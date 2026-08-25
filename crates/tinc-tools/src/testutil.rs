@@ -5,6 +5,7 @@
 // Fs-failure panics are fine in test helpers.
 #![allow(clippy::missing_panics_doc)]
 
+use crate::cmd::init;
 use crate::keypair;
 use crate::names::{Paths, PathsInput};
 use std::fs;
@@ -56,7 +57,7 @@ impl ConfDir {
             confbase: Some(confbase.clone()),
             ..Default::default()
         });
-        crate::cmd::init::run(&paths, name).unwrap();
+        init::run(&paths, name).unwrap();
         Self {
             dir,
             confbase,

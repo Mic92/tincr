@@ -62,6 +62,7 @@ use crate::tui;
 // re-exported for `top/tests.rs`.
 pub use crate::ctl::rows::TrafficRow;
 use SortMode::{InBytes, InPackets, Name, OutBytes, OutPackets, TotalBytes, TotalPackets};
+use std::cmp;
 use std::collections::btree_map::Entry;
 use std::fmt::Write as _;
 
@@ -270,14 +271,14 @@ impl Stats {
 /// `partial_cmp` is `None` only for NaN, which can't occur: rates are
 /// `delta / interval` with interval always > 0. `unwrap_or(Equal)` covers
 /// the unreachable case.
-fn compare(a: &NodeStats, b: &NodeStats, mode: SortMode, cumulative: bool) -> std::cmp::Ordering {
+fn compare(a: &NodeStats, b: &NodeStats, mode: SortMode, cumulative: bool) -> cmp::Ordering {
     // Descending (heavier first): compare b's key against a's. The
     // u64→f64 cast loses precision past 2^53 but counters that large
     // (9 PB / 9 quadrillion packets) don't happen in practice and the
     // ordering would still be correct to within rounding.
     sort_key(b, mode, cumulative)
         .partial_cmp(&sort_key(a, mode, cumulative))
-        .unwrap_or(std::cmp::Ordering::Equal)
+        .unwrap_or(cmp::Ordering::Equal)
 }
 
 /// Project a `NodeStats` onto the scalar the current sort mode cares

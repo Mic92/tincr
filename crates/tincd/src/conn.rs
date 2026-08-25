@@ -23,13 +23,23 @@ use tinc_crypto::sign::PUBLIC_LEN;
 use tinc_proto::Request;
 use tinc_sptps::{Output, Sptps, SptpsError};
 
+use crate::dispatch;
+use crate::dispatch::ConnOptions;
+use crate::dispatch::CtlReq;
+use crate::event::IoId;
 use crate::ids::OutgoingId;
 use crate::invitation_serve::InvitePhase;
+use crate::msg_nosignal;
+use crate::seen::FloodLimiter;
+use std::fmt;
+use std::fmt::Arguments;
+use std::mem;
+use std::str;
 
 /// `fmt::Write` adapter for `Vec<u8>` (which only impls `io::Write`).
 struct VecFmt<'a>(&'a mut Vec<u8>);
-impl std::fmt::Write for VecFmt<'_> {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+impl fmt::Write for VecFmt<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
         self.0.extend_from_slice(s.as_bytes());
         Ok(())
     }
@@ -148,7 +158,7 @@ pub(crate) struct Connection {
     /// window between `conns.insert` and `ev.add` (the `IoWhat` needs
     /// the `ConnId`, so the slot exists first). Tests that build a
     /// `Connection` without an event loop leave it `None`.
-    pub io_id: Option<crate::event::IoId>,
+    pub io_id: Option<IoId>,
     pub inbuf: LineBuf,
     pub outbuf: LineBuf,
     /// Set when an outbuf append would exceed [`OUTBUF_HARD_CAP`].
@@ -183,7 +193,7 @@ pub(crate) struct Connection {
     /// Boxed: ~1KB, most conns are control with `None`.
     pub sptps: Option<Box<Sptps>>,
     /// Top byte is `PROT_MINOR`.
-    pub options: crate::dispatch::ConnOptions,
+    pub options: ConnOptions,
     /// RTT ms. i32: wire `%d`.
     pub estimated_weight: i32,
     /// Connection start time, set at construct.
@@ -258,7 +268,7 @@ pub(crate) struct Connection {
     /// Debug level before this conn's `REQ_SET_DEBUG`; restored on close.
     pub prev_debug_level: Option<i32>,
     /// Gossip re-forward rate limit; checked in `forward_request`.
-    pub flood: crate::seen::FloodLimiter,
+    pub flood: FloodLimiter,
 }
 
 /// Events from one `feed()`. Order matters: an `ADD_EDGE` before a
@@ -309,7 +319,7 @@ impl Connection {
             protocol_minor: 0,
             ecdsa: None,
             sptps: None,
-            options: crate::dispatch::ConnOptions::empty(),
+            options: ConnOptions::empty(),
             estimated_weight: 0,
             start: now,
             address: None,
@@ -335,7 +345,7 @@ impl Connection {
             sptps_kex: tinc_sptps::SptpsKex::default(),
             log_level: None,
             prev_debug_level: None,
-            flood: crate::seen::FloodLimiter::new(),
+            flood: FloodLimiter::new(),
         }
     }
 
@@ -493,7 +503,7 @@ impl Connection {
                     if self.sptps_buf.len() < usize::from(self.sptpslen) {
                         break; // blob spans recv()s
                     }
-                    events.push(SptpsEvent::Blob(std::mem::take(&mut self.sptps_buf)));
+                    events.push(SptpsEvent::Blob(mem::take(&mut self.sptps_buf)));
                     self.sptpslen = 0;
                     continue;
                 }
@@ -514,11 +524,11 @@ impl Connection {
                                 ref bytes,
                             } = o
                             {
-                                let body = crate::dispatch::record_body(bytes);
+                                let body = dispatch::record_body(bytes);
                                 // Same gate check_gate would apply.
                                 if self.allow_request.is_none()
                                     && body.starts_with(b"21 ")
-                                    && let Some(pkt) = std::str::from_utf8(body)
+                                    && let Some(pkt) = str::from_utf8(body)
                                         .ok()
                                         .and_then(|s| tinc_proto::msg::SptpsPacket::parse(s).ok())
                                 {
@@ -659,7 +669,7 @@ impl Connection {
     /// `InvalidState`: cipher not installed or `type >= 128`. Type is 0;
     /// cipher is set at `receive_sig` before `HandshakeDone`. Unreachable
     /// barring a `tinc-sptps` bug.
-    pub(crate) fn send(&mut self, args: std::fmt::Arguments<'_>) -> bool {
+    pub(crate) fn send(&mut self, args: Arguments<'_>) -> bool {
         if self.dead {
             return false;
         }
@@ -710,7 +720,7 @@ impl Connection {
 
         let live = self.outbuf.live();
         // `send(2)`: ENOTSOCK is a useful sanity check.
-        let n = match send(self.fd.as_raw_fd(), live, crate::msg_nosignal()) {
+        let n = match send(self.fd.as_raw_fd(), live, msg_nosignal()) {
             Ok(n) => n,
             Err(Errno::EWOULDBLOCK | Errno::EINTR) => {
                 return Ok(false);
@@ -730,7 +740,7 @@ impl Connection {
     /// Returns `true` if outbuf went empty→nonempty across the batch.
     /// `rows` is owned-Vec because every callsite collects up front
     /// to drop the `&self` borrow before re-fetching `&mut conn`.
-    pub(crate) fn send_dump(&mut self, rows: Vec<String>, req: crate::dispatch::CtlReq) -> bool {
+    pub(crate) fn send_dump(&mut self, rows: Vec<String>, req: CtlReq) -> bool {
         let mut nw = false;
         for row in rows {
             nw |= self.send(format_args!("{row}"));

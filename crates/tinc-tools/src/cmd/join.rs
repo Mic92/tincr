@@ -55,6 +55,8 @@
 //! invitation is ~50 KiB); the safe-variable filter matches names exactly
 //! via `tinc-conf::vars::lookup`.
 
+use std::mem;
+
 mod finalize;
 mod server_stub;
 mod url;
@@ -343,7 +345,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
 
     // Feed leftover from greeting buf, if any.
     if !buf.is_empty() {
-        let leftover = std::mem::take(&mut buf);
+        let leftover = mem::take(&mut buf);
         let mut off = 0;
         while off < leftover.len() {
             let (n, outs) = sptps

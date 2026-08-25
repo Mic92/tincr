@@ -14,8 +14,10 @@ use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::time::Duration;
 
+use super::Io;
 use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
 use nix::sys::time::TimeSpec;
+use std::slice;
 
 /// The kqueue fd.
 pub(super) type Poller = Kqueue;
@@ -73,7 +75,7 @@ fn kev(fd: RawFd, filter: EventFilter, flags: EvFlags, token: usize) -> KEvent {
 /// returned `n` excludes them (so `add()` never submits an
 /// `EV_DELETE` for a filter that was never registered — kqueue would
 /// ENOENT).
-fn changes(fd: RawFd, token: usize, i: super::Io, delete_unwanted: bool) -> ([KEvent; 2], usize) {
+fn changes(fd: RawFd, token: usize, i: Io, delete_unwanted: bool) -> ([KEvent; 2], usize) {
     let want_read = matches!(i, super::Io::Read | super::Io::ReadWrite);
     let want_write = matches!(i, super::Io::Write | super::Io::ReadWrite);
     let flag = |w| {
@@ -90,27 +92,27 @@ fn changes(fd: RawFd, token: usize, i: super::Io, delete_unwanted: bool) -> ([KE
     } else {
         // Wanted first; n counts only wanted.
         match i {
-            super::Io::Read => ([read_ev, write_ev], 1),
-            super::Io::Write => ([write_ev, read_ev], 1),
-            super::Io::ReadWrite => ([read_ev, write_ev], 2),
+            Io::Read => ([read_ev, write_ev], 1),
+            Io::Write => ([write_ev, read_ev], 1),
+            Io::ReadWrite => ([read_ev, write_ev], 2),
         }
     }
 }
 
-pub(super) fn add(kq: &Poller, fd: BorrowedFd<'_>, token: usize, i: super::Io) -> io::Result<()> {
+pub(super) fn add(kq: &Poller, fd: BorrowedFd<'_>, token: usize, i: Io) -> io::Result<()> {
     let (ch, n) = changes(fd.as_raw_fd(), token, i, false);
     kq.kevent(&ch[..n], &mut [], None)
         .map(|_| ())
         .map_err(Into::into)
 }
 
-pub(super) fn modify(kq: &Poller, fd: RawFd, token: usize, i: super::Io) -> io::Result<()> {
+pub(super) fn modify(kq: &Poller, fd: RawFd, token: usize, i: Io) -> io::Result<()> {
     // kqueue: EV_ADD on an existing filter replaces it (no EEXIST).
     // EV_DELETE on a non-existing filter returns ENOENT — tolerate it
     // by submitting changes one at a time.
     let (ch, n) = changes(fd, token, i, true);
     for ch in &ch[..n] {
-        match kq.kevent(std::slice::from_ref(ch), &mut [], None) {
+        match kq.kevent(slice::from_ref(ch), &mut [], None) {
             Ok(_) | Err(nix::errno::Errno::ENOENT) => {}
             Err(e) => return Err(e.into()),
         }

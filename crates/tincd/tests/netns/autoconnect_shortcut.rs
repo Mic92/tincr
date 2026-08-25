@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 use super::common::{KillOnDrop, TmpGuard, node_status, poll_until, try_poll};
 use super::rig::{NetNs, Node, TunPair, enter_netns};
 use super::tcp_fallback::iptables;
+use std::panic;
+use std::panic::AssertUnwindSafe;
+use std::thread;
 
 struct Mesh {
     pair: TunPair,
@@ -141,7 +144,7 @@ fn autoconnect_shortcut_promotes_hot_relay() {
         "shortcut not added\n{}",
         mesh.finish()
     );
-    let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let dropped = panic::catch_unwind(AssertUnwindSafe(|| {
         poll_until(Duration::from_secs(90), || {
             (!mesh.alice_connected_to_bob()).then_some(())
         });
@@ -173,7 +176,7 @@ fn shortcut_survives_traffic_gap() {
     let mut flapped = false;
     while gap_start.elapsed() < Duration::from_secs(30) && !flapped {
         flapped = !mesh.alice_connected_to_bob();
-        std::thread::sleep(Duration::from_millis(500));
+        thread::sleep(Duration::from_millis(500));
     }
     let _ = Mesh::flood(&["-w", "10"]).0.wait();
     let alice_log = mesh.finish();

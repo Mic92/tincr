@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use super::common::{Node, node_reachable, node_status, poll_until};
 use super::fd_tunnel::{mk_ipv4_pkt, sockpair_datagram, write_fd};
+use std::thread;
 
 const VALIDKEY: u32 = 0x02;
 
@@ -47,7 +48,7 @@ fn simultaneous_req_key_settles() {
     for _ in 0..5 {
         write_fd(&alice_dev, &alice_to_bob);
         write_fd(&bob_dev, &bob_to_alice);
-        std::thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(50));
     }
 
     // Sample validkey until it has held on both sides for 10s.
@@ -68,7 +69,7 @@ fn simultaneous_req_key_settles() {
         if steady_since.is_some_and(|since: Instant| since.elapsed() >= Duration::from_secs(10)) {
             break;
         }
-        std::thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(200));
     }
 
     let alice_log = alice.stop();

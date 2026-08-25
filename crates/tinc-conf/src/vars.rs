@@ -56,6 +56,9 @@
 /// Bitflags for config-key metadata.
 ///
 /// `u8` newtype — see module doc for why not `bitflags!`.
+use core::fmt;
+use core::ops::BitOr;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct VarFlags(u8);
 
@@ -116,18 +119,18 @@ impl VarFlags {
     }
 }
 
-impl core::ops::BitOr for VarFlags {
+impl BitOr for VarFlags {
     type Output = Self;
     fn bitor(self, rhs: Self) -> Self {
         self.union(rhs)
     }
 }
 
-impl core::fmt::Debug for VarFlags {
+impl fmt::Debug for VarFlags {
     /// `SERVER|HOST|SAFE` form, not raw `u8`. For test failure
     /// messages — `assert_eq!(v.flags, ...)` prints something
     /// readable.
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let names: &[_] = &[
             (Self::SERVER, "SERVER"),
             (Self::HOST, "HOST"),

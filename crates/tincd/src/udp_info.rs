@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use tinc_proto::msg::misc::{MtuInfo, UdpInfo};
 
 use crate::dispatch::ConnOptions;
+use crate::pmtu::MINMTU;
 
 /// Jumbo-build MTU ceiling (9000 + 14 eth + 4 VLAN). Clamping to
 /// a smaller value would underreport for jumbo peers; clamping
@@ -75,7 +76,7 @@ impl PmtuSnapshot {
     /// converged at 0 (UDP dead).
     #[must_use]
     pub(crate) fn usable_minmtu(self) -> Option<u16> {
-        (self.converged() && self.minmtu >= crate::pmtu::MINMTU).then_some(self.minmtu)
+        (self.converged() && self.minmtu >= MINMTU).then_some(self.minmtu)
     }
 }
 

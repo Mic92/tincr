@@ -19,12 +19,16 @@ use std::net::SocketAddr;
 use std::os::fd::{OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{
     ChildWithLog, Ctl, pubkey_from_seed, read_tcp_addr, tincd_at, wait_for_file,
     write_ed25519_privkey,
 };
+use std::fs;
+use std::process;
+use std::process::ExitStatus;
+use std::thread;
 
 pub struct Node {
     pub name: String,
@@ -127,7 +131,7 @@ impl Node {
     /// `ConnectTo` line and an `Address` in their hosts file, so they
     /// must already be listening.
     pub fn write_config_multi(&self, peers: &[&Node], connect_to: &[&Node]) {
-        std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
+        fs::create_dir_all(self.confbase.join("hosts")).unwrap();
 
         let mut tinc_conf = format!("Name = {}\nAddressFamily = ipv4\n", self.name);
         match (&self.iface, self.device_fd) {
@@ -148,13 +152,13 @@ impl Node {
         }
         tinc_conf.push_str(&self.extra_conf);
         tinc_conf.push_str("PingTimeout = 1\n");
-        std::fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
+        fs::write(self.confbase.join("tinc.conf"), tinc_conf).unwrap();
 
         let mut own_host = format!("Port = {}\n", self.port);
         for subnet in &self.subnets {
             writeln!(own_host, "Subnet = {subnet}").unwrap();
         }
-        std::fs::write(self.confbase.join("hosts").join(&self.name), own_host).unwrap();
+        fs::write(self.confbase.join("hosts").join(&self.name), own_host).unwrap();
 
         for peer in peers {
             self.write_host_file(peer, connect_to.iter().any(|c| c.name == peer.name));
@@ -178,14 +182,14 @@ impl Node {
             );
             writeln!(host, "Address = 127.0.0.1 {}", peer.port).unwrap();
         }
-        std::fs::write(self.confbase.join("hosts").join(&peer.name), host).unwrap();
+        fs::write(self.confbase.join("hosts").join(&peer.name), host).unwrap();
     }
 
-    fn command(&self) -> std::process::Command {
+    fn command(&self) -> process::Command {
         let mut cmd = if let Some(bin) = &self.c_tincd {
             // No `--socket`: C derives it from the pidfile as
             // `s/.pid$/.socket/`, which is what `self.socket` is.
-            let mut cmd = std::process::Command::new(bin);
+            let mut cmd = process::Command::new(bin);
             cmd.args(["-D", "-d5", "-c"])
                 .arg(&self.confbase)
                 .arg("--pidfile")
@@ -211,7 +215,7 @@ impl Node {
         self.start()
     }
 
-    pub fn start_command(&mut self, cmd: std::process::Command) -> &mut Self {
+    pub fn start_command(&mut self, cmd: process::Command) -> &mut Self {
         match self.try_start_command(cmd) {
             Ok(node) => node,
             Err(log) => panic!("tincd did not come up; stderr:\n{log}"),
@@ -223,7 +227,7 @@ impl Node {
         self.try_start_command(self.command())
     }
 
-    fn try_start_command(&mut self, mut cmd: std::process::Command) -> Result<&mut Self, String> {
+    fn try_start_command(&mut self, mut cmd: process::Command) -> Result<&mut Self, String> {
         if let Some(previous) = &mut self.daemon {
             assert!(
                 previous.wait_exit(Duration::ZERO).is_some(),
@@ -232,8 +236,8 @@ impl Node {
             );
             self.stop();
         }
-        let _ = std::fs::remove_file(&self.socket);
-        let _ = std::fs::remove_file(&self.pidfile);
+        let _ = fs::remove_file(&self.socket);
+        let _ = fs::remove_file(&self.pidfile);
         let daemon = ChildWithLog::spawn(cmd.spawn().expect("spawn tincd"));
         if !wait_for_file(&self.socket) {
             return Err(daemon.kill_and_log());
@@ -242,8 +246,8 @@ impl Node {
         if self.port == 0 {
             // Pin it so a restart keeps peers' `Address =` lines valid.
             let own_host = self.confbase.join("hosts").join(&self.name);
-            if let Ok(contents) = std::fs::read_to_string(&own_host) {
-                std::fs::write(
+            if let Ok(contents) = fs::read_to_string(&own_host) {
+                fs::write(
                     own_host,
                     contents.replace("Port = 0\n", &format!("Port = {port}\n")),
                 )
@@ -261,8 +265,8 @@ impl Node {
     /// any released port, but restart pins it. Overwrites the config
     /// with a throwaway one; call `write_config*` afterwards.
     pub fn reserve_port(&mut self) -> u16 {
-        std::fs::create_dir_all(self.confbase.join("hosts")).unwrap();
-        std::fs::write(
+        fs::create_dir_all(self.confbase.join("hosts")).unwrap();
+        fs::write(
             self.confbase.join("tinc.conf"),
             format!(
                 "Name = {}\nDeviceType = dummy\nAddressFamily = ipv4\n",
@@ -270,7 +274,7 @@ impl Node {
             ),
         )
         .unwrap();
-        std::fs::write(self.confbase.join("hosts").join(&self.name), "Port = 0\n").unwrap();
+        fs::write(self.confbase.join("hosts").join(&self.name), "Port = 0\n").unwrap();
         write_ed25519_privkey(&self.confbase, &self.seed);
         self.start().stop();
         self.port
@@ -286,14 +290,14 @@ impl Node {
 
     /// Wait for the daemon to exit by itself; panics on timeout.
     /// `log()` stays available afterwards.
-    pub fn wait_exit(&mut self) -> std::process::ExitStatus {
+    pub fn wait_exit(&mut self) -> ExitStatus {
         let name = self.name.clone();
         let daemon = self
             .daemon
             .as_mut()
             .unwrap_or_else(|| panic!("{name} not started"));
         daemon
-            .wait_exit(std::time::Duration::from_secs(5))
+            .wait_exit(Duration::from_secs(5))
             .unwrap_or_else(|| panic!("{name} did not exit; stderr:\n{}", daemon.log_snapshot()))
     }
 
@@ -356,16 +360,16 @@ impl Node {
 
     /// Poll until the meta connection to `peer` is (in)active.
     pub fn wait_for_peer(&self, peer: &str, active: bool, timeout: Duration) {
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = Instant::now() + timeout;
         while self.has_active_peer(peer) != active {
             assert!(
-                std::time::Instant::now() < deadline,
+                Instant::now() < deadline,
                 "{}: connection to {peer} did not become {}; stderr:\n{}",
                 self.name,
                 if active { "active" } else { "inactive" },
                 self.log()
             );
-            std::thread::sleep(Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(20));
         }
     }
 

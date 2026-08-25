@@ -22,6 +22,16 @@ pub mod bench;
 pub mod node;
 
 pub use node::Node;
+use std::env;
+use std::ffi::OsStr;
+use std::fs;
+use std::fs::OpenOptions;
+use std::io;
+use std::io::BufWriter;
+use std::net;
+use std::process::ExitStatus;
+use std::thread;
+use std::thread::JoinHandle;
 
 /// `tmp!("tag")`: a `TmpGuard` named after the calling module, short
 /// enough for macOS' 104-byte `sun_path`.
@@ -43,14 +53,14 @@ impl TmpGuard {
         #[cfg(target_os = "macos")]
         let base = PathBuf::from("/tmp");
         #[cfg(not(target_os = "macos"))]
-        let base = std::env::temp_dir();
+        let base = env::temp_dir();
         let dir = base.join(format!(
             "tincd-{prefix}-{tag}-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }
 
@@ -70,7 +80,7 @@ impl TmpGuard {
 
 impl Drop for TmpGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -87,9 +97,9 @@ pub fn tincd_cmd() -> Command {
 }
 
 pub fn tincd_at(
-    confbase: impl AsRef<std::ffi::OsStr>,
-    pidfile: impl AsRef<std::ffi::OsStr>,
-    socket: impl AsRef<std::ffi::OsStr>,
+    confbase: impl AsRef<OsStr>,
+    pidfile: impl AsRef<OsStr>,
+    socket: impl AsRef<OsStr>,
 ) -> Command {
     let mut cmd = tincd_cmd();
     cmd.arg("-c")
@@ -106,13 +116,8 @@ pub fn tincd_at(
 /// test can grab it either.
 pub fn refusing_port() -> (socket2::Socket, u16) {
     let sock = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
-    sock.bind(
-        &"127.0.0.1:0"
-            .parse::<std::net::SocketAddr>()
-            .unwrap()
-            .into(),
-    )
-    .unwrap();
+    sock.bind(&"127.0.0.1:0".parse::<net::SocketAddr>().unwrap().into())
+        .unwrap();
     let port = sock.local_addr().unwrap().as_socket().unwrap().port();
     (sock, port)
 }
@@ -130,7 +135,7 @@ pub fn drain_stderr(mut child: Child) -> String {
 /// socket as a readiness signal for it.
 fn read_pidfile(pidfile: &Path) -> String {
     poll_until(Duration::from_secs(5), || {
-        std::fs::read_to_string(pidfile)
+        fs::read_to_string(pidfile)
             .ok()
             .filter(|content| content.contains('\n'))
     })
@@ -147,7 +152,7 @@ pub fn read_cookie(pidfile: &Path) -> String {
 
 /// TCP listen address from the pidfile. IPv4 only (tests set
 /// `AddressFamily = ipv4`); the daemon writes v6 hosts unbracketed.
-pub fn read_tcp_addr(pidfile: &Path) -> std::net::SocketAddr {
+pub fn read_tcp_addr(pidfile: &Path) -> net::SocketAddr {
     let content = read_pidfile(pidfile);
     let host_and_port = content.splitn(3, ' ').nth(2).expect("pidfile has address");
     let (host, port) = host_and_port
@@ -170,7 +175,7 @@ pub fn wait_for_file_with(path: &Path, timeout: Duration) -> bool {
         if path.exists() {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(10));
     }
     false
 }
@@ -191,7 +196,7 @@ pub fn try_poll<T>(timeout: Duration, mut f: impl FnMut() -> Option<T>) -> Optio
         if Instant::now() >= deadline {
             return None;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -206,7 +211,7 @@ impl Drop for KillOnDrop {
     }
 }
 
-pub fn is_timeout(err: &std::io::Error) -> bool {
+pub fn is_timeout(err: &io::Error) -> bool {
     matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
 }
 
@@ -254,14 +259,14 @@ pub fn pubkey_from_seed(seed: &[u8; 32]) -> [u8; 32] {
 
 pub fn write_ed25519_privkey(confbase: &Path, seed: &[u8; 32]) {
     let key = tinc_crypto::sign::SigningKey::from_seed(seed);
-    let file = std::fs::OpenOptions::new()
+    let file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(confbase.join("ed25519_key.priv"))
         .unwrap();
-    let mut writer = std::io::BufWriter::new(file);
+    let mut writer = BufWriter::new(file);
     tinc_conf::write_pem(&mut writer, "ED25519 PRIVATE KEY", &key.to_blob()).unwrap();
 }
 
@@ -282,7 +287,7 @@ impl Ctl {
                 Ok(ctl) => return ctl,
                 Err(e) => {
                     last_err = Some(e);
-                    std::thread::sleep(Duration::from_millis(100));
+                    thread::sleep(Duration::from_millis(100));
                 }
             }
         }
@@ -292,11 +297,11 @@ impl Ctl {
         );
     }
 
-    fn try_connect(socket: &Path, pidfile: &Path) -> std::io::Result<Self> {
-        let cookie = std::fs::read_to_string(pidfile)?
+    fn try_connect(socket: &Path, pidfile: &Path) -> io::Result<Self> {
+        let cookie = fs::read_to_string(pidfile)?
             .split_whitespace()
             .nth(1)
-            .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "pidfile without cookie"))?
+            .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "pidfile without cookie"))?
             .to_owned();
         let stream = UnixStream::connect(socket)?;
         let reader = BufReader::new(stream.try_clone()?);
@@ -570,7 +575,7 @@ impl PeerFixture {
 pub struct ChildWithLog {
     pub child: Child,
     log: Arc<Mutex<Vec<u8>>>,
-    drain: Option<std::thread::JoinHandle<()>>,
+    drain: Option<JoinHandle<()>>,
 }
 
 impl ChildWithLog {
@@ -578,7 +583,7 @@ impl ChildWithLog {
         let mut stderr = child.stderr.take().expect("stderr piped");
         let log = Arc::new(Mutex::new(Vec::new()));
         let log_writer = Arc::clone(&log);
-        let drain = std::thread::spawn(move || {
+        let drain = thread::spawn(move || {
             let mut buf = [0u8; 4096];
             while let Ok(n) = stderr.read(&mut buf) {
                 if n == 0 {
@@ -604,7 +609,7 @@ impl ChildWithLog {
     }
 
     /// Wait for the child to exit on its own (e.g. after SIGTERM).
-    pub fn wait_exit(&mut self, timeout: Duration) -> Option<std::process::ExitStatus> {
+    pub fn wait_exit(&mut self, timeout: Duration) -> Option<ExitStatus> {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
@@ -613,7 +618,7 @@ impl ChildWithLog {
             if Instant::now() >= deadline {
                 return None;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -636,7 +641,10 @@ impl Drop for ChildWithLog {
 
 #[cfg(target_os = "linux")]
 pub mod linux {
+    use std::fs;
+    use std::path::Path;
     use std::process::{Child, Command, Stdio};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     /// bwrap with unprivileged userns works and `/dev/net/tun` exists;
@@ -662,7 +670,7 @@ pub mod linux {
             }
             Ok(_) => {}
         }
-        if !std::path::Path::new("/dev/net/tun").exists() {
+        if !Path::new("/dev/net/tun").exists() {
             eprintln!("SKIP {label}: /dev/net/tun missing");
             return false;
         }
@@ -677,7 +685,7 @@ pub mod linux {
     /// `/proc/self/exe` is resolved out here because inside it would
     /// point at bwrap.
     pub fn bwrap_reexec() -> Command {
-        let self_exe = std::fs::read_link("/proc/self/exe").expect("readlink /proc/self/exe");
+        let self_exe = fs::read_link("/proc/self/exe").expect("readlink /proc/self/exe");
         let mut cmd = Command::new("bwrap");
         cmd.args(["--unshare-net", "--unshare-user"])
             .args(["--cap-add", "CAP_NET_ADMIN"])
@@ -692,7 +700,7 @@ pub mod linux {
             .args(["--proc", "/proc"])
             .args(["--tmpfs", "/run"])
             // NixOS keeps dig/socat/iptables under /run/current-system.
-            .args(if std::path::Path::new("/run/current-system").exists() {
+            .args(if Path::new("/run/current-system").exists() {
                 &["--ro-bind", "/run/current-system", "/run/current-system"][..]
             } else {
                 &[]
@@ -706,7 +714,7 @@ pub mod linux {
     /// Inner-pass base setup: `lo` up and a writable `/run/netns`.
     pub fn bwrap_inner_init() {
         run_ip(&["link", "set", "lo", "up"]);
-        std::fs::create_dir_all("/run/netns").expect("mkdir /run/netns");
+        fs::create_dir_all("/run/netns").expect("mkdir /run/netns");
     }
 
     /// A child netns reachable via `ip netns exec NAME`, gone on
@@ -724,9 +732,9 @@ pub mod linux {
                 .args(["-n", "sleep", "3600"])
                 .spawn()
                 .expect("spawn unshare sleeper");
-            std::thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(100));
             let target = format!("/run/netns/{name}");
-            std::fs::write(&target, b"").expect("touch nsfd target");
+            fs::write(&target, b"").expect("touch nsfd target");
             let status = Command::new("mount")
                 .args(["--bind"])
                 .arg(format!("/proc/{}/ns/net", sleeper.id()))
@@ -749,7 +757,7 @@ pub mod linux {
                 .arg(&target)
                 .stderr(Stdio::null())
                 .status();
-            let _ = std::fs::remove_file(target);
+            let _ = fs::remove_file(target);
             let _ = self.sleeper.kill();
             let _ = self.sleeper.wait();
         }
@@ -786,7 +794,7 @@ pub mod linux {
             if Instant::now() >= deadline {
                 return false;
             }
-            std::thread::sleep(Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(20));
         }
     }
 }
@@ -794,6 +802,7 @@ pub mod linux {
 #[cfg(target_os = "macos")]
 pub mod macos {
     use std::process::{Command, Stdio};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     pub fn run(argv: &[&str]) {
@@ -826,7 +835,7 @@ pub mod macos {
             if Instant::now() >= deadline {
                 return false;
             }
-            std::thread::sleep(Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(20));
         }
     }
 
