@@ -3,7 +3,7 @@
 //! Lines accepted for C compatibility are pinned as `Ok` so tightening
 //! them is a visible test change.
 
-use proptest::prelude::*;
+use proptest::prelude::{ProptestConfig, any, proptest};
 
 use tinc_proto::msg::{
     AddEdge, AnsKey, DelEdge, KeyChanged, MtuInfo, ReqKey, SptpsPacket, SubnetMsg, TcpPacket,

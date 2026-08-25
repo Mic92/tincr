@@ -7,9 +7,8 @@
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
-use super::common::node::*;
-use super::common::*;
-use super::fd_tunnel::*;
+use super::common::{Node, node_reachable, node_status, poll_until};
+use super::fd_tunnel::{mk_ipv4_pkt, sockpair_datagram, write_fd};
 
 const VALIDKEY: u32 = 0x02;
 

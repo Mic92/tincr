@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use nix::sys::signal::Signal;
 
-use super::common::node::*;
-use super::common::*;
+use super::common::node::has_active_peer;
+use super::common::{Node, node_reachable, wait_for_file};
 
 fn node_names(rows: &[String]) -> Vec<&str> {
     rows.iter()

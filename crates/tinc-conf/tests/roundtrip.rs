@@ -1,6 +1,6 @@
 //! Proptest round-trips over the input space tinc itself writes.
 
-use proptest::prelude::*;
+use proptest::prelude::{Just, Strategy, any, prop, prop_assert_eq, prop_oneof, proptest};
 
 use tinc_conf::pem::{read_pem, write_pem};
 use tinc_conf::{Source, parse_line};

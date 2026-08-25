@@ -6,8 +6,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 
-use super::common::node::*;
-use super::common::*;
+use super::common::{Node, TmpGuard};
 
 fn relay(client: TcpStream, upstream: TcpStream) {
     let mut client_read = client.try_clone().unwrap();

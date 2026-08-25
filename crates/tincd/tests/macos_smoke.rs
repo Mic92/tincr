@@ -11,7 +11,7 @@
 #[macro_use]
 mod common;
 
-use common::*;
+use common::Node;
 use std::process::Command;
 
 use nix::sys::signal::Signal;

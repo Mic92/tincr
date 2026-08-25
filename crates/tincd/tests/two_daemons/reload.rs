@@ -2,8 +2,10 @@ use std::time::Duration;
 
 use nix::sys::signal::Signal;
 
-use super::common::node::*;
-use super::common::*;
+use super::common::node::has_subnet;
+use super::common::{
+    Ctl, Node, poll_until, pubkey_from_seed, wait_for_file, write_ed25519_privkey,
+};
 
 /// Rewrite `hosts/SELF` with `subnets` and SIGHUP. The sleep is for
 /// the reload's `mtime > last_check` comparison at second granularity.

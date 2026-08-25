@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use super::common::TmpGuard;
-use super::rig::*;
+use super::rig::{NetNs, Node, TunPair, enter_bwrap, ping};
 
 #[derive(Clone, Copy)]
 enum Impl {

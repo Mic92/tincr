@@ -3,9 +3,9 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::time::{Duration, Instant};
 
-use super::common::node::*;
-use super::common::*;
-use super::fd_tunnel::*;
+use super::common::node::has_subnet;
+use super::common::{Node, node_reachable, node_status, node_traffic, poll_until};
+use super::fd_tunnel::{mk_ipv4_pkt, read_fd_nb, sockpair_datagram, write_fd};
 
 /// Write all three configs and start mid, bob, alice in that order.
 /// hosts/ tweaks must happen via `edit_hosts` because configs are

@@ -408,6 +408,8 @@ pub(crate) fn on_receive_mtu_info<N>(
 
 #[cfg(test)]
 mod tests {
+    use super::MtuInfoAction::{ClampAndForward, Malformed};
+    use super::UdpInfoAction::{DroppedPastRelay, UpdateAndForward};
     use super::*;
     use tinc_proto::AddrStr;
 
@@ -512,7 +514,6 @@ mod tests {
     #[test]
     #[rustfmt::skip]
     fn udp_recv_table() {
-        use UdpInfoAction::*;
         // N = (): tests only care about which variant fires, not the
         // node-id payload (the daemon's NodeId is just plumbed through).
         type Row = (&'static str, &'static str, &'static str,
@@ -523,12 +524,12 @@ mod tests {
         let confm  = FromState { udp_confirmed:      true,  ..ok };
         let novia  = FromState { via_is_self:        false, ..ok };
         let v4 = sa("192.168.1.5:50123");
-        let fwd = || Forward { from: (), to: () };
+        let fwd = || UdpInfoAction::Forward { from: (), to: () };
 
         let cases: &[Row] = &[
             // (label,                       addr,          port,    from_state,  to_ok, cur_addr,           expected)
-            (":238 unknown from",            "192.168.1.5", "50123", None,        true,  None,               UnknownNode),
-            (":261 unknown to",              "192.168.1.5", "50123", Some(ok),    false, None,               UnknownNode),
+            (":238 unknown from",            "192.168.1.5", "50123", None,        true,  None,               UdpInfoAction::UnknownNode),
+            (":261 unknown to",              "192.168.1.5", "50123", Some(ok),    false, None,               UdpInfoAction::UnknownNode),
             (":247 past static relay",       "192.168.1.5", "50123", Some(novia), true,  None,               DroppedPastRelay),
             (":251 directly_connected",      "192.168.1.5", "50123", Some(direct),true,  None,               fwd()),
             (":251 udp_confirmed",           "192.168.1.5", "50123", Some(confm),  true,  None,               fwd()),
@@ -604,7 +605,6 @@ mod tests {
     /// `on_receive_mtu_info` decision table.
     #[test]
     fn mtu_recv_table() {
-        use MtuInfoAction::*;
         type Row = (
             &'static str,
             i32,
@@ -623,18 +623,18 @@ mod tests {
             maxmtu: 1500,
         };
         let max_u16 = u16::try_from(MTU_MAX).unwrap();
-        let fwd = || Forward { from: (), to: () };
+        let fwd = || MtuInfoAction::Forward { from: (), to: () };
 
         #[rustfmt::skip]
         let cases: &[Row] = &[
             // (label,                        mtu,   from,         to_ok, expected)
             (":345 mtu<512 → Malformed",      400,   Some(unconv), true,  Malformed),
             (":365 unconverged → clamp",      1400,  Some(unconv), true,  ClampAndForward { from: (), to: (), new_mtu: 1400 }),
-            ("converged → Forward",           1400,  Some(conv),   true,  fwd()),
-            ("same mtu → Forward",            1500,  Some(unconv), true,  fwd()),
+            ("converged → MtuInfoAction::Forward",           1400,  Some(conv),   true,  fwd()),
+            ("same mtu → MtuInfoAction::Forward",            1500,  Some(unconv), true,  fwd()),
             (":349 clamp to MTU_MAX",         12000, Some(unconv), true,  ClampAndForward { from: (), to: (), new_mtu: max_u16 }),
-            (":357 unknown from",             1400,  None,         true,  UnknownNode),
-            (":371 unknown to",               1400,  Some(unconv), false, UnknownNode),
+            (":357 unknown from",             1400,  None,         true,  MtuInfoAction::UnknownNode),
+            (":371 unknown to",               1400,  Some(unconv), false, MtuInfoAction::UnknownNode),
         ];
         for &(label, mtu, from, to_ok, ref want) in cases {
             let from = from.map(|s| ((), s));

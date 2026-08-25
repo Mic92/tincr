@@ -10,7 +10,7 @@ mod common;
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
-use common::*;
+use common::Node;
 
 /// Loopback listener with backlog 0 and a saturated accept queue.
 fn blackhole() -> (socket2::Socket, Vec<TcpStream>, SocketAddr) {

@@ -1,6 +1,6 @@
 use std::os::unix::fs::PermissionsExt;
 
-use super::rig::*;
+use super::rig::{TunPair, enter_netns, ping, tun_node};
 
 fn write_script(path: &std::path::Path, body: &str) {
     std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();

@@ -1,7 +1,6 @@
 use std::time::Duration;
 
-use super::common::node::*;
-use super::common::*;
+use super::common::{Node, node_reachable, poll_until};
 
 /// alice → mid ← bob. Three nodes because with two, killing the only
 /// peer also kills the connection a `DEL_EDGE` would arrive on, and

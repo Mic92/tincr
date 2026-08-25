@@ -1,9 +1,8 @@
 use std::os::fd::AsRawFd;
 use std::time::Duration;
 
-use super::common::node::*;
-use super::common::*;
-use super::fd_tunnel::*;
+use super::common::{Node, poll_until};
+use super::fd_tunnel::{FdPair, mk_ipv4_pkt, read_fd_nb, sockpair_datagram, write_fd};
 
 /// Last four columns of a `dump nodes` (3) or `dump traffic` (13) row:
 /// `in_packets in_bytes out_packets out_bytes`.

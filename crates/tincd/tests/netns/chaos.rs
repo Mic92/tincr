@@ -2,8 +2,8 @@
 //! kernel ICMP inside the tunnel has no retransmit, so replay-window
 //! behaviour shows up directly in ping loss and `BadSeqno` logs.
 
-use super::common::*;
-use super::rig::*;
+use super::common::TmpGuard;
+use super::rig::{Netem, TunPair, enter_netns, ping, ping_received};
 
 fn chaos_pair(name: &str) -> Option<(TmpGuard, TunPair)> {
     let netns = enter_netns(&format!("chaos::{name}"))?;
