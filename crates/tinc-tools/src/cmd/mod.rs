@@ -186,7 +186,7 @@ pub(crate) fn create_nofollow(path: &Path) -> Result<File, CmdError> {
     open_nofollow(path, OpenKind::CreateTrunc, 0o666)
 }
 
-/// `<target><suffix>` write-then-rename RAII: `open()` creates the scratch file
+/// `<target>.<suffix>` write-then-rename RAII: `open()` creates the scratch file
 /// next to `target` (same filesystem, so `rename(2)` is atomic), `commit()`
 /// renames over it, `Drop` unlinks on any bail. Used by `cmd::config`
 /// (`.config.tmp`) and `cmd::genkey` (`.tmp`).
@@ -196,15 +196,12 @@ pub(crate) struct TmpGuard {
 }
 
 impl TmpGuard {
-    /// Open `<target><suffix>` for writing (`O_CREAT | O_TRUNC`).
+    /// Open `<target>.<suffix>` for writing (`O_CREAT | O_TRUNC`).
     /// A leftover scratch file from a crashed previous run is simply
     /// overwritten.
     pub(crate) fn open(target: &Path, suffix: &str) -> Result<(Self, File), CmdError> {
-        // Manual OsString concat, not `with_extension` — that would
-        // *replace* an existing extension instead of appending.
-        let mut tmp = target.as_os_str().to_owned();
-        tmp.push(suffix);
-        let tmp = PathBuf::from(tmp);
+        // Appends; `with_extension` would replace an existing extension.
+        let tmp = target.with_added_extension(suffix);
 
         let f = File::create(&tmp).map_err(io_err(&tmp))?;
 

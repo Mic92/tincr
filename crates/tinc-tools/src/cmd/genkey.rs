@@ -132,7 +132,7 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
         .map(|m| m.permissions())
         .map_err(io_err(path))?;
 
-    let (tmp_guard, w) = TmpGuard::open(path, ".tmp")?;
+    let (tmp_guard, w) = TmpGuard::open(path, "tmp")?;
     let tmp_path = tmp_guard.tmp_path().to_path_buf();
 
     // Copy with #-prefixing
