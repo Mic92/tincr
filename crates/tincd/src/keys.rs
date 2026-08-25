@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 
 use std::env;
@@ -34,14 +34,14 @@ use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 
 type Stamp = (Option<SystemTime>, u64);
 type HostCache = Mutex<HashMap<PathBuf, (Stamp, Arc<Config>)>>;
-static HOST_CACHE: OnceLock<HostCache> = OnceLock::new();
+static HOST_CACHE: LazyLock<HostCache> = LazyLock::new(HostCache::default);
 
 /// Read `hosts/{name}` into a [`Config`], empty on ENOENT/parse-fail.
 /// Cached per path, revalidated by mtime+size so on-disk updates are seen.
 #[must_use]
 pub(crate) fn read_host_config(confbase: &Path, name: &str) -> Arc<Config> {
     let path = confbase.join("hosts").join(name);
-    let mut cache = HOST_CACHE.get_or_init(Default::default).lock().unwrap();
+    let mut cache = HOST_CACHE.lock().unwrap();
     let Ok(meta) = fs::metadata(&path) else {
         cache.remove(&path);
         return Arc::default();
