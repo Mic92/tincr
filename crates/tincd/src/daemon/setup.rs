@@ -21,6 +21,7 @@ use std::time::{Duration, SystemTime};
 use crate::event::{EventLoop, Io, SelfPipe, TimerId, Timers};
 use crate::graph::Graph;
 use slotmap::SlotMap;
+use tinc_crypto::sign::SigningKey;
 use tinc_device::{Device, DeviceArena, GroBucket};
 use tinc_proto::Subnet;
 
@@ -603,6 +604,120 @@ fn add_broadcast_subnets(subnets: &mut SubnetTree, config: &tinc_conf::Config) {
     }
 }
 
+/// Missing key is fatal: legacy RSA is not supported, so there is no
+/// fallback. The hint tells the user how to create one.
+fn load_private_key(config: &tinc_conf::Config, confbase: &Path) -> Result<SigningKey, SetupError> {
+    read_ecdsa_private_key(config, confbase).map_err(|e| {
+        let hint = if matches!(e, PrivKeyError::Missing(_)) {
+            "\n  (Create a key pair with `tinc generate-ed25519-keys`)"
+        } else {
+            ""
+        };
+        SetupError::Config(format!("{e}{hint}"))
+    })
+}
+
+/// The daemon looks up specific names and never consults the VARS table,
+/// so a typo'd key would otherwise be silently inert. Warn once at startup.
+fn warn_unknown_vars(config: &tinc_conf::Config) {
+    for e in config.entries() {
+        if tinc_conf::lookup_var(&e.variable).is_none() {
+            log::warn!(target: "tincd",
+                       "Unknown configuration variable `{}' {}",
+                       e.variable, e.source);
+        }
+    }
+}
+
+/// Socket activation bypasses `BindToAddress`/`ListenAddress` (the .socket
+/// unit is the bind config); otherwise [`build_listeners`]. Never returns an
+/// empty vec: no listener is a hard error.
+fn open_all_listeners(
+    config: &tinc_conf::Config,
+    settings: &DaemonSettings,
+    socket_activation: Option<usize>,
+) -> Result<Vec<Listener>, SetupError> {
+    let listeners = if let Some(n) = socket_activation {
+        listen::adopt_listeners(n, &settings.sockopts)
+            .map_err(|e| SetupError::Config(format!("socket activation: {e}")))?
+    } else {
+        build_listeners(
+            config,
+            settings.port,
+            settings.addressfamily,
+            &settings.sockopts,
+        )
+    };
+    if listeners.is_empty() {
+        return Err(SetupError::Config(
+            "Unable to create any listening socket!".into(),
+        ));
+    }
+    Ok(listeners)
+}
+
+/// Bind the control socket (the already-running check) before writing the
+/// pidfile, so a second tincd fails before clobbering the live cookie.
+fn init_control(
+    socket: &Path,
+    pidfile: &Path,
+    address: &str,
+    ev: &mut EventLoop<IoWhat>,
+) -> Result<(ControlSocket, String), SetupError> {
+    let control = ControlSocket::bind(socket).map_err(|e| match e {
+        BindError::AlreadyRunning => SetupError::Config(format!(
+            "Control socket {} already in use",
+            socket.display()
+        )),
+        BindError::Io(err) => {
+            SetupError::io(format!("bind control socket {}", socket.display()), err)
+        }
+    })?;
+    let cookie = generate_cookie();
+    write_pidfile(pidfile, &cookie, address)
+        .map_err(|e| SetupError::io(format!("write pidfile {}", pidfile.display()), e))?;
+    ev.add(control.as_fd(), Io::Read, IoWhat::UnixListener)
+        .map_err(|e| SetupError::io("register control socket with event loop", e))?;
+    Ok((control, cookie))
+}
+
+impl DataPlane {
+    fn new(device_mode: tinc_device::Mode) -> Self {
+        #[cfg(not(target_os = "linux"))]
+        let _ = device_mode;
+        Self {
+            tunnels: IntHashMap::default(),
+            choose_udp_x: 0,
+            compressor: compress::Compressor::new(),
+            tx_priority: 0,
+            tx_scratch: Vec::with_capacity(12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD),
+            rx_scratch: Vec::with_capacity(14 + usize::from(MTU)),
+            rx_fast_scratch: Vec::with_capacity(14 + usize::from(MTU)),
+            udp_rx_batch: Some(net::UdpRxBatch::new()),
+            gro_bucket: None,
+            gro_bucket_spare: Some(GroBucket::new()),
+            // Linux TUN: vnet_hdr is unconditional since `5cf9b12d`.
+            // TAP/FdTun/BSD/Dummy: trait default returns Unsupported.
+            // Gate here so we never `offer()` into a bucket whose
+            // flush will fail at write — that would silently drop
+            // every coalesced burst.
+            #[cfg(target_os = "linux")]
+            gro_enabled: device_mode == tinc_device::Mode::Tun,
+            #[cfg(not(target_os = "linux"))]
+            gro_enabled: false,
+            device_arena: Some(DeviceArena::new(net::DEVICE_DRAIN_CAP)),
+            // Lazy: only allocated on first `DrainResult::Super`.
+            // TAP and non-Linux backends never produce Super,
+            // never spend the 100KB.
+            tso_scratch: None,
+            tso_lens: vec![0usize; net::DEVICE_DRAIN_CAP].into_boxed_slice(),
+            // ~64KB once. The stage gate is `tx_batch_live`.
+            tx_batch: TxBatch::default(),
+            tx_batch_live: false,
+        }
+    }
+}
+
 impl Daemon {
     /// Bring the daemon up from `confbase` (`-c`) and the runtime paths.
     ///
@@ -611,7 +726,6 @@ impl Daemon {
     ///
     /// # Panics
     /// If a `SelfPipe` already exists; setup runs once per process.
-    #[expect(clippy::too_many_lines)] // straight-line struct init; pulling 3 fields out makes it worse
     pub fn setup(
         confbase: &Path,
         pidfile: &Path,
@@ -621,33 +735,9 @@ impl Daemon {
     ) -> Result<Self, SetupError> {
         let (config, name) = read_daemon_config(confbase, cmdline_conf)?;
         log::info!(target: "tincd", "tincd starting, name={name}");
+        let mykey = load_private_key(&config, confbase)?;
+        warn_unknown_vars(&config);
 
-        // private key
-        // Missing key is fatal: we forbid legacy, so there is no RSA
-        // fallback. The error message includes the gen-keys hint so
-        // the user knows what to do.
-        let mykey = read_ecdsa_private_key(&config, confbase).map_err(|e| {
-            let hint = if matches!(e, PrivKeyError::Missing(_)) {
-                "\n  (Create a key pair with `tinc generate-ed25519-keys`)"
-            } else {
-                ""
-            };
-            SetupError::Config(format!("{e}{hint}"))
-        })?;
-
-        // surface unknown keys
-        // The daemon never consults the VARS table for lookup (it asks for
-        // specific names), so a typo'd key is otherwise just inert —
-        // "typo ≡ unset" with no hint why. Warn once at startup.
-        for e in config.entries() {
-            if tinc_conf::lookup_var(&e.variable).is_none() {
-                log::warn!(target: "tincd",
-                           "Unknown configuration variable `{}' {}",
-                           e.variable, e.source);
-            }
-        }
-
-        // settings
         let mut settings = load_settings(&config)?;
 
         let n_shards = resolve_shards(&settings, &config);
@@ -712,40 +802,10 @@ impl Daemon {
             (tid, iv)
         });
 
-        // listeners
-        // Socket activation bypasses BindToAddress/ListenAddress
-        // entirely (the .socket unit is the bind config). Otherwise
-        // walk BindToAddress, then ListenAddress, else wildcard.
-        // Empty result is a hard error: the daemon can't function
-        // without at least one listener.
-        let listeners = if let Some(n) = socket_activation {
-            listen::adopt_listeners(n, &settings.sockopts)
-                .map_err(|e| SetupError::Config(format!("socket activation: {e}")))?
-        } else {
-            build_listeners(
-                &config,
-                settings.port,
-                settings.addressfamily,
-                &settings.sockopts,
-            )
-        };
-        // Always read back the bound port - same answer when port≠0
-        // (kernel binds the requested port). `first()` not `[0]`:
-        // the empty-check below still wants its own error message.
-        let my_udp_port = listeners.first().map_or(0, Listener::udp_port);
-        if listeners.is_empty() {
-            return Err(SetupError::Config(
-                "Unable to create any listening socket!".into(),
-            ));
-        }
-        // Map listeners[0]'s bound addr 0.0.0.0→127.0.0.1, format
-        // `"HOST port PORT"`. Pidfile format is fixed (the CLI on
-        // Windows actually connects to this addr; Unix uses the unix
-        // socket and ignores it). Computed before `listeners` is
-        // consumed into `ListenerSlot`s.
+        let listeners = open_all_listeners(&config, &settings, socket_activation)?;
+        let my_udp_port = listeners[0].udp_port();
+        // Computed before `listeners` is consumed into `ListenerSlot`s.
         let address = pidfile_addr(&listeners);
-        // Register each pair. Index `i` becomes `IoWhat::Tcp(i)` so
-        // the dispatch arm can index back for the accept.
         let listener_slots = register_listeners(listeners, &mut ev)?;
 
         #[cfg(target_os = "linux")]
@@ -767,23 +827,7 @@ impl Daemon {
             ShardRuntime::default()
         };
 
-        // init_control
-        // Bind (the AlreadyRunning check) before writing the pidfile,
-        // so a second tincd fails before clobbering the live cookie.
-        let control = ControlSocket::bind(socket).map_err(|e| match e {
-            BindError::AlreadyRunning => SetupError::Config(format!(
-                "Control socket {} already in use",
-                socket.display()
-            )),
-            BindError::Io(err) => {
-                SetupError::io(format!("bind control socket {}", socket.display()), err)
-            }
-        })?;
-        let cookie = generate_cookie();
-        write_pidfile(pidfile, &cookie, &address)
-            .map_err(|e| SetupError::io(format!("write pidfile {}", pidfile.display()), e))?;
-        ev.add(control.as_fd(), Io::Read, IoWhat::UnixListener)
-            .map_err(|e| SetupError::io("register control socket with event loop", e))?;
+        let (control, cookie) = init_control(socket, pidfile, &address, &mut ev)?;
 
         // graph: add myself
         // `Graph::add_node` defaults `reachable = true`.
@@ -856,38 +900,7 @@ impl Daemon {
             seen: SeenRequests::new(),
             nodes: IntHashMap::default(),
             edge_addrs: HashMap::new(),
-            dp: DataPlane {
-                tunnels: IntHashMap::default(),
-                choose_udp_x: 0,
-                compressor: compress::Compressor::new(),
-                tx_priority: 0,
-                tx_scratch: Vec::with_capacity(
-                    12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD,
-                ),
-                rx_scratch: Vec::with_capacity(14 + usize::from(MTU)),
-                rx_fast_scratch: Vec::with_capacity(14 + usize::from(MTU)),
-                udp_rx_batch: Some(net::UdpRxBatch::new()),
-                gro_bucket: None,
-                gro_bucket_spare: Some(GroBucket::new()),
-                // Linux TUN: vnet_hdr is unconditional since `5cf9b12d`.
-                // TAP/FdTun/BSD/Dummy: trait default returns Unsupported.
-                // Gate here so we never `offer()` into a bucket whose
-                // flush will fail at write — that would silently drop
-                // every coalesced burst.
-                #[cfg(target_os = "linux")]
-                gro_enabled: device_mode == tinc_device::Mode::Tun,
-                #[cfg(not(target_os = "linux"))]
-                gro_enabled: false,
-                device_arena: Some(DeviceArena::new(net::DEVICE_DRAIN_CAP)),
-                // Lazy: only allocated on first `DrainResult::Super`.
-                // TAP and non-Linux backends never produce Super,
-                // never spend the 100KB.
-                tso_scratch: None,
-                tso_lens: vec![0usize; net::DEVICE_DRAIN_CAP].into_boxed_slice(),
-                // ~64KB once. The stage gate is `tx_batch_live`.
-                tx_batch: TxBatch::default(),
-                tx_batch_live: false,
-            },
+            dp: DataPlane::new(device_mode),
             id6_table,
             contradicting_add_edge: 0,
             contradicting_del_edge: 0,
@@ -955,54 +968,12 @@ impl Daemon {
         // the very first dial without waiting one tick.
         daemon.request_proxy_resolve();
 
-        // try_outgoing_connections - the actual setup
-        // Done here (not above) because it needs `&mut self` for the
-        // slotmap + graph + EventLoop.
         for peer in connect_to {
-            // The node goes into the graph before we connect; an
-            // ADD_EDGE arriving via some other path can find it.
-            daemon.lookup_or_add_node(&peer);
-            let config_addrs = resolve_config_addrs(&daemon.confbase, &peer);
-            let addr_cache = AddressCache::open(&daemon.confbase, &peer, config_addrs);
-            let oid = daemon.outgoings.insert(Outgoing {
-                node_name: peer,
-                origin: OutOrigin::ConfigConnectTo,
-                timeout: 0,
-                addr_cache,
-            });
-            // Disarmed; `retry_outgoing` arms it.
-            let tid = daemon.timers.add(TimerWhat::RetryOutgoing(oid));
-            daemon.outgoing_timers.insert(oid, tid);
-            daemon.setup_outgoing_connection(oid);
+            daemon.add_config_outgoing(peer);
         }
-
-        // The mark-sweep (terminate connections whose ConnectTo was
-        // removed) is in `reload_configuration`. setup() never has
-        // stale outgoings (it's first boot).
-
-        // load_all_nodes
-        // Done after the ConnectTo loop - both add to the same
-        // graph, order doesn't matter for correctness, but doing it
-        // last keeps the "load every name from disk" step in one place.
         daemon.load_all_nodes();
-
-        // PCP/UPnP portmapper. After listeners (needs the resolved
-        // port); spawned early so the first refresh runs while tinc-up
-        // is still configuring the iface.
         #[cfg(feature = "upnp")]
-        if daemon.settings.upnp != UpnpMode::No {
-            log::info!(target: "tincd::portmap",
-                       "PCP/UPnP port mapping enabled \
-                        (port {}, mode {:?}, refresh {}s)",
-                       daemon.my_udp_port, daemon.settings.upnp,
-                       daemon.settings.upnp_refresh_period);
-            daemon.portmapper = Some(Portmapper::spawn(
-                daemon.my_udp_port,
-                daemon.settings.upnp,
-                Duration::from_secs(u64::from(daemon.settings.upnp_refresh_period)),
-                Duration::from_secs(u64::from(daemon.settings.upnp_discover_wait)),
-            ));
-        }
+        daemon.spawn_portmapper();
 
         // tinc-up
         // The script typically does `ip addr add` / `ip link set up`
@@ -1021,53 +992,88 @@ impl Daemon {
             daemon.run_subnet_script_sync(true, &daemon.name, s);
         }
 
-        // TX fast-path snapshot. Built post-load_all_nodes so
-        // `subnets` has our own configured subnets. routes/ns/tunnels
-        // are still empty — tx_probe returns None at route_of()? until
-        // the first run_graph_and_log refreshes them. That first call
-        // happens on the first on_ack/ADD_EDGE (gossip.rs), well
-        // before any TUN read can produce a Super.
-        daemon.tx_snap = Some({
-            // id6 prefix: [NULL ‖ myself]. Direct send always (probe
-            // gates on via==to, which makes relay==to, which makes
-            // the slow-path equivalent set dst_id = nullid).
-            let src_id6 = daemon
-                .id6_table
-                .id_of(daemon.myself)
-                .unwrap_or(NodeId6::NULL);
-            let mut id6_prefix = [0u8; 12];
-            id6_prefix[..6].copy_from_slice(NodeId6::NULL.as_bytes());
-            id6_prefix[6..].copy_from_slice(src_id6.as_bytes());
-
-            TxSnapshot {
-                // `any_pcap` is not folded: it flips at runtime via `tinc pcap` and is checked
-                // live at the call site. `overwrite_mac` (Router on TAP) is folded because the
-                // RX fast path writes the device without stamping the eth header, which only
-                // TUN tolerates; the shared gate costs TAP+Router the TX fast path too,
-                // acceptable for a fringe setup.
-                slowpath_all: daemon.dns.is_some()
-                    || daemon.settings.routing_mode != RoutingMode::Router
-                    || daemon.settings.priorityinheritance
-                    || daemon.overwrite_mac,
-                myself: daemon.myself,
-                myself_options: daemon.myself_options.bits(),
-                id6_prefix,
-                myself_name: daemon.name.clone().into_boxed_str(),
-                // load_all_nodes ran above; ConnectTo + hosts/ names
-                // are already in id6_table. tx_snap_refresh_graph
-                // re-clones on every BFS, so this initial clone is
-                // mostly for symmetry — first packet doesn't arrive
-                // until handshake done, by which time refresh_graph
-                // has run at least once.
-                id6: Arc::new(daemon.id6_table.clone()),
-                routes: Arc::clone(&daemon.last_routes),
-                subnets: Arc::new(daemon.subnets.clone()),
-                ns: Arc::default(),
-                tunnels: IntHashMap::default(),
-            }
-        });
+        // Built after load_all_nodes so `subnets` and `id6_table` are seeded;
+        // routes/ns/tunnels fill on the first run_graph_and_log.
+        daemon.tx_snap = Some(daemon.initial_tx_snapshot());
 
         Ok(daemon)
+    }
+}
+
+impl Daemon {
+    /// Seed one `ConnectTo` outgoing. The node goes into the graph first so
+    /// an `ADD_EDGE` arriving via another path can find it.
+    fn add_config_outgoing(&mut self, peer: String) {
+        self.lookup_or_add_node(&peer);
+        let config_addrs = resolve_config_addrs(&self.confbase, &peer);
+        let addr_cache = AddressCache::open(&self.confbase, &peer, config_addrs);
+        let oid = self.outgoings.insert(Outgoing {
+            node_name: peer,
+            origin: OutOrigin::ConfigConnectTo,
+            timeout: 0,
+            addr_cache,
+        });
+        // Disarmed; `retry_outgoing` arms it.
+        let tid = self.timers.add(TimerWhat::RetryOutgoing(oid));
+        self.outgoing_timers.insert(oid, tid);
+        self.setup_outgoing_connection(oid);
+    }
+
+    /// PCP/UPnP portmapper; needs the resolved port. Spawned early so the
+    /// first refresh runs while tinc-up is still configuring the iface.
+    #[cfg(feature = "upnp")]
+    fn spawn_portmapper(&mut self) {
+        if self.settings.upnp == UpnpMode::No {
+            return;
+        }
+        log::info!(target: "tincd::portmap",
+                   "PCP/UPnP port mapping enabled \
+                    (port {}, mode {:?}, refresh {}s)",
+                   self.my_udp_port, self.settings.upnp,
+                   self.settings.upnp_refresh_period);
+        self.portmapper = Some(Portmapper::spawn(
+            self.my_udp_port,
+            self.settings.upnp,
+            Duration::from_secs(u64::from(self.settings.upnp_refresh_period)),
+            Duration::from_secs(u64::from(self.settings.upnp_discover_wait)),
+        ));
+    }
+
+    /// TX fast-path snapshot. routes/ns/tunnels start empty, so `tx_probe`
+    /// returns `None` until the first `run_graph_and_log`, which happens on
+    /// the first ACK/`ADD_EDGE`, well before a TUN read can produce a Super.
+    fn initial_tx_snapshot(&self) -> TxSnapshot {
+        let src_id6 = self.id6_table.id_of(self.myself).unwrap_or(NodeId6::NULL);
+        let mut id6_prefix = [0u8; 12];
+        id6_prefix[..6].copy_from_slice(NodeId6::NULL.as_bytes());
+        id6_prefix[6..].copy_from_slice(src_id6.as_bytes());
+
+        TxSnapshot {
+            // `any_pcap` is not folded: it flips at runtime via `tinc pcap` and is checked
+            // live at the call site. `overwrite_mac` (Router on TAP) is folded because the
+            // RX fast path writes the device without stamping the eth header, which only
+            // TUN tolerates; the shared gate costs TAP+Router the TX fast path too,
+            // acceptable for a fringe setup.
+            slowpath_all: self.dns.is_some()
+                || self.settings.routing_mode != RoutingMode::Router
+                || self.settings.priorityinheritance
+                || self.overwrite_mac,
+            myself: self.myself,
+            myself_options: self.myself_options.bits(),
+            id6_prefix,
+            myself_name: self.name.clone().into_boxed_str(),
+            // load_all_nodes ran above; ConnectTo + hosts/ names
+            // are already in id6_table. tx_snap_refresh_graph
+            // re-clones on every BFS, so this initial clone is
+            // mostly for symmetry — first packet doesn't arrive
+            // until handshake done, by which time refresh_graph
+            // has run at least once.
+            id6: Arc::new(self.id6_table.clone()),
+            routes: Arc::clone(&self.last_routes),
+            subnets: Arc::new(self.subnets.clone()),
+            ns: Arc::default(),
+            tunnels: IntHashMap::default(),
+        }
     }
 }
 
