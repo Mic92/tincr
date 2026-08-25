@@ -426,9 +426,7 @@ impl ProxyConfig {
 /// `setup()` wraps it in `SetupError::Config`.
 pub(crate) fn parse_proxy_config(value: &str) -> Result<Option<ProxyConfig>, String> {
     // First word is the type, rest is args.
-    let mut parts = value.splitn(2, ' ');
-    let kind = parts.next().unwrap_or("");
-    let args = parts.next().unwrap_or("");
+    let (kind, args) = value.split_once(' ').unwrap_or((value, ""));
 
     match kind.to_ascii_lowercase().as_str() {
         "none" | "" => Ok(None),
@@ -632,11 +630,9 @@ pub(crate) fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(Str
         // `get_config_string(cfg, &address); port = strchr(address,
         // ' ')` — same `host port` shape as everywhere else in tinc.
         let s = e.get_str();
-        let mut parts = s.splitn(2, ' ');
-        let host = parts.next().unwrap_or("");
-        let port = match parts.next() {
-            None => Some(default_port),
-            Some(p) => p.parse::<u16>().ok(),
+        let (host, port) = match s.split_once(' ') {
+            None => (s, Some(default_port)),
+            Some((h, p)) => (h, p.parse::<u16>().ok()),
         };
         match (host, port) {
             (h, Some(p)) if !h.is_empty() => addrs.push((h.to_string(), p)),

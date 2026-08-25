@@ -305,9 +305,10 @@ fn split_http_response(resp: &str) -> Result<(u16, &str), String> {
 /// reply. Returns the trimmed URL.
 fn parse_ssdp_location(reply: &str) -> Option<&str> {
     for line in reply.split("\r\n") {
-        let mut it = line.splitn(2, ':');
-        if it.next()?.eq_ignore_ascii_case("location") {
-            return Some(it.next()?.trim());
+        if let Some((key, value)) = line.split_once(':')
+            && key.eq_ignore_ascii_case("location")
+        {
+            return Some(value.trim());
         }
     }
     None
