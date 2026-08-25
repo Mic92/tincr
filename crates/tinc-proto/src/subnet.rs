@@ -92,45 +92,12 @@ impl Subnet {
         }
     }
 
-    /// Does `self` match `find`, given a query shape that's either
-    /// an exact subnet or a single address?
-    ///
-    /// `info_subnet` parses the user's input then walks every subnet
-    /// the daemon knows, asking "does this one match?". The match
-    /// rules diverge depending on whether the user typed `10.0.0.5`
-    /// (an address — "which subnet routes this?") or `10.0.0.0/24`
-    /// (a subnet — "who advertises exactly this?").
-    ///
-    /// | `as_address` | meaning | match |
-    /// |---|---|---|
-    /// | `true`  | route lookup | `find` is INSIDE `self`: top `self.prefix` bits agree |
-    /// | `false` | exact subnet | `find` is `self`: prefix equal and all addr bytes equal |
-    ///
-    /// MAC subnets ignore `as_address` (no prefix → only exact-match).
-    /// Mismatched types (V4 vs V6) never match. Weight is ignored —
-    /// `info_subnet` checks weight separately (only when the user
-    /// typed a `#` suffix).
-    ///
-    /// The C does this inline with three nested `if`s per type. We
-    /// pull it here because (a) `Subnet` is the wire-format type,
-    /// (b) `tinc-tools` doesn't have access to `Subnet`'s addr bytes
-    /// without re-matching, (c) the daemon's own routing-table lookup
-    /// (`subnet.c:lookup_subnet_ipv4`) does the same `maskcmp` against
-    /// the same prefix — this is the routing decision, factored.
-    ///
-    /// Example:
-    /// ```
-    /// # use tinc_proto::Subnet;
-    /// # use std::str::FromStr;
-    /// let net: Subnet = "10.0.0.0/24".parse().unwrap();
-    /// let host: Subnet = "10.0.0.5".parse().unwrap();   // /32 by default
-    /// let other: Subnet = "10.0.1.0/24".parse().unwrap();
-    ///
-    /// assert!( net.matches(&host, true));   // 10.0.0.5 is in 10.0.0.0/24
-    /// assert!(!net.matches(&host, false));  // /24 != /32
-    /// assert!(!net.matches(&other, true));  // 10.0.1.x not in 10.0.0.0/24
-    /// assert!( net.matches(&net, false));   // identity
-    /// ```
+    /// Does `self` match `find`? With `as_address` (user typed `10.0.0.5`:
+    /// route lookup) `find` must lie inside `self` — top `self.prefix` bits
+    /// agree. Without (user typed `10.0.0.0/24`: who advertises this) prefix
+    /// and all address bytes must be equal. MAC subnets only exact-match; V4 vs
+    /// V6 never match; weight is ignored (`info_subnet` checks it separately).
+    /// This is the same `maskcmp` the daemon's routing lookup does, factored.
     #[must_use]
     pub fn matches(&self, find: &Self, as_address: bool) -> bool {
         match (self, find) {
@@ -170,17 +137,10 @@ impl Subnet {
     }
 }
 
-/// Do the top `prefix` bits of `a` and `b` agree?
-///
-/// Returns `bool` (true = equal-under-mask). Every caller only
-/// checks `!= 0`, so the memcmp-style sign isn't needed.
-///
-/// The C bit-math `0x100 - (1 << (8 - m))` makes a high-bits mask:
-/// `m=3` → `0x100 - 0x20` = `0xe0` = `0b1110_0000` (top 3 bits).
-/// We spell it `!0 << (8 - m)` which is the same thing (`0xff <<
-/// 5` = `0xe0`, after the implicit u8 truncation).
-///
-/// Generic over 4 vs 16 bytes via slices.
+/// Do the top `prefix` bits of `a` and `b` agree? C's memcmp-style sign
+/// isn't needed; every caller checks equality. The per-byte high-bits mask
+/// is `!0 << (8 - m)` (`m=3` → `0xe0`). Generic over 4 vs 16 bytes via
+/// slices.
 fn maskcmp(a: &[u8], b: &[u8], prefix: u8) -> bool {
     let full = usize::from(prefix / 8);
     let bits = prefix % 8;
@@ -314,18 +274,10 @@ impl FromStr for Subnet {
     }
 }
 
-/// `sscanf("%hx:%hx:%hx:%hx:%hx:%hx%n", ...)`.
-///
-/// Reads 6 colon-separated hex bytes. The C uses `%hx` into `uint16_t`
-/// then casts to `uint8_t` — so `1ff:...` would parse as `0xff` after
-/// the cast. We *don't* replicate that: it's never on the wire (no tinc
-/// version emits 3-digit MAC parts) and it'd be a footgun. 1-2 digits
-/// only.
-///
-/// Why not insist on exactly 2? See the comment in `subnet_parse.c` line
-/// 260: "old tinc versions `net2str()` will aggressively return MAC
-/// addresses with one-digit parts". `0:a:b:c:d:e` is on the wire from
-/// 1.0-era peers.
+/// Six colon-separated hex bytes, 1-2 digits each. One-digit parts are
+/// accepted because 1.0-era peers emit `0:a:b:c:d:e`; C's
+/// `%hx`-then-truncate quirk (`1ff` → `0xff`) is not replicated since
+/// nothing emits it.
 fn parse_mac(s: &str) -> Option<[u8; 6]> {
     let mut out = [0u8; 6];
     let mut parts = s.split(':');

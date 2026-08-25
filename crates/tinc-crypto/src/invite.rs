@@ -76,17 +76,10 @@ pub const SLUG_LEN: usize = 2 * SLUG_PART_LEN;
 const _: () = assert!(COOKIE_LEN * 4 / 3 == SLUG_PART_LEN);
 const _: () = assert!((COOKIE_LEN * 4).is_multiple_of(3)); // exactness, not just division
 
-/// Encodes the 32-byte public key with the standard `+/` alphabet — *not*
-/// url-safe. This string is what the daemon transmits in its meta-greeting
-/// (`ACK` request payload), so `cmd_join` receives it and hashes it
-/// directly for comparison. The b64
-/// alphabet is therefore protocol-locked. Always 43 chars (32 → 43 in
-/// no-pad b64).
-///
-/// `tinc-tools` already does this manually in a couple places (it's just
-/// `b64::encode(public)`). It's its own function here because the *exact*
-/// bytes of this string are the input to `key_hash`, and giving it a name
-/// makes the composition obvious at the call site.
+/// The 32-byte public key in standard `+/` base64 (43 chars, no pad). This
+/// exact string is what the daemon sends in its meta-greeting and what
+/// `cmd_join` hashes for comparison, so the alphabet is protocol-locked;
+/// named so the composition with `key_hash` is obvious at call sites.
 #[must_use]
 pub fn fingerprint(public: &[u8; PUBLIC_LEN]) -> String {
     // b64::encode is the +/ variant. 32 bytes → 43 chars.
@@ -95,15 +88,10 @@ pub fn fingerprint(public: &[u8; PUBLIC_LEN]) -> String {
     f
 }
 
-/// `sha512(fingerprint(pk))[..18]`.
-///
-/// This is what the first half of the URL slug encodes. `cmd_join` decodes
-/// it from the URL, then after the meta-greeting receives the daemon's
-/// pubkey (as a b64 string), hashes *that*, and compares. If they match,
-/// the daemon really holds the invitation key.
-///
-/// The hash is over the b64 string, not the raw pubkey. See module doc
-/// for why that's not a bug.
+/// `sha512(fingerprint(pk))[..18]`: the first half of the URL slug.
+/// `cmd_join` decodes it from the URL, hashes the pubkey string the daemon
+/// greets with, and compares. The hash is over the b64 string, not the raw
+/// key; see module doc.
 #[must_use]
 pub fn key_hash(public: &[u8; PUBLIC_LEN]) -> [u8; COOKIE_LEN] {
     // Intermediate string is short-lived and not secret (it's the public
@@ -113,27 +101,12 @@ pub fn key_hash(public: &[u8; PUBLIC_LEN]) -> [u8; COOKIE_LEN] {
     fingerprint_hash(&fp)
 }
 
-/// `sha512(fingerprint_string)[..18]`. The body of [`key_hash`], exposed
-/// separately because `cmd_join` receives the fingerprint *as a b64 string
-/// off the wire* and hashes it directly:
-///
-/// ```c
-/// char *fingerprint = line + 2;  // pointer into the recv buffer
-/// sha512(fingerprint, strlen(fingerprint), hishash);
-/// if(!mem_eq(hishash, hash, 18)) bail;
-/// ```
-///
-/// The C never decodes the fingerprint back to raw bytes — it hashes
-/// the wire string. So `cmd_join` can't call `key_hash(decode(fp))`;
-/// re-encoding might produce a different string (`+/` vs `-_` alphabet)
-/// and the hash would differ. It must hash exactly what the daemon sent.
-///
-/// Relationship: `key_hash(pk) == fingerprint_hash(&fingerprint(pk))`.
-/// `cmd_invite` uses the left side (it has the raw key). `cmd_join`
-/// uses the right side (it has the wire string).
-///
-/// Not part of the KAT (the KAT goes through `key_hash`). The unit test
-/// below pins the relationship.
+/// `sha512(fingerprint_string)[..18]`, the body of [`key_hash`]. Exposed
+/// because `cmd_join` receives the fingerprint as a b64 string off the wire
+/// and, like C, must hash exactly those bytes — re-encoding could switch
+/// alphabets and change the hash. `key_hash(pk) ==
+/// fingerprint_hash(&fingerprint(pk))`; invite uses the left side, join the
+/// right. The unit test pins that relationship.
 #[must_use]
 pub fn fingerprint_hash(fp: &str) -> [u8; COOKIE_LEN] {
     let digest = Sha512::digest(fp.as_bytes());
@@ -142,19 +115,12 @@ pub fn fingerprint_hash(fp: &str) -> [u8; COOKIE_LEN] {
     out
 }
 
-/// `sha512(cookie || fingerprint(pk))[..18]`.
-///
-/// This is the **filename** of the invitation file. The cookie is a
-/// bearer token; storing the file as `invitations/COOKIE` would leak it
-/// to anyone who can `ls`. Instead the file is named by this hash.
-/// The daemon receives the raw cookie over SPTPS, recomputes the same
-/// hash, and `rename()`s the file to `.used` atomically.
-///
-/// **Cookie comes first** in the concatenation. The fingerprint binds the
-/// hash to the invitation key — without it, knowledge of the cookie alone
-/// would let you compute the filename, defeating the point.
-///
-/// Zeroizes the intermediate buffer because it contains the cookie.
+/// `sha512(cookie || fingerprint(pk))[..18]`: the invitation's filename.
+/// The cookie is a bearer token, so the file is named by this hash rather
+/// than the cookie; the daemon recomputes it from the cookie received over
+/// SPTPS and renames the file to `.used`. Cookie first, fingerprint second
+/// — the fingerprint binds the name to the invitation key. The intermediate
+/// buffer is zeroized.
 #[must_use]
 pub fn cookie_hash(cookie: &[u8; COOKIE_LEN], public: &[u8; PUBLIC_LEN]) -> [u8; COOKIE_LEN] {
     // `sha512(cookie || fingerprint)` — same dance on the daemon side,
@@ -201,20 +167,10 @@ pub fn cookie_filename(cookie: &[u8; COOKIE_LEN], public: &[u8; PUBLIC_LEN]) -> 
     s
 }
 
-/// Parse a URL slug back into `(key_hash, cookie)`.
-///
-/// `cmd_join` does this:
-/// ```c
-/// if(!b64decode_tinc(slash, hash, 24) || !b64decode_tinc(slash + 24, cookie, 24))
-///     goto invalid;
-/// ```
-///
-/// Returns `None` for slugs of the wrong length or with invalid base64
-/// characters. Valid base64 of 24 chars *always* decodes to 18 bytes
-/// (no slop in tinc-b64 — `24 * 6 / 8 = 18`), so length is the only
-/// failure mode after the alphabet check.
-///
-/// The cookie should be zeroized after use; the key hash is not secret.
+/// Parse a URL slug back into `(key_hash, cookie)`: two 24-char tinc-b64
+/// halves, each decoding to exactly 18 bytes. `None` for wrong length or
+/// invalid characters. The cookie should be zeroized after use; the key
+/// hash is not secret.
 #[must_use]
 pub fn parse_slug(slug: &str) -> Option<([u8; COOKIE_LEN], [u8; COOKIE_LEN])> {
     if slug.len() != SLUG_LEN {

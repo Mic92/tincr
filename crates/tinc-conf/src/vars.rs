@@ -79,14 +79,10 @@ impl VarFlags {
     /// want different per peer.
     pub const HOST: Self = Self(2);
 
-    /// `VAR_MULTIPLE = 4`. May appear more than once. `Subnet`,
-    /// `ConnectTo`, `Address` (a peer can have several). Everything
-    /// else is single-valued; the parser silently keeps the *first*
-    /// occurrence (`Config::lookup().next()`). fsck warns when a
-    /// non-MULTIPLE key appears twice — it's the only place that
-    /// surfaces the silent-first-wins behavior. `cmd_config add`
-    /// downgrades to `set` for non-MULTIPLE keys — adding a second
-    /// `Port` would silently shadow itself.
+    /// May appear more than once (`Subnet`, `ConnectTo`, `Address`). For
+    /// everything else the parser silently keeps the first occurrence; fsck
+    /// warns on duplicates and `cmd_config add` downgrades to `set` so a second
+    /// `Port` can't shadow itself.
     pub const MULTIPLE: Self = Self(4);
 
     /// `VAR_OBSOLETE = 8`. Deprecated. fsck warns; `cmd_config set`
@@ -276,14 +272,12 @@ pub static VARS: &[Var] = &[
     // SERVER too or `tinc set Weight` / `fsck` would refuse/flag a
     // value the daemon legitimately consumes.
     v("Weight", S.union(H).union(F)),
-    // End of the C tinc table. Rust-side extensions below, appended
-    // rather than interleaved so indices [0, 74) keep matching the C
-    // array (the spot_check test asserts the alpha-break boundary at
-    // [48]).
+    // End of the C tinc table; Rust-side extensions are appended so indices
+    // [0, 74) keep matching (spot_check asserts the alpha break at [48]).
     //
-    // DNS stub (Rust-only). SERVER, MULTIPLE for DNSAddress (one v4
-    // + one v6). Not SAFE: an invitation that sets DNSAddress points
-    // every name lookup at an attacker-chosen resolver.
+    // DNS stub: SERVER, MULTIPLE for DNSAddress (one v4 + one v6). Not SAFE:
+    // an invitation setting DNSAddress would point every lookup at an
+    // attacker-chosen resolver.
     v("DNSAddress", S.union(M)),
     v("DNSSuffix", S),
     // SPTPSCipher: SERVER+HOST so it can be set as a global default in
@@ -308,15 +302,10 @@ pub static VARS: &[Var] = &[
 /// and this table is stale.
 const _: () = assert!(VARS.len() == 74 + 6);
 
-/// Look up by name, case-insensitive.
-///
-/// Returns `Option<&'static Var>` — the `&'static` matters for
-/// `cmd_config`'s canonicalization: `lookup("port").unwrap().name`
-/// gives `"Port"` with `'static` lifetime, no clone needed.
-///
-/// `None` for unknown keys. fsck *skips* unknowns — intentional: a
-/// typo'd key doesn't crash, it's just inert (the daemon's
-/// `Config::lookup` finds nothing and ignores it).
+/// Look up by name, case-insensitive. The `&'static` lets `cmd_config`
+/// canonicalise (`lookup("port")?.name == "Port"`) without cloning. Unknown
+/// keys are `None`; fsck skips them and the daemon ignores them, so a typo
+/// is inert rather than fatal.
 #[must_use]
 pub fn lookup(name: &str) -> Option<&'static Var> {
     VARS.iter().find(|v| v.name.eq_ignore_ascii_case(name))

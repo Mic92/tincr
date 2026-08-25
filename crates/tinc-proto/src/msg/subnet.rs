@@ -28,15 +28,11 @@ pub struct SubnetMsg {
 }
 
 impl SubnetMsg {
-    /// `add_subnet_h` / `del_subnet_h` parse step.
-    ///
-    /// `sscanf(request, "%*d %*x " MAX_STRING " " MAX_STRING, name, subnetstr)`
-    /// then `check_id(name)` then `str2net(&s, subnetstr)`.
+    /// `ADD_SUBNET` / `DEL_SUBNET` parse: two tokens after the header, then
+    /// `check_id(name)` and subnet parse.
     ///
     /// # Errors
-    ///
-    /// Any of: too few tokens, owner name fails `check_id`, subnet
-    /// string fails `str2net`.
+    /// Too few tokens, owner fails `check_id`, or subnet string invalid.
     pub fn parse(line: &str) -> Result<Self, ParseError> {
         let mut t = Tok::new(line);
         t.skip()?; // %*d — request number, already dispatched on

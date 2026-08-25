@@ -55,15 +55,11 @@ pub struct EcdhPrivate {
 }
 
 impl EcdhPrivate {
-    /// Derive the keypair from a 32-byte seed.
-    ///
-    /// In production this seed comes from a CSPRNG (`ecdh_generate_public`
-    /// calls `randomize`). Exposing seed-based derivation lets the KAT suite
-    /// reproduce the C output exactly without mocking an RNG.
-    ///
-    /// The returned public key is an Ed25519 point — the *same encoding* used
-    /// for signature verification keys, which is what makes tinc's key reuse
-    /// (long-term identity key doubles as static DH key) possible.
+    /// Derive the keypair from a 32-byte seed. Production seeds come from a
+    /// CSPRNG; seed-based derivation lets the KATs reproduce C output without
+    /// mocking an RNG. The public key is an Ed25519 point — the same encoding
+    /// as a verification key, which is what lets tinc reuse the identity key as
+    /// static DH key.
     #[must_use]
     pub fn from_seed(seed: &[u8; 32]) -> (Self, [u8; PUBLIC_LEN]) {
         // ed25519_create_keypair: SHA-512 the seed, clamp the low half.
@@ -78,15 +74,10 @@ impl EcdhPrivate {
         let clamped = clamp_integer(scalar);
         expanded[..32].copy_from_slice(&clamped);
 
-        // Public key: standard Ed25519 base-point scalar multiplication.
-        // We delegate to ed25519-dalek rather than reaching into
-        // curve25519-dalek's `EdwardsPoint::mul_base` because the dalek
-        // ecosystem only stabilises the basepoint-mult-from-clamped-bytes
-        // path through the signature crate. Same math, blessed API.
-        //
-        // `SigningKey::from_bytes(seed)` runs the exact sequence above
-        // internally (SHA-512 + clamp + ge_scalarmult_base), so its
-        // verifying key is bit-identical to `pub_a` in the C KATs.
+        // Public key via ed25519-dalek: `SigningKey::from_bytes(seed)` runs
+        // SHA-512 + clamp + basepoint-mult internally, so its verifying key is
+        // bit-identical to `pub_a` in the C KATs, and it is the API the dalek
+        // ecosystem keeps stable.
         let public = ed25519_dalek::SigningKey::from_bytes(seed)
             .verifying_key()
             .to_bytes();
@@ -105,15 +96,10 @@ impl EcdhPrivate {
         }
     }
 
-    /// Compute the shared secret with a peer's public key.
-    ///
-    /// Consumes `self`, mirroring the C semantics: `ecdh_compute_shared`
-    /// calls `ecdh_free` before returning. Ephemeral keys are single-use.
-    ///
-    /// Returns `None` if the resulting shared secret is all-zero (peer
-    /// supplied a small-order point). No other input validation is done,
-    /// matching `key_exchange.c`; SPTPS authenticates the transcript with
-    /// long-term Ed25519 signatures regardless.
+    /// Compute the shared secret with a peer's public key. Consumes `self`:
+    /// ephemeral keys are single-use, as in C. Returns `None` if the secret is
+    /// all-zero (small-order point); no other validation, matching C — SPTPS
+    /// authenticates the transcript with long-term signatures regardless.
     #[must_use]
     pub fn compute_shared(self, peer_public: &[u8; PUBLIC_LEN]) -> Option<[u8; SHARED_LEN]> {
         // Re-clamp. On a properly generated key this is idempotent
@@ -125,16 +111,10 @@ impl EcdhPrivate {
         scalar.copy_from_slice(&self.expanded[..32]);
         let scalar = clamp_integer(scalar);
 
-        // Edwards y → Montgomery u, by hand.
-        //
-        // The clean way would be:
-        //   CompressedEdwardsY(peer).decompress()?.to_montgomery()
-        // But decompress() validates that y corresponds to a point on the
-        // curve, and rejects if not. The C code doesn't validate: it does
-        //   fe_frombytes(y, peer)   -- masks bit 255, takes y as-is
-        //   u = (1+y)/(1-y)
-        // and ladders on whatever u falls out. So we do the same arithmetic
-        // directly in the field.
+        // Edwards y → Montgomery u = (1+y)/(1-y), by hand.
+        // `CompressedEdwardsY::decompress()` would reject off-curve y, but C's
+        // `fe_frombytes` just masks bit 255 and ladders on whatever falls out, so
+        // we do the same field arithmetic directly.
         let mont_u = edwards_y_to_montgomery_u(peer_public);
 
         // X25519 ladder. `mul_clamped` applies the *same* clamping again,
@@ -149,37 +129,12 @@ impl EcdhPrivate {
     }
 }
 
-/// Reproduce `key_exchange.c`'s Edwards→Montgomery map without on-curve checks.
-///
-/// `fe_frombytes` in the C code masks off bit 255 (the Edwards sign bit) and
-/// loads the remaining 255 bits as a field element. It does **not** reduce mod
-/// p, so non-canonical encodings (values in `[p, 2^255)`) are accepted as-is —
-/// arithmetically equivalent after the first multiply, but we must accept the
-/// same input bytes.
-///
-/// We delegate the field arithmetic to `curve25519-dalek` by way of a trick:
-/// `MontgomeryPoint::to_edwards` performs the *inverse* map `(u-1)/(u+1)`, and
-/// `EdwardsPoint::to_montgomery` performs `(1+y)/(1-y)`. Neither validates.
-/// But `to_montgomery` requires a full `EdwardsPoint`, which we can't build
-/// from y alone without a square-root (the very validation we're avoiding).
-///
-/// So instead we compute it ourselves using the crate's `FieldElement` —
-/// which, frustratingly, is not public. The escape hatch: the curve25519-dalek
-/// `Scalar` type *is* public and its arithmetic is mod ℓ, not mod p, so that's
-/// out too. We're left with one option that doesn't pull in a second bignum
-/// library: do the field math in `u64` limbs ourselves, copying the structure
-/// of `fe.c`.
-///
-/// That would be ~400 lines and a second implementation to audit. Better:
-/// curve25519-dalek **does** expose modular inversion through one path that
-/// doesn't validate — `MontgomeryPoint` arithmetic is pure field ops on the
-/// u-coordinate with no curve check. We can encode `1+y` and `1-y` as fake
-/// "Montgomery points" (they're just field elements in a wrapper), invert via
-/// the projective ladder identity... no, the ladder needs a real point.
-///
-/// Honest answer: we vendor the field math. It's 50 lines, it's the same
-/// arithmetic every Curve25519 implementation does, and the KATs will catch
-/// any mistake. See `fe` module below.
+/// C tinc's Edwards→Montgomery map without on-curve checks. `fe_frombytes`
+/// masks bit 255 and does not reduce mod p, so non-canonical y in `[p,
+/// 2^255)` must be accepted as-is. curve25519-dalek keeps `FieldElement`
+/// private and every public path to `(1+y)/(1-y)` validates the point
+/// first, so the four field ops we need are vendored in the `fe` module
+/// below; the KATs pin the result.
 fn edwards_y_to_montgomery_u(ed_public: &[u8; 32]) -> [u8; 32] {
     let y = fe::from_bytes(ed_public); // masks bit 255, like fe_frombytes
     let one = fe::one();
@@ -190,15 +145,10 @@ fn edwards_y_to_montgomery_u(ed_public: &[u8; 32]) -> [u8; 32] {
     fe::to_bytes(&u)
 }
 
-/// Minimal Curve25519 field arithmetic, mod `2^255 - 19`.
-///
-/// This is **not** a general-purpose field library. It exists solely because
-/// `curve25519-dalek` keeps `FieldElement` private and we need exactly four
-/// operations on the unvalidated Edwards y-coordinate. The implementation is
-/// the obvious schoolbook one with 51-bit radix-2 limbs (à la ref10/donna),
-/// which is what `fe.c` uses too.
-///
-/// Performance is irrelevant: this runs once per handshake. Clarity wins.
+/// Minimal Curve25519 field arithmetic mod `2^255 - 19`: exactly the four
+/// operations needed on the unvalidated Edwards y, schoolbook with 51-bit
+/// limbs like ref10's `fe.c`. Runs once per handshake, so clarity over
+/// speed.
 mod fe {
     /// Field element as 5×51-bit limbs, little-endian, unreduced (lazy carry).
     pub(super) type Fe = [u64; 5];

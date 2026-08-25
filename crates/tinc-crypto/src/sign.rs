@@ -78,13 +78,10 @@ impl SigningKey {
         &self.public
     }
 
-    /// Generate from a fresh seed.
-    ///
-    /// KAT use only — production keys come from disk via [`from_blob`].
-    /// Mirrors `ed25519_create_keypair` exactly: SHA-512 the seed, clamp
-    /// the low half, basepoint-multiply for the public key. The same
-    /// function feeds both signing and ECDH in the C code, which is why
-    /// the on-disk format works for both.
+    /// Generate from a fresh seed; KAT use only, production keys come from disk
+    /// via [`from_blob`]. SHA-512 the seed, clamp the low half,
+    /// basepoint-multiply — the same expansion C uses for both signing and
+    /// ECDH, which is why one on-disk format serves both.
     ///
     /// [`from_blob`]: Self::from_blob
     #[must_use]
@@ -116,21 +113,13 @@ impl SigningKey {
         &self.public
     }
 
-    /// Sign a message.
-    ///
-    /// Produces the same 64-byte signature `ed25519_sign` would. The `hazmat`
-    /// path is the *only* way to feed dalek an expanded key; the safe
-    /// `SigningKey` API insists on the 32-byte seed, which we don't have.
+    /// Sign a message; same 64 bytes C's `ed25519_sign` produces. The `hazmat`
+    /// path is the only way to feed dalek an expanded key.
     ///
     /// # Panics
-    ///
-    /// If `self.public` is not a valid Ed25519 point encoding. Keys built
-    /// via [`from_seed`](Self::from_seed) are always valid; keys loaded
-    /// via [`from_blob`](Self::from_blob) may not be, and will panic here
-    /// rather than silently producing a signature against the wrong public
-    /// key. (The C code would happily sign with garbage; we're stricter on
-    /// purpose since a panic at key-load time is far better than a bad
-    /// signature on the wire.)
+    /// If `self.public` is not a valid point encoding (possible only via
+    /// [`from_blob`](Self::from_blob)). Deliberately stricter than C: a panic
+    /// beats a bad signature on the wire.
     #[must_use]
     pub fn sign(&self, msg: &[u8]) -> [u8; SIG_LEN] {
         // ExpandedSecretKey splits the 64 bytes into (scalar, hash_prefix)
@@ -146,26 +135,13 @@ impl SigningKey {
     }
 }
 
-/// Verify an Ed25519 signature.
-///
-/// `verify.c` uses the standard (cofactored, batch-compatible) equation.
-///
-/// Canonicality: the scalar `S` from the signature is reduced mod `L`
-/// inside the verification equation rather than range-checked, and `R`
-/// is not required to be the canonical encoding of its point. Non-
-/// canonical signatures (e.g. `S ≥ L`, or alternate `R` encodings)
-/// therefore VERIFY, matching ref10 and C tinc — confirmed against
-/// Project Wycheproof vectors. This is deliberate: rejecting inputs
-/// that a C peer accepts would be an interop divergence. It's not a
-/// security issue here because tinc does not treat signatures as
-/// identifiers or map keys; signature malleability doesn't create a
-/// replay or confusion primitive in the meta-protocol or SPTPS.
+/// Verify with the standard cofactored equation. Non-canonical signatures
+/// (`S ≥ L`, alternate `R`) verify as in ref10 and C tinc (checked against
+/// Wycheproof): rejecting what a C peer accepts would break interop, and
+/// tinc never uses signatures as identifiers.
 ///
 /// # Errors
-///
-/// [`SignError`] if `public` is not a valid point encoding, or if the
-/// signature does not verify. The two cases are deliberately conflated:
-/// the caller's response (drop the connection) is the same either way.
+/// [`SignError`] for an invalid point or failed verify (callers drop either).
 pub fn verify(public: &[u8; PUBLIC_LEN], msg: &[u8], sig: &[u8; SIG_LEN]) -> Result<(), SignError> {
     let vk = VerifyingKey::from_bytes(public).map_err(|_| SignError)?;
     let sig = Signature::from_bytes(sig);
