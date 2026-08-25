@@ -113,7 +113,7 @@ impl RawSocket {
 ///   `&raw const sa` cast to `*const sockaddr` (the kernel
 ///   discriminates on `sa_family`, finds `AF_PACKET`, reads as
 ///   `sockaddr_ll`).
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 fn bind_packet(fd: BorrowedFd<'_>, ifindex: libc::c_uint) -> io::Result<()> {
     let sa = sockaddr_ll_packet(ifindex);
 
@@ -143,7 +143,7 @@ fn bind_packet(fd: BorrowedFd<'_>, ifindex: libc::c_uint) -> io::Result<()> {
 /// syscall shim stays one-unsafe.
 // ifindex: c_uint→c_int glibc signedness quirk; kernel allocs small positive ints
 #[expect(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 fn sockaddr_ll_packet(ifindex: libc::c_uint) -> libc::sockaddr_ll {
     // SAFETY: see fn comment.
     let mut sa: libc::sockaddr_ll = unsafe { std::mem::zeroed() };

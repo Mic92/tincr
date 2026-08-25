@@ -47,6 +47,23 @@ impl ConfDir {
         }
     }
 
+    /// Real `tinc init NAME`: tinc.conf, keys, `hosts/NAME` with pubkey.
+    #[must_use]
+    pub fn init(name: &str) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let confbase = dir.path().join("vpn");
+        let paths = Paths::for_cli(&PathsInput {
+            confbase: Some(confbase.clone()),
+            ..Default::default()
+        });
+        crate::cmd::init::run(&paths, name).unwrap();
+        Self {
+            dir,
+            confbase,
+            paths,
+        }
+    }
+
     /// `bare()` + `tinc.conf` with `Name = NAME` + empty `hosts/NAME`.
     #[must_use]
     pub fn with_name(name: &str) -> Self {

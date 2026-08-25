@@ -9,7 +9,7 @@
 //! bump means the dependency changed something protocol-relevant, not
 //! that the test is wrong.
 
-// `forbid` would block the `#![allow(unsafe_code)]` on chapoly's
+// `forbid` would block the `#![expect(unsafe_code)]` on chapoly's
 // EVP_MAC FFI. Everything else stays safe; the allow is scoped to
 // that one module and every block carries a SAFETY comment.
 #![deny(unsafe_code)]

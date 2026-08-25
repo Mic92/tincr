@@ -25,7 +25,7 @@
 //! byte is always `(v<<4)|hl`.
 
 // Field names follow the BSD/netinet headers (`ip_ttl`, `icmp6_cksum`).
-#![allow(clippy::struct_field_names)]
+#![expect(clippy::struct_field_names)]
 #![forbid(unsafe_code)]
 
 use std::mem::size_of;

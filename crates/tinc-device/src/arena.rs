@@ -102,7 +102,7 @@ pub struct DeviceArena {
 // SAFETY: `buf` is a heap pointer we exclusively own (no aliasing,
 // `&mut self` on every mutator). Same Send-safety argument as
 // `Box<[u8]>` — the only difference is we picked the alignment.
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 unsafe impl Send for DeviceArena {}
 
 /// Conventional 4K page. ZC's page-pin granularity. We could
@@ -153,7 +153,7 @@ impl DeviceArena {
         // SAFETY: `layout.size() > 0` (cap > 0, STRIDE > 0, rounded
         // up). `alloc_zeroed` is the same call `vec![0u8; n]` makes
         // under the hood; we're just picking the alignment.
-        #[allow(unsafe_code)]
+        #[expect(unsafe_code)]
         let buf = unsafe { alloc_zeroed(layout) };
         let buf = NonNull::new(buf).unwrap_or_else(|| {
             // Match `Box`'s OOM behavior: abort via the std handler.
@@ -207,7 +207,7 @@ impl DeviceArena {
     pub const fn as_contiguous(&self) -> &[u8] {
         // SAFETY: the full allocation. `layout.size()` is what we
         // alloc'd; ≥ cap*STRIDE.
-        #[allow(unsafe_code)]
+        #[expect(unsafe_code)]
         unsafe {
             std::slice::from_raw_parts(self.buf.as_ptr(), self.cap * Self::STRIDE)
         }
@@ -220,7 +220,7 @@ impl DeviceArena {
     #[must_use]
     pub const fn as_contiguous_mut(&mut self) -> &mut [u8] {
         // SAFETY: same as `as_contiguous`; `&mut self` excludes.
-        #[allow(unsafe_code)]
+        #[expect(unsafe_code)]
         unsafe {
             std::slice::from_raw_parts_mut(self.buf.as_ptr(), self.cap * Self::STRIDE)
         }
@@ -259,7 +259,7 @@ impl Drop for DeviceArena {
         // SAFETY: `buf` came from `alloc_zeroed(self.layout)` and
         // we're the sole owner (no clones, no leaks of the pointer).
         // Layout matches exactly — that's why we stored it.
-        #[allow(unsafe_code)]
+        #[expect(unsafe_code)]
         unsafe {
             dealloc(self.buf.as_ptr(), self.layout);
         }

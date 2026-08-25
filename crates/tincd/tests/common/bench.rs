@@ -1,5 +1,9 @@
 //! Shared by `benches/throughput{,_macos}.rs`; topology stays per-platform.
 
+#![allow(
+    clippy::allow_attributes,
+    reason = "shared by several test binaries, each uses a subset"
+)]
 #![allow(dead_code)] // each bench uses a subset
 
 use std::path::PathBuf;

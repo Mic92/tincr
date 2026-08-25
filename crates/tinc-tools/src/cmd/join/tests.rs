@@ -2,29 +2,17 @@ use super::finalize::split_var;
 use super::wire::{parse_greeting_line1, parse_greeting_line2};
 use super::*;
 
-use crate::cmd::init;
 use crate::cmd::invite;
 use crate::keypair;
-use crate::names::PathsInput;
 use crate::testutil::ConfDir;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
 use std::time::SystemTime;
 
 use tinc_crypto::invite::{COOKIE_LEN, SLUG_LEN, SLUG_PART_LEN};
 use tinc_crypto::sign::SigningKey;
 use tinc_sptps::{Framing, Output, Role, Sptps};
-
-/// Used by tests that need two confbases sharing one tempdir
-/// (invite roundtrip). Simple cases use `ConfDir::bare()`.
-fn paths_at(dir: &Path) -> Paths {
-    Paths::for_cli(&PathsInput {
-        confbase: Some(dir.to_owned()),
-        ..Default::default()
-    })
-}
 
 // parse_url
 
@@ -55,17 +43,10 @@ fn url_ok() {
 #[test]
 fn url_roundtrip_with_invite() {
     // Real URL from invite() — proves the producer/consumer agree.
-    let dir = tempfile::tempdir().unwrap();
-    let inviter = paths_at(&dir.path().join("inviter"));
-    init::run(&inviter, "alice").unwrap();
-    let mut h = fs::OpenOptions::new()
-        .append(true)
-        .open(inviter.host_file("alice"))
-        .unwrap();
-    writeln!(h, "Address = vpn.example").unwrap();
-    drop(h);
+    let inviter = ConfDir::init("alice").append_host("alice", "Address = vpn.example\n");
+    let inviter = inviter.paths();
 
-    let r = invite::invite(&inviter, None, "bob", SystemTime::now()).unwrap();
+    let r = invite::invite(inviter, None, "bob", SystemTime::now()).unwrap();
     let p = parse_url(&r.url).unwrap();
     assert_eq!(p.host, "vpn.example");
     assert_eq!(p.port, "655");
@@ -418,22 +399,15 @@ fn finalize_existing_tinc_conf() {
 /// Full server-side flow on a real invitation file from `invite()`.
 #[test]
 fn server_stub_recovers_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = paths_at(&dir.path().join("inviter"));
-    init::run(&p, "alice").unwrap();
-    let mut h = fs::OpenOptions::new()
-        .append(true)
-        .open(p.host_file("alice"))
-        .unwrap();
-    writeln!(h, "Address = x").unwrap();
-    drop(h);
+    let cd = ConfDir::init("alice").append_host("alice", "Address = x\n");
+    let p = cd.paths();
 
-    let r = invite::invite(&p, None, "bob", SystemTime::now()).unwrap();
+    let r = invite::invite(p, None, "bob", SystemTime::now()).unwrap();
     let parsed = parse_url(&r.url).unwrap();
     let inv_key = keypair::read_private(&p.invitation_key()).unwrap();
 
     let (contents, name, used_path) =
-        server_receive_cookie(&p, &inv_key, &parsed.cookie, "alice", SystemTime::now()).unwrap();
+        server_receive_cookie(p, &inv_key, &parsed.cookie, "alice", SystemTime::now()).unwrap();
 
     assert_eq!(name, "bob");
     // First line is `Name = bob`.
@@ -451,25 +425,18 @@ fn server_stub_recovers_file() {
 /// Single-use: second call with same cookie → ENOENT → "non-existing".
 #[test]
 fn server_stub_single_use() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = paths_at(&dir.path().join("inviter"));
-    init::run(&p, "alice").unwrap();
-    let mut h = fs::OpenOptions::new()
-        .append(true)
-        .open(p.host_file("alice"))
-        .unwrap();
-    writeln!(h, "Address = x").unwrap();
-    drop(h);
+    let cd = ConfDir::init("alice").append_host("alice", "Address = x\n");
+    let p = cd.paths();
 
-    let r = invite::invite(&p, None, "bob", SystemTime::now()).unwrap();
+    let r = invite::invite(p, None, "bob", SystemTime::now()).unwrap();
     let parsed = parse_url(&r.url).unwrap();
     let inv_key = keypair::read_private(&p.invitation_key()).unwrap();
 
     // First use: ok.
-    server_receive_cookie(&p, &inv_key, &parsed.cookie, "alice", SystemTime::now()).unwrap();
+    server_receive_cookie(p, &inv_key, &parsed.cookie, "alice", SystemTime::now()).unwrap();
     // Second use: file is gone (renamed to .used).
-    let err = server_receive_cookie(&p, &inv_key, &parsed.cookie, "alice", SystemTime::now())
-        .unwrap_err();
+    let err =
+        server_receive_cookie(p, &inv_key, &parsed.cookie, "alice", SystemTime::now()).unwrap_err();
     let CmdError::BadInput(msg) = err else {
         panic!()
     };
@@ -515,28 +482,14 @@ fn server_stub_single_use() {
         clippy::items_after_statements,
     )]
 fn invite_join_roundtrip_in_process() {
-    let dir = tempfile::tempdir().unwrap();
+    // Inviter side: alice invites bob. Mode (SERVER|SAFE) exercises
+    // the variable filter.
+    let inviter_cd = ConfDir::init("alice")
+        .append_host("alice", "Address = vpn.example\n")
+        .append_conf("Mode = switch\n");
+    let inviter = inviter_cd.paths();
 
-    // Inviter side: alice invites bob
-    let inviter = paths_at(&dir.path().join("inviter"));
-    init::run(&inviter, "alice").unwrap();
-    {
-        let mut h = fs::OpenOptions::new()
-            .append(true)
-            .open(inviter.host_file("alice"))
-            .unwrap();
-        writeln!(h, "Address = vpn.example").unwrap();
-    }
-    // Add a Mode (SERVER|SAFE) so we exercise the chunk-1 filter.
-    {
-        let mut tc = fs::OpenOptions::new()
-            .append(true)
-            .open(inviter.tinc_conf())
-            .unwrap();
-        writeln!(tc, "Mode = switch").unwrap();
-    }
-
-    let inv_result = invite::invite(&inviter, Some("acme"), "bob", SystemTime::now()).unwrap();
+    let inv_result = invite::invite(inviter, Some("acme"), "bob", SystemTime::now()).unwrap();
     let parsed = parse_url(&inv_result.url).unwrap();
 
     // Load invitation key. Both the server stub and the joiner's
@@ -546,7 +499,8 @@ fn invite_join_roundtrip_in_process() {
     let inv_pub = *inv_key.public_key();
 
     // Joiner setup
-    let joiner_paths = paths_at(&dir.path().join("joiner"));
+    let joiner_cd = ConfDir::bare();
+    let joiner_paths = joiner_cd.paths();
     let throwaway = keypair::generate();
     let throwaway_pub = *throwaway.public_key();
 
@@ -671,7 +625,7 @@ fn invite_join_roundtrip_in_process() {
                             // Recover the file. (KAT-tested
                             // composition.)
                             let (contents, name, used) = server_receive_cookie(
-                                &inviter,
+                                inviter,
                                 &inv_key,
                                 &cookie,
                                 "alice",
@@ -762,7 +716,7 @@ fn invite_join_roundtrip_in_process() {
                         }
                         Output::Record { record_type: 1, .. } => {
                             // The seam.
-                            let r = finalize_join(&data, &joiner_paths, false).unwrap();
+                            let r = finalize_join(&data, joiner_paths, false).unwrap();
                             joiner_pending.push((1, r.pubkey_b64.clone().into_bytes()));
                             join_result = Some(r);
                         }
@@ -830,7 +784,7 @@ fn invite_join_roundtrip_in_process() {
     // 6. fsck passes on the joiner's confbase. The contract:
     //    join produces a confbase that fsck approves of. If join
     //    ever writes something fsck flags, this fires.
-    let report = crate::cmd::fsck::run(&joiner_paths, false).unwrap();
+    let report = crate::cmd::fsck::run(joiner_paths, false).unwrap();
     assert!(
         report.ok,
         "join should produce fsck-clean confbase: {:?}",

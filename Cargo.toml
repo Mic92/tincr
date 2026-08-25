@@ -19,6 +19,8 @@ rust-version = "1.88"
 # priority = -1: item-level #[allow]s win over the group.
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+# `#[expect]` only: a suppression that stops firing becomes an error.
+allow_attributes = "warn"
 
 # Thin LTO + one codegen unit: cross-crate inlining on the packet
 # path (tincd → tinc-sptps → tinc-crypto). Full LTO is marginal

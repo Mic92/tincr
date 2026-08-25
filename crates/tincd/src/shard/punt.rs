@@ -4,7 +4,7 @@
 //! path by construction, and this keeps the module safe code only.
 //! The worker kicks an eventfd after pushing; control drains on wake.
 
-#![allow(dead_code)] // see worker.rs
+#![cfg_attr(not(test), expect(dead_code))]
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Mutex;
@@ -29,7 +29,7 @@ pub(crate) struct PuntQueue {
 
 struct Inner {
     full: VecDeque<PuntPkt>,
-    #[allow(clippy::vec_box)] // boxes move in/out of PuntPkt without a 2KB copy
+    #[expect(clippy::vec_box)] // boxes move in/out of PuntPkt without a 2KB copy
     free: Vec<Box<[u8; PUNT_SLOT]>>,
     dropped: u64,
 }

@@ -1,4 +1,4 @@
-#![allow(clippy::cast_possible_truncation)] // test packet builders: u8/u16 header field consts
+#![expect(clippy::cast_possible_truncation)] // test packet builders: u8/u16 header field consts
 use super::*;
 
 /// Decode a typical TSO header: `csum_start=20` (IPv4 hdr),

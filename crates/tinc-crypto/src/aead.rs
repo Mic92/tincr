@@ -290,7 +290,7 @@ impl SptpsCipher {
 
 mod gcm {
     // The crate denies unsafe_code; this FFI module is the one opt-out.
-    #![allow(unsafe_code)]
+    #![expect(unsafe_code)]
 
     use super::TAG_LEN;
     use openssl_sys as ffi;

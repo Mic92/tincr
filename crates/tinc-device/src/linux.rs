@@ -7,7 +7,7 @@
 //! the direction. `nix::ioctl_write_ptr_bad!` generates
 //! `unsafe fn(fd, *const T)`, documenting the wrong contract (the
 //! kernel also writes). So we call `libc::ioctl(fd, req, *mut ifreq)`
-//! directly, with a scoped `#[allow(unsafe_code)]` and a SAFETY
+//! directly, with a scoped `#[expect(unsafe_code)]` and a SAFETY
 //! comment stating what the kernel reads/writes/locks.
 //!
 //! # `libc::ifreq` layout
@@ -279,7 +279,6 @@ impl Tun {
 /// # Errors
 /// `InvalidInput` for too-long name. The error message includes
 /// the name and the limit.
-#[allow(clippy::cast_possible_wrap)] // ASCII bytes → c_char (c_char sign is arch-dependent)
 fn pack_ifr_name(iface: Option<&str>) -> io::Result<[libc::c_char; libc::IFNAMSIZ]> {
     let mut buf = [0; libc::IFNAMSIZ];
     let Some(name) = iface else {
@@ -326,7 +325,7 @@ fn pack_ifr_name(iface: Option<&str>) -> io::Result<[libc::c_char; libc::IFNAMSI
 /// are integers, byte arrays, or pointers (the `ifru_data: *mut
 /// c_char` union arm — NULL is valid). All-bits-zero is a valid
 /// representation.
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 fn ifreq_with_name(ifr_name: [libc::c_char; libc::IFNAMSIZ]) -> libc::ifreq {
     // SAFETY: see fn comment.
     let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
@@ -337,7 +336,7 @@ fn ifreq_with_name(ifr_name: [libc::c_char; libc::IFNAMSIZ]) -> libc::ifreq {
 /// The single `libc::ioctl(fd, req, struct ifreq *)` call site.
 /// `TUNSETIFF` and `SIOCGIFHWADDR` both go through here so the
 /// unsafe surface is one audited block, not one per ioctl.
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 fn ioctl_ifreq(fd: BorrowedFd<'_>, req: libc::Ioctl, ifr: &mut libc::ifreq) -> io::Result<()> {
     // SAFETY:
     //   - `fd` borrows an open fd; lifetime tied to the owning
@@ -444,7 +443,7 @@ const TUN_F_CSUM: libc::c_uint = 0x01;
 const TUN_F_TSO4: libc::c_uint = 0x02;
 const TUN_F_TSO6: libc::c_uint = 0x04;
 
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 fn tunsetoffload(fd: BorrowedFd<'_>) -> io::Result<()> {
     let flags = TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6;
     // SAFETY:
@@ -469,7 +468,7 @@ fn tunsetoffload(fd: BorrowedFd<'_>) -> io::Result<()> {
 ///
 /// Uses `ifr_ifru.ifru_hwaddr: sockaddr`. The MAC is in `sa_data
 /// [0..6]` (the rest of `sockaddr` is unused/garbage for hwaddr).
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 fn siocgifhwaddr(fd: BorrowedFd<'_>) -> io::Result<Mac> {
     // The kernel reads NOTHING from this ifreq — `SIOCGIFHWADDR`
     // on a TUN/TAP fd

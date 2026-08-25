@@ -84,7 +84,7 @@ pub(crate) struct RxTarget<'a> {
     /// Carried so the caller can do per-peer accounting later (or so
     /// a stuck-decrypt can `send_req_key` — but that's slow-path, so
     /// in practice this is just for the test asserts today).
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     // cfg-dependent: tests assert routing; shard slow-path will read for `send_req_key`
     pub from_nid: NodeId,
     /// The peer's handles. `rx_open` reads `incipher` (decrypt) and

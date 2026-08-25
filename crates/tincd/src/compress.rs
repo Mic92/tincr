@@ -260,7 +260,7 @@ fn decompress_zlib(src: &[u8], max_len: usize) -> Option<Vec<u8>> {
 /// ILP32 → unsigned long → u32). Rust `usize` is exactly that.
 /// `__lzo_init_v2` runtime-checks these sizeof assumptions and
 /// returns non-zero on mismatch; `ensure_init` asserts on it.
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 mod lzo {
     use std::ffi::{c_int, c_long, c_short, c_uint};
     use std::mem::size_of;

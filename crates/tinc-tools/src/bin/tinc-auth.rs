@@ -497,7 +497,7 @@ fn main() -> ExitCode {
         // SAFETY: socket activation contract. `LISTEN_PID` matched
         // our pid, so we were exec'd by systemd and fd 3 is ours
         // alone. We claim it exactly once.
-        #[allow(unsafe_code)]
+        #[expect(unsafe_code)]
         let owned = unsafe { OwnedFd::from_raw_fd(SD_LISTEN_FDS_START) };
         Some(UnixListener::from(owned))
     } else if let Some(path) = &args.listen_socket {

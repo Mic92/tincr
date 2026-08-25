@@ -114,7 +114,7 @@ pub(crate) fn get_int_sockopt(
     // SAFETY: fd is borrowed; val/len are stack locals the kernel
     // writes through for the duration of the call.
     // truncation: size_of::<c_int>() == 4, fits socklen_t.
-    #[allow(unsafe_code, clippy::cast_possible_truncation)]
+    #[expect(unsafe_code, clippy::cast_possible_truncation)]
     let rc = unsafe {
         let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
         libc::getsockopt(
@@ -180,7 +180,7 @@ pub(crate) struct Listener {
     /// (vs `ListenAddress` or the implicit wildcard). Consumed by
     /// outgoing-connect to pick a source address; only read from tests
     /// today.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub bindto: bool,
     /// TCP listener, accepting peer conns. `Socket` owns the fd; Drop
     /// closes.
@@ -345,7 +345,7 @@ pub(crate) fn adopt_listeners_from(
             // other code in this process will use these fds (we're
             // the first and only consumer; main.rs read LISTEN_FDS
             // and unset it before calling us).
-            #[allow(unsafe_code)]
+            #[expect(unsafe_code)]
             unsafe {
                 OwnedFd::from_raw_fd(tcp_fd)
             }

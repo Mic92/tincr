@@ -1,5 +1,9 @@
 //! Fixtures shared by the `sptps` and `vs_c` test binaries.
 
+#![allow(
+    clippy::allow_attributes,
+    reason = "shared by several test binaries, each uses a subset"
+)]
 #![allow(dead_code)]
 
 use rand_core::{Infallible, TryCryptoRng, TryRng};

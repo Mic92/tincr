@@ -6,8 +6,6 @@
 //! `Arc<TunnelHandles>` inside it.
 
 #![cfg(target_os = "linux")]
-// Wired into setup in the next commit; see bpf/mod.rs for the same staging.
-#![allow(dead_code)]
 
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};

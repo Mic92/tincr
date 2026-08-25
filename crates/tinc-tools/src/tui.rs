@@ -89,7 +89,7 @@ pub(crate) struct Winsize {
 /// is variadic at the C level — `nix` can't prove the third arg
 /// type matches the request. The macro is the safe-usage pattern;
 /// the `unsafe` is the FFI calling convention, not the logic.
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 #[must_use]
 pub(crate) fn winsize() -> Winsize {
     // Macro generates `unsafe fn tiocgwinsz(fd, *mut winsize)`.

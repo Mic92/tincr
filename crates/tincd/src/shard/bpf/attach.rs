@@ -34,7 +34,7 @@ pub const TUNSETSTEERINGEBPF: libc::c_ulong = 0x8004_54e0;
 ///
 /// `prog_fd = -1` on a TUN with no prog attached: succeeds (kernel
 /// `__tun_set_ebpf(NULL)` is idempotent).
-#[allow(unsafe_code)]
+#[expect(unsafe_code)]
 pub fn tunsetsteeringebpf(tun_fd: BorrowedFd<'_>, prog_fd: i32) -> io::Result<()> {
     let mut prog_fd = prog_fd; // kernel reads via copy_from_user
     // SAFETY: TUNSETSTEERINGEBPF takes `int *` (4 bytes); kernel

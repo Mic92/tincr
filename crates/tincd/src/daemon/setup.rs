@@ -165,7 +165,7 @@ type ShardTuns = Vec<Box<dyn Device + Send>>;
 
 #[cfg_attr(
     not(any(target_os = "linux", target_os = "android")),
-    allow(unused_variables)
+    expect(unused_variables)
 )]
 fn open_device(
     config: &tinc_conf::Config,
@@ -211,7 +211,7 @@ fn open_device(
                 // SAFETY: the parent dup2'd an open tun fd to this
                 // number before exec. Wrapping now means later `?`
                 // closes it instead of leaking the bare int.
-                #[allow(unsafe_code)]
+                #[expect(unsafe_code)]
                 let fd = unsafe { OwnedFd::from_raw_fd(raw) };
                 tinc_device::FdTun::open(tinc_device::FdSource::Inherited(fd))
                     .map_err(|e| SetupError::io(format!("open inherited device fd {raw}"), e))?
@@ -559,7 +559,7 @@ fn register_signals(
     // can install an arbitrary fn pointer; `SigIgn` carries none, so
     // there is no async-signal-safety concern. We are still single-
     // threaded at setup (called before the event loop runs).
-    #[allow(unsafe_code)]
+    #[expect(unsafe_code)]
     unsafe {
         use nix::sys::signal::{SigHandler, Signal, signal};
         let _ = signal(Signal::SIGUSR1, SigHandler::SigIgn);
@@ -658,7 +658,7 @@ impl Daemon {
         // device
         let (device, shard_tuns) = open_device(&config, n_shards, settings.shards.is_some())?;
         // open_device may have fallen back to a single queue.
-        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+        #[cfg_attr(not(target_os = "linux"), expect(unused_variables))]
         let n_shards = if shard_tuns.is_empty() {
             1
         } else {
@@ -1264,7 +1264,7 @@ mod tests {
         // `Name = $FOO` → getenv("FOO"). Non-alnum sanitized to `_`.
         // SAFETY: nextest runs each test in its own process by
         // default, so no concurrent env readers.
-        #[allow(unsafe_code)]
+        #[expect(unsafe_code)]
         unsafe {
             std::env::set_var("TINC_TEST_NAME_PLAIN", "alpha42");
             std::env::set_var("TINC_TEST_NAME_DOTTED", "host.local");

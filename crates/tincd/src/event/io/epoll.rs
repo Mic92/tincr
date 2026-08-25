@@ -9,7 +9,7 @@ use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::time::Duration;
 
-#[allow(deprecated)] // epoll_ctl(RawFd) — see `epoll_ctl_raw` below.
+#[expect(deprecated)] // epoll_ctl(RawFd) — see `epoll_ctl_raw` below.
 use nix::sys::epoll::epoll_ctl;
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollOp, EpollTimeout};
 
@@ -49,7 +49,7 @@ pub(super) fn add(ep: &Poller, fd: BorrowedFd<'_>, token: usize, i: super::Io) -
 /// tripwire in `EventLoop::del` catches it), not a soundness hole
 /// in this crate. So use nix's deprecated free-function `epoll_ctl`,
 /// which still takes `RawFd` and keeps the `unsafe` inside nix.
-#[allow(deprecated)]
+#[expect(deprecated)]
 fn epoll_ctl_raw(
     ep: &Poller,
     op: EpollOp,

@@ -76,7 +76,7 @@ fn enter_bwrap_with_miniupnpd(test_name: &str) -> Option<String> {
             return None;
         }
         // SAFETY: nextest runs one test per process.
-        #[allow(unsafe_code)]
+        #[expect(unsafe_code)]
         unsafe {
             std::env::set_var("MINIUPNPD_BIN", bin);
         }
