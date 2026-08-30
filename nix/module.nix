@@ -319,6 +319,8 @@ let
       serviceConfig = {
         Type = "notify";
         NotifyAccess = "main";
+        # tincd dials out. Do not let switch-to-configuration leave it to the socket.
+        X-NotSocketActivated = true;
         ExecStart = "${pkg}/bin/tincd -D -n ${netName} --pidfile=${pidfile}";
         ExecReload = "${pkg}/bin/tinc -n ${netName} reload";
         PIDFile = pidfile;
