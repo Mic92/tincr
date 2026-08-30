@@ -45,7 +45,7 @@ debug = true
 [workspace.dependencies]
 # Test-only (tinc-sptps vs_c.rs BridgeRng): `ChaCha20Legacy` matches
 # csrc/shim.c's keystream. The hot-path AEAD is OpenSSL (tinc-crypto).
-chacha20 = "0.9"
+chacha20 = "0.10"
 openssl-sys = "0.9"
 # digest-0.11 cohort: one dalek/sha2/digest version workspace-wide.
 # KATs pin the wire bytes across the 2→3-pre bump.
