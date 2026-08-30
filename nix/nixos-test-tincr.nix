@@ -67,7 +67,13 @@ testers.runNixOSTest {
   name = "tincr-module";
 
   nodes = {
-    alpha = mkNode "alpha" "10.21.0.1" { connectTo = [ "beta" ]; };
+    alpha = {
+      imports = [ (mkNode "alpha" "10.21.0.1" { connectTo = [ "beta" ]; }) ];
+      # Only the service unit changes, the socket stays identical.
+      specialisation.svcchange.configuration = {
+        services.tincr.networks.mesh.extraConfig = "PingInterval = 59";
+      };
+    };
     beta = mkNode "beta" "10.21.0.2" { };
   };
 
@@ -144,6 +150,17 @@ testers.runNixOSTest {
 
         # PTR not asserted. resolved's mDNS responder answers first.
         # PTR is unit-tested in crates/tincd/src/dns.rs.
+
+    with subtest("switch-to-configuration restarts the service itself"):
+        # Peers may reconnect and socket-activate alpha, so assert on what
+        # s-t-c decided rather than on is-active.
+        out = alpha.succeed(
+            "/run/current-system/specialisation/svcchange/bin/switch-to-configuration test 2>&1"
+        )
+        started = [l for l in out.splitlines() if l.startswith(("starting", "restarting"))]
+        assert any("tincr-mesh.service" in l for l in started), out
+        alpha.wait_until_succeeds("systemctl is-active tincr-mesh.service", timeout=30)
+        alpha.wait_until_succeeds("ping -c1 -W2 10.21.0.2", timeout=30)
 
     with subtest("clean stop"):
         alpha.systemctl("stop tincr-mesh.service")
