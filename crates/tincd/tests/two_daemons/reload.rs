@@ -7,9 +7,11 @@ use super::common::{
 };
 use std::fmt::Write;
 use std::fs;
+use std::path::PathBuf;
 use std::thread;
 use tinc_crypto::invite::{build_slug, cookie_filename};
 use tinc_crypto::sign::SigningKey;
+use tinc_tools::names::{Paths, PathsInput};
 
 /// Rewrite `hosts/SELF` with `subnets` and SIGHUP. The sleep is for
 /// the reload's `mtime > last_check` comparison at second granularity.
@@ -52,15 +54,9 @@ fn sighup_subnet_changes_reach_peer() {
     wait_for_subnets(&mut bob_ctl, "alice", &["10.0.0.0/24"], &["10.1.0.0/24"]);
 }
 
-/// Real `tinc join` (in-process tinc-tools) against a real daemon:
-/// invitation handshake, file transfer, key exchange, and single use.
-#[test]
-fn tinc_join_consumes_invitation() {
-    let tmp = tmp!("join");
-    let mut alice = Node::new(tmp.path(), "alice", 0xAA);
-    alice.write_config_multi(&[], &[]);
-    alice.start();
-
+/// Plant an invitation for bob on a running `alice` and return
+/// `(url, invitation_file)`.
+fn invite_bob(alice: &Node) -> (String, PathBuf) {
     let invitations = alice.confbase.join("invitations");
     fs::create_dir_all(&invitations).unwrap();
     let invitation_key = SigningKey::from_seed(&[0x11; 32]);
@@ -80,18 +76,31 @@ fn tinc_join_consumes_invitation() {
     .unwrap();
     // The daemon loads the invitation key at startup/reload only.
     assert_eq!(alice.ctl().reload(), 0);
-
     let url = format!(
         "127.0.0.1:{}/{}",
         alice.port,
         build_slug(invitation_key.public_key(), &cookie)
     );
-    let paths_for = |dir: &str| {
-        tinc_tools::names::Paths::for_cli(&tinc_tools::names::PathsInput {
-            confbase: Some(tmp.path().join(dir)),
-            ..Default::default()
-        })
-    };
+    (url, invitation_file)
+}
+
+fn cli_paths(confbase: PathBuf) -> Paths {
+    Paths::for_cli(&PathsInput {
+        confbase: Some(confbase),
+        ..Default::default()
+    })
+}
+
+/// Real `tinc join` (in-process tinc-tools) against a real daemon. Covers
+/// the invitation handshake, file transfer, key exchange and single use.
+#[test]
+fn tinc_join_consumes_invitation() {
+    let tmp = tmp!("join");
+    let mut alice = Node::new(tmp.path(), "alice", 0xAA);
+    alice.write_config_multi(&[], &[]);
+    alice.start();
+    let (url, invitation_file) = invite_bob(&alice);
+    let paths_for = |dir: &str| cli_paths(tmp.path().join(dir));
 
     if let Err(err) = tinc_tools::cmd::join::join(&url, &paths_for("bob"), false) {
         panic!("join: {err:?}\nalice:\n{}", alice.stop());
