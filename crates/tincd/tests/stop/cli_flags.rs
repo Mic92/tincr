@@ -2,8 +2,8 @@ use std::ffi::OsStr;
 use std::process::{Command, Output, Stdio};
 
 use super::common::{
-    ChildWithLog, Node, read_cookie, read_tcp_addr, tincd_at, tincd_bin, tincd_cmd, wait_for_file,
-    write_ed25519_privkey,
+    ChildWithLog, Node, SETTLE, poll_until, read_cookie, read_tcp_addr, tincd_at, tincd_bin,
+    tincd_cmd, write_ed25519_privkey,
 };
 use super::testnode;
 use std::fs;
@@ -244,8 +244,11 @@ fn mlock_flag_locks_or_fails_loudly() {
         .spawn()
         .unwrap();
     let mut child = ChildWithLog::spawn(child);
-    let started = wait_for_file(&node.socket);
-    let exited = child.child.try_wait().unwrap();
+    let exited = poll_until(SETTLE, || match child.child.try_wait().unwrap() {
+        Some(st) => Some(Some(st)),
+        None => node.socket.exists().then_some(None),
+    });
+    let started = exited.is_none();
     let log = child.kill_and_log();
     if started {
         assert!(!log.contains("unknown argument"), "{log}");
