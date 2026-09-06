@@ -484,7 +484,7 @@ pub fn run(
     )?;
 
     let target = match &intent.node {
-        Some(node) => paths.hosts_dir().join(node),
+        Some(node) => paths.host_dirs().file(node),
         None => paths.tinc_conf(),
     };
 
