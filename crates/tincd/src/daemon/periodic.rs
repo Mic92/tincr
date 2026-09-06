@@ -576,14 +576,15 @@ impl Daemon {
     /// not reloadable: Port, `AddressFamily`, `DeviceType` (need re-bind/
     /// re-open). Not-yet: Compression, Forwarding.
     pub(super) fn reload_configuration(&mut self) -> bool {
-        let config = match setup::read_daemon_config(&self.confbase, &self.cmdline_conf) {
-            Ok((c, ..)) => c,
-            Err(e) => {
-                log::error!(target: "tincd",
+        let (config, new_hosts) =
+            match setup::read_daemon_config(&self.confbase, &self.cmdline_conf) {
+                Ok((c, _, h)) => (c, h),
+                Err(e) => {
+                    log::error!(target: "tincd",
                             "Unable to reread configuration file: {e}");
-                return false;
-            }
-        };
+                    return false;
+                }
+            };
 
         // Warn about edits to keys that need a full restart, so an
         // operator who changed Port= and ran `tinc reload` is told
@@ -616,6 +617,10 @@ impl Daemon {
                 && iface != self.iface
             {
                 warn("Interface");
+            }
+            // The sandbox grant was computed at startup.
+            if new_hosts.overlay() != self.hosts.overlay() {
+                warn("HostsOverlayDirectory");
             }
             // BindToAddress / ListenAddress / Device / DeviceType /
             // Mode / key paths are also restart-only but have no

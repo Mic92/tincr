@@ -10,6 +10,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::Config;
 use crate::name::check_id;
 
 #[derive(Debug, Clone)]
@@ -21,10 +22,21 @@ pub struct HostDirs {
 impl HostDirs {
     #[must_use]
     pub fn new(confbase: &Path, overlay: Option<PathBuf>) -> Self {
-        Self {
-            primary: confbase.join("hosts"),
-            overlay,
-        }
+        let primary = confbase.join("hosts");
+        // An overlay that is `hosts/` itself would list every node twice.
+        let overlay = overlay.filter(|o| !o.components().eq(primary.components()));
+        Self { primary, overlay }
+    }
+
+    /// Reads `HostsOverlayDirectory` from the merged config. A relative
+    /// path is taken against confbase.
+    #[must_use]
+    pub fn from_config(confbase: &Path, config: &Config) -> Self {
+        let overlay = config
+            .lookup("HostsOverlayDirectory")
+            .next()
+            .map(|e| confbase.join(e.get_str()));
+        Self::new(confbase, overlay)
     }
 
     /// Path to read `name` from. Prefers `hosts/`, then the overlay. When
@@ -136,6 +148,18 @@ mod tests {
         fs::write(&file, "").unwrap();
         let d = HostDirs::new(tmp.path(), Some(file));
         assert!(d.names().is_err());
+    }
+    /// Pointing the overlay at `hosts/` itself is a no-op, not a second
+    /// scan of the same directory.
+    #[test]
+    fn overlay_equal_to_primary_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        for v in ["hosts", "hosts/", "./hosts"] {
+            let f = tmp.path().join("tinc.conf");
+            fs::write(&f, format!("HostsOverlayDirectory = {v}\n")).unwrap();
+            let d = HostDirs::from_config(tmp.path(), &Config::read(&f).unwrap());
+            assert!(d.overlay().is_none(), "{v}");
+        }
     }
 
     #[test]

@@ -7,6 +7,7 @@ use super::common::{
 };
 use std::fmt::Write;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::thread;
 use tinc_crypto::invite::{build_slug, cookie_filename};
@@ -132,6 +133,59 @@ fn tinc_join_consumes_invitation() {
         tinc_tools::cmd::join::join(&url, &paths_for("bob2"), false).is_err(),
         "invitation reused"
     );
+}
+
+/// With `HostsOverlayDirectory` set, the invited node's key is written to
+/// the overlay rather than the deploy-managed `hosts/`, and the daemon
+/// then authenticates bob from there.
+#[test]
+fn join_with_overlay_writes_there_and_peer_connects() {
+    let tmp = tmp!("joinov");
+    let mut alice =
+        Node::new(tmp.path(), "alice", 0xAA).with_conf("HostsOverlayDirectory = hosts.local\n");
+    alice.write_config_multi(&[], &[]);
+    // The hook must learn where the file went. It cannot assume hosts/$NODE.
+    let hook = alice.confbase.join("invitation-accepted");
+    let hook_out = alice.confbase.join("hook.out");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\necho \"$NODE $HOST_FILE\" > '{}'\n",
+            hook_out.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    alice.start();
+    let (url, _) = invite_bob(&alice);
+
+    let bob_confbase = tmp.path().join("bob");
+    if let Err(err) = tinc_tools::cmd::join::join(&url, &cli_paths(bob_confbase.clone()), false) {
+        panic!("join: {err:?}\nalice:\n{}", alice.stop());
+    }
+    let overlay_bob = alice.confbase.join("hosts.local/bob");
+    assert!(wait_for_file(&overlay_bob));
+    assert!(!alice.confbase.join("hosts/bob").exists());
+    assert!(wait_for_file(&hook_out));
+    assert_eq!(
+        fs::read_to_string(&hook_out).unwrap().trim(),
+        format!("bob {}", overlay_bob.display())
+    );
+
+    // bob dials alice with the joined config. His key exists only in
+    // alice's overlay.
+    let append = |p: &str, s: &str| {
+        let p = bob_confbase.join(p);
+        fs::write(&p, fs::read_to_string(&p).unwrap() + s).unwrap();
+    };
+    append(
+        "tinc.conf",
+        "DeviceType = dummy\nAddressFamily = ipv4\nPingTimeout = 1\n",
+    );
+    append("hosts/bob", "Port = 0\n");
+    let mut bob = Node::new(tmp.path(), "bob", 0xBB);
+    bob.start();
+    alice.wait_for_peer("bob", true, Duration::from_secs(10));
 }
 
 /// Android bundle update: rename-swap `hosts/` and reload over the

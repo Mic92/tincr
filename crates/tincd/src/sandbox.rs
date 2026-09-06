@@ -134,6 +134,9 @@ pub struct Paths {
     /// Unix control socket path. `rwc`. Already bound but
     /// `ControlSocket::Drop` unlinks it.
     pub unixsocket: PathBuf,
+    /// `HostsOverlayDirectory`. Accepted invitations are written here, so
+    /// it gets `rwc` but never exec.
+    pub hosts_overlay: Option<PathBuf>,
 }
 
 /// Process-global sandbox state. `enter()` writes once; `can()`
@@ -265,6 +268,9 @@ fn discover_paths(level: Level, paths: &Paths) -> SandboxPaths {
     }
     if let Some(dev) = &paths.device {
         rwc.push(dev.clone());
+    }
+    if let Some(o) = &paths.hosts_overlay {
+        rwc.push(o.clone());
     }
 
     let mut runtime_files: Vec<PathBuf> = vec![paths.pidfile.clone(), paths.unixsocket.clone()];
@@ -466,6 +472,7 @@ mod tests {
             logfile: Some(PathBuf::from("/var/log/tinc.log")),
             pidfile: PathBuf::from("/run/tinc.pid"),
             unixsocket: PathBuf::from("/run/tinc.sock"),
+            hosts_overlay: None,
         };
         let p = discover_paths(Level::Normal, &paths);
         assert_eq!(p.confbase, PathBuf::from("/etc/tinc/net"));
@@ -496,6 +503,7 @@ mod tests {
             logfile: None,
             pidfile: PathBuf::from("/run/p"),
             unixsocket: PathBuf::from("/run/s"),
+            hosts_overlay: None,
         };
         let p = discover_paths(Level::High, &paths);
         assert!(p.scripts.is_empty());

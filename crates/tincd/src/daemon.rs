@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::inthash::IntHashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::event::{EventLoop, Ready, SelfPipe, TimerId, Timers};
@@ -266,7 +266,7 @@ pub struct Daemon {
     /// Kept so `id_h` peer-branch can resolve `hosts/NAME` paths.
     /// Stored once here, borrowed into each `IdCtx`.
     pub(crate) confbase: PathBuf,
-    /// Where host files are read from and written to.
+    /// `hosts/` plus `HostsOverlayDirectory`. Not reloadable.
     pub(crate) hosts: HostDirs,
     /// `-o` overrides, re-merged on reload.
     pub(crate) cmdline_conf: tinc_conf::Config,
@@ -624,6 +624,12 @@ impl Daemon {
 }
 
 impl Daemon {
+    /// For the sandbox allow-list, which is built after setup.
+    #[must_use]
+    pub fn hosts_overlay(&self) -> Option<&Path> {
+        self.hosts.overlay()
+    }
+
     /// Node name for logging. tincd never calls `Graph::del_node`
     /// (only `del_edge`; nodes accumulate monotonically), so any
     /// `NodeId` obtained from `node_ids`, `id6_table`, `last_routes`,

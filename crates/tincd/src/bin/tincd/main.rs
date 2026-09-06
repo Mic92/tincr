@@ -26,6 +26,7 @@ use procsetup::{
 use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use std::panic::AssertUnwindSafe;
+use std::path::Path;
 use std::process::ExitCode;
 use std::{env, panic, process};
 use tincd::{Daemon, RunOutcome, sandbox, sd_notify};
@@ -207,6 +208,7 @@ fn main() -> ExitCode {
         logfile: args.logfile.clone(),
         pidfile: args.pidfile.clone(),
         unixsocket: args.socket.clone(),
+        hosts_overlay: daemon.hosts_overlay().map(Path::to_path_buf),
     };
     if let Err(e) = sandbox::enter(sandbox_level, &sandbox_paths, args.do_chroot) {
         log::error!(target: "tincd", "{e}");

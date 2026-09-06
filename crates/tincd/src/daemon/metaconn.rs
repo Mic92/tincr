@@ -5,6 +5,7 @@ use super::{ConnId, Daemon};
 use std::io;
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, OwnedFd};
+use std::path::Path;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -973,12 +974,17 @@ impl Daemon {
                                 return needs_write;
                             };
 
-                            match invitation_serve::finalize(&self.hosts, &name, pubkey_b64) {
+                            let host_path = match invitation_serve::finalize(
+                                &self.hosts,
+                                &name,
+                                pubkey_b64,
+                            ) {
                                 Ok(host_path) => {
                                     log::info!(target: "tincd::auth",
                                                 "Key successfully received from {name} ({hostname}), \
                                                  wrote {}",
                                                 host_path.display());
+                                    host_path
                                 }
                                 Err(e) => {
                                     log::error!(target: "tincd::auth",
@@ -986,7 +992,7 @@ impl Daemon {
                                     self.terminate(id);
                                     return needs_write;
                                 }
-                            }
+                            };
 
                             // Write addr cache. Our cache is per-
                             // Outgoing not per-Node, but write the
@@ -1002,7 +1008,7 @@ impl Daemon {
                                 cache.disarm();
                             }
 
-                            self.run_invitation_accepted_script(&name, conn_addr);
+                            self.run_invitation_accepted_script(&name, &host_path, conn_addr);
 
                             // empty type-2 = ACK; joiner closes after
                             // reading it.
@@ -1033,9 +1039,16 @@ impl Daemon {
         needs_write
     }
 
-    pub(super) fn run_invitation_accepted_script(&self, node: &str, addr: Option<SocketAddr>) {
+    pub(super) fn run_invitation_accepted_script(
+        &self,
+        node: &str,
+        host_file: &Path,
+        addr: Option<SocketAddr>,
+    ) {
         let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
         env.add("NODE", node.to_owned());
+        // With HostsOverlayDirectory the file is not at hosts/$NODE.
+        env.add("HOST_FILE", host_file.display().to_string());
         if let Some(a) = addr {
             env.add("REMOTEADDRESS", a.ip().to_string());
             env.add("REMOTEPORT", a.port().to_string());
