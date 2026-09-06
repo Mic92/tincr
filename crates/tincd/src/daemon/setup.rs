@@ -21,6 +21,7 @@ use std::time::{Duration, SystemTime};
 use crate::event::{EventLoop, Io, SelfPipe, TimerId, Timers};
 use crate::graph::Graph;
 use slotmap::SlotMap;
+use tinc_conf::HostDirs;
 use tinc_crypto::sign::SigningKey;
 use tinc_device::{Device, DeviceArena, GroBucket};
 use tinc_proto::Subnet;
@@ -75,7 +76,6 @@ use crate::shard::TxSnapshot;
 use crate::shard::runtime;
 use crate::tunnel::MTU;
 use std::env;
-use std::fs;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
@@ -393,11 +393,12 @@ fn register_listeners(
 /// extension. Off (returns `Ok(None)`) unless both are set.
 /// `Alias =` lines from hosts/ files, lowercased. Node names win over
 /// aliases. A duplicate alias goes to the first host in sorted order.
-/// tinc.conf + `-o` overrides + hosts/NAME, and the expanded name.
+/// Merged tinc.conf, `-o` overrides and hosts/NAME, plus the expanded name
+/// and the host dirs, which are needed to locate hosts/NAME at all.
 pub(super) fn read_daemon_config(
     confbase: &Path,
     cmdline_conf: &tinc_conf::Config,
-) -> Result<(tinc_conf::Config, String), SetupError> {
+) -> Result<(tinc_conf::Config, String, HostDirs), SetupError> {
     let mut config =
         tinc_conf::read_server_config(confbase).map_err(|e| SetupError::Config(format!("{e}")))?;
     config.merge(cmdline_conf.entries().iter().cloned());
@@ -407,25 +408,20 @@ pub(super) fn read_daemon_config(
         .map(tinc_conf::Entry::get_str)
         .ok_or_else(|| SetupError::Config("Name for tinc daemon required!".into()))?;
     let name = expand_name(name).map_err(SetupError::Config)?;
-    let host = keys::read_host_config(confbase, &name);
+    let hosts = HostDirs::new(confbase, None);
+    let host = keys::read_host_config(&hosts, &name);
     if host.entries().is_empty() {
         log::warn!(target: "tincd", "hosts/{name} empty or unreadable, using defaults");
     }
     config.merge(host.entries().iter().cloned());
-    Ok((config, name))
+    Ok((config, name, hosts))
 }
 
-pub(super) fn load_aliases(confbase: &Path) -> HashMap<String, String> {
-    let mut nodes: Vec<String> = fs::read_dir(confbase.join("hosts"))
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok()?.file_name().into_string().ok())
-        .filter(|n| tinc_proto::check_id(n))
-        .collect();
-    nodes.sort();
+pub(super) fn load_aliases(hosts: &HostDirs) -> HashMap<String, String> {
+    let nodes = hosts.names().unwrap_or_default();
     let mut aliases = HashMap::new();
     for node in &nodes {
-        for e in keys::read_host_config(confbase, node).lookup("Alias") {
+        for e in keys::read_host_config(hosts, node).lookup("Alias") {
             let alias = e.value.trim_matches('.').to_ascii_lowercase();
             let problem = if alias.is_empty() || alias.contains('.') {
                 "invalid"
@@ -449,7 +445,7 @@ pub(super) fn load_aliases(confbase: &Path) -> HashMap<String, String> {
 
 fn load_dns_config(
     config: &tinc_conf::Config,
-    confbase: &Path,
+    hosts: &HostDirs,
 ) -> Result<Option<DnsConfig>, SetupError> {
     let mut a4 = None;
     let mut a6 = None;
@@ -478,7 +474,7 @@ fn load_dns_config(
                          .chain(a6.map(|a| a.to_string()))
                          .collect::<Vec<_>>()
                          .join(" + "));
-            let aliases = load_aliases(confbase);
+            let aliases = load_aliases(hosts);
             if !aliases.is_empty() {
                 log::info!(target: "tincd::dns", "{} aliases loaded", aliases.len());
             }
@@ -732,7 +728,7 @@ impl Daemon {
         cmdline_conf: &tinc_conf::Config,
         socket_activation: Option<usize>,
     ) -> Result<Self, SetupError> {
-        let (config, name) = read_daemon_config(confbase, cmdline_conf)?;
+        let (config, name, hosts) = read_daemon_config(confbase, cmdline_conf)?;
         log::info!(target: "tincd", "tincd starting, name={name}");
         let mykey = load_private_key(&config, confbase)?;
         warn_unknown_vars(&config);
@@ -852,7 +848,7 @@ impl Daemon {
         // `DNSAddress=` and `DNSSuffix=` are set. The magic IP must
         // also be added to the TUN in `tinc-up`. `DNSAddress` can be
         // repeated for v4+v6.
-        let dns = load_dns_config(&config, confbase)?;
+        let dns = load_dns_config(&config, &hosts)?;
 
         // BroadcastSubnet
         add_broadcast_subnets(&mut subnets, &config);
@@ -889,6 +885,7 @@ impl Daemon {
             name,
             mykey,
             confbase: confbase.to_path_buf(),
+            hosts,
             cmdline_conf: cmdline_conf.clone(),
             myself_options: myself_options_from_config(&config),
             my_udp_port,
@@ -1004,7 +1001,7 @@ impl Daemon {
     /// an `ADD_EDGE` arriving via another path can find it.
     fn add_config_outgoing(&mut self, peer: String) {
         self.lookup_or_add_node(&peer);
-        let config_addrs = resolve_config_addrs(&self.confbase, &peer);
+        let config_addrs = resolve_config_addrs(&self.hosts, &peer);
         let addr_cache = AddressCache::open(&self.confbase, &peer, config_addrs);
         let oid = self.outgoings.insert(Outgoing {
             node_name: peer,
@@ -1120,7 +1117,7 @@ mod tests {
         .unwrap();
         fs::write(hosts.join("bob"), "Alias = db\nAlias = mail\n").unwrap();
 
-        let a = load_aliases(dir.path());
+        let a = load_aliases(&HostDirs::new(dir.path(), None));
         // node name wins, duplicate goes to sorted-first alice
         assert_eq!(a.get("web").unwrap(), "alice");
         assert_eq!(a.get("db").unwrap(), "alice");

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::event::{EventLoop, Ready, SelfPipe, TimerId, Timers};
 use crate::graph::{EdgeId, Graph, NodeId, Route};
 use slotmap::SlotMap;
+use tinc_conf::HostDirs;
 use tinc_crypto::sign::SigningKey;
 use tinc_device::Device;
 use tinc_proto::AddrStr;
@@ -265,6 +266,8 @@ pub struct Daemon {
     /// Kept so `id_h` peer-branch can resolve `hosts/NAME` paths.
     /// Stored once here, borrowed into each `IdCtx`.
     pub(crate) confbase: PathBuf,
+    /// Where host files are read from and written to.
+    pub(crate) hosts: HostDirs,
     /// `-o` overrides, re-merged on reload.
     pub(crate) cmdline_conf: tinc_conf::Config,
 

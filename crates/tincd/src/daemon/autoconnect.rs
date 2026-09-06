@@ -11,7 +11,6 @@ use crate::addrcache::AddressCache;
 use crate::autoconnect::{self, AutoAction, NodeSnapshot, OutgoingSnapshot, ShortcutKnobs};
 use crate::keys;
 use crate::outgoing::{OutOrigin, Outgoing, OutgoingId, resolve_config_addrs};
-use std::fs;
 use tinc_crypto::os_rng;
 
 impl Daemon {
@@ -21,12 +20,10 @@ impl Daemon {
     /// `Subnet=` lines are preloaded so `on_add_subnet`'s lookup-first gate finds
     /// them (cold start only; a reload doesn't diff the authorised set yet).
     pub(super) fn load_all_nodes(&mut self) {
-        let hosts_dir = self.confbase.join("hosts");
-        let dir = match fs::read_dir(&hosts_dir) {
-            Ok(d) => d,
+        let names = match self.hosts.names() {
+            Ok(n) => n,
             Err(e) => {
-                log::error!(target: "tincd",
-                            "Could not open {}: {e}", hosts_dir.display());
+                log::error!(target: "tincd", "Could not read host directories: {e}");
                 return;
             }
         };
@@ -37,18 +34,10 @@ impl Daemon {
         // backoff).
         self.has_address.clear();
 
-        for ent in dir.flatten() {
-            let Some(fname) = ent.file_name().to_str().map(str::to_owned) else {
-                continue; // non-UTF-8 filename — can't be a node name
-            };
-            // also filters `.` `..` and swap files.
-            if !tinc_proto::check_id(&fname) {
-                continue;
-            }
-
+        for fname in names {
             self.lookup_or_add_node(&fname);
 
-            let cfg = keys::read_host_config(&self.confbase, &fname);
+            let cfg = keys::read_host_config(&self.hosts, &fname);
 
             if cfg.lookup("Address").next().is_some() {
                 self.has_address.insert(fname.clone());
@@ -205,7 +194,7 @@ impl Daemon {
                                "Autoconnecting to {name}");
                 }
                 self.lookup_or_add_node(&name);
-                let config_addrs = resolve_config_addrs(&self.confbase, &name);
+                let config_addrs = resolve_config_addrs(&self.hosts, &name);
                 let addr_cache = AddressCache::open(&self.confbase, &name, config_addrs);
                 let oid = self.outgoings.insert(Outgoing {
                     node_name: name,

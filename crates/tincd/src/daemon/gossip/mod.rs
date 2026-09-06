@@ -63,8 +63,8 @@ impl Daemon {
         &self,
         name: &str,
     ) -> Option<([u8; tinc_crypto::sign::PUBLIC_LEN], tinc_sptps::SptpsAead)> {
-        let cfg = hostkeys::read_host_config(&self.confbase, name);
-        let key = hostkeys::read_ecdsa_public_key(&cfg, &self.confbase, name)?;
+        let cfg = hostkeys::read_host_config(&self.hosts, name);
+        let key = hostkeys::read_ecdsa_public_key(&cfg, &self.hosts, name)?;
         let aead = hostkeys::read_sptps_cipher(&cfg, name).unwrap_or(self.settings.sptps_cipher);
         Some((key, aead))
     }
@@ -76,7 +76,7 @@ impl Daemon {
     /// two reads independent means the meta-conn and UDP-tunnel paths
     /// can't drift on which one consults the host file.
     pub(super) fn peer_sptps_kex(&self, name: &str) -> tinc_sptps::SptpsKex {
-        let cfg = hostkeys::read_host_config(&self.confbase, name);
+        let cfg = hostkeys::read_host_config(&self.hosts, name);
         daemon::read_sptps_kex(&cfg, self.settings.sptps_kex).unwrap_or_else(|v| {
             log::warn!(target: "tincd::net",
                            "hosts/{name}: SPTPSKex = {v}: invalid, using {}",

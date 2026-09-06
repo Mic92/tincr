@@ -22,7 +22,7 @@ use std::net::SocketAddr;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
 use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
-use std::path::Path;
+use tinc_conf::HostDirs;
 
 use nix::errno::Errno;
 #[cfg(target_os = "linux")]
@@ -609,13 +609,13 @@ pub(crate) fn do_outgoing_pipe(
 /// [`crate::bgresolve::DnsWorker`] via [`AddressCache::unresolved_hosts`]. A
 /// bad port warns and skips the line.
 #[must_use]
-pub(crate) fn resolve_config_addrs(confbase: &Path, node_name: &str) -> Vec<(String, u16)> {
-    if !confbase.join("hosts").join(node_name).exists() {
+pub(crate) fn resolve_config_addrs(hosts: &HostDirs, node_name: &str) -> Vec<(String, u16)> {
+    if !hosts.file(node_name).exists() {
         log::warn!(target: "tincd::conn",
                    "hosts/{node_name} not readable; no Address config");
         return Vec::new();
     }
-    let cfg = keys::read_host_config(confbase, node_name);
+    let cfg = keys::read_host_config(hosts, node_name);
 
     // A bare `Address` (no port) falls back to the host's `Port`
     // before the 655 default.
@@ -757,7 +757,7 @@ mod tests {
             fs::create_dir_all(tmp.join("hosts")).unwrap();
             fs::write(tmp.join("hosts").join("bob"), body).unwrap();
 
-            let got = resolve_config_addrs(&tmp, "bob");
+            let got = resolve_config_addrs(&HostDirs::new(&tmp, None), "bob");
             let want: Vec<_> = want.iter().map(|(h, p)| (h.to_string(), *p)).collect();
             assert_eq!(got, want, "case {i}: {body:?}");
 
@@ -776,7 +776,7 @@ mod tests {
         fs::create_dir_all(&tmp).unwrap();
         // No hosts/ dir at all.
 
-        let addrs = resolve_config_addrs(&tmp, "bob");
+        let addrs = resolve_config_addrs(&HostDirs::new(&tmp, None), "bob");
         assert!(addrs.is_empty());
 
         let _ = fs::remove_dir_all(&tmp);

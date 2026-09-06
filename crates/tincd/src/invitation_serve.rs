@@ -16,6 +16,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+use tinc_conf::HostDirs;
 
 use tinc_conf::read_pem;
 use tinc_crypto::invite::cookie_filename;
@@ -188,15 +189,15 @@ pub(crate) fn serve_cookie(
     Ok((contents, invited_name, used_path))
 }
 
-/// `finalize_invitation`: type-1 handler.
-/// Writes `hosts/{name}`. Addrcache/script/unlink/type-2 are daemon-side.
+/// Type-1 handler: writes the host file, into the overlay when one is
+/// configured. Addrcache, script, unlink and the type-2 reply are
+/// daemon-side.
 ///
 /// # Errors
-/// - `BadPubkey`: newline = config-injection (**security**).
-/// - `HostFileExists`: don't overwrite (**security**: attacker could
-///   replace a known key). We use `O_CREAT|O_EXCL` (no TOCTOU).
+/// `BadPubkey` on a newline (config injection). `HostFileExists` when the
+/// name exists in either directory, so an invitee cannot replace a key.
 pub(crate) fn finalize(
-    confbase: &Path,
+    hosts: &HostDirs,
     name: &str,
     pubkey_b64: &str,
 ) -> Result<PathBuf, ServeError> {
@@ -210,7 +211,13 @@ pub(crate) fn finalize(
         return Err(ServeError::BadPubkey);
     }
 
-    let host_path = confbase.join("hosts").join(name);
+    if hosts.exists(name) {
+        return Err(ServeError::HostFileExists(hosts.file(name)));
+    }
+    if let Some(o) = hosts.overlay() {
+        fs::create_dir_all(o).map_err(io_err(o))?;
+    }
+    let host_path = hosts.write_path(name);
 
     // :128-134. C: access() then fopen("w") — TOCTOU. We: O_CREAT|O_EXCL.
     let mut f = fs::OpenOptions::new()
@@ -395,7 +402,7 @@ mod tests {
         fs::create_dir_all(tmp.path().join("hosts")).unwrap();
 
         let pk = valid_pubkey_b64();
-        let path = finalize(tmp.path(), "bob", &pk).unwrap();
+        let path = finalize(&HostDirs::new(tmp.path(), None), "bob", &pk).unwrap();
 
         assert_eq!(path, tmp.path().join("hosts").join("bob"));
         let written = fs::read_to_string(&path).unwrap();
@@ -408,7 +415,7 @@ mod tests {
         let tmp = TmpDir::new("fin-newline");
         fs::create_dir_all(tmp.path().join("hosts")).unwrap();
 
-        let err = finalize(tmp.path(), "bob", "evil\nPort = 0").unwrap_err();
+        let err = finalize(&HostDirs::new(tmp.path(), None), "bob", "evil\nPort = 0").unwrap_err();
         assert!(matches!(err, ServeError::BadPubkey));
         assert!(!tmp.path().join("hosts").join("bob").exists());
     }
@@ -424,12 +431,12 @@ mod tests {
         let bad_charset = format!("{}=", &good[..42]);
 
         for bad in [&good[..42], too_long.as_str(), bad_charset.as_str()] {
-            let err = finalize(tmp.path(), "bob", bad).unwrap_err();
+            let err = finalize(&HostDirs::new(tmp.path(), None), "bob", bad).unwrap_err();
             assert!(matches!(err, ServeError::BadPubkey), "{bad:?}: {err:?}");
             assert!(!tmp.path().join("hosts").join("bob").exists());
         }
 
-        finalize(tmp.path(), "bob", &good).unwrap();
+        finalize(&HostDirs::new(tmp.path(), None), "bob", &good).unwrap();
     }
 
     #[test]
@@ -439,10 +446,31 @@ mod tests {
         let host = tmp.path().join("hosts").join("bob");
         fs::write(&host, "Ed25519PublicKey = original\n").unwrap();
 
-        let err = finalize(tmp.path(), "bob", &valid_pubkey_b64()).unwrap_err();
+        let err =
+            finalize(&HostDirs::new(tmp.path(), None), "bob", &valid_pubkey_b64()).unwrap_err();
         assert!(matches!(err, ServeError::HostFileExists(_)));
         let after = fs::read_to_string(&host).unwrap();
         assert_eq!(after, "Ed25519PublicKey = original\n");
+    }
+
+    /// With an overlay, invited hosts land there and a read-only `hosts/`
+    /// is never touched. A node already in `hosts/` still blocks.
+    #[test]
+    fn finalize_writes_overlay() {
+        let tmp = TmpDir::new("fin-overlay");
+        let overlay = tmp.path().join("hosts.local");
+        fs::create_dir_all(tmp.path().join("hosts")).unwrap();
+        fs::create_dir_all(&overlay).unwrap();
+        let dirs = HostDirs::new(tmp.path(), Some(overlay.clone()));
+
+        let path = finalize(&dirs, "bob", &valid_pubkey_b64()).unwrap();
+        assert_eq!(path, overlay.join("bob"));
+        assert!(!tmp.path().join("hosts/bob").exists());
+
+        fs::write(tmp.path().join("hosts/carol"), "").unwrap();
+        let err = finalize(&dirs, "carol", &valid_pubkey_b64()).unwrap_err();
+        assert!(matches!(err, ServeError::HostFileExists(_)));
+        assert!(!overlay.join("carol").exists());
     }
 
     // chunk_file.

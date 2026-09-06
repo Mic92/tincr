@@ -239,7 +239,7 @@ impl Daemon {
             cookie: &self.cookie,
             my_name: &self.name,
             mykey: &self.mykey,
-            confbase: &self.confbase,
+            hosts: &self.hosts,
             invitation_key: self.invitation_key.as_ref(),
             global_pmtu: self.settings.global_pmtu,
             sptps_cipher: self.settings.sptps_cipher,
@@ -973,7 +973,7 @@ impl Daemon {
                                 return needs_write;
                             };
 
-                            match invitation_serve::finalize(&self.confbase, &name, pubkey_b64) {
+                            match invitation_serve::finalize(&self.hosts, &name, pubkey_b64) {
                                 Ok(host_path) => {
                                     log::info!(target: "tincd::auth",
                                                 "Key successfully received from {name} ({hostname}), \

@@ -577,7 +577,7 @@ impl Daemon {
     /// re-open). Not-yet: Compression, Forwarding.
     pub(super) fn reload_configuration(&mut self) -> bool {
         let config = match setup::read_daemon_config(&self.confbase, &self.cmdline_conf) {
-            Ok((c, _)) => c,
+            Ok((c, ..)) => c,
             Err(e) => {
                 log::error!(target: "tincd",
                             "Unable to reread configuration file: {e}");
@@ -626,7 +626,7 @@ impl Daemon {
         apply_reloadable_settings(&config, &mut self.settings);
 
         if let Some(dns) = &mut self.dns {
-            dns.aliases = setup::load_aliases(&self.confbase);
+            dns.aliases = setup::load_aliases(&self.hosts);
         }
 
         // Operator may have run `tinc invite` since boot.
@@ -727,7 +727,7 @@ impl Daemon {
         // Add: same path as setup()
         for peer in to_add {
             self.lookup_or_add_node(&peer);
-            let config_addrs = resolve_config_addrs(&self.confbase, &peer);
+            let config_addrs = resolve_config_addrs(&self.hosts, &peer);
             let addr_cache = AddressCache::open(&self.confbase, &peer, config_addrs);
             let oid = self.outgoings.insert(Outgoing {
                 node_name: peer,
@@ -750,7 +750,7 @@ impl Daemon {
         let host_mtimes: Vec<(String, SystemTime)> = conn_names
             .iter()
             .filter_map(|name| {
-                let path = self.confbase.join("hosts").join(name);
+                let path = self.hosts.file(name);
                 fs::metadata(&path)
                     .and_then(|m| m.modified())
                     .ok()
