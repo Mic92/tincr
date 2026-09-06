@@ -55,9 +55,11 @@ stdenv.mkDerivation (finalAttrs: {
     "assembleDebug"
     "assembleDebugAndroidTest"
   ];
-  doCheck = false;
+  # Renders every screen state on the JVM. The PNGs go to $out/screenshots.
+  doCheck = true;
+  gradleCheckTask = "recordRoborazziDebug";
   # AGP variant matching breaks the generic nixDownloadDeps task.
-  gradleUpdateTask = "assembleDebug assembleDebugAndroidTest";
+  gradleUpdateTask = "assembleDebug assembleDebugAndroidTest recordRoborazziDebug";
 
   env.ANDROID_HOME = android.fullSdkRoot;
 
@@ -67,6 +69,7 @@ stdenv.mkDerivation (finalAttrs: {
       $out/tincr.apk
     install -Dm644 app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk \
       $out/tincr-test.apk
+    cp -r app/build/outputs/roborazzi $out/screenshots
     runHook postInstall
   '';
 })

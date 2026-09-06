@@ -20,6 +20,10 @@ class TincrVpnService : VpnService() {
         private const val TAG = "tincr"
         private const val CHANNEL = "tincr-vpn"
         private const val TUN_SOCKET = "tincr-tun"
+
+        @Volatile
+        var running = false
+            private set
     }
 
     private var tun: ParcelFileDescriptor? = null
@@ -52,6 +56,7 @@ class TincrVpnService : VpnService() {
         // tincd connects to @tincr-tun and receives the tun fd.
         fdServer.serveOnce()
         watchNetwork(config)
+        running = true
     }
 
     // Retry: consent may land just after service start.
@@ -94,6 +99,7 @@ class TincrVpnService : VpnService() {
     }
 
     private fun stopVpn() {
+        running = false
         netCallback?.let {
             getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it)
         }

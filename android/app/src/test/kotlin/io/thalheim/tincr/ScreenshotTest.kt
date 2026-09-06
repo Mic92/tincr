@@ -1,0 +1,67 @@
+package io.thalheim.tincr
+
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onRoot
+import com.github.takahirom.roborazzi.captureRoboImage
+import io.thalheim.tincr.ui.AdvancedScreen
+import io.thalheim.tincr.ui.Device
+import io.thalheim.tincr.ui.HomeState
+import io.thalheim.tincr.ui.Link
+import io.thalheim.tincr.ui.MainScreen
+import io.thalheim.tincr.ui.Notice
+import io.thalheim.tincr.ui.OnboardingScreen
+import io.thalheim.tincr.ui.Tab
+import io.thalheim.tincr.ui.TincrTheme
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
+
+// `gradle recordRoborazziDebug` renders every screen state to
+// build/outputs/roborazzi/*.png. There are no goldens to diff against.
+// The test proves each state composes, and the PNGs are for review.
+@RunWith(RobolectricTestRunner::class)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+@Config(sdk = [35], qualifiers = "w393dp-h852dp-xxhdpi")
+class ScreenshotTest {
+    @get:Rule
+    val compose = createComposeRule()
+
+    private val family = HomeState(
+        network = "Family network",
+        link = Link.Connected,
+        inviter = "Jörg",
+        devices = listOf(
+            Device("Jörg’s server", "Backups & photos", online = true),
+            Device("Mama’s phone", "", online = true, self = true),
+            Device("Papa’s laptop", "Last seen yesterday", online = false),
+            Device("Living room TV", "Media", online = true),
+        ),
+    )
+
+    private fun shot(name: String, content: @Composable () -> Unit) {
+        compose.setContent { TincrTheme { content() } }
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/$name.png")
+    }
+
+    @Composable
+    private fun main(state: HomeState, tab: Tab) =
+        MainScreen(state, tab, onTab = {}, onToggle = {}, onHelpReport = {}, onSettings = {})
+
+    @Test fun onboarding() = shot("1_onboarding") { OnboardingScreen({}, {}) }
+    @Test fun homeConnected() = shot("2_home_connected") { main(family, Tab.Home) }
+    @Test fun homeOff() = shot("2_home_off") { main(family.copy(link = Link.Off), Tab.Home) }
+    @Test fun homeConnecting() = shot("2_home_connecting") { main(family.copy(link = Link.Connecting), Tab.Home) }
+    @Test fun devices() = shot("3_devices") { main(family, Tab.Devices) }
+    @Test fun devicesNoInternet() =
+        shot("3_devices_no_internet") { main(family.copy(notice = Notice.NoInternet), Tab.Devices) }
+    @Test fun homeNewPhone() =
+        shot("2_home_new_phone") { main(family.copy(link = Link.Off, notice = Notice.NewPhone), Tab.Home) }
+    @Test fun help() = shot("4_help") { main(family, Tab.Help) }
+    @Test fun advanced() = shot("5_advanced") {
+        AdvancedScreen("tincd 0.1.0 starting\nListening on 0.0.0.0 port 12655\nConnected to gate", onBack = {})
+    }
+}
