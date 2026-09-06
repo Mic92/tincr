@@ -67,7 +67,12 @@ participate.
   unit file doesn't need `-d` flags.
 - **`HostsOverlayDirectory` config key.** Second host directory for
   deployments where `hosts/` is read-only. Invited nodes are written
-  there and `invitation-accepted` gets the path in `HOST_FILE`.
+  there, override `hosts/`, and `invitation-accepted` gets the path in
+  `HOST_FILE`.
+- **`tinc invite --replace NODE`.** Re-keys an existing node through an
+  invitation (new phone, lost key). The invitation file starts with
+  `#replace <oldkey>`. A C tincd serving such a file refuses the join
+  with "host file exists", so mixed setups fail safe.
 - **`SPTPSCipher` host key.** Selects AES-256-GCM instead of
   ChaCha20-Poly1305 for the SPTPS record AEAD on a per-edge basis.
   On AES-NI/PMULL hardware this roughly doubles tunnel throughput.
