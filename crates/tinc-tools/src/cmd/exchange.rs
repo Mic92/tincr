@@ -374,7 +374,7 @@ mod tests {
     }
 
     /// Nodes the daemon accepted into `HostsOverlayDirectory` are peers
-    /// too. `hosts/` wins when both have the name.
+    /// too. The overlay wins when both have the name.
     #[test]
     fn export_all_includes_overlay() {
         let cd = setup("alice", "Subnet = 10.0.1.0/24\n")
@@ -384,7 +384,7 @@ mod tests {
         export_all(cd.paths(), &mut out).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("Name = bob\nSubnet = 10.0.2.0/24"), "{s}");
-        assert!(!s.contains("6.6.6.6"), "{s}");
+        assert!(!s.contains("10.0.1.0"), "{s}");
         assert_eq!(s.matches("Name = alice").count(), 1);
     }
 

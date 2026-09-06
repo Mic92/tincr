@@ -1,9 +1,10 @@
 //! `hosts/` plus an optional `HostsOverlayDirectory`.
 //!
 //! On managed systems `hosts/` is deployed read-only from a registry.
-//! Accepted invitations are written to the overlay instead, so a deploy
-//! never clobbers them. Lookups try `hosts/` first and fall back to the
-//! overlay, which means the registry copy wins once a node lands there.
+//! Runtime writes (accepted invitations, replaced keys) go to the overlay
+//! so a deploy never clobbers them. The overlay wins on lookup, like
+//! `/etc` over `/usr/lib`. Entries there are meant to be pruned once the
+//! registry copy has caught up.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -39,19 +40,30 @@ impl HostDirs {
         Self::new(confbase, overlay)
     }
 
-    /// Path to read `name` from. Prefers `hosts/`, then the overlay. When
+    /// Path to read `name` from. Prefers the overlay, then `hosts/`. When
     /// neither has it, returns the `hosts/` path so error messages point
     /// there.
     #[must_use]
     pub fn file(&self, name: &str) -> PathBuf {
-        let p = self.primary.join(name);
-        if present(&p) {
-            return p;
-        }
         match &self.overlay {
             Some(o) if present(&o.join(name)) => o.join(name),
-            _ => p,
+            _ => self.primary.join(name),
         }
+    }
+
+    /// Names present in both dirs, where the overlay copy masks the
+    /// deployed one.
+    #[must_use]
+    pub fn overridden(&self) -> Vec<String> {
+        let Some(o) = &self.overlay else {
+            return Vec::new();
+        };
+        let mut names = BTreeSet::new();
+        let _ = collect(o, &mut names);
+        names
+            .into_iter()
+            .filter(|n| present(&self.primary.join(n)))
+            .collect()
     }
 
     /// Any directory entry for `name` in either dir, dangling symlinks
@@ -120,8 +132,8 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
 
-    /// A dangling symlink in `hosts/` still occupies the name. Falling
-    /// through to the overlay would let an invitee claim it.
+    /// A dangling symlink still occupies the name, so an invitee cannot
+    /// claim it.
     #[test]
     fn dangling_symlink_occupies_name() {
         let tmp = tempfile::tempdir().unwrap();
@@ -129,11 +141,12 @@ mod tests {
         fs::create_dir_all(tmp.path().join("hosts")).unwrap();
         fs::create_dir_all(&ov).unwrap();
         symlink("/nonexistent", tmp.path().join("hosts/bob")).unwrap();
-        fs::write(ov.join("bob"), "").unwrap();
-        let d = HostDirs::new(tmp.path(), Some(ov));
+        symlink("/nonexistent", ov.join("carol")).unwrap();
+        let d = HostDirs::new(tmp.path(), Some(ov.clone()));
         assert!(d.exists("bob"));
-        assert_eq!(d.file("bob"), tmp.path().join("hosts/bob"));
-        assert!(!d.exists("carol"));
+        assert!(d.exists("carol"));
+        assert_eq!(d.file("carol"), ov.join("carol"));
+        assert!(!d.exists("dave"));
     }
 
     /// A missing overlay is normal before the first join. An unreadable one
@@ -163,17 +176,19 @@ mod tests {
     }
 
     #[test]
-    fn primary_shadows_overlay() {
+    fn overlay_overrides_primary() {
         let tmp = tempfile::tempdir().unwrap();
         let ov = tmp.path().join("hosts.local");
         fs::create_dir_all(tmp.path().join("hosts")).unwrap();
         fs::create_dir_all(&ov).unwrap();
         let d = HostDirs::new(tmp.path(), Some(ov.clone()));
 
-        fs::write(ov.join("bob"), "").unwrap();
-        assert_eq!(d.file("bob"), ov.join("bob"));
         fs::write(tmp.path().join("hosts/bob"), "").unwrap();
         assert_eq!(d.file("bob"), tmp.path().join("hosts/bob"));
+        assert!(d.overridden().is_empty());
+        fs::write(ov.join("bob"), "").unwrap();
+        assert_eq!(d.file("bob"), ov.join("bob"));
+        assert_eq!(d.overridden(), ["bob"]);
 
         assert_eq!(d.file("nobody"), tmp.path().join("hosts/nobody"));
         assert_eq!(d.write_path("carol"), ov.join("carol"));

@@ -173,13 +173,13 @@ Reject invitations older than this.
 Second host directory for setups where
 .Pa hosts/
 is deployed read-only.
-Host files accepted through invitations are written here, and lookups
-fall back to it when a name is missing from
-.Pa hosts/ .
-An entry in
-.Pa hosts/
-always wins, so a node graduating into the deployed set shadows its
-overlay copy.
+Host files accepted through invitations and keys replaced with
+.Nm tinc Cm invite Fl -replace
+are written here.
+An entry here overrides the one in
+.Pa hosts/ ,
+which is logged at startup and reload.
+Remove it once the deployed copy has caught up.
 Relative to the configuration directory.
 The
 .Pa invitation-accepted
