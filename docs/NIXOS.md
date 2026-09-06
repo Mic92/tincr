@@ -90,7 +90,10 @@ services.tincr.networks = {
 
 Some things stay operator-driven rather than declared: private
 keys, peer invitations (`tinc -n <net> invite`), and joining
-(`tinc -n <net> join <url>`).
+(`tinc -n <net> join <url>`). Since `hosts/` lives in the store,
+the module sets `HostsOverlayDirectory = /var/lib/tincr/<net>/hosts`:
+nodes that accept an invitation are written there and stay valid
+across deploys until they are added to `hosts` proper.
 
 Set `socketActivation = false` to start the daemon at boot
 (`multi-user.target`) instead of on the first inbound connection.
