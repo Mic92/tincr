@@ -109,7 +109,12 @@ Since `hosts/` lives in the store,
 the module sets `HostsOverlayDirectory = /var/lib/tincr/<net>/hosts`:
 nodes that accept an invitation are written there and override the
 deployed copy until removed. Prune entries that match `hosts` after a
-deploy.
+deploy. `/etc/tinc/<net>/invitations` is a symlink into the same
+state directory, so invitations are issued as the service user:
+
+```console
+$ sudo -u tincr tinc -n mesh --pidfile /run/tincr/mesh.pid invite phone
+```
 
 Set `socketActivation = false` to start the daemon at boot
 (`multi-user.target`) instead of on the first inbound connection.
