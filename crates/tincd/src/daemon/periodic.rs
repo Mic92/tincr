@@ -409,7 +409,7 @@ impl Daemon {
         self.submit_script(format!("hosts/{node}-{suffix}"), env);
     }
 
-    fn submit_script(&self, name: String, env: ScriptEnv) {
+    pub(super) fn submit_script(&self, name: String, env: ScriptEnv) {
         self.script_worker.submit(Job::Script {
             confbase: self.confbase.clone(),
             name,

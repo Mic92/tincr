@@ -19,7 +19,7 @@ use crate::keys;
 use crate::outgoing::ProxyConfig;
 use crate::script::ScriptEnv;
 use crate::tunnel::MTU;
-use crate::{invitation_serve, script, socks};
+use crate::{invitation_serve, socks};
 
 use crate::addrcache::AddressCache;
 use crate::dispatch::REQ_DISCONNECT;
@@ -1097,10 +1097,8 @@ impl Daemon {
             env.add("REMOTEADDRESS", a.ip().to_string());
             env.add("REMOTEPORT", a.port().to_string());
         }
-        Self::log_script(
-            "invitation-accepted",
-            script::execute(&self.confbase, "invitation-accepted", &env, None),
-        );
+        // Queued so a slow hook cannot delay the joiner's ACK.
+        self.submit_script("invitation-accepted".to_owned(), env);
     }
 }
 
