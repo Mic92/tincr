@@ -108,6 +108,10 @@ Things that work in both daemons but not identically.
   on ambient `PATH` entries or leaked variables may need adjusting.
   Per-event hooks (`host-up`, `subnet-up`, …) are spawned without
   waiting. Only `tinc-up`/`tinc-down` block.
+- **A failing `invitation-created` hook aborts `tinc invite`.** C
+  ignores the exit status. tincr removes the invitation file and
+  prints no URL, so a hook that allocates addresses or registers the
+  node can veto a half-provisioned invitation.
 - **Privilege drop is stricter.** All three uids/gids are set and
   verified, `no_new_privs` is always enabled, and failure to drop is
   fatal rather than logged-and-continued.
