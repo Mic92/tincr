@@ -19,7 +19,8 @@ use std::time::{Duration, SystemTime};
 use tinc_conf::HostDirs;
 
 use tinc_conf::read_pem;
-use tinc_crypto::invite::cookie_filename;
+use tinc_crypto::b64;
+use tinc_crypto::invite::{cookie_filename, strip_replace_marker};
 
 use std::io;
 use std::io::ErrorKind;
@@ -41,8 +42,12 @@ pub(crate) const CHUNK_SIZE: usize = 1024;
 pub(crate) enum InvitePhase {
     /// type != 0 || len != 18 → close.
     WaitingCookie,
-    /// `c->status.invitation_used = true`.
-    WaitingPubkey { name: String },
+    /// `c->status.invitation_used = true`. `replace` carries the pinned
+    /// old key when the file came from `tinc invite --replace`.
+    WaitingPubkey {
+        name: String,
+        replace: Option<String>,
+    },
     /// Post-ACK terminal state; any further record terminates the conn.
     Done,
 }
@@ -63,6 +68,11 @@ pub(crate) enum ServeError {
     /// Don't overwrite: would replace a known key.
     #[error("host config file {} already exists", .0.display())]
     HostFileExists(PathBuf),
+    /// Replace-invite whose pinned key no longer matches the host file.
+    #[error(
+        "key of {0} changed since the invitation was issued. The invitation is used up, issue a new one"
+    )]
+    KeyChanged(String),
     #[error("I/O error on {}: {err}", path.display())]
     Io {
         path: PathBuf,
@@ -124,7 +134,17 @@ fn parse_name_line(line: &str) -> Option<&str> {
     }
 }
 
-/// Type-0 (cookie) handler: returns `(file_contents, invited_name, used_path)`.
+#[derive(Debug)]
+pub(crate) struct Served {
+    /// What goes on the wire, with the replace marker stripped.
+    pub contents: Vec<u8>,
+    pub name: String,
+    /// Pinned old key (b64) from `tinc invite --replace`.
+    pub replace: Option<String>,
+    pub used_path: PathBuf,
+}
+
+/// Type-0 (cookie) handler.
 ///
 /// # Errors
 /// `NonExisting` (rename ENOENT; single use is enforced by the atomic rename),
@@ -137,7 +157,7 @@ pub(crate) fn serve_cookie(
     myname: &str,
     invitation_lifetime: Duration,
     now: SystemTime,
-) -> Result<(Vec<u8>, String, PathBuf), ServeError> {
+) -> Result<Served, ServeError> {
     // :201-207
     let filename = cookie_filename(cookie, inv_key.public_key());
     let inv_dir = confbase.join("invitations");
@@ -169,11 +189,13 @@ pub(crate) fn serve_cookie(
     }
 
     // :240-257
-    let contents = fs::read(&used_path).map_err(io_err(&used_path))?;
+    let raw = fs::read(&used_path).map_err(io_err(&used_path))?;
+    let (replace, contents) = strip_replace_marker(&raw);
+    let replace = replace.map(|k| String::from_utf8_lossy(k).into_owned());
     let first_line = contents
         .iter()
         .position(|&b| b == b'\n')
-        .map_or(&contents[..], |i| &contents[..i]);
+        .map_or(contents, |i| &contents[..i]);
     let first_line = str::from_utf8(first_line)
         .map_err(|_| ServeError::BadInvitationFile("first line not UTF-8".into()))?;
 
@@ -186,20 +208,27 @@ pub(crate) fn serve_cookie(
             ServeError::BadInvitationFile(format!("first line not `Name = X`: {first_line:?}"))
         })?;
 
-    Ok((contents, invited_name, used_path))
+    Ok(Served {
+        contents: contents.to_vec(),
+        name: invited_name,
+        replace,
+        used_path,
+    })
 }
 
-/// Type-1 handler: writes the host file, into the overlay when one is
-/// configured. Addrcache, script, unlink and the type-2 reply are
-/// daemon-side.
+/// Type-1 handler: writes the host file at `write_path`. For a
+/// replace-invite, `replace` is the pinned old key and `current` is the
+/// key the daemon currently reads for `name`.
 ///
 /// # Errors
-/// `BadPubkey` on a newline (config injection). `HostFileExists` when the
-/// name exists in either directory, so an invitee cannot replace a key.
+/// `BadPubkey` on config injection, `HostFileExists` for a fresh invite
+/// of a known name, `KeyChanged` when the pin does not match.
 pub(crate) fn finalize(
     hosts: &HostDirs,
     name: &str,
     pubkey_b64: &str,
+    replace: Option<&str>,
+    current: Option<&[u8; 32]>,
 ) -> Result<PathBuf, ServeError> {
     // Ed25519 pubkey: 32 bytes → exactly 43 chars of unpadded tinc-
     // base64. `b64::decode` rejects anything outside the union
@@ -211,13 +240,22 @@ pub(crate) fn finalize(
         return Err(ServeError::BadPubkey);
     }
 
-    if hosts.exists(name) {
-        return Err(ServeError::HostFileExists(hosts.file(name)));
-    }
     if let Some(o) = hosts.overlay() {
         fs::create_dir_all(o).map_err(io_err(o))?;
     }
     let host_path = hosts.write_path(name);
+    if let Some(pinned) = replace {
+        if current.is_none() || b64::decode(pinned).as_deref() != current.map(<[u8; 32]>::as_slice)
+        {
+            return Err(ServeError::KeyChanged(name.to_owned()));
+        }
+        let old = fs::read_to_string(hosts.file(name)).map_err(io_err(&hosts.file(name)))?;
+        write_replaced(&host_path, &old, pubkey_b64)?;
+        return Ok(host_path);
+    }
+    if hosts.exists(name) {
+        return Err(ServeError::HostFileExists(hosts.file(name)));
+    }
 
     // :128-134. C: access() then fopen("w") — TOCTOU. We: O_CREAT|O_EXCL.
     let mut f = fs::OpenOptions::new()
@@ -240,6 +278,54 @@ pub(crate) fn finalize(
     writeln!(f, "Ed25519PublicKey = {pubkey_b64}").map_err(io_err(&host_path))?;
 
     Ok(host_path)
+}
+
+/// Writes `old` with every Ed25519 public key form removed and the new
+/// key appended. Goes through tmp + rename so a reader never sees half a
+/// file.
+fn write_replaced(host_path: &Path, old: &str, pubkey_b64: &str) -> Result<(), ServeError> {
+    let mut out = String::with_capacity(old.len() + 64);
+    let mut in_pem = false;
+    for line in old.lines() {
+        if in_pem {
+            in_pem = !line.starts_with("-----END ED25519 PUBLIC KEY-----");
+            continue;
+        }
+        if line.starts_with("-----BEGIN ED25519 PUBLIC KEY-----") {
+            in_pem = true;
+            continue;
+        }
+        let key = split_var(line).map_or("", |(k, _)| k);
+        if key.eq_ignore_ascii_case("Ed25519PublicKey")
+            || key.eq_ignore_ascii_case("Ed25519PublicKeyFile")
+        {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str("Ed25519PublicKey = ");
+    out.push_str(pubkey_b64);
+    out.push('\n');
+
+    let tmp = host_path.with_extension("tmp");
+    let write = || -> io::Result<()> {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
+            .open(&tmp)?;
+        f.write_all(out.as_bytes())?;
+        fs::rename(&tmp, host_path)
+    };
+    write().map_err(|err| {
+        let _ = fs::remove_file(&tmp);
+        ServeError::Io {
+            path: host_path.to_owned(),
+            err,
+        }
+    })
 }
 
 /// Use [`CHUNK_SIZE`] for wire parity.
@@ -285,11 +371,16 @@ mod tests {
         let body = "Name = bob\nAddress = 192.0.2.1\n";
         let (tmp, cookie) = setup_invitation("roundtrip", &key, body);
 
-        let (contents, name, used_path) =
-            serve_cookie(tmp.path(), &key, &cookie, "alice", WEEK, SystemTime::now()).unwrap();
+        let Served {
+            contents,
+            name,
+            replace,
+            used_path,
+        } = serve_cookie(tmp.path(), &key, &cookie, "alice", WEEK, SystemTime::now()).unwrap();
 
         assert_eq!(contents, body.as_bytes());
         assert_eq!(name, "bob");
+        assert!(replace.is_none());
 
         assert!(used_path.exists(), ".used file should exist");
         assert!(
@@ -322,8 +413,9 @@ mod tests {
         let key = test_key();
         let (tmp, cookie) = setup_invitation("single-use", &key, "Name = bob\n");
 
-        let (_, name, _) =
-            serve_cookie(tmp.path(), &key, &cookie, "alice", WEEK, SystemTime::now()).unwrap();
+        let name = serve_cookie(tmp.path(), &key, &cookie, "alice", WEEK, SystemTime::now())
+            .unwrap()
+            .name;
         assert_eq!(name, "bob");
 
         // Second call: original gone → ENOENT → NonExisting.
@@ -402,7 +494,7 @@ mod tests {
         fs::create_dir_all(tmp.path().join("hosts")).unwrap();
 
         let pk = valid_pubkey_b64();
-        let path = finalize(&HostDirs::new(tmp.path(), None), "bob", &pk).unwrap();
+        let path = finalize(&HostDirs::new(tmp.path(), None), "bob", &pk, None, None).unwrap();
 
         assert_eq!(path, tmp.path().join("hosts").join("bob"));
         let written = fs::read_to_string(&path).unwrap();
@@ -415,7 +507,14 @@ mod tests {
         let tmp = TmpDir::new("fin-newline");
         fs::create_dir_all(tmp.path().join("hosts")).unwrap();
 
-        let err = finalize(&HostDirs::new(tmp.path(), None), "bob", "evil\nPort = 0").unwrap_err();
+        let err = finalize(
+            &HostDirs::new(tmp.path(), None),
+            "bob",
+            "evil\nPort = 0",
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, ServeError::BadPubkey));
         assert!(!tmp.path().join("hosts").join("bob").exists());
     }
@@ -431,12 +530,13 @@ mod tests {
         let bad_charset = format!("{}=", &good[..42]);
 
         for bad in [&good[..42], too_long.as_str(), bad_charset.as_str()] {
-            let err = finalize(&HostDirs::new(tmp.path(), None), "bob", bad).unwrap_err();
+            let err =
+                finalize(&HostDirs::new(tmp.path(), None), "bob", bad, None, None).unwrap_err();
             assert!(matches!(err, ServeError::BadPubkey), "{bad:?}: {err:?}");
             assert!(!tmp.path().join("hosts").join("bob").exists());
         }
 
-        finalize(&HostDirs::new(tmp.path(), None), "bob", &good).unwrap();
+        finalize(&HostDirs::new(tmp.path(), None), "bob", &good, None, None).unwrap();
     }
 
     #[test]
@@ -446,11 +546,66 @@ mod tests {
         let host = tmp.path().join("hosts").join("bob");
         fs::write(&host, "Ed25519PublicKey = original\n").unwrap();
 
-        let err =
-            finalize(&HostDirs::new(tmp.path(), None), "bob", &valid_pubkey_b64()).unwrap_err();
+        let err = finalize(
+            &HostDirs::new(tmp.path(), None),
+            "bob",
+            &valid_pubkey_b64(),
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, ServeError::HostFileExists(_)));
         let after = fs::read_to_string(&host).unwrap();
         assert_eq!(after, "Ed25519PublicKey = original\n");
+    }
+
+    /// The replace marker is parsed off and never reaches the invitee.
+    #[test]
+    fn serve_cookie_strips_replace_marker() {
+        let key = test_key();
+        let body = "#replace abc\nName = bob\nConnectTo = alice\n";
+        let (tmp, cookie) = setup_invitation("replace", &key, body);
+        let s = serve_cookie(tmp.path(), &key, &cookie, "alice", WEEK, SystemTime::now()).unwrap();
+        assert_eq!(s.contents, b"Name = bob\nConnectTo = alice\n");
+        assert_eq!(s.name, "bob");
+        assert_eq!(s.replace.as_deref(), Some("abc"));
+    }
+
+    /// Replace keeps everything but the key lines and writes to the
+    /// overlay. It only does so while the pinned key is still current.
+    #[test]
+    fn finalize_replace() {
+        let tmp = TmpDir::new("fin-replace");
+        let overlay = tmp.path().join("ov");
+        fs::create_dir_all(tmp.path().join("hosts")).unwrap();
+        let dirs = HostDirs::new(tmp.path(), Some(overlay.clone()));
+        let old = [1u8; 32];
+        let pin = b64::encode(&old);
+        fs::write(
+            tmp.path().join("hosts/bob"),
+            format!(
+                "# Bob <bob@example.org>\nSubnet = 10.0.0.7\nEd25519PublicKeyFile = x\n\
+                 ed25519publickey = {pin}\n-----BEGIN ED25519 PUBLIC KEY-----\nabc\n\
+                 -----END ED25519 PUBLIC KEY-----\nPort = 655\n"
+            ),
+        )
+        .unwrap();
+        let new = valid_pubkey_b64();
+
+        let err = finalize(&dirs, "bob", &new, Some(&pin), Some(&[2u8; 32])).unwrap_err();
+        assert!(matches!(err, ServeError::KeyChanged(_)));
+        let err = finalize(&dirs, "bob", &new, Some(&pin), None).unwrap_err();
+        assert!(matches!(err, ServeError::KeyChanged(_)));
+        assert!(!overlay.join("bob").exists());
+
+        let path = finalize(&dirs, "bob", &new, Some(&pin), Some(&old)).unwrap();
+        assert_eq!(path, overlay.join("bob"));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!(
+                "# Bob <bob@example.org>\nSubnet = 10.0.0.7\nPort = 655\nEd25519PublicKey = {new}\n"
+            )
+        );
     }
 
     /// With an overlay, invited hosts land there and a read-only `hosts/`
@@ -463,12 +618,12 @@ mod tests {
         fs::create_dir_all(&overlay).unwrap();
         let dirs = HostDirs::new(tmp.path(), Some(overlay.clone()));
 
-        let path = finalize(&dirs, "bob", &valid_pubkey_b64()).unwrap();
+        let path = finalize(&dirs, "bob", &valid_pubkey_b64(), None, None).unwrap();
         assert_eq!(path, overlay.join("bob"));
         assert!(!tmp.path().join("hosts/bob").exists());
 
         fs::write(tmp.path().join("hosts/carol"), "").unwrap();
-        let err = finalize(&dirs, "carol", &valid_pubkey_b64()).unwrap_err();
+        let err = finalize(&dirs, "carol", &valid_pubkey_b64(), None, None).unwrap_err();
         assert!(matches!(err, ServeError::HostFileExists(_)));
         assert!(!overlay.join("carol").exists());
     }
