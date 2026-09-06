@@ -70,6 +70,21 @@ pub const SLUG_PART_LEN: usize = 24;
 /// Full slug length: `b64(key_hash) || b64(cookie)`.
 pub const SLUG_LEN: usize = 2 * SLUG_PART_LEN;
 
+/// First line of a replace-invitation: `#replace <old-b64-pubkey>`. tincr
+/// only. The daemon strips it before sending, so `tinc join` never sees it.
+pub const REPLACE_MARKER: &str = "#replace ";
+
+/// Split an optional replace marker off an invitation file. Returns the
+/// pinned old key (still b64) and the remainder starting at `Name =`.
+#[must_use]
+pub fn strip_replace_marker(contents: &[u8]) -> (Option<&[u8]>, &[u8]) {
+    let Some(rest) = contents.strip_prefix(REPLACE_MARKER.as_bytes()) else {
+        return (None, contents);
+    };
+    let nl = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
+    (Some(&rest[..nl]), rest.get(nl + 1..).unwrap_or_default())
+}
+
 // Compile-time witness that 18 → 24 is the encoding length we claimed.
 // b64 length for n bytes (no padding) is `(n*4).div_ceil(3)`. 18*4/3 = 24
 // exactly, no ceil needed. If someone bumps COOKIE_LEN this fires.
@@ -196,6 +211,22 @@ pub fn parse_slug(slug: &str) -> Option<([u8; COOKIE_LEN], [u8; COOKIE_LEN])> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replace_marker() {
+        assert_eq!(
+            strip_replace_marker(b"Name = a\n"),
+            (None, &b"Name = a\n"[..])
+        );
+        assert_eq!(
+            strip_replace_marker(b"#replace abc\nName = a\n"),
+            (Some(&b"abc"[..]), &b"Name = a\n"[..])
+        );
+        assert_eq!(
+            strip_replace_marker(b"#replace abc"),
+            (Some(&b"abc"[..]), &b""[..])
+        );
+    }
 
     /// `key_hash(pk) == fingerprint_hash(fingerprint(pk))`. The KAT
     /// proves `key_hash` matches C; this proves `fingerprint_hash`

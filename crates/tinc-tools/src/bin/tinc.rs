@@ -190,7 +190,7 @@ const COMMANDS: &[CmdEntry] = &[
         // unredeemable until manual restart.
         needs_daemon: true,
         run: Run::Any(cmd_invite),
-        help: "invite NODE            Generate an invitation for NODE.",
+        help: "invite [--replace] NODE  Generate an invitation for NODE.\n    --replace - let a new device take over NODE's name, replacing its key",
     },
     CmdEntry {
         name: "join",
@@ -481,6 +481,10 @@ fn cmd_fsck(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError>
 /// `tinc invite alice | mail alice@example` works). Warnings to
 /// stderr.
 fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
+    let (replace, args) = match args.split_first() {
+        Some((a, rest)) if a == "--replace" => (true, rest),
+        _ => (false, args),
+    };
     let [invitee] = args else {
         return Err(if args.is_empty() {
             CmdError::MissingArg("node name")
@@ -489,7 +493,13 @@ fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdErro
         });
     };
 
-    let r = cmd::invite::invite(paths, g.netname.as_deref(), invitee, SystemTime::now())?;
+    let r = cmd::invite::invite(
+        paths,
+        g.netname.as_deref(),
+        invitee,
+        replace,
+        SystemTime::now(),
+    )?;
 
     if r.key_is_new {
         // The daemon loads `invitations/ed25519_key.priv` at startup;
