@@ -49,7 +49,7 @@ fn url_roundtrip_with_invite() {
     let inviter = ConfDir::init("alice").append_host("alice", "Address = vpn.example\n");
     let inviter = inviter.paths();
 
-    let r = invite::invite(inviter, None, "bob", SystemTime::now()).unwrap();
+    let r = invite::invite(inviter, None, "bob", false, SystemTime::now()).unwrap();
     let p = parse_url(&r.url).unwrap();
     assert_eq!(p.host, "vpn.example");
     assert_eq!(p.port, "655");
@@ -428,7 +428,7 @@ fn server_stub_recovers_file() {
     let cd = ConfDir::init("alice").append_host("alice", "Address = x\n");
     let p = cd.paths();
 
-    let r = invite::invite(p, None, "bob", SystemTime::now()).unwrap();
+    let r = invite::invite(p, None, "bob", false, SystemTime::now()).unwrap();
     let parsed = parse_url(&r.url).unwrap();
     let inv_key = keypair::read_private(&p.invitation_key()).unwrap();
 
@@ -454,7 +454,7 @@ fn server_stub_single_use() {
     let cd = ConfDir::init("alice").append_host("alice", "Address = x\n");
     let p = cd.paths();
 
-    let r = invite::invite(p, None, "bob", SystemTime::now()).unwrap();
+    let r = invite::invite(p, None, "bob", false, SystemTime::now()).unwrap();
     let parsed = parse_url(&r.url).unwrap();
     let inv_key = keypair::read_private(&p.invitation_key()).unwrap();
 
@@ -496,7 +496,8 @@ fn invite_join_roundtrip_in_process() {
         .append_conf("Mode = switch\n");
     let inviter = inviter_cd.paths();
 
-    let inv_result = invite::invite(inviter, Some("acme"), "bob", SystemTime::now()).unwrap();
+    let inv_result =
+        invite::invite(inviter, Some("acme"), "bob", false, SystemTime::now()).unwrap();
     let parsed = parse_url(&inv_result.url).unwrap();
 
     // Load invitation key. Both the server stub and the joiner's

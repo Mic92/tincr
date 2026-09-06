@@ -144,10 +144,22 @@ overwrite existing files.
 .Pq or Cm export-all
 followed by
 .Cm import .
-.It Cm invite Ar NODE
+.It Cm invite Oo Fl -replace Oc Ar NODE
 Generate an invitation URL for
 .Ar NODE
 and print it to stdout.
+With
+.Fl -replace ,
+.Ar NODE
+must already exist.
+Its current Ed25519 key is pinned in the invitation, and the device
+that joins takes over the name while the rest of the host file
+(Subnet, Address, ...) is kept.
+The join fails if the key changed in the meantime.
+Any live connection of the old device is closed.
+Both invitation scripts see the replaced key in
+.Ev REPLACE .
+tincr only.
 .It Cm join Oo Fl -identity-only Ns Oo = Ns Ar FILE Oc Oc Op Ar URL
 Join a network using an invitation URL (read from stdin if omitted).
 With
