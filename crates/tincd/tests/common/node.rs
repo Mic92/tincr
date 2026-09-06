@@ -22,7 +22,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use super::{
-    ChildWithLog, Ctl, pubkey_from_seed, read_tcp_addr, tincd_at, wait_for_file,
+    ChildWithLog, Ctl, SETTLE, pubkey_from_seed, read_tcp_addr, tincd_at, wait_for_file,
     write_ed25519_privkey,
 };
 use std::fs;
@@ -297,7 +297,7 @@ impl Node {
             .as_mut()
             .unwrap_or_else(|| panic!("{name} not started"));
         daemon
-            .wait_exit(Duration::from_secs(5))
+            .wait_exit(SETTLE)
             .unwrap_or_else(|| panic!("{name} did not exit; stderr:\n{}", daemon.log_snapshot()))
     }
 

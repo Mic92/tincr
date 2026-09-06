@@ -134,7 +134,7 @@ pub fn drain_stderr(mut child: Child) -> String {
 /// so poll until the pidfile is complete rather than trusting the
 /// socket as a readiness signal for it.
 fn read_pidfile(pidfile: &Path) -> String {
-    poll_until(Duration::from_secs(5), || {
+    poll_until(SETTLE, || {
         fs::read_to_string(pidfile)
             .ok()
             .filter(|content| content.contains('\n'))
@@ -164,9 +164,14 @@ pub fn read_tcp_addr(pidfile: &Path) -> net::SocketAddr {
         .expect("IPv4 listen address")
 }
 
+/// Upper bound for "the daemon or a script it forked did X". Generous
+/// because unsandboxed macOS CI scans freshly written executables on
+/// first exec while dozens of tests spawn daemons in parallel.
+pub const SETTLE: Duration = Duration::from_secs(20);
+
 /// The control socket appearing is the daemon's readiness signal.
 pub fn wait_for_file(path: &Path) -> bool {
-    wait_for_file_with(path, Duration::from_secs(5))
+    wait_for_file_with(path, SETTLE)
 }
 
 pub fn wait_for_file_with(path: &Path, timeout: Duration) -> bool {
