@@ -218,6 +218,8 @@ let
           "Interface = ${net.interfaceName}"
           "Port = ${toString net.listenPort}"
           "AutoConnect = ${if net.autoConnect then "yes" else "no"}"
+          # hosts/ is in the store, so invited nodes land in the state dir.
+          "HostsOverlayDirectory = /var/lib/tincr/${netName}/hosts"
         ]
         ++ map (n: "ConnectTo = ${n}") net.connectTo
         ++ optional net.dns.enable "DNSSuffix = ${net.dns.suffix}"
