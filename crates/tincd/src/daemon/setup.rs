@@ -409,6 +409,9 @@ pub(super) fn read_daemon_config(
         .ok_or_else(|| SetupError::Config("Name for tinc daemon required!".into()))?;
     let name = expand_name(name).map_err(SetupError::Config)?;
     let hosts = HostDirs::from_config(confbase, &config);
+    for n in hosts.overridden() {
+        log::warn!(target: "tincd", "hosts/{n} is overridden by {}", hosts.file(&n).display());
+    }
     let host = keys::read_host_config(&hosts, &name);
     if host.entries().is_empty() {
         log::warn!(target: "tincd", "hosts/{name} empty or unreadable, using defaults");
