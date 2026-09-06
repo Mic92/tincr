@@ -65,6 +65,9 @@ participate.
   [OPERATING.md](OPERATING.md) for unit files.
 - **`LogLevel` config key.** Sets verbosity from `tinc.conf` so the
   unit file doesn't need `-d` flags.
+- **`HostsOverlayDirectory` config key.** Second host directory for
+  deployments where `hosts/` is read-only. Invited nodes are written
+  there and `invitation-accepted` gets the path in `HOST_FILE`.
 - **`SPTPSCipher` host key.** Selects AES-256-GCM instead of
   ChaCha20-Poly1305 for the SPTPS record AEAD on a per-edge basis.
   On AES-NI/PMULL hardware this roughly doubles tunnel throughput.
@@ -134,3 +137,4 @@ Things that work in both daemons but not identically.
 | `UPnP`                                    | Same values as C; also drives PCP.    |
 | `Sandbox`                                 | New (`off`/`normal`/`high`).          |
 | `LogLevel`                                | New.                                  |
+| `HostsOverlayDirectory`                   | New.                                  |

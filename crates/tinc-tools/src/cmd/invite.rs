@@ -125,9 +125,9 @@ pub fn invite(
     // Needed for the `ConnectTo` line and the host config dump.
     let myname = get_my_name(paths)?;
 
-    // `hosts/alice` exists → alice is already known. Can't invite.
-    let host_file = paths.host_file(invitee);
-    if host_file.exists() {
+    // Known in `hosts/` or the overlay. The daemon would refuse the join,
+    // so refuse to mint the URL.
+    if paths.host_dirs().exists(invitee) {
         return Err(CmdError::BadInput(format!(
             "A host config file for {invitee} already exists!"
         )));
@@ -917,6 +917,19 @@ mod tests {
             panic!("wrong variant: {err:?}")
         };
         assert!(msg.contains("already exists"));
+    }
+
+    /// A node the daemon accepted into `HostsOverlayDirectory` is known
+    /// too. Inviting it again would mint a URL the daemon rejects.
+    #[test]
+    fn invite_existing_overlay_host_fails() {
+        let cd = ConfDir::bare();
+        let paths = cd.paths().clone();
+        init_with_address(&paths, "alice", "myhost");
+        let cd = cd.with_overlay_host("bob", "");
+        let paths = cd.paths().clone();
+        let err = invite(&paths, None, "bob", SystemTime::now()).unwrap_err();
+        assert!(matches!(err, CmdError::BadInput(m) if m.contains("already exists")));
     }
 
     /// invite with no Address → clear error before any files created.

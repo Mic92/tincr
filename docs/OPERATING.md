@@ -59,10 +59,10 @@ re-opening:
 
 - `Port`, `BindToAddress`, `ListenAddress`, `AddressFamily`
 - `Device`, `DeviceType`, `Interface`, `Mode`
-- private key paths
+- private key paths, `HostsOverlayDirectory`
 
-The daemon warns when it sees `Port`/`AddressFamily`/`Interface`
-changed on reload; for the others, restart.
+The daemon warns when it sees `Port`/`AddressFamily`/`Interface`/
+`HostsOverlayDirectory` changed on reload; for the others, restart.
 
 ## Log files and rotation
 

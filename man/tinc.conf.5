@@ -169,6 +169,23 @@ Datagram anti-replay window size.
 Lease time for learned MAC addresses in switch mode.
 .It Va InvitationExpire Li = Ar SECONDS Pq 604800
 Reject invitations older than this.
+.It Va HostsOverlayDirectory Li = Ar PATH
+Second host directory for setups where
+.Pa hosts/
+is deployed read-only.
+Host files accepted through invitations are written here, and lookups
+fall back to it when a name is missing from
+.Pa hosts/ .
+An entry in
+.Pa hosts/
+always wins, so a node graduating into the deployed set shadows its
+overlay copy.
+Relative to the configuration directory.
+The
+.Pa invitation-accepted
+script receives the written path in
+.Ev HOST_FILE .
+tincr only.
 .It Va Proxy Li = Ar TYPE Ar ...
 Dial outgoing connections through a proxy.
 .Ar TYPE

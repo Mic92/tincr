@@ -81,6 +81,15 @@ impl ConfDir {
         self
     }
 
+    /// Configure `HostsOverlayDirectory = hosts.local` and put `hosts.local/NAME` there.
+    #[must_use]
+    pub fn with_overlay_host(self, name: &str, content: &str) -> Self {
+        let dir = self.confbase.join("hosts.local");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(name), content).unwrap();
+        self.append_conf("HostsOverlayDirectory = hosts.local\n")
+    }
+
     /// Append to `tinc.conf` (creating it if needed).
     #[must_use]
     pub fn append_conf(self, content: &str) -> Self {

@@ -32,6 +32,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::path::PathBuf;
+use tinc_conf::{HostDirs, read_server_config};
 
 /// `CONFDIR` from `config.h`. Baked at compile time.
 ///
@@ -269,6 +270,14 @@ impl Paths {
         self.confbase.join("hosts").join(name)
     }
 
+    /// `hosts/` plus the daemon's `HostsOverlayDirectory`, for commands that
+    /// read peers. Writers keep using [`host_file`](Self::host_file).
+    #[must_use]
+    pub fn host_dirs(&self) -> HostDirs {
+        let cfg = read_server_config(&self.confbase).unwrap_or_default();
+        HostDirs::from_config(&self.confbase, &cfg)
+    }
+
     /// `addrcache/` — recently-seen peer addresses. `tinc init`
     /// creates it empty. Different name from C tinc's `cache/`: the
     /// on-disk format is incompatible (text + header vs raw
@@ -345,6 +354,28 @@ mod tests {
     use super::*;
     use std::env;
     use std::fs;
+
+    /// The daemon merges `conf.d/*.conf`, so the CLI must too or the two
+    /// disagree about where peers live.
+    #[test]
+    fn host_dirs_reads_conf_d() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("tinc.conf"), "Name = a\n").unwrap();
+        fs::create_dir(tmp.path().join("conf.d")).unwrap();
+        fs::write(
+            tmp.path().join("conf.d/overlay.conf"),
+            "HostsOverlayDirectory = hl\n",
+        )
+        .unwrap();
+        let p = Paths::for_cli(&PathsInput {
+            confbase: Some(tmp.path().to_path_buf()),
+            ..Default::default()
+        });
+        assert_eq!(
+            p.host_dirs().overlay(),
+            Some(tmp.path().join("hl").as_path())
+        );
+    }
 
     #[test]
     fn confbase_from_netname() {
