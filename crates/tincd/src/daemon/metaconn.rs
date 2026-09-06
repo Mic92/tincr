@@ -39,6 +39,7 @@ use crate::tcp_tunnel;
 use std::fs;
 use std::str;
 use std::time::Instant;
+use tinc_crypto::invite::Headers;
 use tinc_crypto::os_rng;
 use tinc_proto::Request;
 use tinc_sptps::Output;
@@ -930,7 +931,7 @@ impl Daemon {
                             let invitation_serve::Served {
                                 contents,
                                 name: invited_name,
-                                replace,
+                                headers,
                                 used_path,
                             } = match result {
                                 Ok(t) => t,
@@ -965,14 +966,15 @@ impl Daemon {
 
                             conn.invite = Some(InvitePhase::WaitingPubkey {
                                 name: invited_name.clone(),
-                                replace,
+                                headers,
                             });
 
                             log::info!(target: "tincd::auth",
                                         "Invitation successfully sent to {invited_name} ({hostname})");
                         }
 
-                        (1, Some(InvitePhase::WaitingPubkey { name, replace })) => {
+                        (1, Some(InvitePhase::WaitingPubkey { name, headers })) => {
+                            let Headers { replace, env } = headers;
                             // newline check happens inside finalize().
                             let Ok(pubkey_b64) = str::from_utf8(&bytes) else {
                                 log::error!(target: "tincd::auth",
@@ -1040,6 +1042,7 @@ impl Daemon {
                                 &name,
                                 &host_path,
                                 replace.as_deref(),
+                                env,
                                 conn_addr,
                             );
 
@@ -1077,6 +1080,7 @@ impl Daemon {
         node: &str,
         host_file: &Path,
         replaced: Option<&str>,
+        extra: Vec<(String, String)>,
         addr: Option<SocketAddr>,
     ) {
         let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
@@ -1085,6 +1089,9 @@ impl Daemon {
         env.add("HOST_FILE", host_file.display().to_string());
         if let Some(k) = replaced {
             env.add("REPLACE", k.to_owned());
+        }
+        for (k, v) in extra {
+            env.add(k, v);
         }
         if let Some(a) = addr {
             env.add("REMOTEADDRESS", a.ip().to_string());

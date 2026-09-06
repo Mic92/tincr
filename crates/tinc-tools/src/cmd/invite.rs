@@ -55,7 +55,9 @@ use std::time::{Duration, SystemTime};
 use rand_core::Rng;
 use tinc_conf::Config;
 use tinc_crypto::b64;
-use tinc_crypto::invite::{COOKIE_LEN, REPLACE_MARKER, SLUG_PART_LEN, build_slug, cookie_filename};
+use tinc_crypto::invite::{
+    COOKIE_LEN, Headers, SLUG_PART_LEN, build_slug, cookie_filename, valid_env_key,
+};
 use tinc_crypto::os_rng;
 use tinc_crypto::sign::SigningKey;
 use zeroize::Zeroizing;
@@ -104,10 +106,9 @@ pub struct InviteResult {
     pub key_is_new: bool,
 }
 
-/// `tinc invite [--replace] NODENAME`. `now` is injectable for tests. With
-/// `replace`, NODENAME must already exist. Its current Ed25519 key is
-/// pinned in the invitation so the daemon swaps exactly that key at join
-/// time.
+/// `tinc invite [-e KEY=VAL] [--replace] NODENAME`. With `replace`,
+/// NODENAME must exist and its current key is pinned so the daemon swaps
+/// exactly that key. `env` is stored in the invitation for both hooks.
 ///
 /// # Errors
 /// `BadInput` (invalid or taken name, no `Address` configured) or `Io`.
@@ -116,12 +117,18 @@ pub fn invite(
     netname: Option<&str>,
     invitee: &str,
     replace: bool,
+    env: &[(String, String)],
     now: SystemTime,
 ) -> Result<InviteResult, CmdError> {
     if !check_id(invitee) {
         return Err(CmdError::BadInput(format!(
             "Invalid name for node: {invitee}"
         )));
+    }
+    for (k, v) in env {
+        if !valid_env_key(k) || v.contains('\n') {
+            return Err(CmdError::BadInput(format!("Invalid -e {k}=...")));
+        }
     }
 
     // Needed for the `ConnectTo` line and the host config dump.
@@ -222,10 +229,12 @@ pub fn invite(
     // Write the invitation file, O_EXCL 0600 (an 18-byte random cookie can't
     // collide, so EEXIST is a real problem). Built as one string and written once:
     // testable builder, no partial writes.
-    let mut body = build_invitation_file(paths, netname, invitee, &myname, &address)?;
-    if let Some(k) = &old_key {
-        body.insert_str(0, &format!("{REPLACE_MARKER}{k}\n"));
-    }
+    let headers = Headers {
+        replace: old_key,
+        env: env.to_vec(),
+    };
+    let body =
+        headers.to_string() + &build_invitation_file(paths, netname, invitee, &myname, &address)?;
     write_invitation_file(&inv_path, &body)?;
 
     // Build the URL
@@ -233,15 +242,15 @@ pub fn invite(
     let slug = Zeroizing::new(build_slug(pubkey, &cookie));
     let url = Zeroizing::new(format!("{address}/{}", *slug));
 
-    let hook = run_created_hook(
-        paths,
-        netname,
-        &myname,
-        invitee,
-        old_key.as_deref(),
-        &inv_path,
-        &url,
-    );
+    let mut hook_env: Vec<(&str, &str)> = vec![
+        ("NAME", &myname),
+        ("NODE", invitee),
+        ("INVITATION_URL", &url),
+    ];
+    hook_env.extend(netname.map(|n| ("NETNAME", n)));
+    hook_env.extend(headers.replace.as_deref().map(|k| ("REPLACE", k)));
+    hook_env.extend(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    let hook = run_created_hook(paths, &inv_path, &hook_env);
     if let Err(e) = hook {
         let _ = fs::remove_file(&inv_path);
         return Err(e);
@@ -253,30 +262,14 @@ pub fn invite(
 /// Run `confbase/invitation-created` with the upstream env contract. The
 /// hook may edit `INVITATION_FILE`, and whatever it leaves there is what
 /// the invitee receives.
-fn run_created_hook(
-    paths: &Paths,
-    netname: Option<&str>,
-    myname: &str,
-    invitee: &str,
-    old_key: Option<&str>,
-    inv_path: &Path,
-    url: &str,
-) -> Result<(), CmdError> {
+fn run_created_hook(paths: &Paths, inv_path: &Path, env: &[(&str, &str)]) -> Result<(), CmdError> {
     let script = paths.confbase.join("invitation-created");
     if !script.exists() {
         return Ok(());
     }
     let mut cmd = Command::new(&script);
-    cmd.env("NAME", myname)
-        .env("NODE", invitee)
-        .env("INVITATION_FILE", inv_path)
-        .env("INVITATION_URL", url);
-    if let Some(n) = netname {
-        cmd.env("NETNAME", n);
-    }
-    if let Some(k) = old_key {
-        cmd.env("REPLACE", k);
-    }
+    cmd.env("INVITATION_FILE", inv_path)
+        .envs(env.iter().copied());
     let status = cmd.status().map_err(io_err(&script))?;
     if status.success() {
         Ok(())
@@ -758,7 +751,15 @@ mod tests {
         let confbase = cd.confbase();
         init_with_address(&paths, "alice", "myhost.example");
 
-        let r = invite(&paths, Some("testnet"), "bob", false, SystemTime::now()).unwrap();
+        let r = invite(
+            &paths,
+            Some("testnet"),
+            "bob",
+            false,
+            &[],
+            SystemTime::now(),
+        )
+        .unwrap();
 
         // Key was freshly generated (first invite).
         assert!(r.key_is_new);
@@ -846,7 +847,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let r = invite(&paths, None, "bob", false, SystemTime::now()).unwrap();
+        let r = invite(&paths, None, "bob", false, &[], SystemTime::now()).unwrap();
 
         let body = only_invitation(&cd);
         assert!(
@@ -869,7 +870,7 @@ mod tests {
         fs::write(&script, "#!/bin/sh\nexit 3\n").unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let err = invite(&paths, None, "bob", false, SystemTime::now()).unwrap_err();
+        let err = invite(&paths, None, "bob", false, &[], SystemTime::now()).unwrap_err();
         assert!(err.to_string().contains("invitation-created"), "{err}");
 
         let inv_dir = cd.confbase().join("invitations");
@@ -889,13 +890,13 @@ mod tests {
         init_with_address(&paths, "alice", "myhost");
 
         // First invite: creates key + invitation file for bob.
-        let r1 = invite(&paths, None, "bob", false, SystemTime::now()).unwrap();
+        let r1 = invite(&paths, None, "bob", false, &[], SystemTime::now()).unwrap();
         assert!(r1.key_is_new);
 
         let key_path = paths.invitation_key();
         fs::write(&key_path, "garbage, not PEM\n").unwrap();
 
-        let err = invite(&paths, None, "carol", false, SystemTime::now()).unwrap_err();
+        let err = invite(&paths, None, "carol", false, &[], SystemTime::now()).unwrap_err();
         let CmdError::BadInput(msg) = err else {
             panic!("wrong variant: {err:?}")
         };
@@ -920,10 +921,10 @@ mod tests {
         let paths = cd.paths().clone();
         init_with_address(&paths, "alice", "myhost");
 
-        let r1 = invite(&paths, None, "bob", false, SystemTime::now()).unwrap();
+        let r1 = invite(&paths, None, "bob", false, &[], SystemTime::now()).unwrap();
         assert!(r1.key_is_new);
 
-        let r2 = invite(&paths, None, "carol", false, SystemTime::now()).unwrap();
+        let r2 = invite(&paths, None, "carol", false, &[], SystemTime::now()).unwrap();
         assert!(!r2.key_is_new, "second invite should reuse key");
 
         // Same key → same key_hash in both URLs.
@@ -946,7 +947,7 @@ mod tests {
         let paths = cd.paths().clone();
         init_with_address(&paths, "alice", "myhost");
         // hosts/alice exists (init created it). Inviting alice fails.
-        let err = invite(&paths, None, "alice", false, SystemTime::now()).unwrap_err();
+        let err = invite(&paths, None, "alice", false, &[], SystemTime::now()).unwrap_err();
         let CmdError::BadInput(msg) = err else {
             panic!("wrong variant: {err:?}")
         };
@@ -962,7 +963,7 @@ mod tests {
         init_with_address(&paths, "alice", "myhost");
         let cd = cd.with_overlay_host("bob", "");
         let paths = cd.paths().clone();
-        let err = invite(&paths, None, "bob", false, SystemTime::now()).unwrap_err();
+        let err = invite(&paths, None, "bob", false, &[], SystemTime::now()).unwrap_err();
         assert!(matches!(err, CmdError::BadInput(m) if m.contains("already exists")));
     }
 
@@ -993,19 +994,28 @@ mod tests {
         let script = cd.confbase().join("invitation-created");
         fs::write(
             &script,
-            "#!/bin/sh\necho \"# $REPLACE\" >> \"$INVITATION_FILE\"\n",
+            "#!/bin/sh\necho \"# $REPLACE $KARTEI_NS\" >> \"$INVITATION_FILE\"\n",
         )
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
-        invite(&paths, None, "bob", true, SystemTime::now()).unwrap();
+        let env = [("KARTEI_NS".to_owned(), "mic92".to_owned())];
+        invite(&paths, None, "bob", true, &env, SystemTime::now()).unwrap();
 
         let body = only_invitation(&cd);
         assert!(
-            body.starts_with(&format!("{REPLACE_MARKER}{old}\nName = bob\n")),
+            body.starts_with(&format!(
+                "#replace {old}\n#env KARTEI_NS=mic92\nName = bob\n"
+            )),
             "{body}"
         );
-        assert!(body.ends_with(&format!("# {old}\n")), "{body}");
+        assert!(body.ends_with(&format!("# {old} mic92\n")), "{body}");
+
+        for (k, v) in [("NODE", "x"), ("lower", "x"), ("OK", "a\nb")] {
+            let env = [(k.to_owned(), v.to_owned())];
+            let err = invite(&paths, None, "carol", false, &env, SystemTime::now()).unwrap_err();
+            assert!(matches!(err, CmdError::BadInput(_)), "{k}: {err}");
+        }
     }
 
     #[test]
@@ -1020,7 +1030,7 @@ mod tests {
             ("alice", "myself"),
             ("rsa", "no Ed25519 public key"),
         ] {
-            let err = invite(&paths, None, who, true, SystemTime::now()).unwrap_err();
+            let err = invite(&paths, None, who, true, &[], SystemTime::now()).unwrap_err();
             assert!(
                 matches!(&err, CmdError::BadInput(m) if m.contains(want)),
                 "{who}: {err}"
@@ -1037,7 +1047,7 @@ mod tests {
         let confbase = cd.confbase();
         init::run(&paths, "alice").unwrap(); // no Address
 
-        let err = invite(&paths, None, "bob", false, SystemTime::now()).unwrap_err();
+        let err = invite(&paths, None, "bob", false, &[], SystemTime::now()).unwrap_err();
         let CmdError::BadInput(msg) = err else {
             panic!("wrong variant: {err:?}")
         };
@@ -1057,7 +1067,7 @@ mod tests {
         let cd = ConfDir::bare();
         let paths = cd.paths().clone();
         init_with_address(&paths, "alice", "myhost");
-        let err = invite(&paths, None, "../etc", false, SystemTime::now()).unwrap_err();
+        let err = invite(&paths, None, "../etc", false, &[], SystemTime::now()).unwrap_err();
         assert!(matches!(err, CmdError::BadInput(_)));
     }
 
@@ -1080,7 +1090,7 @@ mod tests {
         writeln!(tc, "Device = /dev/net/tun").unwrap();
         drop(tc);
 
-        let r = invite(&paths, None, "bob", false, SystemTime::now()).unwrap();
+        let r = invite(&paths, None, "bob", false, &[], SystemTime::now()).unwrap();
         let slug = r.url.rsplit('/').next().unwrap();
         let (_, cookie) = tinc_crypto::invite::parse_slug(slug).unwrap();
         let sk = keypair::read_private(&paths.invitation_key()).unwrap();

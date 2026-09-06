@@ -57,11 +57,10 @@ use std::thread;
 use std::time::Duration;
 
 /// One script invocation's environment as `(key, value)` pairs for
-/// [`Command::envs`]. Keys are `&'static str` (all literals); values are
-/// formatted `String`s.
+/// [`Command::envs`].
 #[derive(Clone)]
 pub(crate) struct ScriptEnv {
-    vars: Vec<(&'static str, String)>,
+    vars: Vec<(String, String)>,
 }
 
 impl ScriptEnv {
@@ -81,17 +80,17 @@ impl ScriptEnv {
         // REMOTEADDRESS, REMOTEPORT, SUBNET, WEIGHT). 10 is right.
         let mut vars = Vec::with_capacity(10);
         if let Some(n) = netname {
-            vars.push(("NETNAME", n.to_owned()));
+            vars.push(("NETNAME".into(), n.to_owned()));
         }
-        vars.push(("NAME", myname.to_owned()));
+        vars.push(("NAME".into(), myname.to_owned()));
         if let Some(d) = device {
-            vars.push(("DEVICE", d.to_owned()));
+            vars.push(("DEVICE".into(), d.to_owned()));
         }
         if let Some(i) = iface {
-            vars.push(("INTERFACE", i.to_owned()));
+            vars.push(("INTERFACE".into(), i.to_owned()));
         }
         if let Some(level) = debug {
-            vars.push(("DEBUG", level.to_string()));
+            vars.push(("DEBUG".into(), level.to_string()));
         }
         Self { vars }
     }
@@ -99,8 +98,8 @@ impl ScriptEnv {
     /// `environment_add` for one var. We take key + formatted
     /// value. Call sites: NODE, REMOTEADDRESS, REMOTEPORT,
     /// SUBNET, WEIGHT.
-    pub(crate) fn add(&mut self, key: &'static str, value: String) {
-        self.vars.push((key, value));
+    pub(crate) fn add(&mut self, key: impl Into<String>, value: String) {
+        self.vars.push((key.into(), value));
     }
 }
 
@@ -154,7 +153,7 @@ fn prepare(
         None => Command::new(&scriptname),
     };
     // Inherit daemon env (matches upstream C `system()`); add tinc vars on top.
-    cmd.envs(env.vars.iter().map(|(k, v)| (*k, v.as_str())));
+    cmd.envs(env.vars.iter().map(|(k, v)| (k, v)));
     cmd.current_dir(confbase);
     Ok(cmd)
 }
@@ -361,13 +360,13 @@ mod tests {
             Some("tun0"),
             Some(2),
         );
-        let keys: Vec<_> = env.vars.iter().map(|(k, _)| *k).collect();
+        let keys: Vec<_> = env.vars.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(keys, ["NETNAME", "NAME", "DEVICE", "INTERFACE", "DEBUG"]);
         assert_eq!(env.vars[4].1, "2");
 
         // None branches: only NAME survives.
         let env = ScriptEnv::base(None, "alpha", None, None, None);
-        let keys: Vec<_> = env.vars.iter().map(|(k, _)| *k).collect();
+        let keys: Vec<_> = env.vars.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(keys, ["NAME"]);
     }
 

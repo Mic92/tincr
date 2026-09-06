@@ -190,7 +190,7 @@ const COMMANDS: &[CmdEntry] = &[
         // unredeemable until manual restart.
         needs_daemon: true,
         run: Run::Any(cmd_invite),
-        help: "invite [--replace] NODE  Generate an invitation for NODE.\n    --replace - let a new device take over NODE's name, replacing its key",
+        help: "invite [OPTIONS] NODE  Generate an invitation for NODE.\n    -e KEY=VAL - pass KEY=VAL to the invitation hooks\n    --replace - let a new device take over NODE's name, replacing its key",
     },
     CmdEntry {
         name: "join",
@@ -481,12 +481,25 @@ fn cmd_fsck(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError>
 /// `tinc invite alice | mail alice@example` works). Warnings to
 /// stderr.
 fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
-    let (replace, args) = match args.split_first() {
-        Some((a, rest)) if a == "--replace" => (true, rest),
-        _ => (false, args),
-    };
-    let [invitee] = args else {
-        return Err(if args.is_empty() {
+    let mut replace = false;
+    let mut env = Vec::new();
+    let mut rest = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--replace" => replace = true,
+            "-e" => {
+                let kv = it.next().ok_or(CmdError::MissingArg("-e KEY=VAL"))?;
+                let (k, v) = kv
+                    .split_once('=')
+                    .ok_or_else(|| CmdError::BadInput(format!("-e {kv}: expected KEY=VAL")))?;
+                env.push((k.to_owned(), v.to_owned()));
+            }
+            _ => rest.push(a),
+        }
+    }
+    let [invitee] = rest[..] else {
+        return Err(if rest.is_empty() {
             CmdError::MissingArg("node name")
         } else {
             CmdError::TooManyArgs
@@ -498,6 +511,7 @@ fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdErro
         g.netname.as_deref(),
         invitee,
         replace,
+        &env,
         SystemTime::now(),
     )?;
 

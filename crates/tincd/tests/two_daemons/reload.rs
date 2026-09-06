@@ -251,7 +251,10 @@ fn replace_invite_rekeys_node_and_drops_old_device() {
     let hook_out = alice.confbase.join("hook.out");
     fs::write(
         &hook,
-        format!("#!/bin/sh\necho \"$REPLACE\" > '{}'\n", hook_out.display()),
+        format!(
+            "#!/bin/sh\necho \"$REPLACE $KARTEI_NS\" > '{}'\n",
+            hook_out.display()
+        ),
     )
     .unwrap();
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
@@ -265,10 +268,12 @@ fn replace_invite_rekeys_node_and_drops_old_device() {
     )
     .unwrap();
     let alice_paths = cli_paths(alice.confbase.clone());
-    let err = tinc_tools::cmd::invite::invite(&alice_paths, None, "bob", false, SystemTime::now())
-        .unwrap_err();
+    let now = SystemTime::now();
+    let err =
+        tinc_tools::cmd::invite::invite(&alice_paths, None, "bob", false, &[], now).unwrap_err();
     assert!(err.to_string().contains("already exists"), "{err}");
-    let url = tinc_tools::cmd::invite::invite(&alice_paths, None, "bob", true, SystemTime::now())
+    let env = [("KARTEI_NS".to_owned(), "mic92".to_owned())];
+    let url = tinc_tools::cmd::invite::invite(&alice_paths, None, "bob", true, &env, now)
         .unwrap()
         .url;
     assert_eq!(alice.ctl().reload(), 0);
@@ -289,7 +294,10 @@ fn replace_invite_rekeys_node_and_drops_old_device() {
     assert!(!new_host.contains(&old_b64));
     assert!(fs::read_to_string(&hosts_bob).unwrap().contains(&old_b64));
     assert!(wait_for_file(&hook_out));
-    assert_eq!(fs::read_to_string(&hook_out).unwrap().trim(), old_b64);
+    assert_eq!(
+        fs::read_to_string(&hook_out).unwrap().trim(),
+        format!("{old_b64} mic92")
+    );
 
     // Old bob was kicked and stays out when it retries with the old key.
     alice.wait_for_peer("bob", false, Duration::from_secs(10));
