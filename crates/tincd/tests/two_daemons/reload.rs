@@ -1,5 +1,5 @@
 use nix::sys::signal::Signal;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use super::common::node::has_subnet;
 use super::common::{
@@ -158,7 +158,8 @@ fn join_with_overlay_writes_there_and_peer_connects() {
     fs::write(
         &hook,
         format!(
-            "#!/bin/sh\necho \"$NODE $HOST_FILE\" > '{}'\n",
+            // A slow hook must not delay the joiner's ACK.
+            "#!/bin/sh\nsleep 3\necho \"$NODE $HOST_FILE\" > '{}'\n",
             hook_out.display()
         ),
     )
@@ -168,9 +169,11 @@ fn join_with_overlay_writes_there_and_peer_connects() {
     let (url, _) = invite_bob(&alice);
 
     let bob_confbase = tmp.path().join("bob");
+    let t0 = Instant::now();
     if let Err(err) = tinc_tools::cmd::join::join(&url, &full(&cli_paths(bob_confbase.clone()))) {
         panic!("join: {err:?}\nalice:\n{}", alice.stop());
     }
+    assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
     let overlay_bob = alice.confbase.join("hosts.local/bob");
     assert!(wait_for_file(&overlay_bob));
     assert!(!alice.confbase.join("hosts/bob").exists());
