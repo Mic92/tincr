@@ -65,7 +65,7 @@ mod wire;
 #[cfg(all(test, unix))]
 mod tests;
 
-pub use finalize::finalize_join;
+pub use finalize::{finalize_identity, finalize_join};
 pub use url::{ParsedUrl, parse_url};
 
 #[cfg_attr(not(test), expect(unused_imports))]
@@ -73,6 +73,7 @@ pub(crate) use server_stub::server_receive_cookie;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use tinc_crypto::b64;
@@ -121,34 +122,59 @@ pub struct JoinResult {
     pub hosts_written: Vec<String>,
 }
 
-/// `tinc join URL`. `paths` should be a fresh confbase; checked up front (and
-/// again in `finalize_join`) so we fail before connecting and burning the
-/// single-use cookie. One sequence sharing sockets, SPTPS pump and blob state.
+/// What to do with the invitation once the daemon hands it over.
+pub enum Mode<'a> {
+    /// Write tinc.conf, hosts/*, key and tinc-up into `paths`.
+    Full { paths: &'a Paths, force: bool },
+    /// Register a fresh key with the inviter and keep only that key, in
+    /// the given file or on stdout. For hosts whose config is deployed by
+    /// other means.
+    IdentityOnly(Option<PathBuf>),
+}
+
+impl Mode<'_> {
+    /// Checked before connecting: the daemon burns the cookie on receipt,
+    /// so "file exists" must not be discovered afterwards.
+    fn preflight(&self) -> Result<(), CmdError> {
+        let existing = match self {
+            Mode::Full { paths, .. } => {
+                if let Some(confdir) = &paths.confdir {
+                    makedir(confdir, 0o755)?;
+                }
+                makedir(&paths.confbase, 0o755)?;
+                paths.tinc_conf()
+            }
+            Mode::IdentityOnly(Some(key)) => key.clone(),
+            Mode::IdentityOnly(None) => return Ok(()),
+        };
+        if existing.exists() {
+            return Err(CmdError::BadInput(format!(
+                "{} already exists!",
+                existing.display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn finalize(&self, data: &[u8]) -> Result<JoinResult, CmdError> {
+        match self {
+            Mode::Full { paths, force } => finalize_join(data, paths, *force),
+            Mode::IdentityOnly(key) => finalize_identity(data, key.as_deref()),
+        }
+    }
+}
+
+/// `tinc join URL`. In `Full` mode `paths` should be a fresh confbase,
+/// checked up front so we fail before connecting and burning the single-use
+/// cookie. One sequence sharing sockets, SPTPS pump and blob state.
 ///
 /// # Errors
 /// `BadInput` (bad URL, wrong greeting, `key_hash` mismatch, blob parse) or
 /// `Io`.
-pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
-    // Parse URL
+pub fn join(url: &str, mode: &Mode<'_>) -> Result<(), CmdError> {
     let parsed =
         parse_url(url).ok_or_else(|| CmdError::BadInput("Invalid invitation URL.".into()))?;
-
-    // Preflight before connecting: the daemon renames the cookie to .used on
-    // receipt, so failing on "tinc.conf exists" afterwards would burn the
-    // invitation. Confbase (and confdir) are created here for the access check;
-    // `finalize_join` adds hosts/cache.
-    if let Some(confdir) = &paths.confdir {
-        makedir(confdir, 0o755)?;
-    }
-    makedir(&paths.confbase, 0o755)?;
-
-    let tinc_conf = paths.tinc_conf();
-    if tinc_conf.exists() {
-        return Err(CmdError::BadInput(format!(
-            "Configuration file {} already exists!",
-            tinc_conf.display()
-        )));
-    }
+    mode.preflight()?;
 
     // Generate throwaway key
     // This key is only for the SPTPS handshake; it's not the node's
@@ -271,7 +297,7 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
                         // case 1: finalize returns the pubkey; the send
                         // happens here.
                         1 => {
-                            let r = finalize_join(&data, paths, force)?;
+                            let r = mode.finalize(&data)?;
                             pubkey_to_send = Some(r.pubkey_b64);
                             joined_name = Some(r.name);
                         }
@@ -394,7 +420,9 @@ pub fn join(url: &str, paths: &Paths, force: bool) -> Result<(), CmdError> {
         ));
     }
 
-    eprintln!("Configuration stored in: {}", paths.confbase.display());
+    if let Mode::Full { paths, .. } = mode {
+        eprintln!("Configuration stored in: {}", paths.confbase.display());
+    }
     if let Some(name) = joined_name {
         eprintln!("Joined as: {name}");
     }

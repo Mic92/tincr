@@ -90,7 +90,22 @@ services.tincr.networks = {
 
 Some things stay operator-driven rather than declared: private
 keys, peer invitations (`tinc -n <net> invite`), and joining
-(`tinc -n <net> join <url>`). Since `hosts/` lives in the store,
+(`tinc -n <net> join <url>`).
+
+To enrol a module-managed host through an invitation without it ever
+writing config, run the join where the secret is kept:
+
+```console
+$ tinc join --identity-only=./secrets/web1-tinc.priv <url>
+```
+
+This registers a new key with the inviting node (whose
+`invitation-accepted` hook can commit `hosts/web1` to the registry)
+and leaves only the private key behind. Encrypt it with sops/agenix,
+set `ed25519PrivateKeyFile` to the decrypted path, deploy. Without
+`=FILE` the PEM goes to stdout, for piping into a secrets tool.
+
+Since `hosts/` lives in the store,
 the module sets `HostsOverlayDirectory = /var/lib/tincr/<net>/hosts`:
 nodes that accept an invitation are written there and stay valid
 across deploys until they are added to `hosts` proper.

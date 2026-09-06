@@ -149,6 +149,34 @@ fn finalize_minimal_blob() {
     assert_eq!(b64::encode(sk.public_key()), r.pubkey_b64);
 }
 
+/// Identity-only: the key goes where asked, nothing lands in confbase.
+#[test]
+fn finalize_identity_writes_only_the_key() {
+    let cd = ConfDir::bare();
+    let key = cd.path().join("key.priv");
+    let blob = b"Name = bob\nMode = switch\n#-#\nName = alice\nAddress = x\n";
+    let r = finalize_identity(blob, Some(&key)).unwrap();
+    assert_eq!(r.name, "bob");
+    let sk = keypair::read_private(&key).unwrap();
+    assert_eq!(b64::encode(sk.public_key()), r.pubkey_b64);
+    assert_eq!(
+        fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(!cd.paths().tinc_conf().exists());
+    assert_eq!(fs::read_dir(cd.paths().hosts_dir()).unwrap().count(), 0);
+    // A second run must not clobber an existing key.
+    assert!(finalize_identity(blob, Some(&key)).is_err());
+}
+
+#[test]
+fn finalize_identity_rejects_bad_blob() {
+    let cd = ConfDir::bare();
+    let key = cd.path().join("k");
+    assert!(finalize_identity(b"Mode = switch\n", Some(&key)).is_err());
+    assert!(!key.exists());
+}
+
 /// `VAR_SAFE` filter. `Mode` is SERVER|SAFE → tinc.conf.
 /// `Subnet` is HOST|MULTIPLE|SAFE → hosts/bob.
 /// `Device` is SERVER but not SAFE → dropped (without --force).
