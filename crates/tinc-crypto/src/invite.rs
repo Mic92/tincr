@@ -50,6 +50,7 @@
 //! other two reject silently. Hence: KAT-tested via `kat/gen_kat.c`.
 
 use sha2::{Digest, Sha512};
+use std::fmt;
 use zeroize::Zeroize;
 
 use crate::b64;
@@ -70,19 +71,82 @@ pub const SLUG_PART_LEN: usize = 24;
 /// Full slug length: `b64(key_hash) || b64(cookie)`.
 pub const SLUG_LEN: usize = 2 * SLUG_PART_LEN;
 
-/// First line of a replace-invitation: `#replace <old-b64-pubkey>`. tincr
-/// only. The daemon strips it before sending, so `tinc join` never sees it.
+/// Header line pinning the key a replace-invitation swaps out. tincr
+/// only. The daemon strips headers before sending, so `tinc join`
+/// never sees them.
 pub const REPLACE_MARKER: &str = "#replace ";
+/// Header line carrying `KEY=VAL` for the invitation hooks.
+pub const ENV_MARKER: &str = "#env ";
 
-/// Split an optional replace marker off an invitation file. Returns the
-/// pinned old key (still b64) and the remainder starting at `Name =`.
+/// Env names the hooks get from tinc itself. A header must not spoof them.
+pub const RESERVED_ENV: &[&str] = &[
+    "NAME",
+    "NODE",
+    "NETNAME",
+    "INVITATION_FILE",
+    "INVITATION_URL",
+    "HOST_FILE",
+    "REPLACE",
+    "REMOTEADDRESS",
+    "REMOTEPORT",
+    "DEVICE",
+    "INTERFACE",
+    "DEBUG",
+];
+
+/// `KEY` for `-e KEY=VAL`: shell-safe and not one tinc sets itself.
 #[must_use]
-pub fn strip_replace_marker(contents: &[u8]) -> (Option<&[u8]>, &[u8]) {
-    let Some(rest) = contents.strip_prefix(REPLACE_MARKER.as_bytes()) else {
-        return (None, contents);
-    };
-    let nl = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
-    (Some(&rest[..nl]), rest.get(nl + 1..).unwrap_or_default())
+pub fn valid_env_key(k: &str) -> bool {
+    let mut b = k.bytes();
+    b.next()
+        .is_some_and(|c| c.is_ascii_uppercase() || c == b'_')
+        && b.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+        && !RESERVED_ENV.contains(&k)
+}
+
+/// Leading `#` lines of an invitation file, parsed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Headers {
+    /// Pinned old key (b64) from `#replace`.
+    pub replace: Option<String>,
+    /// `#env KEY=VAL` pairs, in file order, keys validated.
+    pub env: Vec<(String, String)>,
+}
+
+impl fmt::Display for Headers {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(k) = &self.replace {
+            writeln!(f, "{REPLACE_MARKER}{k}")?;
+        }
+        for (k, v) in &self.env {
+            writeln!(f, "{ENV_MARKER}{k}={v}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Split the `#` header block off an invitation file. Returns the parsed
+/// headers and the remainder starting at `Name =`.
+#[must_use]
+pub fn strip_headers(mut contents: &[u8]) -> (Headers, &[u8]) {
+    let mut h = Headers::default();
+    while contents.first() == Some(&b'#') {
+        let nl = contents
+            .iter()
+            .position(|&b| b == b'\n')
+            .unwrap_or(contents.len());
+        let line = String::from_utf8_lossy(&contents[..nl]);
+        if let Some(k) = line.strip_prefix(REPLACE_MARKER) {
+            h.replace = Some(k.to_owned());
+        } else if let Some(kv) = line.strip_prefix(ENV_MARKER)
+            && let Some((k, v)) = kv.split_once('=')
+            && valid_env_key(k)
+        {
+            h.env.push((k.to_owned(), v.to_owned()));
+        }
+        contents = contents.get(nl + 1..).unwrap_or_default();
+    }
+    (h, contents)
 }
 
 // Compile-time witness that 18 → 24 is the encoding length we claimed.
@@ -213,19 +277,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn replace_marker() {
-        assert_eq!(
-            strip_replace_marker(b"Name = a\n"),
-            (None, &b"Name = a\n"[..])
+    fn headers() {
+        let (h, rest) = strip_headers(b"Name = a\n");
+        assert_eq!((h, rest), (Headers::default(), &b"Name = a\n"[..]));
+
+        let (h, rest) = strip_headers(
+            b"#replace abc\n#env KARTEI_NS=mic92\n#env X=a=b\n# note\n#env NODE=x\n#env bad key=1\nName = a\n",
         );
+        assert_eq!(h.replace.as_deref(), Some("abc"));
         assert_eq!(
-            strip_replace_marker(b"#replace abc\nName = a\n"),
-            (Some(&b"abc"[..]), &b"Name = a\n"[..])
+            h.env,
+            [
+                ("KARTEI_NS".into(), "mic92".into()),
+                ("X".into(), "a=b".into())
+            ]
         );
-        assert_eq!(
-            strip_replace_marker(b"#replace abc"),
-            (Some(&b"abc"[..]), &b""[..])
-        );
+        assert_eq!(rest, b"Name = a\n");
+
+        assert_eq!(strip_headers(b"#replace abc").1, b"");
+        assert_eq!(strip_headers(h.to_string().as_bytes()).0, h);
+    }
+
+    #[test]
+    fn env_key() {
+        assert!(valid_env_key("KARTEI_NS"));
+        assert!(valid_env_key("_X1"));
+        for k in ["", "ns", "1A", "A-B", "A B", "NODE", "REPLACE", "HOST_FILE"] {
+            assert!(!valid_env_key(k), "{k}");
+        }
     }
 
     /// `key_hash(pk) == fingerprint_hash(fingerprint(pk))`. The KAT

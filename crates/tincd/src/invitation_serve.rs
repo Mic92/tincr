@@ -20,7 +20,7 @@ use tinc_conf::HostDirs;
 
 use tinc_conf::read_pem;
 use tinc_crypto::b64;
-use tinc_crypto::invite::{cookie_filename, strip_replace_marker};
+use tinc_crypto::invite::{Headers, cookie_filename, strip_headers};
 
 use std::io;
 use std::io::ErrorKind;
@@ -42,12 +42,8 @@ pub(crate) const CHUNK_SIZE: usize = 1024;
 pub(crate) enum InvitePhase {
     /// type != 0 || len != 18 → close.
     WaitingCookie,
-    /// `c->status.invitation_used = true`. `replace` carries the pinned
-    /// old key when the file came from `tinc invite --replace`.
-    WaitingPubkey {
-        name: String,
-        replace: Option<String>,
-    },
+    /// `c->status.invitation_used = true`.
+    WaitingPubkey { name: String, headers: Headers },
     /// Post-ACK terminal state; any further record terminates the conn.
     Done,
 }
@@ -136,11 +132,10 @@ fn parse_name_line(line: &str) -> Option<&str> {
 
 #[derive(Debug)]
 pub(crate) struct Served {
-    /// What goes on the wire, with the replace marker stripped.
+    /// What goes on the wire, headers stripped.
     pub contents: Vec<u8>,
     pub name: String,
-    /// Pinned old key (b64) from `tinc invite --replace`.
-    pub replace: Option<String>,
+    pub headers: Headers,
     pub used_path: PathBuf,
 }
 
@@ -190,8 +185,7 @@ pub(crate) fn serve_cookie(
 
     // :240-257
     let raw = fs::read(&used_path).map_err(io_err(&used_path))?;
-    let (replace, contents) = strip_replace_marker(&raw);
-    let replace = replace.map(|k| String::from_utf8_lossy(k).into_owned());
+    let (headers, contents) = strip_headers(&raw);
     let first_line = contents
         .iter()
         .position(|&b| b == b'\n')
@@ -211,7 +205,7 @@ pub(crate) fn serve_cookie(
     Ok(Served {
         contents: contents.to_vec(),
         name: invited_name,
-        replace,
+        headers,
         used_path,
     })
 }
@@ -374,13 +368,13 @@ mod tests {
         let Served {
             contents,
             name,
-            replace,
+            headers,
             used_path,
         } = serve_cookie(tmp.path(), &key, &cookie, "alice", WEEK, SystemTime::now()).unwrap();
 
         assert_eq!(contents, body.as_bytes());
         assert_eq!(name, "bob");
-        assert!(replace.is_none());
+        assert_eq!(headers, Headers::default());
 
         assert!(used_path.exists(), ".used file should exist");
         assert!(
@@ -559,16 +553,17 @@ mod tests {
         assert_eq!(after, "Ed25519PublicKey = original\n");
     }
 
-    /// The replace marker is parsed off and never reaches the invitee.
+    /// Headers are parsed off and never reach the invitee.
     #[test]
-    fn serve_cookie_strips_replace_marker() {
+    fn serve_cookie_strips_headers() {
         let key = test_key();
-        let body = "#replace abc\nName = bob\nConnectTo = alice\n";
+        let body = "#replace abc\n#env KARTEI_NS=mic92\nName = bob\nConnectTo = alice\n";
         let (tmp, cookie) = setup_invitation("replace", &key, body);
         let s = serve_cookie(tmp.path(), &key, &cookie, "alice", WEEK, SystemTime::now()).unwrap();
         assert_eq!(s.contents, b"Name = bob\nConnectTo = alice\n");
         assert_eq!(s.name, "bob");
-        assert_eq!(s.replace.as_deref(), Some("abc"));
+        assert_eq!(s.headers.replace.as_deref(), Some("abc"));
+        assert_eq!(s.headers.env, [("KARTEI_NS".into(), "mic92".into())]);
     }
 
     /// Replace keeps everything but the key lines and writes to the

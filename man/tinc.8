@@ -144,10 +144,20 @@ overwrite existing files.
 .Pq or Cm export-all
 followed by
 .Cm import .
-.It Cm invite Oo Fl -replace Oc Ar NODE
+.It Cm invite Oo Fl e Ar KEY=VAL Oc Oo Fl -replace Oc Ar NODE
 Generate an invitation URL for
 .Ar NODE
 and print it to stdout.
+Each
+.Fl e
+is stored in the invitation and exported to the
+.Pa invitation-created
+and
+.Pa invitation-accepted
+scripts, e.g.\&
+.Li -e OWNER=alice
+for a script that records who a node belongs to.
+The invitee never sees these values.
 With
 .Fl -replace ,
 .Ar NODE

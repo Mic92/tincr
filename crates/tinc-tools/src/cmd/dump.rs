@@ -34,7 +34,7 @@ use crate::names::{Paths, check_id};
 // Re-exported so existing `cmd::dump::{NodeRow,…}` paths keep working.
 pub use crate::ctl::rows::{ConnRow, EdgeRow, NodeRow, StatusBit, SubnetRow, strip_weight};
 use std::io::ErrorKind;
-use tinc_crypto::invite::{REPLACE_MARKER, SLUG_PART_LEN};
+use tinc_crypto::invite::SLUG_PART_LEN;
 
 /// Which `dump` sub-verb.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,10 +182,10 @@ pub fn dump_invitations(paths: &Paths) -> Result<Vec<InviteRow>, CmdError> {
         if rd.read_line(&mut first).is_err() || first.is_empty() {
             continue;
         }
-        if first.starts_with(REPLACE_MARKER) {
+        while first.starts_with('#') {
             first.clear();
-            if rd.read_line(&mut first).is_err() {
-                continue;
+            if rd.read_line(&mut first).is_err() || first.is_empty() {
+                break;
             }
         }
 
