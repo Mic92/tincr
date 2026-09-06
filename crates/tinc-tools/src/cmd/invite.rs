@@ -36,17 +36,20 @@
 //!   printed. **TODO**: wire best-effort reload.
 //! - The URL host comes from the `Address` config variable; there is no
 //!   HTTP probe or tty prompt to discover it.
-//! - No `invitation-created` script hook. **TODO**: add once a shared
-//!   script runner exists.
 //!
 //! ## What we tighten
 //!
 //! - Cookie zeroized on every exit path. We wrap in `Zeroizing` so
 //!   Drop handles it.
+//! - A failing `invitation-created` hook aborts the invite and removes
+//!   the invitation file. Upstream ignores the exit status. Registries
+//!   allocate addresses in this hook, so a URL for a half-provisioned
+//!   node must not be printed.
 
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use rand_core::Rng;
@@ -203,10 +206,45 @@ pub fn invite(
     let slug = Zeroizing::new(build_slug(pubkey, &cookie));
     let url = Zeroizing::new(format!("{address}/{}", *slug));
 
-    // TODO(chunk-8): execute_script("invitation-created") — lifts to
-    // shared script.rs with daemon's execute_script.
+    if let Err(e) = run_created_hook(paths, netname, &myname, invitee, &inv_path, &url) {
+        let _ = fs::remove_file(&inv_path);
+        return Err(e);
+    }
 
     Ok(InviteResult { url, key_is_new })
+}
+
+/// Run `confbase/invitation-created` with the upstream env contract. The
+/// hook may edit `INVITATION_FILE`, and whatever it leaves there is what
+/// the invitee receives.
+fn run_created_hook(
+    paths: &Paths,
+    netname: Option<&str>,
+    myname: &str,
+    invitee: &str,
+    inv_path: &Path,
+    url: &str,
+) -> Result<(), CmdError> {
+    let script = paths.confbase.join("invitation-created");
+    if !script.exists() {
+        return Ok(());
+    }
+    let mut cmd = Command::new(&script);
+    cmd.env("NAME", myname)
+        .env("NODE", invitee)
+        .env("INVITATION_FILE", inv_path)
+        .env("INVITATION_URL", url);
+    if let Some(n) = netname {
+        cmd.env("NETNAME", n);
+    }
+    let status = cmd.status().map_err(io_err(&script))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(CmdError::BadInput(format!(
+            "invitation-created script failed: {status}"
+        )))
+    }
 }
 
 /// Expiry sweep plus live count over `inv_dir`: entries with a 24-char
@@ -749,6 +787,63 @@ mod tests {
         assert!(chunk2.contains("Name = alice\n"));
         // alice's pubkey is in chunk 2 (init wrote it as a config line).
         assert!(chunk2.contains("Ed25519PublicKey = "));
+    }
+
+    /// The `invitation-created` hook sees `NODE`, `INVITATION_FILE` and
+    /// `INVITATION_URL` and may append to the file. Registries use this to
+    /// add a `Subnet` line.
+    #[test]
+    fn invitation_created_hook_can_edit_file() {
+        let cd = ConfDir::bare();
+        let paths = cd.paths().clone();
+        init_with_address(&paths, "alice", "myhost");
+        let script = cd.confbase().join("invitation-created");
+        fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'Subnet = 10.0.0.7\\n# %s %s %s\\n' \
+             \"$NODE\" \"$NAME\" \"$INVITATION_URL\" >> \"$INVITATION_FILE\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let r = invite(&paths, None, "bob", SystemTime::now()).unwrap();
+
+        let inv_dir = cd.confbase().join("invitations");
+        let file = fs::read_dir(&inv_dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.file_name().unwrap().len() == SLUG_PART_LEN)
+            .unwrap();
+        let body = fs::read_to_string(file).unwrap();
+        assert!(
+            body.ends_with(&format!(
+                "Subnet = 10.0.0.7\n# bob alice {}\n",
+                r.url.as_str()
+            )),
+            "{body}"
+        );
+    }
+
+    /// A failing hook aborts the invite and leaves no invitation behind,
+    /// so a URL is never printed for a half-provisioned node.
+    #[test]
+    fn invitation_created_hook_failure_aborts() {
+        let cd = ConfDir::bare();
+        let paths = cd.paths().clone();
+        init_with_address(&paths, "alice", "myhost");
+        let script = cd.confbase().join("invitation-created");
+        fs::write(&script, "#!/bin/sh\nexit 3\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = invite(&paths, None, "bob", SystemTime::now()).unwrap_err();
+        assert!(err.to_string().contains("invitation-created"), "{err}");
+
+        let inv_dir = cd.confbase().join("invitations");
+        let live = fs::read_dir(&inv_dir)
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().len() == SLUG_PART_LEN)
+            .count();
+        assert_eq!(live, 0);
     }
 
     /// Corrupt key + live invitations → refuse, don't rotate (would
