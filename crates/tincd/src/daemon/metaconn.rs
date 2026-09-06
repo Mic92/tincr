@@ -15,6 +15,7 @@ use crate::dispatch::{
     record_body, send_ack,
 };
 use crate::invitation_serve::InvitePhase;
+use crate::keys;
 use crate::outgoing::ProxyConfig;
 use crate::script::ScriptEnv;
 use crate::tunnel::MTU;
@@ -926,7 +927,12 @@ impl Daemon {
                                 self.settings.invitation_lifetime,
                                 SystemTime::now(),
                             );
-                            let (contents, invited_name, used_path) = match result {
+                            let invitation_serve::Served {
+                                contents,
+                                name: invited_name,
+                                replace,
+                                used_path,
+                            } = match result {
                                 Ok(t) => t,
                                 Err(e) => {
                                     log::error!(target: "tincd::auth",
@@ -959,13 +965,14 @@ impl Daemon {
 
                             conn.invite = Some(InvitePhase::WaitingPubkey {
                                 name: invited_name.clone(),
+                                replace,
                             });
 
                             log::info!(target: "tincd::auth",
                                         "Invitation successfully sent to {invited_name} ({hostname})");
                         }
 
-                        (1, Some(InvitePhase::WaitingPubkey { name })) => {
+                        (1, Some(InvitePhase::WaitingPubkey { name, replace })) => {
                             // newline check happens inside finalize().
                             let Ok(pubkey_b64) = str::from_utf8(&bytes) else {
                                 log::error!(target: "tincd::auth",
@@ -974,10 +981,16 @@ impl Daemon {
                                 return needs_write;
                             };
 
+                            let current = replace.and_then(|_| {
+                                let cfg = keys::read_host_config(&self.hosts, &name);
+                                keys::read_ecdsa_public_key(&cfg, &self.hosts, &name)
+                            });
                             let host_path = match invitation_serve::finalize(
                                 &self.hosts,
                                 &name,
                                 pubkey_b64,
+                                replace.as_ref(),
+                                current.as_ref(),
                             ) {
                                 Ok(host_path) => {
                                     log::info!(target: "tincd::auth",
@@ -1008,7 +1021,30 @@ impl Daemon {
                                 cache.disarm();
                             }
 
-                            self.run_invitation_accepted_script(&name, &host_path, conn_addr);
+                            // Replace is revocation on this node: drop the
+                            // old device's session now, not on its next
+                            // reconnect.
+                            if replace.is_some() {
+                                let old: Vec<ConnId> = self
+                                    .conns
+                                    .iter()
+                                    .filter(|(cid, c)| *cid != id && !c.control && c.name == name)
+                                    .map(|(cid, _)| cid)
+                                    .collect();
+                                for cid in old {
+                                    log::info!(target: "tincd::auth",
+                                               "Closing connection with {name}: key replaced");
+                                    self.terminate(cid);
+                                }
+                            }
+
+                            let replaced = replace.map(|k| tinc_crypto::b64::encode(&k));
+                            self.run_invitation_accepted_script(
+                                &name,
+                                &host_path,
+                                replaced.as_deref(),
+                                conn_addr,
+                            );
 
                             // empty type-2 = ACK; joiner closes after
                             // reading it.
@@ -1043,12 +1079,16 @@ impl Daemon {
         &self,
         node: &str,
         host_file: &Path,
+        replaced: Option<&str>,
         addr: Option<SocketAddr>,
     ) {
         let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
         env.add("NODE", node.to_owned());
         // With HostsOverlayDirectory the file is not at hosts/$NODE.
         env.add("HOST_FILE", host_file.display().to_string());
+        if let Some(k) = replaced {
+            env.add("REPLACE", k.to_owned());
+        }
         if let Some(a) = addr {
             env.add("REMOTEADDRESS", a.ip().to_string());
             env.add("REMOTEPORT", a.port().to_string());

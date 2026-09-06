@@ -54,8 +54,8 @@ use std::time::{Duration, SystemTime};
 
 use rand_core::Rng;
 use tinc_conf::Config;
-use tinc_crypto::invite::{COOKIE_LEN, REPLACE_MARKER, SLUG_PART_LEN, build_slug, cookie_filename};
 use tinc_crypto::b64;
+use tinc_crypto::invite::{COOKIE_LEN, REPLACE_MARKER, SLUG_PART_LEN, build_slug, cookie_filename};
 use tinc_crypto::os_rng;
 use tinc_crypto::sign::SigningKey;
 use zeroize::Zeroizing;
@@ -139,7 +139,10 @@ pub fn invite(
         let file = hosts.file(invitee);
         let cfg = Config::read(&file).map_err(|e| CmdError::BadInput(e.to_string()))?;
         let key = keypair::load_public_from_config(&cfg, &file).ok_or_else(|| {
-            CmdError::BadInput(format!("{} has no Ed25519 public key to replace", file.display()))
+            CmdError::BadInput(format!(
+                "{} has no Ed25519 public key to replace",
+                file.display()
+            ))
         })?;
         Some(b64::encode(&key))
     } else {
@@ -981,10 +984,17 @@ mod tests {
         let paths = cd.paths().clone();
         init_with_address(&paths, "alice", "myhost");
         let old = b64::encode(&[7u8; 32]);
-        let cd = cd.with_overlay_host("bob", &format!("Subnet = 10.0.0.7\nEd25519PublicKey = {old}\n"));
+        let cd = cd.with_overlay_host(
+            "bob",
+            &format!("Subnet = 10.0.0.7\nEd25519PublicKey = {old}\n"),
+        );
         let paths = cd.paths().clone();
         let script = cd.confbase().join("invitation-created");
-        fs::write(&script, "#!/bin/sh\necho \"# $REPLACE\" >> \"$INVITATION_FILE\"\n").unwrap();
+        fs::write(
+            &script,
+            "#!/bin/sh\necho \"# $REPLACE\" >> \"$INVITATION_FILE\"\n",
+        )
+        .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
         invite(&paths, None, "bob", true, SystemTime::now()).unwrap();
@@ -1010,7 +1020,10 @@ mod tests {
             ("rsa", "no Ed25519 public key"),
         ] {
             let err = invite(&paths, None, who, true, SystemTime::now()).unwrap_err();
-            assert!(matches!(&err, CmdError::BadInput(m) if m.contains(want)), "{who}: {err}");
+            assert!(
+                matches!(&err, CmdError::BadInput(m) if m.contains(want)),
+                "{who}: {err}"
+            );
         }
     }
 

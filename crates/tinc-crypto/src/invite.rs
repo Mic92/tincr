@@ -214,12 +214,18 @@ mod tests {
 
     #[test]
     fn replace_marker() {
-        assert_eq!(strip_replace_marker(b"Name = a\n"), (None, &b"Name = a\n"[..]));
+        assert_eq!(
+            strip_replace_marker(b"Name = a\n"),
+            (None, &b"Name = a\n"[..])
+        );
         assert_eq!(
             strip_replace_marker(b"#replace abc\nName = a\n"),
             (Some(&b"abc"[..]), &b"Name = a\n"[..])
         );
-        assert_eq!(strip_replace_marker(b"#replace abc"), (Some(&b"abc"[..]), &b""[..]));
+        assert_eq!(
+            strip_replace_marker(b"#replace abc"),
+            (Some(&b"abc"[..]), &b""[..])
+        );
     }
 
     /// `key_hash(pk) == fingerprint_hash(fingerprint(pk))`. The KAT

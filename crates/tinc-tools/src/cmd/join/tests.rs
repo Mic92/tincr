@@ -496,7 +496,8 @@ fn invite_join_roundtrip_in_process() {
         .append_conf("Mode = switch\n");
     let inviter = inviter_cd.paths();
 
-    let inv_result = invite::invite(inviter, Some("acme"), "bob", false, SystemTime::now()).unwrap();
+    let inv_result =
+        invite::invite(inviter, Some("acme"), "bob", false, SystemTime::now()).unwrap();
     let parsed = parse_url(&inv_result.url).unwrap();
 
     // Load invitation key. Both the server stub and the joiner's

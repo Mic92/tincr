@@ -1,5 +1,5 @@
 use nix::sys::signal::Signal;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use super::common::node::has_subnet;
 use super::common::{
@@ -227,6 +227,82 @@ fn identity_only_join_registers_key_and_peer_connects() {
     // Not the harness key: the one the join generated.
     fs::remove_file(bob.confbase.join("ed25519_key.priv")).unwrap();
     bob.start();
+    alice.wait_for_peer("bob", true, Duration::from_secs(10));
+}
+
+/// `tinc invite --replace bob` on alice while the old bob is connected:
+/// a new device joins under bob's name, alice keeps bob's Subnet, swaps
+/// the key (into the overlay, `hosts/` untouched), kicks the old bob and
+/// no longer lets it in; the new key does get in.
+#[test]
+fn replace_invite_rekeys_node_and_drops_old_device() {
+    let tmp = tmp!("replace");
+    let mut alice =
+        Node::new(tmp.path(), "alice", 0xAA).with_conf("HostsOverlayDirectory = hosts.local\n");
+    let mut bob = Node::new(tmp.path(), "bob", 0xBB);
+    bob.start_dialing(&mut alice);
+    let hosts_bob = alice.confbase.join("hosts/bob");
+    fs::write(
+        &hosts_bob,
+        fs::read_to_string(&hosts_bob).unwrap() + "Subnet = 10.0.0.7/32\n",
+    )
+    .unwrap();
+    let hook = alice.confbase.join("invitation-accepted");
+    let hook_out = alice.confbase.join("hook.out");
+    fs::write(
+        &hook,
+        format!("#!/bin/sh\necho \"$REPLACE\" > '{}'\n", hook_out.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Real `tinc invite --replace`: needs alice's Address for the URL.
+    let hosts_alice = alice.confbase.join("hosts/alice");
+    fs::write(
+        &hosts_alice,
+        fs::read_to_string(&hosts_alice).unwrap()
+            + &format!("Address = 127.0.0.1 {}\n", alice.port),
+    )
+    .unwrap();
+    let alice_paths = cli_paths(alice.confbase.clone());
+    let err = tinc_tools::cmd::invite::invite(&alice_paths, None, "bob", false, SystemTime::now())
+        .unwrap_err();
+    assert!(err.to_string().contains("already exists"), "{err}");
+    let url = tinc_tools::cmd::invite::invite(&alice_paths, None, "bob", true, SystemTime::now())
+        .unwrap()
+        .url;
+    assert_eq!(alice.ctl().reload(), 0);
+
+    let key = tmp.path().join("newbob.priv");
+    if let Err(err) = tinc_tools::cmd::join::join(&url, &Mode::IdentityOnly(Some(key.clone()))) {
+        panic!("join: {err:?}\nalice:\n{}", alice.stop());
+    }
+
+    let old_b64 = tinc_crypto::b64::encode(&bob.pubkey());
+    let overlay_bob = alice.confbase.join("hosts.local/bob");
+    assert!(wait_for_file(&overlay_bob));
+    let new_host = fs::read_to_string(&overlay_bob).unwrap();
+    assert!(
+        new_host.starts_with("Subnet = 10.0.0.7/32\nEd25519PublicKey = "),
+        "{new_host}"
+    );
+    assert!(!new_host.contains(&old_b64));
+    assert!(fs::read_to_string(&hosts_bob).unwrap().contains(&old_b64));
+    assert!(wait_for_file(&hook_out));
+    assert_eq!(fs::read_to_string(&hook_out).unwrap().trim(), old_b64);
+
+    // Old bob was kicked and, retrying with the old key, stays out.
+    alice.wait_for_peer("bob", false, Duration::from_secs(10));
+    thread::sleep(Duration::from_millis(1500));
+    assert!(!alice.has_active_peer("bob"), "old key got back in");
+    bob.stop();
+
+    // New device with the joined key connects as bob.
+    let mut newbob = Node::new(tmp.path(), "bob", 0xBB)
+        .with_conf(&format!("Ed25519PrivateKeyFile = {}\n", key.display()));
+    newbob.write_config_multi(&[&alice], &[&alice]);
+    fs::remove_file(newbob.confbase.join("ed25519_key.priv")).unwrap();
+    newbob.start();
     alice.wait_for_peer("bob", true, Duration::from_secs(10));
 }
 
