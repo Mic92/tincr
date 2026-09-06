@@ -27,6 +27,7 @@ use std::fs;
 use std::io;
 use std::io::ErrorKind;
 use std::sync::Once;
+use tinc_conf::HostDirs;
 use tinc_conf::{Config, read_pem};
 use tinc_crypto::aead::{SptpsAead, hw_aes_available};
 use tinc_crypto::b64;
@@ -39,8 +40,8 @@ static HOST_CACHE: LazyLock<HostCache> = LazyLock::new(HostCache::default);
 /// Read `hosts/{name}` into a [`Config`], empty on ENOENT/parse-fail.
 /// Cached per path, revalidated by mtime+size so on-disk updates are seen.
 #[must_use]
-pub(crate) fn read_host_config(confbase: &Path, name: &str) -> Arc<Config> {
-    let path = confbase.join("hosts").join(name);
+pub(crate) fn read_host_config(hosts: &HostDirs, name: &str) -> Arc<Config> {
+    let path = hosts.file(name);
     let mut cache = HOST_CACHE.lock().unwrap();
     let Ok(meta) = fs::metadata(&path) else {
         cache.remove(&path);
@@ -220,7 +221,7 @@ pub(crate) fn read_ecdsa_private_key(
 #[must_use]
 pub(crate) fn read_ecdsa_public_key(
     host_config: &Config,
-    confbase: &Path,
+    hosts: &HostDirs,
     name: &str,
 ) -> Option<[u8; PUBLIC_LEN]> {
     // Source 1: inline b64 config var.
@@ -240,10 +241,7 @@ pub(crate) fn read_ecdsa_public_key(
     let path = host_config
         .lookup("Ed25519PublicKeyFile")
         .next()
-        .map_or_else(
-            || confbase.join("hosts").join(name),
-            |e| PathBuf::from(e.get_str()),
-        );
+        .map_or_else(|| hosts.file(name), |e| PathBuf::from(e.get_str()));
 
     // Open + parse. Errors are logged; a missing PEM block is
     // silently treated as "no key".
@@ -515,7 +513,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.merge(tinc_conf::parse_file(&host_file).unwrap());
 
-        let loaded = read_ecdsa_public_key(&cfg, tmp.path(), "peer").unwrap();
+        let loaded = read_ecdsa_public_key(&cfg, &HostDirs::new(tmp.path(), None), "peer").unwrap();
         assert_eq!(loaded, pk);
     }
 
@@ -546,7 +544,7 @@ mod tests {
 
         // The PEM block is there, but the inline var is malformed.
         // No fallthrough → None.
-        let loaded = read_ecdsa_public_key(&cfg, tmp.path(), "peer");
+        let loaded = read_ecdsa_public_key(&cfg, &HostDirs::new(tmp.path(), None), "peer");
         assert!(loaded.is_none(), "must not fall through to PEM block");
     }
 
@@ -574,7 +572,7 @@ mod tests {
         // Precondition: source 1 doesn't fire.
         assert!(cfg.lookup("Ed25519PublicKey").next().is_none());
 
-        let loaded = read_ecdsa_public_key(&cfg, tmp.path(), "peer").unwrap();
+        let loaded = read_ecdsa_public_key(&cfg, &HostDirs::new(tmp.path(), None), "peer").unwrap();
         assert_eq!(loaded, pk);
     }
 
@@ -602,7 +600,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.merge(tinc_conf::parse_file(&host_file).unwrap());
 
-        let loaded = read_ecdsa_public_key(&cfg, tmp.path(), "peer").unwrap();
+        let loaded = read_ecdsa_public_key(&cfg, &HostDirs::new(tmp.path(), None), "peer").unwrap();
         assert_eq!(loaded, pk);
     }
 
@@ -621,7 +619,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.merge(tinc_conf::parse_file(&host_file).unwrap());
 
-        let loaded = read_ecdsa_public_key(&cfg, tmp.path(), "peer");
+        let loaded = read_ecdsa_public_key(&cfg, &HostDirs::new(tmp.path(), None), "peer");
         assert!(loaded.is_none());
     }
 
@@ -632,7 +630,7 @@ mod tests {
         let tmp = TmpDir::new("pub-nohosts");
         // No hosts/ dir at all.
         let cfg = Config::default();
-        let loaded = read_ecdsa_public_key(&cfg, tmp.path(), "peer");
+        let loaded = read_ecdsa_public_key(&cfg, &HostDirs::new(tmp.path(), None), "peer");
         assert!(loaded.is_none());
     }
 
@@ -663,7 +661,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.merge(tinc_conf::parse_file(&host_file).unwrap());
 
-        let loaded = read_ecdsa_public_key(&cfg, tmp.path(), "peer").unwrap();
+        let loaded = read_ecdsa_public_key(&cfg, &HostDirs::new(tmp.path(), None), "peer").unwrap();
         assert_eq!(loaded, pk_inline, "inline var should win");
         assert_ne!(loaded, pk_pem);
     }

@@ -28,6 +28,11 @@ fn mkctl() -> Connection {
 /// `IdCtx` for tests not reaching the peer pubkey load. `OnceLock`
 /// for `'static` lifetime. `confbase="."` → pubkey load fails;
 /// tests reaching it use `PeerSetup`.
+fn nohosts() -> &'static HostDirs {
+    static D: OnceLock<HostDirs> = OnceLock::new();
+    D.get_or_init(|| HostDirs::new(".".as_ref(), None))
+}
+
 fn mkctx(cookie: &str) -> IdCtx<'_> {
     static DUMMY_KEY: OnceLock<SigningKey> = OnceLock::new();
     let mykey = DUMMY_KEY.get_or_init(|| SigningKey::from_seed(&[0x99; 32]));
@@ -35,7 +40,7 @@ fn mkctx(cookie: &str) -> IdCtx<'_> {
         cookie,
         my_name: "testd",
         mykey,
-        confbase: Path::new("."),
+        hosts: nohosts(),
         invitation_key: None,
         global_pmtu: None,
         sptps_cipher: tinc_sptps::SptpsAead::default(),
@@ -183,6 +188,7 @@ fn id_early_rejects() {
 /// Tempdir + hosts/ layout for peer-branch tests.
 struct PeerSetup {
     tmp: PathBuf,
+    hosts: HostDirs,
 }
 impl PeerSetup {
     fn new(tag: &str, peer_name: &str, peer_pub: &[u8; 32]) -> Self {
@@ -196,10 +202,8 @@ impl PeerSetup {
             format!("Ed25519PublicKey = {b64}\n"),
         )
         .unwrap();
-        Self { tmp }
-    }
-    fn confbase(&self) -> &Path {
-        &self.tmp
+        let hosts = HostDirs::new(&tmp, None);
+        Self { tmp, hosts }
     }
 }
 
@@ -209,7 +213,7 @@ fn peer_ctx<'a>(setup: &'a PeerSetup, mykey: &'a SigningKey, cookie: &'a str) ->
         cookie,
         my_name: "testd",
         mykey,
-        confbase: setup.confbase(),
+        hosts: &setup.hosts,
         invitation_key: None,
         global_pmtu: None,
         sptps_cipher: tinc_sptps::SptpsAead::default(),
@@ -325,7 +329,7 @@ fn id_invitation_bad_throwaway() {
         cookie: &cookie,
         my_name: "alice",
         mykey: &mykey,
-        confbase: Path::new("."),
+        hosts: nohosts(),
         invitation_key: Some(&inv_key),
         global_pmtu: None,
         sptps_cipher: tinc_sptps::SptpsAead::default(),

@@ -17,11 +17,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod hostdirs;
 pub mod name;
 pub mod parse;
 pub mod pem;
 pub mod vars;
 
+pub use hostdirs::HostDirs;
 pub use parse::{
     Config, Entry, ParseError, ReadError, Source, parse_file, parse_line, read_server_config,
     split_kv,

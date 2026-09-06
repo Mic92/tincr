@@ -5,7 +5,6 @@
 //! The mutating handler step lives in `Daemon` (handlers need
 //! `&mut Daemon`).
 
-use std::path::Path;
 use std::time::Instant;
 
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
@@ -21,6 +20,7 @@ use std::fmt;
 use std::str;
 use std::time::Duration;
 use subtle::ConstantTimeEq;
+use tinc_conf::HostDirs;
 
 bitflags::bitflags! {
     /// Connection option wire bits (ACK `%x` field). The top byte
@@ -346,7 +346,7 @@ pub(crate) struct IdCtx<'a> {
     pub cookie: &'a str,       // control cookie, 64 hex chars
     pub my_name: &'a str,      // our node name
     pub mykey: &'a SigningKey, // our Ed25519 key
-    pub confbase: &'a Path,    // for `read_ecdsa_public_key`
+    pub hosts: &'a HostDirs,   // for `read_ecdsa_public_key`
     /// Invitation key. `None` → `?` branch rejects.
     pub invitation_key: Option<&'a SigningKey>,
     /// Global tinc.conf `PMTU`. Clamps in addition to per-host (min
@@ -672,11 +672,11 @@ fn load_peer_host_config(
     ctx: &IdCtx<'_>,
     name: &str,
 ) -> Option<[u8; PUBLIC_LEN]> {
-    let host_config = keys::read_host_config(ctx.confbase, name);
+    let host_config = keys::read_host_config(ctx.hosts, name);
     // Parse failure doesn't doom us yet — read_ecdsa_public_key can
     // still fall back to the raw PEM file below.
 
-    let ecdsa = read_ecdsa_public_key(&host_config, ctx.confbase, name);
+    let ecdsa = read_ecdsa_public_key(&host_config, ctx.hosts, name);
     conn.ecdsa = ecdsa;
 
     // `.ok()`: a value that fails to parse is treated as absent.
