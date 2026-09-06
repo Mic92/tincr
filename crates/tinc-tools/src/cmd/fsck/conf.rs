@@ -1,10 +1,8 @@
 //! Phase 5: per-variable validity (obsolete/wrong-file/duplicate).
 
-use std::fs;
-
 use tinc_conf::{Config, VARS, VarFlags, read_server_config};
 
-use crate::names::{Paths, check_id};
+use crate::names::Paths;
 
 use super::Finding;
 
@@ -22,25 +20,14 @@ pub(super) fn check_variables(paths: &Paths, findings: &mut Vec<Finding>) {
     // Read failure on server config → skip the var check. A
     // `ConfigReadFailed` was already pushed in Phase 1.
 
-    // Each host file
-    // The `check_id` filter skips `.`, `..`, and any `hosts/*` that
-    // isn't a valid node name (`tinc init` only creates valid-named
-    // files).
-    let Ok(rd) = fs::read_dir(paths.hosts_dir()) else {
-        // Silent skip on opendir failure: the hosts/ dir was already
-        // checked in Phase 4; the `DirUnreadable` finding is there.
-        // Don't double-report.
+    // Each host file, overlay included. An unreadable hosts/ was already
+    // reported as `DirUnreadable`, so skip silently here.
+    let hosts = paths.host_dirs();
+    let Ok(names) = hosts.names() else {
         return;
     };
-    for ent in rd {
-        let Ok(ent) = ent else { continue };
-        let fname = ent.file_name();
-        let Some(node) = fname.to_str() else { continue };
-        if !check_id(node) {
-            continue;
-        }
-
-        let Ok(cfg) = Config::read(paths.host_file(node)) else {
+    for node in &names {
+        let Ok(cfg) = Config::read(hosts.file(node)) else {
             // Silent skip; unparseable host files are a separate phase.
             continue;
         };

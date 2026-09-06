@@ -640,6 +640,19 @@ fn server_var_in_host() {
     );
 }
 
+/// Host files in `HostsOverlayDirectory` get the same variable checks.
+#[test]
+fn server_var_in_overlay_host() {
+    let cd = ConfDir::bare();
+    init(cd.paths(), "alice");
+    let cd = cd.with_overlay_host("bob", "Device = /dev/net/tun\n");
+    let r = run(cd.paths(), false).unwrap();
+    assert_eq!(
+        count(&r, |f| matches!(f, Finding::ServerVarInHost { .. })),
+        1
+    );
+}
+
 /// Two `Name =` lines → `DuplicateVar`. `Name` is non-MULTIPLE.
 /// **The only place that surfaces silent-first-wins** — the
 /// daemon would silently use the first.

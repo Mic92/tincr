@@ -35,6 +35,29 @@ fn sign_verify_roundtrip() {
     assert_eq!(v.body, data);
 }
 
+/// The signer may be a node known only through `HostsOverlayDirectory`.
+#[test]
+fn verify_signer_in_overlay() {
+    let cd = ConfDir::with_name("alice").with_ed25519_key("alice");
+    let mut signed = Vec::new();
+    let input = cd.path().join("payload");
+    fs::write(&input, b"x\n").unwrap();
+    sign(cd.paths(), Some(&input), 1_700_000_000, &mut signed).unwrap();
+    let host = fs::read_to_string(cd.paths().host_file("alice")).unwrap();
+    fs::remove_file(cd.paths().host_file("alice")).unwrap();
+    let cd = cd.with_overlay_host("bob", &host);
+    let signed = String::from_utf8(signed)
+        .unwrap()
+        .replacen("alice", "bob", 1);
+    // Signature covers the signer name, so this must fail on the
+    // signature, not on a missing host file.
+    let e = verify_blob(cd.paths(), &Signer::Named("bob".into()), signed.as_bytes()).unwrap_err();
+    assert!(
+        matches!(e, CmdError::BadInput(ref m) if m.contains("Invalid signature")),
+        "{e:?}"
+    );
+}
+
 /// `Signer::Any` (`*`) — verify against whoever the header says.
 /// Uses the `verify_blob` seam (the blob is the testable layer;
 /// `verify_cmd` adds stdin-slurp on top, which blocks under test).

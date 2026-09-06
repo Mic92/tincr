@@ -105,7 +105,7 @@ pub fn get_my_name(paths: &Paths) -> Result<String, CmdError> {
 /// # Errors
 /// I/O on the host file or `out`.
 pub fn export_one(paths: &Paths, name: &str, mut out: impl Write) -> Result<(), CmdError> {
-    let path = paths.host_file(name);
+    let path = paths.host_dirs().file(name);
     // Host files are small (a few KB at most). `read_to_string`
     // rejects non-UTF-8; host files are ASCII in practice (config
     // keys, b64, addresses). A non-UTF-8 host file is corruption.
@@ -157,20 +157,9 @@ pub fn export(paths: &Paths, out: impl Write) -> Result<(), CmdError> {
 /// # Errors
 /// `hosts_dir` can't be opened; per-file errors are accumulated.
 pub fn export_all(paths: &Paths, mut out: impl Write) -> Result<(), CmdError> {
-    let hosts_dir = paths.hosts_dir();
-    let mut entries: Vec<String> = fs::read_dir(&hosts_dir)
-        .map_err(io_err(&hosts_dir))?
-        .filter_map(|e| {
-            // Silently skip anything that doesn't look like a node
-            // name — `.`, `..`, editor swap files, README, whatever.
-            // `to_str()` failing (non-UTF-8 dirent) → also skip;
-            // `check_id` would reject it anyway (bytes ≥0x80).
-            let name = e.ok()?.file_name().to_str()?.to_owned();
-            check_id(&name).then_some(name)
-        })
-        .collect();
-
-    entries.sort();
+    let hosts = paths.host_dirs();
+    // Non-node dirents (swap files, README) are skipped by `names()`.
+    let entries = hosts.names().map_err(io_err(hosts.primary()))?;
 
     let mut first = true;
     let mut any_error = false;
@@ -382,6 +371,21 @@ mod tests {
         assert!(sep_pos < bob_pos);
         // Separator only between, not before alice.
         assert_eq!(s.matches(SEPARATOR).count(), 1);
+    }
+
+    /// Nodes the daemon accepted into `HostsOverlayDirectory` are peers
+    /// too. `hosts/` wins when both have the name.
+    #[test]
+    fn export_all_includes_overlay() {
+        let cd = setup("alice", "Subnet = 10.0.1.0/24\n")
+            .with_overlay_host("bob", "Subnet = 10.0.2.0/24\n")
+            .with_overlay_host("alice", "Subnet = 6.6.6.6/32\n");
+        let mut out = Vec::new();
+        export_all(cd.paths(), &mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("Name = bob\nSubnet = 10.0.2.0/24"), "{s}");
+        assert!(!s.contains("6.6.6.6"), "{s}");
+        assert_eq!(s.matches("Name = alice").count(), 1);
     }
 
     #[test]

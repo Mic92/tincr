@@ -96,8 +96,8 @@ pub(crate) fn resolve(paths: &Paths, input: &str) -> Result<PathBuf, CmdError> {
         return Err(bad());
     }
 
-    // Join the full input (with dash); the split was only for validation.
-    Ok(paths.hosts_dir().join(input))
+    // Join the full input (with dash). The split was only for validation.
+    Ok(paths.host_dirs().file(input))
 }
 
 /// Pick the editor: `$VISUAL` → `$EDITOR` → `vi` (POSIX guarantees vi).
@@ -178,6 +178,7 @@ pub fn run(paths: &Paths, input: &str) -> Result<(), CmdError> {
 mod tests {
     use super::*;
     use crate::names::PathsInput;
+    use crate::testutil::ConfDir;
 
     fn paths() -> Paths {
         Paths::for_cli(&PathsInput {
@@ -232,6 +233,17 @@ mod tests {
             let r = resolve(&p, f).unwrap();
             assert_eq!(r, p.confbase.join(f), "conffile: {f}");
         }
+    }
+
+    /// A node known only through `HostsOverlayDirectory` is edited in
+    /// place instead of creating an empty shadow in `hosts/`.
+    #[test]
+    fn resolve_overlay_host() {
+        let cd = ConfDir::with_name("alice").with_overlay_host("bob", "Port = 1\n");
+        let r = resolve(cd.paths(), "bob").unwrap();
+        assert_eq!(r, cd.confbase().join("hosts.local/bob"));
+        let r = resolve(cd.paths(), "carol").unwrap();
+        assert_eq!(r, cd.paths().host_file("carol"));
     }
 
     /// `resolve` Err-path table: dash-split validation plus the

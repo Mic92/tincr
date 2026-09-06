@@ -654,6 +654,14 @@ fn run_full_get() {
 }
 
 #[test]
+fn run_full_get_overlay_host() {
+    let (cd, paths) = setup_full("alice", "");
+    let _cd = cd.with_overlay_host("bob", "Subnet = 10.0.2.0/24\n");
+    let (out, _) = run(&paths, Action::Get, "bob.Subnet", false).unwrap();
+    assert!(matches!(out, ConfigOutput::Got(v) if v == ["10.0.2.0/24"]));
+}
+
+#[test]
 fn run_full_get_not_found() {
     let (_d, paths) = setup_full("alice", "");
     let e = run(&paths, Action::Get, "Device", false).unwrap_err();

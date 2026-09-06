@@ -287,7 +287,7 @@ pub fn verify_blob(paths: &Paths, signer: &Signer, blob: &[u8]) -> Result<Verifi
     };
 
     // Load public key
-    let host_path = paths.host_file(resolved_signer);
+    let host_path = paths.host_dirs().file(resolved_signer);
     let pubkey = load_host_pubkey(&host_path)?;
 
     // Decode sig + reconstruct trailer + verify
