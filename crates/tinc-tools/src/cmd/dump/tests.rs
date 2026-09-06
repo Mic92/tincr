@@ -495,6 +495,7 @@ fn inv_valid_table() {
         // Same tokenizer as tinc.conf — a hand-edited `Name=bob` must
         // list even though invite always writes the spaced form.
         ("no-space `=`",                "Name=bob\n"),
+        ("replace marker",              "#replace abc\nName = bob\n"),
     ];
     for (label, content) in cases {
         let (d, paths) = setup_inv();
@@ -661,7 +662,7 @@ fn inv_roundtrip_with_invite() {
 
     // `now` is parameterized for sweep_expired tests; pass real time.
     let now = SystemTime::now();
-    let result = invite::invite(&paths, None, "bob", now).unwrap();
+    let result = invite::invite(&paths, None, "bob", false, now).unwrap();
     // Only the written file matters here, not the returned URL.
     let _ = result;
 
