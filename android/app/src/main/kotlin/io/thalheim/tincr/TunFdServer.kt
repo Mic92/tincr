@@ -4,12 +4,12 @@ import android.net.LocalServerSocket
 import java.io.FileDescriptor
 
 // Sends the tun fd via SCM_RIGHTS to tincd (Device = @NAME).
-class TunFdServer(private val name: String, private val fd: FileDescriptor) {
+class TunFdServer(name: String, private val fd: FileDescriptor) {
+    private val server = LocalServerSocket(name)
+
     fun serveOnce() {
-        val server = LocalServerSocket(name)
         try {
-            val sock = server.accept()
-            sock.use {
+            server.accept().use {
                 it.setFileDescriptorsForSend(arrayOf(fd))
                 it.outputStream.write(1)
                 it.outputStream.flush()
