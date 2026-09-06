@@ -12,6 +12,7 @@ let
 
   hosts = {
     alpha = ''
+      Address = 192.168.1.1
       Subnet = 10.21.0.1/32
       Ed25519PublicKey = ${keys.alpha.ed25519Public}
     '';
@@ -162,8 +163,16 @@ testers.runNixOSTest {
         alpha.wait_until_succeeds("systemctl is-active tincr-mesh.service", timeout=30)
         alpha.wait_until_succeeds("ping -c1 -W2 10.21.0.2", timeout=30)
 
+    with subtest("tinc invite works as the service user"):
+        url = alpha.succeed(
+            "runuser -u tincr -- tinc -n mesh --pidfile /run/tincr/mesh.pid invite gamma"
+        ).strip()
+        assert len(url.rsplit("/", 1)[1]) == 48, url
+        alpha.succeed("runuser -u tincr -- test -O /var/lib/tincr/mesh/invitations/ed25519_key.priv")
+
     with subtest("clean stop"):
-        alpha.systemctl("stop tincr-mesh.service")
+        # alpha has an Address now, so beta would re-trigger the socket.
+        alpha.systemctl("stop tincr-mesh.socket tincr-mesh.service")
         alpha.wait_until_succeeds(
             "systemctl show -p ActiveState tincr-mesh.service "
             "| grep -x ActiveState=inactive",

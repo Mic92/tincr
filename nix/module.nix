@@ -449,6 +449,15 @@ in
 
       environment.etc = mkMerge (mapAttrsToList etcForNet enabledNets);
 
+      # `tinc invite` and tincd use confbase/invitations, which is under
+      # read-only /etc here. Keep the data in the state dir.
+      systemd.tmpfiles.rules = flatten (
+        mapAttrsToList (n: _: [
+          "d /var/lib/tincr/${n}/invitations 0700 ${serviceUser} ${serviceUser} -"
+          "L /etc/tinc/${n}/invitations - - - - /var/lib/tincr/${n}/invitations"
+        ]) enabledNets
+      );
+
       networking.useNetworkd = mkDefault true;
       systemd.network = {
         netdevs = mapAttrs' (n: net: nameValuePair "40-tincr-${n}" (mkNetdev n net)) enabledNets;
