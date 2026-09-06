@@ -88,3 +88,23 @@ fn join_with_existing_config_fails_before_connect() {
         .fails_with("already exists");
     assert!(!stderr.contains("connect"), "{stderr}");
 }
+
+/// `--identity-only` ignores an existing tinc.conf (the config is managed
+/// elsewhere) but refuses to clobber an existing key, again before
+/// connecting.
+#[test]
+fn join_identity_only_preflight() {
+    let url = format!("127.0.0.1:1/{}", "a".repeat(SLUG_LEN));
+    let conf = Conf::init("alice");
+    let stderr = conf
+        .tinc(&["join", "--identity-only", &url])
+        .fails_with("connect");
+    assert!(!stderr.contains("already exists"), "{stderr}");
+
+    let key = conf.dir().join("k");
+    fs::write(&key, "").unwrap();
+    let stderr = conf
+        .tinc(&["join", &format!("--identity-only={}", key.display()), &url])
+        .fails_with("already exists");
+    assert!(!stderr.contains("connect"), "{stderr}");
+}

@@ -51,7 +51,7 @@ use std::io;
 use std::io::{IsTerminal, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tinc_tools::cmd::{self, CmdError};
+use tinc_tools::cmd::{self, CmdError, join};
 use tinc_tools::names::{Paths, PathsInput};
 
 /// How a command consumes its positionals. `main` does the arity
@@ -196,7 +196,7 @@ const COMMANDS: &[CmdEntry] = &[
         name: "join",
         needs_daemon: false,
         run: Run::Any(cmd_join),
-        help: "join INVITATION        Join a VPN using an invitation.",
+        help: "join [URL]             Join a VPN using an invitation.\n    --identity-only[=FILE] - only register a key, write it to FILE or stdout",
     },
     // daemon RPC
     // `start`/`restart`: not really daemon-RPC (they *spawn* the
@@ -721,10 +721,26 @@ fn cmd_help(_: &Paths, _: &Globals, _: &[String]) -> Result<(), CmdError> {
 
 /// URL on argv or piped on stdin (no tty prompt — same "no prompts"
 /// deviation as elsewhere). `--force` propagates to `finalize_join`'s
-/// `VAR_SAFE` override.
+/// `VAR_SAFE` override. `--identity-only[=FILE]` registers a key with the
+/// inviter and writes nothing but that key, to FILE or stdout.
 fn cmd_join(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
+    let mut mode = join::Mode::Full {
+        paths,
+        force: g.force,
+    };
+    let mut rest = Vec::new();
+    for arg in args {
+        match arg.strip_prefix("--identity-only") {
+            Some("") => mode = join::Mode::IdentityOnly(None),
+            Some(f) if f.starts_with('=') => {
+                mode = join::Mode::IdentityOnly(Some(PathBuf::from(&f[1..])));
+            }
+            _ => rest.push(arg.as_str()),
+        }
+    }
+
     let url_buf;
-    let url: &str = match args {
+    let url: &str = match rest.as_slice() {
         [u] => u,
         [] => {
             let mut buf = String::new();
@@ -737,7 +753,7 @@ fn cmd_join(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError>
         _ => return Err(CmdError::TooManyArgs),
     };
 
-    cmd::join::join(url, paths, g.force)
+    join::join(url, &mode)
 }
 
 fn cmd_verify(paths: &Paths, _: &Globals, args: &[String]) -> Result<(), CmdError> {

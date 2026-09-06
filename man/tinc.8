@@ -148,8 +148,22 @@ followed by
 Generate an invitation URL for
 .Ar NODE
 and print it to stdout.
-.It Cm join Op Ar URL
+.It Cm join Oo Fl -identity-only Ns Oo = Ns Ar FILE Oc Oc Op Ar URL
 Join a network using an invitation URL (read from stdin if omitted).
+With
+.Fl -identity-only
+no configuration is written.
+A fresh key is registered with the inviter and its private half goes to
+.Ar FILE ,
+or stdout, for hosts whose
+.Pa tinc.conf
+and
+.Pa hosts/
+are deployed by other means.
+Run it where the secret should live, for example inside a secrets
+generator on the admin machine, and point
+.Va Ed25519PrivateKeyFile
+at the result.
 .El
 .Ss Daemon control
 .Bl -tag -width Ds

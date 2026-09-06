@@ -5,8 +5,8 @@
 //! needs to go back over the wire.
 
 use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use tinc_conf::vars::{self, VarFlags};
 use tinc_crypto::b64;
@@ -105,6 +105,29 @@ pub fn finalize_join(data: &[u8], paths: &Paths, force: bool) -> Result<JoinResu
         }
     }
     r
+}
+
+/// `--identity-only` counterpart of [`finalize_join`]: validate the blob
+/// header, generate the node key, write it to `key` (or stdout) and drop
+/// everything else the inviter sent.
+///
+/// # Errors
+/// Blob has no valid `Name`, or the key cannot be written.
+pub fn finalize_identity(data: &[u8], key: Option<&Path>) -> Result<JoinResult, CmdError> {
+    let data = str::from_utf8(data)
+        .map_err(|_| CmdError::BadInput("Invitation data is not valid UTF-8".into()))?;
+    let name = parse_blob_header(&mut data.lines())?;
+    let sk = keypair::generate();
+    match key {
+        Some(path) => cmd::write_private_key(path, &sk, OpenKind::CreateExcl)?,
+        None => tinc_conf::pem::write_pem(io::stdout().lock(), keypair::TY_PRIVATE, &sk.to_blob())
+            .map_err(io_err("<stdout>"))?,
+    }
+    Ok(JoinResult {
+        name,
+        pubkey_b64: b64::encode(sk.public_key()),
+        hosts_written: Vec::new(),
+    })
 }
 
 fn finalize_join_inner(

@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::thread;
 use tinc_crypto::invite::{build_slug, cookie_filename};
 use tinc_crypto::sign::SigningKey;
+use tinc_tools::cmd::join::Mode;
 use tinc_tools::names::{Paths, PathsInput};
 
 /// Rewrite `hosts/SELF` with `subnets` and SIGHUP. The sleep is for
@@ -85,6 +86,13 @@ fn invite_bob(alice: &Node) -> (String, PathBuf) {
     (url, invitation_file)
 }
 
+fn full(paths: &Paths) -> Mode<'_> {
+    Mode::Full {
+        paths,
+        force: false,
+    }
+}
+
 fn cli_paths(confbase: PathBuf) -> Paths {
     Paths::for_cli(&PathsInput {
         confbase: Some(confbase),
@@ -103,7 +111,7 @@ fn tinc_join_consumes_invitation() {
     let (url, invitation_file) = invite_bob(&alice);
     let paths_for = |dir: &str| cli_paths(tmp.path().join(dir));
 
-    if let Err(err) = tinc_tools::cmd::join::join(&url, &paths_for("bob"), false) {
+    if let Err(err) = tinc_tools::cmd::join::join(&url, &full(&paths_for("bob"))) {
         panic!("join: {err:?}\nalice:\n{}", alice.stop());
     }
     let bob_confbase = tmp.path().join("bob");
@@ -130,7 +138,7 @@ fn tinc_join_consumes_invitation() {
     assert!(!invitation_file.with_extension("used").exists());
 
     assert!(
-        tinc_tools::cmd::join::join(&url, &paths_for("bob2"), false).is_err(),
+        tinc_tools::cmd::join::join(&url, &full(&paths_for("bob2"))).is_err(),
         "invitation reused"
     );
 }
@@ -160,7 +168,7 @@ fn join_with_overlay_writes_there_and_peer_connects() {
     let (url, _) = invite_bob(&alice);
 
     let bob_confbase = tmp.path().join("bob");
-    if let Err(err) = tinc_tools::cmd::join::join(&url, &cli_paths(bob_confbase.clone()), false) {
+    if let Err(err) = tinc_tools::cmd::join::join(&url, &full(&cli_paths(bob_confbase.clone()))) {
         panic!("join: {err:?}\nalice:\n{}", alice.stop());
     }
     let overlay_bob = alice.confbase.join("hosts.local/bob");
@@ -184,6 +192,40 @@ fn join_with_overlay_writes_there_and_peer_connects() {
     );
     append("hosts/bob", "Port = 0\n");
     let mut bob = Node::new(tmp.path(), "bob", 0xBB);
+    bob.start();
+    alice.wait_for_peer("bob", true, Duration::from_secs(10));
+}
+
+/// `--identity-only`: bob's config is deployed out of band (here: written
+/// by the test), the join only registers a key with alice and hands bob
+/// the private half via `Ed25519PrivateKeyFile`.
+#[test]
+fn identity_only_join_registers_key_and_peer_connects() {
+    let tmp = tmp!("joinid");
+    let mut alice = Node::new(tmp.path(), "alice", 0xAA);
+    alice.write_config_multi(&[], &[]);
+    alice.start();
+    let (url, _) = invite_bob(&alice);
+
+    let key = tmp.path().join("vault/bob.priv");
+    fs::create_dir_all(key.parent().unwrap()).unwrap();
+    if let Err(err) = tinc_tools::cmd::join::join(&url, &Mode::IdentityOnly(Some(key.clone()))) {
+        panic!("join: {err:?}\nalice:\n{}", alice.stop());
+    }
+    assert!(key.exists());
+    assert!(
+        !tmp.path().join("bob").exists(),
+        "identity-only wrote a confbase"
+    );
+    let alice_hosts_bob = alice.confbase.join("hosts/bob");
+    assert!(wait_for_file(&alice_hosts_bob));
+
+    // The "deploy": bob's confbase from the registry, key from the vault.
+    let mut bob = Node::new(tmp.path(), "bob", 0xBB)
+        .with_conf(&format!("Ed25519PrivateKeyFile = {}\n", key.display()));
+    bob.write_config_multi(&[&alice], &[&alice]);
+    // Not the harness key: the one the join generated.
+    fs::remove_file(bob.confbase.join("ed25519_key.priv")).unwrap();
     bob.start();
     alice.wait_for_peer("bob", true, Duration::from_secs(10));
 }
