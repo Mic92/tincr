@@ -3,26 +3,25 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    treefmt-nix = {
-      url = "github:numtide/treefmt-nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     crane.url = "github:ipetkov/crane";
-    fenix = {
-      url = "github:nix-community/fenix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs =
     {
       self,
       nixpkgs,
-      treefmt-nix,
       crane,
-      fenix,
     }:
     let
+      # Formatter, android toolchain and CI effects live in dev/ so that
+      # consumers lock only the inputs above.
+      dev =
+        (import (fetchTarball {
+          url = "https://github.com/NixOS/flake-compat/archive/5edf11c44bc78a0d334f6334cdaf7d60d732daab.tar.gz";
+          sha256 = "sha256-vNpUSpF5Nuw8xvDLj2KCwwksIbjua2LZCqhV1LNRDns=";
+        }) { src = ./dev; }).outputs;
+      inherit (dev) treefmt-nix nixbot;
+      fenixFor = pkgs: import dev.fenix { inherit pkgs; };
       systems = [
         "x86_64-linux"
         "aarch64-linux"
@@ -68,7 +67,7 @@
             in
             pkgs'.callPackage ./nix/tincd-android.nix {
               craneLib = crane.mkLib pkgs';
-              fenix = fenix.packages.${system};
+              fenix = fenixFor pkgs';
             };
           tincd-android-x86_64 = self.packages.${system}.tincd-android.override {
             target = "x86_64-linux-android";
@@ -88,7 +87,7 @@
         }
         // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
           android = (androidPkgsFor system).callPackage ./nix/devshell-android.nix {
-            fenix = fenix.packages.${system};
+            fenix = fenixFor (androidPkgsFor system);
           };
         }
       );
