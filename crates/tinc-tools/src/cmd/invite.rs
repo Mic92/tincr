@@ -250,13 +250,30 @@ pub fn invite(
     hook_env.extend(netname.map(|n| ("NETNAME", n)));
     hook_env.extend(headers.replace.as_deref().map(|k| ("REPLACE", k)));
     hook_env.extend(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-    let hook = run_created_hook(paths, &inv_path, &hook_env);
+    let hook = run_created_hook(paths, &inv_path, &hook_env)
+        .and_then(|()| hoist_appended(&inv_path, &body));
     if let Err(e) = hook {
         let _ = fs::remove_file(&inv_path);
         return Err(e);
     }
 
     Ok(InviteResult { url, key_is_new })
+}
+
+/// Lines a hook appended after the original body belong to the invitee,
+/// so move them in front of the separator. A hook that rewrote the file
+/// is left alone.
+fn hoist_appended(inv_path: &Path, original: &str) -> Result<(), CmdError> {
+    let now = fs::read_to_string(inv_path).map_err(io_err(inv_path))?;
+    let (Some(tail), Some(sep)) = (now.strip_prefix(original), original.find(SEPARATOR)) else {
+        return Ok(());
+    };
+    if tail.is_empty() {
+        return Ok(());
+    }
+    let (head, rest) = original.split_at(sep);
+    let nl = if tail.ends_with('\n') { "" } else { "\n" };
+    fs::write(inv_path, format!("{head}{tail}{nl}{rest}")).map_err(io_err(inv_path))
 }
 
 /// Run `confbase/invitation-created` with the upstream env contract. The
@@ -831,8 +848,8 @@ mod tests {
     }
 
     /// The `invitation-created` hook sees `NODE`, `INVITATION_FILE` and
-    /// `INVITATION_URL` and may append to the file. Registries use this to
-    /// add a `Subnet` line.
+    /// `INVITATION_URL` and may append to the file. Appended lines are
+    /// hoisted into the invitee's chunk so `join` applies them.
     #[test]
     fn invitation_created_hook_can_edit_file() {
         let cd = ConfDir::bare();
@@ -850,8 +867,9 @@ mod tests {
         let r = invite(&paths, None, "bob", false, &[], SystemTime::now()).unwrap();
 
         let body = only_invitation(&cd);
+        let chunk1 = body.split(SEPARATOR).next().unwrap();
         assert!(
-            body.ends_with(&format!(
+            chunk1.ends_with(&format!(
                 "Subnet = 10.0.0.7\n# bob alice {}\n",
                 r.url.as_str()
             )),
@@ -1009,7 +1027,10 @@ mod tests {
             )),
             "{body}"
         );
-        assert!(body.ends_with(&format!("# {old} mic92\n")), "{body}");
+        assert!(
+            body.contains(&format!("# {old} mic92\n{SEPARATOR}")),
+            "{body}"
+        );
 
         for (k, v) in [("NODE", "x"), ("lower", "x"), ("OK", "a\nb")] {
             let env = [(k.to_owned(), v.to_owned())];

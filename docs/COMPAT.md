@@ -121,7 +121,9 @@ Things that work in both daemons but not identically.
 - **A failing `invitation-created` hook aborts `tinc invite`.** C
   ignores the exit status. tincr removes the invitation file and
   prints no URL, so a hook that allocates addresses or registers the
-  node can veto a half-provisioned invitation.
+  node can veto a half-provisioned invitation. Lines the hook appends
+  to `INVITATION_FILE` are moved into the invitee's chunk. In C they
+  end up in the inviter's host file entry and `join` ignores them.
 - **Privilege drop is stricter.** All three uids/gids are set and
   verified, `no_new_privs` is always enabled, and failure to drop is
   fatal rather than logged-and-continued.
