@@ -7,6 +7,7 @@ import com.github.takahirom.roborazzi.captureRoboImage
 import io.thalheim.tincr.ui.AdvancedScreen
 import io.thalheim.tincr.ui.Device
 import io.thalheim.tincr.ui.HomeState
+import io.thalheim.tincr.ui.JoinScreen
 import io.thalheim.tincr.ui.Link
 import io.thalheim.tincr.ui.MainScreen
 import io.thalheim.tincr.ui.Notice
@@ -52,6 +53,10 @@ class ScreenshotTest {
         MainScreen(state, tab, onTab = {}, onToggle = {}, onHelpReport = {}, onSettings = {})
 
     @Test fun onboarding() = shot("1_onboarding") { OnboardingScreen({}, {}) }
+    @Test fun join() = shot("1_join") { JoinScreen("tinc://join/example.org/" + "x".repeat(48), {}, false, null, {}, {}) }
+    @Test fun joinError() =
+        shot("1_join_error") { JoinScreen("nope", {}, false, "This is not an invitation link.", {}, {}) }
+    @Test fun joinBusy() = shot("1_join_busy") { JoinScreen("", {}, true, null, {}, {}) }
     @Test fun homeConnected() = shot("2_home_connected") { main(family, Tab.Home) }
     @Test fun homeOff() = shot("2_home_off") { main(family.copy(link = Link.Off), Tab.Home) }
     @Test fun homeConnecting() = shot("2_home_connecting") { main(family.copy(link = Link.Connecting), Tab.Home) }

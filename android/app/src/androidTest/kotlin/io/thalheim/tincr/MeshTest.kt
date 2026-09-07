@@ -64,16 +64,59 @@ class MeshTest {
         )
     }
 
-    @Test
-    fun meshComesUp() {
-        val phoneDir = File(ctx.filesDir, "networks/default")
-        val gateDir = File(ctx.filesDir, "gate")
+    private val phoneDir = File(ctx.filesDir, "networks/default")
+    private val gateDir = File(ctx.filesDir, "gate")
+
+    private fun freshDirs(withPhone: Boolean) {
         phoneDir.deleteRecursively()
         gateDir.deleteRecursively()
-        copyAssets("mesh/phone", phoneDir)
+        if (withPhone) copyAssets("mesh/phone", phoneDir)
         copyAssets("mesh/gate", gateDir)
+    }
 
+    private fun tinc(dir: File, vararg args: String): String {
+        val bin = File(ctx.applicationInfo.nativeLibraryDir, "libtinc.so")
+        val p = ProcessBuilder(
+            bin.absolutePath, "--batch", "-c", dir.absolutePath,
+            "--pidfile", File(dir, "tincd.pid").absolutePath, *args,
+        ).redirectErrorStream(true).start()
+        val out = p.inputStream.bufferedReader().readText()
+        check(p.waitFor() == 0) { "tinc ${args.joinToString(" ")}: $out" }
+        return out
+    }
+
+    @Test
+    fun meshComesUp() {
+        freshDirs(withPhone = true)
         gate = TincdRunner(ctx, NetworkConfig.load(gateDir)).also { it.start() }
+        bringUpAndCheck()
+    }
+
+    // Phone side starts empty and is provisioned purely from an
+    // invitation issued by gate, Ifconfig/Route included.
+    @Test
+    fun joinThenMesh() {
+        freshDirs(withPhone = false)
+        File(gateDir, "hosts/phone").delete()
+        gate = TincdRunner(ctx, NetworkConfig.load(gateDir)).also { it.start() }
+        poll(10_000, "gate control socket") { File(gateDir, "tincd.pid").isFile }
+
+        val url = tinc(gateDir, "invite", "phone").lines().first { it.startsWith("127.0.0.1:") }.trim()
+        val inv = File(gateDir, "invitations").listFiles()!!.single { it.name != "ed25519_key.priv" }
+        // Stands in for an invitation-created hook on the inviter.
+        inv.writeText(
+            inv.readText().replaceFirst("#--", "Ifconfig = 10.243.42.42/16\nRoute = 10.243.0.0/16\n#--"),
+        )
+
+        Join.run(ctx, phoneDir, "tinc://join/$url")
+
+        assertTrue(File(phoneDir, "tinc.conf").readText().contains("ConnectTo = gate"))
+        assertTrue(File(phoneDir, "vpn.conf").readText() == "address 10.243.42.42/16\nroute 10.243.0.0/16\n")
+        assertTrue(File(gateDir, "hosts/phone").isFile)
+        bringUpAndCheck()
+    }
+
+    private fun bringUpAndCheck() {
         shell("appops set ${ctx.packageName} ACTIVATE_VPN allow")
         poll(10_000, "VPN consent") { android.net.VpnService.prepare(ctx) == null }
         ctx.startForegroundService(Intent(ctx, TincrVpnService::class.java))
