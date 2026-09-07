@@ -1,0 +1,13 @@
+Categories:
+  - Internet
+  - Security
+License: GPL-2.0-or-later
+AuthorName: Jörg Thalheim
+SourceCode: https://github.com/Mic92/tincr
+IssueTracker: https://github.com/Mic92/tincr/issues
+Name: tincr
+Summary: tinc mesh VPN, joined by invitation
+Description: |
+  Android client for tinc 1.1 networks running the tincr daemon. A device
+  joins by scanning or pasting an invitation from an existing node and
+  keeps its host list in sync from the network's bundle URL. No root needed.
