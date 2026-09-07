@@ -41,7 +41,7 @@ runCommand "android-mesh-check"
     adb shell am instrument -w \
       io.thalheim.tincr.test/androidx.test.runner.AndroidJUnitRunner \
       | tee instrument.log
-    grep -q "OK (1 test" instrument.log
+    grep -q "OK (2 tests" instrument.log
 
     adb emu kill || true
     touch $out

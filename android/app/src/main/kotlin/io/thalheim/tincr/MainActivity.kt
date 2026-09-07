@@ -16,12 +16,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import io.thalheim.tincr.ui.AdvancedScreen
 import io.thalheim.tincr.ui.HomeState
+import io.thalheim.tincr.ui.JoinScreen
 import io.thalheim.tincr.ui.Link
 import io.thalheim.tincr.ui.MainScreen
 import io.thalheim.tincr.ui.OnboardingScreen
 import io.thalheim.tincr.ui.Tab
 import io.thalheim.tincr.ui.TincrTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import androidx.compose.runtime.rememberCoroutineScope
 import java.io.File
 
 class MainActivity : ComponentActivity() {
@@ -30,8 +35,12 @@ class MainActivity : ComponentActivity() {
         if (it.resultCode == RESULT_OK) startVpn()
     }
 
+    // Set by a `tinc://` deep link, consumed by the join screen.
+    private var pendingLink by mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingLink = intent.data?.takeIf { it.scheme == "tinc" }?.toString()
         setContent { TincrTheme { App() } }
         // adb/test entry. Consent must be pre-granted via appops.
         if (intent.getBooleanExtra("autostart", false)) {
@@ -45,6 +54,12 @@ class MainActivity : ComponentActivity() {
         var advanced by remember { mutableStateOf(false) }
         var link by remember { mutableStateOf(Link.Off) }
         var log by remember { mutableStateOf("") }
+        var joined by remember { mutableStateOf(File(netDir, "tinc.conf").isFile) }
+        var joining by remember { mutableStateOf(pendingLink != null) }
+        var joinLink by remember { mutableStateOf(pendingLink ?: "") }
+        var joinBusy by remember { mutableStateOf(false) }
+        var joinError by remember { mutableStateOf<String?>(null) }
+        val scope = rememberCoroutineScope()
         LaunchedEffect(Unit) {
             while (true) {
                 link = if (TincrVpnService.running) Link.Connected else Link.Off
@@ -53,8 +68,27 @@ class MainActivity : ComponentActivity() {
                 delay(1000)
             }
         }
-        if (!File(netDir, "tinc.conf").isFile) {
-            OnboardingScreen(onScan = ::notYet, onLink = ::notYet)
+        if (!joined && joining) {
+            BackHandler(!joinBusy) { joining = false }
+            JoinScreen(
+                joinLink, { joinLink = it; joinError = null }, joinBusy, joinError,
+                onJoin = {
+                    joinBusy = true
+                    scope.launch {
+                        joinError = withContext(Dispatchers.IO) {
+                            runCatching { Join.run(this@MainActivity, netDir, joinLink) }
+                                .exceptionOrNull()?.message
+                        }
+                        joinBusy = false
+                        joined = joinError == null
+                    }
+                },
+                onBack = { joining = false },
+            )
+            return
+        }
+        if (!joined) {
+            OnboardingScreen(onScan = ::notYet, onLink = { joining = true })
             return
         }
         if (advanced) {
@@ -73,7 +107,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun notYet() {
-        Toast.makeText(this, "Joining is not implemented yet", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Scanning is not implemented yet", Toast.LENGTH_SHORT).show()
     }
 
     private fun sendHelpReport(log: String) {
