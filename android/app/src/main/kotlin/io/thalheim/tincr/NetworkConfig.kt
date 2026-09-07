@@ -7,12 +7,23 @@ data class CidrAddr(val address: String, val prefix: Int)
 // App-side settings from vpn.conf next to the tinc config tree.
 data class NetworkConfig(
     val dir: File,
+    val network: String?,
+    val inviter: String?,
     val addresses: List<CidrAddr>,
     val routes: List<CidrAddr>,
     val dnsServers: List<String>,
     val searchDomains: List<String>,
     val mtu: Int,
 ) {
+    val name: String?
+        get() = File(dir, "tinc.conf").takeIf { it.isFile }?.useLines { lines ->
+            lines.map { it.split("=", limit = 2) }
+                .firstOrNull { it.size == 2 && it[0].trim().equals("Name", ignoreCase = true) }
+                ?.get(1)?.trim()
+        }
+    val hosts: List<String>
+        get() = File(dir, "hosts").list()?.sorted().orEmpty()
+
     companion object {
         fun load(dir: File): NetworkConfig {
             val addresses = mutableListOf<CidrAddr>()
@@ -20,6 +31,8 @@ data class NetworkConfig(
             val dns = mutableListOf<String>()
             val domains = mutableListOf<String>()
             var mtu = 1400
+            var network: String? = null
+            var inviter: String? = null
 
             val f = File(dir, "vpn.conf")
             if (f.isFile) {
@@ -29,6 +42,8 @@ data class NetworkConfig(
                     val (key, value) = t.split(Regex("\\s+"), limit = 2)
                         .takeIf { it.size == 2 } ?: return@forEachLine
                     when (key.lowercase()) {
+                        "network" -> network = value
+                        "inviter" -> inviter = value
                         "address" -> cidr(value)?.let { addresses.add(it) }
                         "route" -> cidr(value)?.let { routes.add(it) }
                         "dns" -> dns.add(value)
@@ -37,7 +52,7 @@ data class NetworkConfig(
                     }
                 }
             }
-            return NetworkConfig(dir, addresses, routes, dns, domains, mtu)
+            return NetworkConfig(dir, network, inviter, addresses, routes, dns, domains, mtu)
         }
 
         private fun cidr(s: String): CidrAddr? {
