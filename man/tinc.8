@@ -169,6 +169,12 @@ The join fails if the key changed in the meantime.
 Any live connection of the old device is closed.
 Both invitation scripts see the replaced key in
 .Ev REPLACE .
+Lines that an
+.Pa invitation-created
+script appends to
+.Ev INVITATION_FILE
+(Subnet, Ifconfig, Route, ...) are placed in the section for
+.Ar NODE .
 tincr only.
 .It Cm join Oo Fl -identity-only Ns Oo = Ns Ar FILE Oc Oc Op Ar URL
 Join a network using an invitation URL (read from stdin if omitted).
