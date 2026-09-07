@@ -69,6 +69,8 @@ object Join {
     // are peers' host files whose Address must not sit inside a route.
     internal fun vpnConf(data: List<String>): String {
         val own = ownName(data)
+        var network: String? = null
+        var inviter: String? = null
         val addrs = mutableListOf<CidrAddr>()
         val routes = mutableListOf<CidrAddr>()
         val peerAddrs = mutableListOf<String>()
@@ -79,6 +81,8 @@ object Join {
             val v = value(line)
             if (k == "name" && v != own) chunk++
             when {
+                chunk == 0 && k == "netname" -> network = v
+                chunk == 0 && k == "connectto" && inviter == null -> inviter = v
                 chunk == 0 && k == "ifconfig" -> cidr(v)?.let(addrs::add)
                 chunk == 0 && k == "route" -> cidr(v.substringBefore(' '))?.let(routes::add)
                 chunk > 0 && k == "address" -> peerAddrs.add(v.substringBefore(' '))
@@ -91,6 +95,8 @@ object Join {
             if (hit != null) throw JoinError("Peer address $a lies inside routed ${hit.address}/${hit.prefix}.")
         }
         return buildString {
+            network?.let { append("network $it\n") }
+            inviter?.let { append("inviter $it\n") }
             addrs.forEach { append("address ${it.address}/${it.prefix}\n") }
             routes.forEach { append("route ${it.address}/${it.prefix}\n") }
         }

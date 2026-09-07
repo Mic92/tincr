@@ -21,6 +21,7 @@ class JoinTest {
     fun vpnConfFromInvitation() {
         val data = """
             Name = phone
+            NetName = mesh
             ConnectTo = gate
             Ifconfig = 10.243.42.42/16
             Route = 10.243.0.0/16
@@ -30,7 +31,10 @@ class JoinTest {
             Address = 192.0.2.1 655
             Subnet = 10.243.0.1
         """.trimIndent().lines()
-        assertEquals("address 10.243.42.42/16\nroute 10.243.0.0/16\nroute 42::/16\n", Join.vpnConf(data))
+        assertEquals(
+            "network mesh\ninviter gate\naddress 10.243.42.42/16\nroute 10.243.0.0/16\nroute 42::/16\n",
+            Join.vpnConf(data),
+        )
     }
 
     @Test
