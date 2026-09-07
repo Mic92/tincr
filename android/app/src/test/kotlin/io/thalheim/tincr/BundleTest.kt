@@ -44,10 +44,18 @@ class BundleTest {
         val dir = netDir()
         val n = Bundle.install(
             NetworkConfig.load(dir),
-            tgz("hosts/gate" to "Address = 1.2.3.4\n", "./eve" to "Address = 5.6.7.8\n", "README.md" to "x").inputStream(),
+            tgz(
+                "hosts/gate" to "Address = 1.2.3.4\nEd25519PublicKey = a\n",
+                "./eve" to "-----BEGIN RSA PUBLIC KEY-----\nx\n",
+                "README.md" to "x",
+                "README" to "not a host file\n",
+                "doc/deep/gate" to "Ed25519PublicKey = nested\n",
+                "big" to "Ed25519PublicKey = b\n" + "x".repeat(70_000),
+            ).inputStream(),
         )
         assertEquals(2, n)
         assertEquals(listOf("eve", "gate", "phone"), File(dir, "hosts").list()!!.sorted())
+        assertEquals("Address = 1.2.3.4\nEd25519PublicKey = a\n", File(dir, "hosts/gate").readText())
         assertEquals("Ed25519PublicKey = mine\n", File(dir, "hosts/phone").readText())
         assertEquals(false, File(dir, "hosts.new").exists() || File(dir, "hosts.old").exists())
     }
