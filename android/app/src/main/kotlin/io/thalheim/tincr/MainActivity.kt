@@ -37,15 +37,15 @@ class MainActivity : ComponentActivity() {
         if (it.resultCode == RESULT_OK) startVpn()
     }
 
-    // Set by a `tinc://` deep link or a QR scan, consumed by the join screen.
-    private var pendingLink by mutableStateOf<String?>(null)
+    // Non-null shows the join screen. Set by deep link, QR scan or the button.
+    private var joinLink by mutableStateOf<String?>(null)
     private val scan = registerForActivityResult(ScanContract()) { r ->
-        r.contents?.let { pendingLink = it }
+        r.contents?.let { joinLink = it }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        pendingLink = intent.data?.takeIf { it.scheme == "tinc" }?.toString()
+        joinLink = intent.data?.takeIf { it.scheme == "tinc" }?.toString()
         setContent { TincrTheme { App() } }
         // adb/test entry. Consent must be pre-granted via appops.
         if (intent.getBooleanExtra("autostart", false)) {
@@ -60,15 +60,6 @@ class MainActivity : ComponentActivity() {
         var log by remember { mutableStateOf("") }
         var state by remember { mutableStateOf(homeState(emptyMap(), false)) }
         var joined by remember { mutableStateOf(File(netDir, "tinc.conf").isFile) }
-        var joining by remember { mutableStateOf(false) }
-        var joinLink by remember { mutableStateOf("") }
-        LaunchedEffect(pendingLink) {
-            pendingLink?.let {
-                joinLink = it
-                joining = true
-                pendingLink = null
-            }
-        }
         var joinBusy by remember { mutableStateOf(false) }
         var joinError by remember { mutableStateOf<String?>(null) }
         val scope = rememberCoroutineScope()
@@ -85,27 +76,27 @@ class MainActivity : ComponentActivity() {
                 delay(1000)
             }
         }
-        if (!joined && joining) {
-            BackHandler(!joinBusy) { joining = false }
+        val link = joinLink
+        if (!joined && link != null) {
+            BackHandler(!joinBusy) { joinLink = null }
             JoinScreen(
-                joinLink, { joinLink = it; joinError = null }, joinBusy, joinError,
+                link, { joinLink = it; joinError = null }, joinBusy, joinError,
                 onJoin = {
                     joinBusy = true
                     scope.launch {
                         joinError = withContext(Dispatchers.IO) {
-                            runCatching { Join.run(this@MainActivity, netDir, joinLink) }
-                                .exceptionOrNull()?.message
+                            runCatching { Join.run(this@MainActivity, netDir, link) }.exceptionOrNull()?.message
                         }
                         joinBusy = false
                         joined = joinError == null
                     }
                 },
-                onBack = { joining = false },
+                onBack = { joinLink = null },
             )
             return
         }
         if (!joined) {
-            OnboardingScreen(onScan = ::scanQr, onLink = { joining = true })
+            OnboardingScreen(onScan = ::scanQr, onLink = { joinLink = "" })
             return
         }
         if (advanced) {

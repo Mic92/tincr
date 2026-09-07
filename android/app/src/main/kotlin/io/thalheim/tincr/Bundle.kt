@@ -57,11 +57,9 @@ object Bundle {
             throw java.io.IOException("bundle has no host files")
         }
         val hosts = File(dir, "hosts")
-        config.name?.let { own ->
-            File(hosts, own).takeIf { it.isFile }?.copyTo(File(fresh, own), overwrite = true)
-        }
+        config.name?.let { own -> File(hosts, own).takeIf { it.isFile }?.copyTo(File(fresh, own), overwrite = true) }
         val old = File(dir, "hosts.old").apply { deleteRecursively() }
-        if (hosts.exists() && !hosts.renameTo(old)) throw java.io.IOException("cannot move hosts aside")
+        hosts.renameTo(old)
         if (!fresh.renameTo(hosts)) {
             old.renameTo(hosts)
             throw java.io.IOException("cannot move hosts into place")
@@ -75,12 +73,8 @@ object Bundle {
         val din = DataInputStream(input)
         val hdr = ByteArray(512)
         while (true) {
-            try {
-                din.readFully(hdr)
-            } catch (e: java.io.EOFException) {
-                return
-            }
-            if (hdr.all { it == 0.toByte() }) return
+            din.readFully(hdr)
+            if (hdr[0] == 0.toByte()) return
             val name = String(hdr, 0, 100).substringBefore('\u0000').substringAfterLast('/')
             val size = String(hdr, 124, 12).trim('\u0000', ' ').ifEmpty { "0" }.toLong(8)
             val type = hdr[156].toInt().toChar()
