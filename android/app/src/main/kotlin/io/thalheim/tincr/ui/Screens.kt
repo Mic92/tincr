@@ -25,11 +25,14 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Link
@@ -78,6 +81,44 @@ fun OnboardingScreen(onScan: () -> Unit, onLink: () -> Unit) {
         Spacer(Modifier.weight(1f))
         Muted("No account. No sign-up.\nThe invitation is all you need.")
         Spacer(Modifier.height(28.dp))
+    }
+}
+
+// Paste-a-link step of onboarding. `busy` while the exchange runs,
+// `error` is shown verbatim under the field.
+@Composable
+fun JoinScreen(
+    link: String,
+    onLink: (String) -> Unit,
+    busy: Boolean,
+    error: String?,
+    onJoin: () -> Unit,
+    onBack: () -> Unit,
+) {
+    Column(
+        Modifier.fillMaxSize().background(Palette.bg).statusBarsPadding().padding(horizontal = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Spacer(Modifier.height(96.dp))
+        Text("Paste your invitation", fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(10.dp))
+        Muted("It looks like tinc://join/… and works once.")
+        Spacer(Modifier.height(28.dp))
+        OutlinedTextField(
+            link, onLink, Modifier.fillMaxWidth(), enabled = !busy, singleLine = true,
+            label = { Text("Invitation link") }, isError = error != null,
+            supportingText = { if (error != null) Text(error, color = Palette.amberInk) },
+        )
+        Spacer(Modifier.height(20.dp))
+        if (busy) {
+            CircularProgressIndicator(color = Palette.blue)
+            Spacer(Modifier.height(12.dp))
+            Muted("Joining…")
+        } else {
+            BigButton("Join network", Icons.Filled.Link, primary = true, onJoin)
+            Spacer(Modifier.height(14.dp))
+            BigButton("Back", Icons.AutoMirrored.Filled.ArrowBack, primary = false, onBack)
+        }
     }
 }
 
