@@ -12,7 +12,10 @@ import java.util.zip.GZIPInputStream
 // Our own host file survives, identity files are never touched.
 object Bundle {
     private const val TAG = "tincr"
-    private val NAME = Regex("[A-Za-z0-9_]+")
+    // `NAME`, `./NAME` or `hosts/NAME` at most 64 KiB with a host key inside.
+    private val ENTRY = Regex("(?:\\./)?(?:hosts/)?([A-Za-z0-9_]+)")
+    private val HOST_KEY = Regex("(?im)^\\s*Ed25519PublicKey\\s*=|-----BEGIN RSA PUBLIC KEY-----")
+    private const val MAX_ENTRY = 64 * 1024
 
     // True when hosts/ changed and tincd should reload.
     fun update(config: NetworkConfig): Boolean {
@@ -46,11 +49,11 @@ object Bundle {
             mkdirs()
         }
         var n = 0
-        untar(GZIPInputStream(tgz)) { name, body ->
-            if (NAME.matches(name)) {
-                File(fresh, name).writeBytes(body)
-                n++
-            }
+        untar(GZIPInputStream(tgz)) { path, body ->
+            val name = ENTRY.matchEntire(path)?.groupValues?.get(1) ?: return@untar
+            if (!HOST_KEY.containsMatchIn(String(body))) return@untar
+            File(fresh, name).writeBytes(body)
+            n++
         }
         if (n == 0) {
             fresh.deleteRecursively()
@@ -68,20 +71,27 @@ object Bundle {
         return n
     }
 
-    // ustar reader, regular files only, basename of each entry.
+    // ustar reader. Hands regular files up to MAX_ENTRY to `entry`, skips
+    // everything else (dirs, links, pax headers, big files).
     private fun untar(input: InputStream, entry: (String, ByteArray) -> Unit) {
         val din = DataInputStream(input)
         val hdr = ByteArray(512)
         while (true) {
             din.readFully(hdr)
             if (hdr[0] == 0.toByte()) return
-            val name = String(hdr, 0, 100).substringBefore('\u0000').substringAfterLast('/')
+            val path = String(hdr, 0, 100).substringBefore('\u0000')
             val size = String(hdr, 124, 12).trim('\u0000', ' ').ifEmpty { "0" }.toLong(8)
             val type = hdr[156].toInt().toChar()
-            val body = ByteArray(size.toInt())
-            din.readFully(body)
-            din.skipBytes(((512 - size % 512) % 512).toInt())
-            if ((type == '0' || type == '\u0000') && name.isNotEmpty()) entry(name, body)
+            val padded = size + (512 - size % 512) % 512
+            if ((type == '0' || type == '\u0000') && size <= MAX_ENTRY) {
+                val body = ByteArray(size.toInt())
+                din.readFully(body)
+                din.skipBytes((padded - size).toInt())
+                entry(path, body)
+            } else {
+                var left = padded
+                while (left > 0) left -= din.skip(left).also { if (it <= 0) throw java.io.EOFException() }
+            }
         }
     }
 }
