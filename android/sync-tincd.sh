@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build tincd for both ABIs and place it as jniLibs/<abi>/libtincd.so.
+# Build tincd and tinc for both ABIs into jniLibs/<abi>/.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -10,4 +10,5 @@ declare -A abis=(
 for abi in "${!abis[@]}"; do
   out=$(nix build --no-link --print-out-paths ".#${abis[$abi]}")
   install -Dm755 "$out/bin/tincd" "android/app/src/main/jniLibs/$abi/libtincd.so"
+  install -Dm755 "$out/bin/tinc" "android/app/src/main/jniLibs/$abi/libtinc.so"
 done
