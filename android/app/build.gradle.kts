@@ -23,8 +23,9 @@ android {
         applicationId = "io.thalheim.tincr"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // CI passes the commit timestamp so every published build upgrades.
+        versionCode = (findProperty("tincr.versionCode") as String?)?.toInt() ?: 1
+        versionName = "0.1.0" + ((findProperty("tincr.versionName") as String?)?.let { "-$it" } ?: "")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk.abiFilters += listOf("arm64-v8a", "x86_64")
     }
