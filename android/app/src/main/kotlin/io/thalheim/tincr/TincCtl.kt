@@ -11,6 +11,7 @@ import java.io.InputStreamReader
 class TincCtl(private val dir: File) {
     companion object {
         const val REQ_STOP = 0
+        const val REQ_RELOAD = 1
         const val REQ_DUMP_NODES = 3
         const val REQ_RETRY = 10
     }

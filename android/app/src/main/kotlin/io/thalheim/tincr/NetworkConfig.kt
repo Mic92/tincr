@@ -9,6 +9,7 @@ data class NetworkConfig(
     val dir: File,
     val network: String?,
     val inviter: String?,
+    val bundleUrl: String?,
     val addresses: List<CidrAddr>,
     val routes: List<CidrAddr>,
     val dnsServers: List<String>,
@@ -35,6 +36,7 @@ data class NetworkConfig(
             var logLevel = 2
             var network: String? = null
             var inviter: String? = null
+            var bundle: String? = null
 
             val f = File(dir, "vpn.conf")
             if (f.isFile) {
@@ -46,6 +48,7 @@ data class NetworkConfig(
                     when (key.lowercase()) {
                         "network" -> network = value
                         "inviter" -> inviter = value
+                        "bundle" -> bundle = value
                         "address" -> cidr(value)?.let { addresses.add(it) }
                         "route" -> cidr(value)?.let { routes.add(it) }
                         "dns" -> dns.add(value)
@@ -55,7 +58,7 @@ data class NetworkConfig(
                     }
                 }
             }
-            return NetworkConfig(dir, network, inviter, addresses, routes, dns, domains, mtu, logLevel)
+            return NetworkConfig(dir, network, inviter, bundle, addresses, routes, dns, domains, mtu, logLevel)
         }
 
         private fun cidr(s: String): CidrAddr? {
