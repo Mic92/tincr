@@ -44,6 +44,7 @@ stdenv.mkDerivation (finalAttrs: {
   postPatch = ''
     mkdir -p app/src/main/jniLibs/${abi}
     cp ${tincd}/bin/tincd app/src/main/jniLibs/${abi}/libtincd.so
+    cp ${tincd}/bin/tinc app/src/main/jniLibs/${abi}/libtinc.so
     echo "android.aapt2FromMavenOverride=${android.aapt2}" >> gradle.properties
   '';
 

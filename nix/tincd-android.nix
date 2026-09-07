@@ -27,7 +27,7 @@ let
     pname = "tincd-android";
     version = "0.1.0";
     strictDeps = true;
-    cargoExtraArgs = "-p tincd";
+    cargoExtraArgs = "-p tincd -p tinc-tools --bin tincd --bin tinc";
     nativeBuildInputs = [ perl ]; # openssl-src
     doCheck = false;
     CARGO_BUILD_TARGET = target;
