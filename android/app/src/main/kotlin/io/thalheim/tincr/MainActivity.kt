@@ -28,6 +28,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.concurrent.thread
 import androidx.compose.runtime.rememberCoroutineScope
 import java.io.File
 
@@ -51,6 +52,14 @@ class MainActivity : ComponentActivity() {
         if (intent.getBooleanExtra("autostart", false)) {
             prepareAndStart()
         }
+    }
+
+    // People open the app when something is off or to look someone up,
+    // so bring hosts/ up to date right then. A conditional GET, 304 mostly.
+    override fun onResume() {
+        super.onResume()
+        val config = NetworkConfig.load(netDir)
+        if (config.bundleUrl != null) thread(name = "tincr-bundle") { BundleJob.refresh(config) }
     }
 
     @Composable
