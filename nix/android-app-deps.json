@@ -1036,6 +1036,13 @@
    "jar": "sha256-5afGScVMQSBJkIJHyl4l/mkh10aEnGAXqE3GBEI3pLQ=",
    "pom": "sha256-3gVzL73LWwXhmYWrwKKE5Bvj7GhTh9BPhIil5lBOoI4="
   },
+  "com/google/zxing#core/3.4.1": {
+   "jar": "sha256-rPowM4wmJntsq2ZVCcIlG7lug1C/ytidWblJuncBH40=",
+   "pom": "sha256-saD67kJKPHdVNMgfoW9aXVqmXKQOathX9pYbMz6jn9M="
+  },
+  "com/google/zxing#zxing-parent/3.4.1": {
+   "pom": "sha256-ICgf4RuOS9TBfe7FYURNFXW9Uy/stz7Pa4nv2tfNiTg="
+  },
   "com/googlecode/juniversalchardet#juniversalchardet/1.0.3": {
    "jar": "sha256-dXv+kGGTuLZR553CbNZ9a1XQdwos37A4FZFQT3edSnY=",
    "pom": "sha256-eEY5mzXHzWQqmzoADD4tYtBOs3pFR7aTPMixi8wvCGs="
@@ -1046,6 +1053,12 @@
   "com/ibm/icu#icu4j/75.1": {
    "jar": "sha256-VD5DqR0UmeMxxxGnVvgz1vuMwBn5yZE8C99NUwCZMtU=",
    "pom": "sha256-zQuqR3iLDwfDHUpJMvYY1Mqf/TADrj3Cyt5T32cI8CA="
+  },
+  "com/journeyapps#zxing-android-embedded/4.3.0": {
+   "pom": "sha256-xN0Jl0M1wh7+58opGD7K5e9+JrSCZaYFxlOj785H8ps="
+  },
+  "com/journeyapps/zxing-android-embedded/4.3.0/zxing-android-embedded-4.3.0": {
+   "aar": "sha256-SrAzUxJ8NOVcu4D7yaNAMd7Lz7HsXo+ZGUTS1JRiGjM="
   },
   "com/squareup#javapoet/1.10.0": {
    "jar": "sha256-IO9LguQ/98ZSKBohMTzzuUEJJGet0/pzUJwm9pae/as=",
