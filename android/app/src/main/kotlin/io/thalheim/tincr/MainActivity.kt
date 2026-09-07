@@ -3,11 +3,12 @@ package io.thalheim.tincr
 import android.content.Intent
 import android.net.VpnService
 import android.os.Bundle
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -35,8 +36,11 @@ class MainActivity : ComponentActivity() {
         if (it.resultCode == RESULT_OK) startVpn()
     }
 
-    // Set by a `tinc://` deep link, consumed by the join screen.
+    // Set by a `tinc://` deep link or a QR scan, consumed by the join screen.
     private var pendingLink by mutableStateOf<String?>(null)
+    private val scan = registerForActivityResult(ScanContract()) { r ->
+        r.contents?.let { pendingLink = it }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -55,8 +59,15 @@ class MainActivity : ComponentActivity() {
         var link by remember { mutableStateOf(Link.Off) }
         var log by remember { mutableStateOf("") }
         var joined by remember { mutableStateOf(File(netDir, "tinc.conf").isFile) }
-        var joining by remember { mutableStateOf(pendingLink != null) }
-        var joinLink by remember { mutableStateOf(pendingLink ?: "") }
+        var joining by remember { mutableStateOf(false) }
+        var joinLink by remember { mutableStateOf("") }
+        LaunchedEffect(pendingLink) {
+            pendingLink?.let {
+                joinLink = it
+                joining = true
+                pendingLink = null
+            }
+        }
         var joinBusy by remember { mutableStateOf(false) }
         var joinError by remember { mutableStateOf<String?>(null) }
         val scope = rememberCoroutineScope()
@@ -88,7 +99,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         if (!joined) {
-            OnboardingScreen(onScan = ::notYet, onLink = { joining = true })
+            OnboardingScreen(onScan = ::scanQr, onLink = { joining = true })
             return
         }
         if (advanced) {
@@ -106,8 +117,11 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun notYet() {
-        Toast.makeText(this, "Scanning is not implemented yet", Toast.LENGTH_SHORT).show()
+    private fun scanQr() {
+        scan.launch(
+            ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                .setPrompt("Scan the invitation code").setBeepEnabled(false).setOrientationLocked(false),
+        )
     }
 
     private fun sendHelpReport(log: String) {
