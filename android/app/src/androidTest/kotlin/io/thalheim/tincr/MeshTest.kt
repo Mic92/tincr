@@ -111,7 +111,7 @@ class MeshTest {
         Join.run(ctx, phoneDir, "tinc://join/$url")
 
         assertTrue(File(phoneDir, "tinc.conf").readText().contains("ConnectTo = gate"))
-        assertTrue(File(phoneDir, "vpn.conf").readText() == "address 10.243.42.42/16\nroute 10.243.0.0/16\n")
+        assertTrue(File(phoneDir, "vpn.conf").readText() == "inviter gate\naddress 10.243.42.42/16\nroute 10.243.0.0/16\n")
         assertTrue(File(gateDir, "hosts/phone").isFile)
         bringUpAndCheck()
     }
@@ -139,6 +139,7 @@ class MeshTest {
             }
         }
         assertTrue(log(phoneLog).contains("Ready"))
+        poll(10_000, "dump nodes over control socket") { TincCtl(phoneDir).nodes()["gate"] == true }
     }
 
     @After

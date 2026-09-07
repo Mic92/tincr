@@ -16,6 +16,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import io.thalheim.tincr.ui.AdvancedScreen
+import io.thalheim.tincr.ui.Device
 import io.thalheim.tincr.ui.HomeState
 import io.thalheim.tincr.ui.JoinScreen
 import io.thalheim.tincr.ui.Link
@@ -56,8 +57,8 @@ class MainActivity : ComponentActivity() {
     private fun App() {
         var tab by remember { mutableStateOf(Tab.Home) }
         var advanced by remember { mutableStateOf(false) }
-        var link by remember { mutableStateOf(Link.Off) }
         var log by remember { mutableStateOf("") }
+        var state by remember { mutableStateOf(homeState(emptyMap(), false)) }
         var joined by remember { mutableStateOf(File(netDir, "tinc.conf").isFile) }
         var joining by remember { mutableStateOf(false) }
         var joinLink by remember { mutableStateOf("") }
@@ -73,9 +74,14 @@ class MainActivity : ComponentActivity() {
         val scope = rememberCoroutineScope()
         LaunchedEffect(Unit) {
             while (true) {
-                link = if (TincrVpnService.running) Link.Connected else Link.Off
-                val f = File(netDir, "tincd.log")
-                log = if (f.isFile) f.readLines().takeLast(200).joinToString("\n") else "(no log)"
+                val running = TincrVpnService.running
+                val (nodes, tail) = withContext(Dispatchers.IO) {
+                    val f = File(netDir, "tincd.log")
+                    (if (running) TincCtl(netDir).nodes() else emptyMap()) to
+                        (if (f.isFile) f.readLines().takeLast(200).joinToString("\n") else "(no log)")
+                }
+                state = homeState(nodes, running)
+                log = tail
                 delay(1000)
             }
         }
@@ -107,13 +113,26 @@ class MainActivity : ComponentActivity() {
             AdvancedScreen(log, onBack = { advanced = false })
             return
         }
-        // Devices and inviter will come from invitation metadata. Not wired yet.
-        val state = HomeState(network = "tincr", link = link, devices = emptyList(), inviter = "your admin")
         MainScreen(
             state, tab, onTab = { tab = it },
             onToggle = { if (TincrVpnService.running) stop() else prepareAndStart() },
             onHelpReport = { sendHelpReport(log) },
             onSettings = { advanced = true },
+        )
+    }
+
+    // Connected once any peer is reachable, so the ring does not turn
+    // green on a daemon that is up but alone.
+    private fun homeState(nodes: Map<String, Boolean>, running: Boolean): HomeState {
+        val cfg = NetworkConfig.load(netDir)
+        val self = cfg.name
+        val devices = cfg.hosts.map { Device(it, "", online = nodes[it] == true, self = it == self) }
+        val anyPeer = devices.any { it.online && !it.self }
+        return HomeState(
+            network = cfg.network ?: "tincr",
+            link = if (!running) Link.Off else if (anyPeer) Link.Connected else Link.Connecting,
+            devices = devices,
+            inviter = cfg.inviter ?: "the person who invited you",
         )
     }
 

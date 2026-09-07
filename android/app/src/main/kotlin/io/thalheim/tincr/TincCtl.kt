@@ -11,6 +11,7 @@ import java.io.InputStreamReader
 class TincCtl(private val dir: File) {
     companion object {
         const val REQ_STOP = 0
+        const val REQ_DUMP_NODES = 3
         const val REQ_RETRY = 10
     }
 
@@ -18,8 +19,17 @@ class TincCtl(private val dir: File) {
         File(dir, "tincd.pid").takeIf { it.isFile }
             ?.readText()?.split(Regex("\\s+"))?.getOrNull(1)
 
-    fun request(req: Int): Boolean {
-        val cookie = cookie() ?: return false
+    fun request(req: Int): Boolean = converse(req)?.let { it.lastOrNull()?.startsWith("18 $req 0") } ?: false
+
+    // Node name -> reachable, from `dump nodes` (status bit 4).
+    fun nodes(): Map<String, Boolean> = converse(REQ_DUMP_NODES).orEmpty()
+        .mapNotNull { it.split(' ') }
+        .filter { it.size > 12 }
+        .associate { it[2] to ((it[12].toIntOrNull(16) ?: 0) and 0x10 != 0) }
+
+    // Lines up to and including the `18 <req> ...` terminator.
+    private fun converse(req: Int): List<String>? {
+        val cookie = cookie() ?: return null
         return try {
             LocalSocket().use { sock ->
                 sock.connect(
@@ -30,14 +40,19 @@ class TincCtl(private val dir: File) {
                 )
                 val r = BufferedReader(InputStreamReader(sock.inputStream))
                 sock.outputStream.write("0 ^$cookie 0\n".toByteArray())
-                r.readLine() ?: return false
-                r.readLine() ?: return false
+                r.readLine() ?: return null
+                r.readLine() ?: return null
                 sock.outputStream.write("18 $req\n".toByteArray())
-                val ack = r.readLine() ?: return false
-                ack.startsWith("18 $req 0")
+                val out = mutableListOf<String>()
+                while (true) {
+                    val line = r.readLine() ?: return null
+                    out.add(line)
+                    if (line.split(' ').size <= 3) break
+                }
+                out
             }
         } catch (e: java.io.IOException) {
-            false
+            null
         }
     }
 }
