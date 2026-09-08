@@ -20,8 +20,12 @@ object Join {
     }
 
     fun run(context: Context, dir: File, link: String) {
-        val url = parseLink(link) ?: throw JoinError("This is not an invitation link.")
+        val url = parseLink(link) ?: throw JoinError(
+            if (link.trim().startsWith("http")) "This is a web link, not an invitation. Invitations look like server/…48 characters."
+            else "This is not an invitation link. It should look like server/…48 characters.",
+        )
         val tinc = File(context.applicationInfo.nativeLibraryDir, "libtinc.so")
+        if (!tinc.canExecute()) throw JoinError("This install is incomplete (libtinc.so missing). Reinstall the app.")
         val tmp = File(dir.parentFile, dir.name + ".join")
         tmp.deleteRecursively()
         tmp.mkdirs()
@@ -29,13 +33,30 @@ object Join {
             val p = ProcessBuilder(tinc.absolutePath, "--batch", "-c", tmp.absolutePath, "join", url)
                 .redirectErrorStream(true).start()
             val out = p.inputStream.bufferedReader().readText()
-            if (p.waitFor() != 0) throw JoinError(out.lines().lastOrNull { it.isNotBlank() } ?: "join failed")
+            if (p.waitFor() != 0) throw JoinError(explain(url, out))
             finish(tmp)
             dir.deleteRecursively()
             if (!tmp.renameTo(dir)) throw JoinError("cannot move config into place")
         } finally {
             tmp.deleteRecursively()
         }
+    }
+
+    // Turn tinc's stderr into something a person can act on, raw text kept below.
+    private fun explain(url: String, out: String): String {
+        val host = url.substringBeforeLast('/')
+        val last = out.lines().lastOrNull { it.isNotBlank() }.orEmpty()
+        val hint = when {
+            "looking up" in out || "resolve" in out ->
+                "Can’t find the server $host. Check your internet connection, or ask whoever sent this whether the address is right."
+            "Could not connect" in out || "timed out" in out || "Connection refused" in out ->
+                "The server $host does not answer. It may be down or this network blocks it. Try mobile data, then ask the sender."
+            "Peer has an invalid key" in out || "Invalid invitation" in out || "not valid" in out ->
+                "The server does not recognise this invitation. Each invitation works once and expires. Ask for a new one."
+            "already exists" in out -> "This phone already joined. To start over, clear the app’s storage in Android settings."
+            else -> "Joining failed."
+        }
+        return "$hint\n\n($last)"
     }
 
     private fun finish(dir: File) {

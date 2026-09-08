@@ -8,16 +8,21 @@ import android.content.ComponentName
 import android.content.Context
 import android.util.Log
 import java.io.File
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import kotlin.concurrent.thread
 
-// Daily hosts/ refresh. Also run on every VPN start.
+// Daily hosts/ refresh, also kicked on VPN start and app open.
 class BundleJob : JobService() {
     companion object {
         private const val ID = 1
+        private val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "tincr-bundle").apply { isDaemon = true } }
+
+        @Volatile
+        var lastProblem: Problem? = null
+            private set
 
         fun schedule(context: Context) {
-            val js = context.getSystemService(JobScheduler::class.java)
+            val js = context.getSystemService(JobScheduler::class.java) ?: return
             if (js.getPendingJob(ID) != null) return
             js.schedule(
                 JobInfo.Builder(ID, ComponentName(context, BundleJob::class.java))
@@ -28,14 +33,19 @@ class BundleJob : JobService() {
             )
         }
 
-        @Synchronized
-        fun refresh(config: NetworkConfig) {
-            try {
-                if (Bundle.update(config) && TincrVpnService.running) {
-                    TincCtl(config.dir).request(TincCtl.REQ_RELOAD)
+        // Serialised on one thread so two refreshes never race on hosts.new/.
+        fun kick(context: Context, config: NetworkConfig, done: () -> Unit = {}) {
+            val url = config.bundleUrl ?: return done()
+            executor.execute {
+                try {
+                    if (Bundle.update(config) && Vpn.running) TincCtl(config.dir).request(TincCtl.REQ_RELOAD)
+                    lastProblem = null
+                } catch (e: Exception) {
+                    Log.w("tincr", "bundle: ${e.message}")
+                    lastProblem = Problems.bundle(url, e)
+                } finally {
+                    done()
                 }
-            } catch (e: Exception) {
-                Log.w("tincr", "bundle update failed: ${e.message}")
             }
         }
     }
@@ -43,10 +53,7 @@ class BundleJob : JobService() {
     override fun onStartJob(params: JobParameters): Boolean {
         val config = NetworkConfig.load(File(filesDir, "networks/default"))
         if (config.bundleUrl == null) return false
-        thread(name = "tincr-bundle") {
-            refresh(config)
-            jobFinished(params, false)
-        }
+        kick(this, config) { jobFinished(params, false) }
         return true
     }
 

@@ -31,7 +31,8 @@ object Bundle {
             when (val code = conn.responseCode) {
                 HttpURLConnection.HTTP_NOT_MODIFIED -> return false
                 HttpURLConnection.HTTP_OK -> {}
-                else -> throw java.io.IOException("bundle fetch: HTTP $code")
+                HttpURLConnection.HTTP_NOT_FOUND -> throw java.io.IOException("HTTP 404, the bundle URL from the invitation no longer exists")
+                else -> throw java.io.IOException("HTTP $code")
             }
             val n = conn.inputStream.use { install(config, it) }
             conn.getHeaderField("ETag")?.let { etagFile.writeText(it) }
@@ -57,9 +58,11 @@ object Bundle {
         }
         if (n == 0) {
             fresh.deleteRecursively()
-            throw java.io.IOException("bundle has no host files")
+            throw java.io.IOException("archive contains no host files")
         }
+        // Never lose the ConnectTo peer, or the next start cannot dial anyone.
         val hosts = File(dir, "hosts")
+        config.inviter?.let { File(hosts, it).takeIf { f -> f.isFile && !File(fresh, it).exists() }?.copyTo(File(fresh, it)) }
         config.name?.let { own -> File(hosts, own).takeIf { it.isFile }?.copyTo(File(fresh, own), overwrite = true) }
         val old = File(dir, "hosts.old").apply { deleteRecursively() }
         hosts.renameTo(old)
