@@ -30,6 +30,15 @@ nix build github:Mic92/tincr#packages.x86_64-linux.tincd
 > nix build github:Mic92/tincr#packages.x86_64-linux.tincd-compat
 > ```
 
+### Android
+
+Add the F-Droid repository `https://mic92.github.io/tincr/repo`
+(fingerprint `E3B370C2EC784B15CA4FC254B74EE6EF5786E3FB5FE1E4A0391BA56DA637EF12`)
+or grab `tincr.apk` from the
+[nightly release](https://github.com/Mic92/tincr/releases/tag/nightly).
+Both track `main`. Joining a network needs an invitation from an existing
+node (`tinc invite`), scanned as a QR code or opened as a `tinc://` link.
+
 ## Getting started
 
 [docs/QUICKSTART.md](docs/QUICKSTART.md) sets up a two-node mesh.

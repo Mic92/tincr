@@ -74,6 +74,8 @@
           };
           tincr-app = (androidPkgsFor system).callPackage ./nix/android-app.nix {
             inherit (self.packages.${system}) tincd-android;
+            versionCode = self.lastModified or 1;
+            versionName = self.shortRev or self.dirtyShortRev or null;
           };
         }
       );
@@ -128,6 +130,20 @@
       );
 
       formatter = eachSystem (system: _: treefmt.${system}.config.build.wrapper);
+
+      herculesCI =
+        { ... }:
+        let
+          system = "x86_64-linux";
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          onPush.default.outputs.effects.fdroid = pkgs.callPackage ./nix/fdroid/effect.nix {
+            inherit (nixbot.lib.effects { inherit pkgs; }) mkEffect;
+            inherit (self.packages.${system}) tincr-app;
+            rev = self.rev or "dirty";
+          };
+        };
 
       nixosModules.tincr = nixpkgs.lib.modules.importApply ./nix/module.nix { inherit crane; };
     };
