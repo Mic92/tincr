@@ -1,18 +1,8 @@
 package io.thalheim.tincr.ui
 
-enum class Link { Connected, Connecting, Off }
+import io.thalheim.tincr.Problem
 
-// Degraded states are phrased as instructions, never diagnoses.
-enum class Notice(val title: String, val body: String) {
-    NoInternet(
-        "No internet connection",
-        "The network will reconnect by itself when you’re back online.",
-    ),
-    NewPhone(
-        "This looks like a new phone",
-        "Ask the person who invited you for a fresh invitation.",
-    ),
-}
+enum class Link { Connected, Connecting, Off }
 
 data class Device(
     val name: String,
@@ -26,7 +16,7 @@ data class HomeState(
     val link: Link,
     val devices: List<Device>,
     val inviter: String,
-    val notice: Notice? = null,
+    val notice: Problem? = null,
 ) {
     val onlineCount get() = devices.count { it.online }
 }
