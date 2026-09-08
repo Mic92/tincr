@@ -40,6 +40,10 @@ import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -48,7 +52,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import io.thalheim.tincr.Problem
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -268,13 +274,23 @@ private fun DeviceRow(d: Device) {
 }
 
 @Composable
-private fun NoticeBanner(n: Notice) {
+private fun NoticeBanner(n: Problem) {
+    var open by remember { mutableStateOf(false) }
     Column(
         Modifier.padding(top = 16.dp).fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp)).background(Palette.amberSoft).padding(14.dp),
+            .clip(RoundedCornerShape(14.dp)).background(Palette.amberSoft)
+            .clickable(enabled = n.detail.isNotEmpty()) { open = !open }.padding(14.dp),
     ) {
         Text(n.title, color = Palette.amberInk, fontSize = 15.sp, fontWeight = FontWeight.Bold)
         Text(n.body, color = Palette.amberInk.copy(alpha = .85f), fontSize = 14.sp)
+        if (n.detail.isNotEmpty()) {
+            Text(
+                if (open) n.detail else "Tap for details to pass on",
+                color = Palette.amberInk.copy(alpha = .7f), fontSize = 12.sp,
+                fontFamily = if (open) FontFamily.Monospace else null,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
     }
 }
 

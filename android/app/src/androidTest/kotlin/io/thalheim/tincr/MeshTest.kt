@@ -89,7 +89,7 @@ class MeshTest {
     @Test
     fun meshComesUp() {
         freshDirs(withPhone = true)
-        gate = TincdRunner(ctx, NetworkConfig.load(gateDir)).also { it.start() }
+        gate = TincdRunner(File(ctx.applicationInfo.nativeLibraryDir, "libtincd.so"), gateDir).also { it.start {} }
         bringUpAndCheck()
     }
 
@@ -99,13 +99,13 @@ class MeshTest {
     fun joinThenMesh() {
         freshDirs(withPhone = false)
         File(gateDir, "hosts/phone").delete()
-        gate = TincdRunner(ctx, NetworkConfig.load(gateDir)).also { it.start() }
+        gate = TincdRunner(File(ctx.applicationInfo.nativeLibraryDir, "libtincd.so"), gateDir).also { it.start {} }
         poll(10_000, "gate control socket") { File(gateDir, "tincd.pid").isFile }
 
         val url = tinc(gateDir, "invite", "phone").lines().first { it.startsWith("127.0.0.1:") }.trim()
         val inv = File(gateDir, "invitations").listFiles()!!.single { it.name != "ed25519_key.priv" }
         // Stands in for an invitation-created hook on the inviter.
-        val port = serveBundle(mapOf("extra" to "Subnet = 10.243.9.9/32\n"))
+        val port = serveBundle(mapOf("extra" to "Subnet = 10.243.9.9/32\nEd25519PublicKey = ${"A".repeat(43)}\n"))
         inv.writeText(
             inv.readText().replaceFirst(
                 "#--",

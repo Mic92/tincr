@@ -28,14 +28,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlin.concurrent.thread
 import androidx.compose.runtime.rememberCoroutineScope
 import java.io.File
 
 class MainActivity : ComponentActivity() {
     private val netDir get() = File(filesDir, "networks/default")
     private val consent = registerForActivityResult(StartActivityForResult()) {
-        if (it.resultCode == RESULT_OK) startVpn()
+        if (it.resultCode == RESULT_OK) startVpn() else Vpn.problem = Problems.consentMissing()
     }
 
     // Non-null shows the join screen. Set by deep link, QR scan or the button.
@@ -54,12 +53,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // People open the app when something is off or to look someone up,
-    // so bring hosts/ up to date right then. A conditional GET, 304 mostly.
+    // People open the app when something is off, so refresh hosts/ now.
     override fun onResume() {
         super.onResume()
-        val config = NetworkConfig.load(netDir)
-        if (config.bundleUrl != null) thread(name = "tincr-bundle") { BundleJob.refresh(config) }
+        BundleJob.kick(this, NetworkConfig.load(netDir))
     }
 
     @Composable
@@ -67,20 +64,19 @@ class MainActivity : ComponentActivity() {
         var tab by remember { mutableStateOf(Tab.Home) }
         var advanced by remember { mutableStateOf(false) }
         var log by remember { mutableStateOf("") }
-        var state by remember { mutableStateOf(homeState(emptyMap(), false)) }
+        var state by remember { mutableStateOf(homeState(emptyMap(), Vpn.phase)) }
         var joined by remember { mutableStateOf(File(netDir, "tinc.conf").isFile) }
         var joinBusy by remember { mutableStateOf(false) }
         var joinError by remember { mutableStateOf<String?>(null) }
         val scope = rememberCoroutineScope()
         LaunchedEffect(Unit) {
             while (true) {
-                val running = TincrVpnService.running
+                val phase = Vpn.phase
                 val (nodes, tail) = withContext(Dispatchers.IO) {
-                    val f = File(netDir, "tincd.log")
-                    (if (running) TincCtl(netDir).nodes() else emptyMap()) to
-                        (if (f.isFile) f.readLines().takeLast(200).joinToString("\n") else "(no log)")
+                    (if (phase == Phase.Running) TincCtl(netDir).nodes() else emptyMap()) to
+                        TincdRunner.logTail(netDir, 200).ifEmpty { "(no log)" }
                 }
-                state = homeState(nodes, running)
+                state = homeState(nodes, phase)
                 log = tail
                 delay(1000)
             }
@@ -115,24 +111,28 @@ class MainActivity : ComponentActivity() {
         }
         MainScreen(
             state, tab, onTab = { tab = it },
-            onToggle = { if (TincrVpnService.running) stop() else prepareAndStart() },
-            onHelpReport = { sendHelpReport(log) },
+            onToggle = { if (Vpn.phase == Phase.Off) prepareAndStart() else stop() },
+            onHelpReport = { sendHelpReport(state, log) },
             onSettings = { advanced = true },
         )
     }
 
-    // Connected once any peer is reachable, so the ring does not turn
-    // green on a daemon that is up but alone.
-    private fun homeState(nodes: Map<String, Boolean>, running: Boolean): HomeState {
+    // Connected only once a peer is reachable, not merely when tincd is up.
+    private fun homeState(nodes: Map<String, Boolean>, phase: Phase): HomeState {
         val cfg = NetworkConfig.load(netDir)
         val self = cfg.name
         val devices = cfg.hosts.map { Device(it, "", online = nodes[it] == true, self = it == self) }
         val anyPeer = devices.any { it.online && !it.self }
         return HomeState(
             network = cfg.network ?: "tincr",
-            link = if (!running) Link.Off else if (anyPeer) Link.Connected else Link.Connecting,
+            link = when {
+                phase == Phase.Off || phase == Phase.Stopping -> Link.Off
+                anyPeer -> Link.Connected
+                else -> Link.Connecting
+            },
             devices = devices,
             inviter = cfg.inviter ?: "the person who invited you",
+            notice = Vpn.problem ?: BundleJob.lastProblem,
         )
     }
 
@@ -143,10 +143,19 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun sendHelpReport(log: String) {
+    private fun sendHelpReport(state: HomeState, log: String) {
+        val cfg = NetworkConfig.load(netDir)
+        val text = buildString {
+            append("tincr ").append(runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull()).append('\n')
+            append("Android ").append(android.os.Build.VERSION.RELEASE).append(" (").append(android.os.Build.MODEL).append(")\n")
+            append("node ").append(cfg.name).append(" network ").append(cfg.network).append(" via ").append(cfg.inviter).append('\n')
+            append("state ").append(Vpn.phase).append(", ").append(state.onlineCount).append('/').append(state.devices.size).append(" reachable\n")
+            state.notice?.let { append("\nProblem: ").append(it.title).append('\n').append(it.detail).append('\n') }
+            append("\n--- tincd.log (last 200 lines) ---\n").append(log)
+        }
         val send = Intent(Intent.ACTION_SEND).setType("text/plain")
-            .putExtra(Intent.EXTRA_SUBJECT, "tincr help report")
-            .putExtra(Intent.EXTRA_TEXT, log)
+            .putExtra(Intent.EXTRA_SUBJECT, "tincr help report from ${cfg.name}")
+            .putExtra(Intent.EXTRA_TEXT, text)
         startActivity(Intent.createChooser(send, "Send help report"))
     }
 
@@ -155,7 +164,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun prepareAndStart() {
-        val ask = VpnService.prepare(this)
+        val ask = try {
+            VpnService.prepare(this)
+        } catch (e: IllegalStateException) {
+            Vpn.problem = Problems.consentMissing().copy(detail = "prepare: ${e.message}")
+            return
+        }
         if (ask != null) consent.launch(ask) else startVpn()
     }
 
