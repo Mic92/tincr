@@ -52,6 +52,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
+use qrcode::{EcLevel, QrCode, render::unicode::Dense1x2};
 use rand_core::Rng;
 use tinc_conf::Config;
 use tinc_crypto::b64;
@@ -242,10 +243,12 @@ pub fn invite(
     let slug = Zeroizing::new(build_slug(pubkey, &cookie));
     let url = Zeroizing::new(format!("{address}/{}", *slug));
 
+    let link = Zeroizing::new(app_link(&url));
     let mut hook_env: Vec<(&str, &str)> = vec![
         ("NAME", &myname),
         ("NODE", invitee),
         ("INVITATION_URL", &url),
+        ("INVITATION_LINK", &link),
     ];
     hook_env.extend(netname.map(|n| ("NETNAME", n)));
     hook_env.extend(headers.replace.as_deref().map(|k| ("REPLACE", k)));
@@ -258,6 +261,27 @@ pub fn invite(
     }
 
     Ok(InviteResult { url, key_is_new })
+}
+
+/// What phones open or scan. `tinc join` accepts it too.
+#[must_use]
+pub fn app_link(url: &str) -> String {
+    format!("tinc://join/{url}")
+}
+
+/// QR code as UTF-8 half blocks, dark on light with a quiet zone, for
+/// terminals.
+#[must_use]
+pub fn qr_utf8(data: &str) -> String {
+    QrCode::with_error_correction_level(data, EcLevel::L).map_or_else(
+        |_| String::new(),
+        |c| {
+            c.render::<Dense1x2>()
+                .dark_color(Dense1x2::Light)
+                .light_color(Dense1x2::Dark)
+                .build()
+        },
+    )
 }
 
 /// Lines a hook appended after the original body belong to the invitee,
@@ -858,8 +882,8 @@ mod tests {
         let script = cd.confbase().join("invitation-created");
         fs::write(
             &script,
-            "#!/bin/sh\nprintf 'Subnet = 10.0.0.7\\n# %s %s %s\\n' \
-             \"$NODE\" \"$NAME\" \"$INVITATION_URL\" >> \"$INVITATION_FILE\"\n",
+            "#!/bin/sh\nprintf 'Subnet = 10.0.0.7\\n# %s %s %s %s\\n' \
+             \"$NODE\" \"$NAME\" \"$INVITATION_URL\" \"$INVITATION_LINK\" >> \"$INVITATION_FILE\"\n",
         )
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
@@ -870,11 +894,17 @@ mod tests {
         let chunk1 = body.split(SEPARATOR).next().unwrap();
         assert!(
             chunk1.ends_with(&format!(
-                "Subnet = 10.0.0.7\n# bob alice {}\n",
+                "Subnet = 10.0.0.7\n# bob alice {0} tinc://join/{0}\n",
                 r.url.as_str()
             )),
             "{body}"
         );
+    }
+
+    #[test]
+    fn qr_renders_link() {
+        let q = qr_utf8("tinc://join/host.example/x");
+        assert!(q.lines().count() > 10 && q.contains('█'), "{q}");
     }
 
     /// A failing hook aborts the invite and leaves no invitation behind,
