@@ -131,5 +131,6 @@
       formatter = eachSystem (system: _: treefmt.${system}.config.build.wrapper);
 
       nixosModules.tincr = nixpkgs.lib.modules.importApply ./nix/module.nix { inherit crane; };
+      darwinModules.tincr = nixpkgs.lib.modules.importApply ./nix/darwin-module.nix { inherit crane; };
     };
 }
