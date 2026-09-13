@@ -544,6 +544,12 @@ pub struct Daemon {
     /// each round re-resolves (dynamic DNS).
     pub(crate) dns_hints: HashMap<String, Vec<SocketAddr>>,
 
+    /// Which node actually answered at a dialled address (from ACK, or
+    /// from an `ID` naming someone else). The edge-walk skips gossiped
+    /// candidates owned by another node, e.g. a `NATed` leaf reported at
+    /// its hub's listener (#100).
+    pub(crate) addr_owners: HashMap<SocketAddr, String>,
+
     /// Resolved SOCKS/HTTP proxy address(es). Empty until the worker
     /// answers (or after a failed lookup) — callers don't distinguish
     /// "pending" from "NXDOMAIN", they just retry. `do_outgoing_

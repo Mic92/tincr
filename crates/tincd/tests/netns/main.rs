@@ -14,6 +14,7 @@ mod autoconnect_shortcut;
 mod bpf_steer;
 mod chaos;
 mod crossimpl;
+mod nat_hub;
 mod ping;
 mod portmap;
 mod sandbox;
