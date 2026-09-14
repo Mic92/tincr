@@ -314,7 +314,7 @@ impl Daemon {
                 // PMTU shrank under us; frames in this batch are
                 // lost (kernel rejected the whole sendmsg) — same
                 // outcome as the per-frame path, just `count×`.
-                helpers::handle_udp_emsgsize(tunnels, graph, relay_nid, origlen);
+                helpers::handle_udp_emsgsize(tunnels, graph, tunnel_handles, relay_nid, origlen);
             } else if helpers::is_udp_unreachable_errno(&e) {
                 let relay_name = graph
                     .node(relay_nid)
@@ -436,8 +436,14 @@ impl Daemon {
             }
             Err((relay, origlen)) => {
                 // PMTU shrank under us; frames lost, inner-TCP
-                // retransmits. Cap maxmtu for the next super.
-                helpers::handle_udp_emsgsize(&mut self.dp.tunnels, &self.graph, relay, origlen);
+                // retransmits. Cap min/maxmtu for the next super.
+                helpers::handle_udp_emsgsize(
+                    &mut self.dp.tunnels,
+                    &self.graph,
+                    &self.tunnel_handles,
+                    relay,
+                    origlen,
+                );
             }
         }
         // Batch already shipped inside seal_super.

@@ -26,18 +26,35 @@ use tinc_proto::Request;
 use tinc_sptps::Output;
 
 /// Per-send result: meta-socket write readiness + whether the local
-/// UDP socket accepted a datagram.
+/// UDP socket accepted a datagram. `udp_emsgsize`: the socket rejected
+/// it as oversized for the kernel's cached PMTU — local proof that the
+/// relay's `maxmtu` is wrong, which a counted revalidation probe treats
+/// as a miss (other local errors do not; see `on_counted_probe_sent`).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(in crate::daemon) struct TunnelSendOutcome {
     pub(in crate::daemon) needs_write: bool,
     pub(in crate::daemon) udp_sent: bool,
+    pub(in crate::daemon) udp_emsgsize: bool,
 }
 
 impl TunnelSendOutcome {
     fn merge(&mut self, other: Self) {
         self.needs_write |= other.needs_write;
         self.udp_sent |= other.udp_sent;
+        self.udp_emsgsize |= other.udp_emsgsize;
     }
+}
+
+/// Result of one immediate UDP `sendto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UdpSubmit {
+    /// Kernel accepted the datagram.
+    Sent,
+    /// `EMSGSIZE`: over the kernel's cached PMTU; PMTU state already
+    /// clamped. The frame was not sent and can still be re-sent.
+    TooBig,
+    /// Any other local error (dropped; UDP is unreliable).
+    Failed,
 }
 
 impl Daemon {
@@ -593,7 +610,7 @@ impl Daemon {
         if go_tcp {
             return TunnelSendOutcome {
                 needs_write: self.send_sptps_tcp(to_nid, from_nid, record_type, ct, from_is_myself),
-                udp_sent: false,
+                ..TunnelSendOutcome::default()
             };
         }
 
@@ -680,26 +697,36 @@ impl Daemon {
         // Immediate-send path. Hit when: outside the drain loop,
         // or cold path (no cached addr), or relay/
         // handshake (`ct.is_some()`).
-        TunnelSendOutcome {
-            needs_write: false,
-            udp_sent: self.send_sptps_udp_immediate(sockaddr, sock, relay_nid, origlen),
+        match self.send_sptps_udp_immediate(sockaddr, sock, relay_nid, origlen) {
+            UdpSubmit::Sent => TunnelSendOutcome {
+                udp_sent: true,
+                ..TunnelSendOutcome::default()
+            },
+            // Frame dropped; `handle_udp_emsgsize` already clamped the
+            // relay's bounds so the next one takes the TCP gate. For a
+            // probe `udp_emsgsize` is the miss signal for `try_tx`.
+            UdpSubmit::TooBig => TunnelSendOutcome {
+                udp_emsgsize: true,
+                ..TunnelSendOutcome::default()
+            },
+            UdpSubmit::Failed => TunnelSendOutcome::default(),
         }
     }
 
     /// Single-frame UDP send for [`Self::send_sptps_data_relay`].
     /// `count=1` means `stride == last_len`; both `Portable` and
-    /// `linux::Fast` skip GSO. Returns true only when the local UDP
-    /// socket accepted the datagram. Handles `EMSGSIZE` → PMTU shrink.
+    /// `linux::Fast` skip GSO. Handles `EMSGSIZE` → PMTU shrink and
+    /// reports it distinctly so the caller can re-route the frame.
     fn send_sptps_udp_immediate(
         &mut self,
         sockaddr: &socket2::SockAddr,
         sock: u8,
         relay_nid: NodeId,
         origlen: usize,
-    ) -> bool {
+    ) -> UdpSubmit {
         let len = len_u16(self.dp.tx_scratch.len());
         let Some(slot) = self.listeners.get_mut(usize::from(sock)) else {
-            return false;
+            return UdpSubmit::Failed;
         };
         let Err(e) = slot.egress.send_batch(&EgressBatch {
             dst: sockaddr,
@@ -708,13 +735,20 @@ impl Daemon {
             count: 1,
             last_len: len,
         }) else {
-            return true;
+            return UdpSubmit::Sent;
         };
         if e.kind() == io::ErrorKind::WouldBlock {
             // Drop; UDP is unreliable.
         } else if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) {
             let at_len = len_u16(origlen);
-            helpers::handle_udp_emsgsize(&mut self.dp.tunnels, &self.graph, relay_nid, at_len);
+            helpers::handle_udp_emsgsize(
+                &mut self.dp.tunnels,
+                &self.graph,
+                &self.tunnel_handles,
+                relay_nid,
+                at_len,
+            );
+            return UdpSubmit::TooBig;
         } else if helpers::is_udp_unreachable_errno(&e) {
             // node_log_name borrows self; clone for the helper.
             let relay_name = self.node_log_name(relay_nid).to_owned();
@@ -731,7 +765,7 @@ impl Daemon {
             log::warn!(target: "tincd::net",
                        "Error sending UDP SPTPS packet to {relay_name}: {e}");
         }
-        false
+        UdpSubmit::Failed
     }
 }
 

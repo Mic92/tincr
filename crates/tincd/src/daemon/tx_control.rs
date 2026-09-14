@@ -312,8 +312,8 @@ impl Daemon {
                 .pmtu
                 .get_or_insert_with(|| PmtuState::new(now, initial_maxmtu));
             // Re-seed even if pmtu state already exists (UDP timeout
-            // restarted discovery). Our get_or_insert only seeds on
-            // first construction.
+            // or Lost reset restarted discovery). Our get_or_insert
+            // only seeds on first construction.
             if p.phase.is_discovery_start() {
                 p.maxmtu = initial_maxmtu;
             }
@@ -323,12 +323,21 @@ impl Daemon {
                 for a in &actions {
                     Self::log_pmtu_action(&target_name, a);
                 }
+                // Lost reset zeroed minmtu: publish to the shard fast path.
+                if actions.contains(&PmtuAction::LogReset)
+                    && let Some(h) = self.tunnel_handles.get(&target)
+                {
+                    h.minmtu.store(0, atomic::Ordering::Relaxed);
+                }
                 for a in actions {
                     if let PmtuAction::SendProbe { len, counts_miss } = a {
                         let outcome = self.send_udp_probe(target, &target_name, len);
                         nw |= outcome.needs_write;
+                        // Only sent or EMSGSIZE'd probes are evidence
+                        // about the path; ENETUNREACH etc. must not
+                        // walk Steady towards Lost.
                         if counts_miss
-                            && outcome.udp_sent
+                            && (outcome.udp_sent || outcome.udp_emsgsize)
                             && let Some(pmtu) = self
                                 .dp
                                 .tunnels
