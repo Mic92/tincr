@@ -255,6 +255,10 @@ pub(crate) enum DispatchError {
     Unauthorized,
     /// `id_h`: cookie mismatch / bad name / version reject.
     BadId(String),
+    /// `id_h` on an outgoing conn: the peer at `conn.address` is
+    /// `actual`, not the node we dialled. Split from `BadId` so the
+    /// daemon can remember who really owns that address.
+    WrongPeer { actual: String },
     /// ACK line malformed.
     BadAck(String),
     /// `ADD/DEL_SUBNET` parse failed.
@@ -444,10 +448,9 @@ fn id_peer(
     let is_outgoing = conn.outgoing.is_some();
     if is_outgoing {
         if conn.name != name {
-            return Err(DispatchError::BadId(format!(
-                "peer {} is {} instead of {}",
-                conn.hostname, name, conn.name
-            )));
+            return Err(DispatchError::WrongPeer {
+                actual: name.to_owned(),
+            });
         }
     } else {
         conn.name = name.to_string();

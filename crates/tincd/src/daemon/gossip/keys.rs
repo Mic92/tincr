@@ -434,13 +434,11 @@ impl Daemon {
         // trust as ADD_EDGE's unauthenticated address.
         if let Some((addr_s, port_s)) = &msg.udp_addr
             && let Some(addr) = local_addr::parse_addr_port(addr_s.as_str(), port_s.as_str())
+            && self.learn_udp_addr(from_nid, addr, "REQ_KEY")
         {
             log::debug!(target: "tincd::proto",
                         "Relay-observed UDP address for {} (REQ_KEY): {addr}",
                         msg.from);
-            let t = self.dp.tunnels.entry(from_nid).or_default();
-            t.udp_addr = Some(addr);
-            t.udp_addr_cached = None;
         }
 
         // Responder start() always emits KEX (→ ANS_KEY via
@@ -615,13 +613,11 @@ impl Daemon {
                 .is_some_and(|t| t.status.validkey);
             if validkey
                 && let Some(addr) = local_addr::parse_addr_port(addr_s.as_str(), port_s.as_str())
+                && self.learn_udp_addr(from_nid, addr, "ANS_KEY")
             {
                 log::debug!(target: "tincd::proto",
                                 "Using reflexive UDP address from {}: {addr}",
                                 msg.from);
-                let t = self.dp.tunnels.entry(from_nid).or_default();
-                t.udp_addr = Some(addr);
-                t.udp_addr_cached = None; // stale: reflexive addr supersedes
 
                 // Punch coordination, initiator side: validkey just went true and we hold a
                 // fresh relay-observed address, so probe now rather than on the next `try_tx`

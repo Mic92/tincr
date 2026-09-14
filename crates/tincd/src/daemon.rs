@@ -33,6 +33,7 @@ mod autoconnect;
 mod connect;
 mod dp;
 mod dump;
+mod endpoint;
 mod gossip;
 pub(crate) mod intervals;
 mod metaconn;
@@ -544,6 +545,15 @@ pub struct Daemon {
     /// each round re-resolves (dynamic DNS).
     pub(crate) dns_hints: HashMap<String, Vec<SocketAddr>>,
 
+    /// Listener addresses proven to belong to a node: the dial target of
+    /// every ACK'd outgoing conn, and the address behind every `ID` that
+    /// named a different node than we dialled. The edge-walk drops a
+    /// candidate for `bob` this table attributes to someone else: a leaf
+    /// behind a hub's NAT is gossiped at the hub's public address and
+    /// dialling it reaches the hub (#100). In-memory; a later ACK
+    /// overwrites, so a reassigned address heals itself.
+    pub(crate) addr_owners: HashMap<SocketAddr, String>,
+
     /// Resolved SOCKS/HTTP proxy address(es). Empty until the worker
     /// answers (or after a failed lookup) — callers don't distinguish
     /// "pending" from "NXDOMAIN", they just retry. `do_outgoing_
@@ -720,6 +730,9 @@ impl Daemon {
                             "Error while waiting for input: {e}");
                 return RunOutcome::PollError;
             }
+            // I/O handlers stamp `last_ping_time` etc. from this clock;
+            // `tick()`'s snapshot is from before the wait.
+            self.timers.refresh();
 
             // io dispatch.
             for &(what, ready) in &fired_io {

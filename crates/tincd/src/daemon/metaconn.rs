@@ -258,6 +258,17 @@ impl Daemon {
                 conn.invite = Some(InvitePhase::WaitingCookie);
                 (needs_write, init, true)
             }
+            Err(DispatchError::WrongPeer { actual }) => {
+                log::error!(target: "tincd::proto",
+                            "ID rejected from {}: peer {} is {actual} instead of {}",
+                            conn.name, conn.hostname, conn.name);
+                // Every later edge-walk for `conn.name` skips this
+                // address; `Address =` config lines are unaffected.
+                if let Some(a) = conn.address {
+                    self.addr_owners.insert(a, actual);
+                }
+                return Some((DispatchResult::Drop, false));
+            }
             Err(e) => {
                 log::error!(target: "tincd::proto",
                             "ID rejected from {}: {e:?}", conn.name);

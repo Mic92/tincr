@@ -76,6 +76,17 @@ impl Daemon {
             (Ipv4Addr::UNSPECIFIED, 0).into()
         };
 
+        // A peer whose source address is inside a mesh Subnet reached
+        // us through the tunnel; authenticating it would be a meta
+        // connection that only lives while some other path carries
+        // it (see `daemon::endpoint`). Close before `ID` so the dialer
+        // moves to its next address.
+        if self.is_tunnel_addr(peer.ip()) {
+            log::info!(target: "tincd::conn",
+                       "Refusing connection from {peer}: address is inside the VPN");
+            return; // `sock` drops → close
+        }
+
         // Checked after accept: refusing to accept would busy-loop
         // LT epoll. accept+close is cheap; the SPTPS state isn't.
         if self.pending_meta >= MAX_PENDING_META {
@@ -425,6 +436,7 @@ impl Daemon {
                         &mut self.dp.tunnels,
                         &self.listeners,
                         &self.tunnel_handles,
+                        &self.subnets,
                         from_nid,
                         &from_name,
                         peer_addr,
@@ -502,6 +514,7 @@ impl Daemon {
                 &mut self.dp.tunnels,
                 &self.listeners,
                 &self.tunnel_handles,
+                &self.subnets,
                 from_nid,
                 &from_name,
                 peer_addr,

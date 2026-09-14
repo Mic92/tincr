@@ -11,6 +11,26 @@ fn all_up(_: &str) -> bool {
     true
 }
 
+/// `covers`: the dial-candidate gate. A tunnel address (inside any
+/// advertised /32, /24, /16 …) is in; a catch-all gateway route
+/// (`0.0.0.0/0`, the `/1` split) doesn't make the whole internet a
+/// tunnel address.
+#[test]
+fn covers_tunnel_addrs_not_default_routes() {
+    let mut t = SubnetTree::new();
+    t.add(sn("10.243.0.0/16"), "hub".into());
+    t.add(sn("42:0:ce16::/32"), "hub".into());
+    t.add(sn("0.0.0.0/0"), "gw".into());
+    t.add(sn("::/1"), "gw".into());
+    t.add(sn("8000::/1"), "gw".into());
+    let ip = |s: &str| IpAddr::from_str(s).unwrap();
+    assert!(t.covers(ip("10.243.0.25")));
+    assert!(t.covers(ip("42:0:ce16::16a2")));
+    assert!(!t.covers(ip("95.217.192.59")));
+    assert!(!t.covers(ip("2001:db8::1")));
+    assert!(!SubnetTree::new().covers(ip("10.243.0.25")));
+}
+
 // Ord: pin every tiebreak level.
 //
 // The comparator is the algorithm. If these break, routing breaks.

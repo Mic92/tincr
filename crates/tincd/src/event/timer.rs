@@ -177,6 +177,17 @@ impl<W: Copy> Timers<W> {
         self.now
     }
 
+    /// Re-read the clock after the poll returns. `tick()`'s snapshot
+    /// predates the wait, so without this every I/O handler in the
+    /// turn (accept, connect completion, ping bookkeeping) stamps
+    /// timestamps up to one full poll timeout in the past; the ping
+    /// sweep then sees a conn whose handshake is seconds old at birth
+    /// and closes it "during authentication". C tinc re-reads `now`
+    /// after `select()` for the same reason.
+    pub(crate) fn refresh(&mut self) {
+        self.now = Instant::now();
+    }
+
     /// True if no timers are armed. Tests use this; daemon shouldn't
     /// (it always has `pingtimer` armed).
     #[cfg(test)]

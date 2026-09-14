@@ -370,12 +370,11 @@ impl Daemon {
                 Ok(false)
             }
             UdpInfoAction::UpdateAndForward { from, to, new_addr } => {
-                log::debug!(target: "tincd::proto",
-                            "UDP_INFO from {conn_name}: learned {} at {new_addr}",
-                            parsed.from);
-                let t = self.dp.tunnels.entry(from).or_default();
-                t.udp_addr = Some(new_addr);
-                t.udp_addr_cached = None; // stale
+                if self.learn_udp_addr(from, new_addr, "UDP_INFO") {
+                    log::debug!(target: "tincd::proto",
+                                "UDP_INFO from {conn_name}: learned {} at {new_addr}",
+                                parsed.from);
+                }
                 Ok(self.send_udp_info_forward(from, to))
             }
             UdpInfoAction::Forward { from, to } => Ok(self.send_udp_info_forward(from, to)),

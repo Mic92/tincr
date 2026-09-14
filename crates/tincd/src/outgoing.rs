@@ -251,19 +251,14 @@ pub(crate) fn punch_connect(ps: PunchSock, target: SocketAddr) -> Option<Socket>
     }
 }
 
-/// One direct (no proxy) connect attempt: next cached addr, socket,
+/// One direct (no proxy) connect attempt at `addr`: socket,
 /// nonblocking `connect()`.
 pub(crate) fn try_connect(
-    addr_cache: &mut AddressCache,
+    addr: SocketAddr,
     node_name: &str,
     bind_to: Option<SocketAddr>,
     sockopts: &SockOpts,
 ) -> ConnectAttempt {
-    let Some(addr) = addr_cache.next_addr() else {
-        log::error!(target: "tincd::conn",
-                    "Could not set up a meta connection to {node_name}");
-        return ConnectAttempt::Exhausted;
-    };
     log::info!(target: "tincd::conn",
                "Trying to connect to {node_name} ({addr})");
     match dial_nonblocking(

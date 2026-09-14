@@ -66,10 +66,8 @@ fn connect_reach_then_disconnect() {
 #[test]
 fn outgoing_retries_after_refused() {
     let tmp = tmp!("retry");
-    // An inbound conn is timestamped with the loop's cached time (up
-    // to 1s old); PingTimeout=1 would reap it before ID.
-    let mut alice = Node::new(tmp.path(), "alice", 0xA1).with_conf("PingTimeout = 3\n");
-    let mut bob = Node::new(tmp.path(), "bob", 0xB1).with_conf("PingTimeout = 3\n");
+    let mut alice = Node::new(tmp.path(), "alice", 0xA1);
+    let mut bob = Node::new(tmp.path(), "bob", 0xB1);
 
     bob.reserve_port();
     bob.write_config(&alice, false);
@@ -86,6 +84,30 @@ fn outgoing_retries_after_refused() {
         "{log}"
     );
     assert!(log.contains("Connected to bob"), "{log}");
+}
+
+/// Listener restarts under an established dialer. The dialer's retry
+/// lands on an idle listener whose loop has been parked in `poll` for
+/// up to a full timer period; the accept must be timestamped with a
+/// fresh clock, or the ping sweep reaps it mid-handshake ("Timeout …
+/// during authentication") and every retry dies the same way.
+#[test]
+fn listener_restart_reauthenticates() {
+    let tmp = tmp!("relisten");
+    let mut alice = Node::new(tmp.path(), "alice", 0xA2);
+    let mut bob = Node::new(tmp.path(), "bob", 0xB2);
+    alice.start_dialing(&mut bob);
+
+    bob.stop();
+    bob.start();
+    alice.wait_for_peer("bob", true, Duration::from_secs(15));
+    bob.wait_for_peer("alice", true, Duration::from_secs(5));
+
+    let bob_log = bob.stop();
+    assert!(
+        !bob_log.contains("during authentication"),
+        "listener reaped a live handshake:\n{bob_log}"
+    );
 }
 
 /// PING/PONG keeps an idle connection alive; a `SIGSTOP`ped peer misses
