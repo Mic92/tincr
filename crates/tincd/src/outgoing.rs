@@ -47,7 +47,6 @@ use crate::socks::ProxyType;
 use core::ptr;
 use std::env;
 use std::fmt;
-use std::iter;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 
@@ -286,20 +285,18 @@ pub(crate) fn punch_connect(ps: PunchSock, target: SocketAddr) -> Option<Socket>
     }
 }
 
-/// One direct (no proxy) connect attempt: next cached addr, socket,
-/// nonblocking `connect()`.
+/// One direct (no proxy) connect attempt at `addr`: socket,
+/// nonblocking `connect()`. An `addr` outside `family` is skipped.
 pub(crate) fn try_connect(
-    addr_cache: &mut AddressCache,
+    addr: SocketAddr,
     node_name: &str,
     family: AddrFamily,
     bind_to: &[SocketAddr],
     sockopts: &SockOpts,
 ) -> ConnectAttempt {
-    let Some(addr) = iter::from_fn(|| addr_cache.next_addr()).find(|a| family.allows(a)) else {
-        log::error!(target: "tincd::conn",
-                    "Could not set up a meta connection to {node_name}");
-        return ConnectAttempt::Exhausted;
-    };
+    if !family.allows(&addr) {
+        return ConnectAttempt::Retry;
+    }
     let bind_to = dial_bind(bind_to, addr);
     log::info!(target: "tincd::conn",
                "Trying to connect to {node_name} ({addr})");
@@ -770,15 +767,14 @@ mod tests {
         assert_eq!(dial_bind(&binds, "[::1]:655".parse().unwrap()), Some(v6));
         assert_eq!(dial_bind(&[v4], "[::1]:655".parse().unwrap()), None);
 
-        let mut cache = AddressCache::new(vec!["[::1]:1".parse().unwrap()]);
         let r = try_connect(
-            &mut cache,
+            "[::1]:1".parse().unwrap(),
             "bob",
             AddrFamily::Ipv4,
             &[],
             &SockOpts::default(),
         );
-        assert!(matches!(r, ConnectAttempt::Exhausted), "{r:?}");
+        assert!(matches!(r, ConnectAttempt::Retry), "{r:?}");
     }
 
     /// `retry_outgoing` arithmetic: +5 each time, capped at

@@ -31,7 +31,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use tinc_proto::Subnet;
 
@@ -356,6 +356,39 @@ impl SubnetTree {
             }
         }
         last_hit
+    }
+
+    /// Is `ip` inside a Subnet somebody advertises, i.e. a tunnel
+    /// address? Entries shorter than /8 are ignored: those are
+    /// default-route style gateway advertisements (`0.0.0.0/0`,
+    /// `::/0`, the `/1` split) that say nothing about where the
+    /// address lives. Owner and reachability don't matter.
+    #[must_use]
+    pub(crate) fn covers(&self, ip: IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(addr) => {
+                let q = Subnet::V4 {
+                    addr,
+                    prefix: 32,
+                    weight: 0,
+                };
+                self.ipv4.iter().any(|k| {
+                    matches!(k.subnet, Subnet::V4 { prefix, .. } if prefix >= 8)
+                        && k.subnet.matches(&q, true)
+                })
+            }
+            IpAddr::V6(addr) => {
+                let q = Subnet::V6 {
+                    addr,
+                    prefix: 128,
+                    weight: 0,
+                };
+                self.ipv6.iter().any(|k| {
+                    matches!(k.subnet, Subnet::V6 { prefix, .. } if prefix >= 8)
+                        && k.subnet.matches(&q, true)
+                })
+            }
+        }
     }
 
     /// Iterate all owned subnets in C tinc's dump/gossip order:
