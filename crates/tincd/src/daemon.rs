@@ -726,6 +726,9 @@ impl Daemon {
                             "Error while waiting for input: {e}");
                 return RunOutcome::PollError;
             }
+            // I/O handlers stamp `last_ping_time` etc. from this clock;
+            // `tick()`'s snapshot is from before the wait.
+            self.timers.refresh();
 
             // io dispatch.
             for &(what, ready) in &fired_io {

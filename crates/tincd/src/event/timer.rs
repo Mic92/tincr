@@ -177,6 +177,14 @@ impl<W: Copy> Timers<W> {
         self.now
     }
 
+    /// Re-read the clock after poll returns. `tick()`'s snapshot
+    /// predates the wait, so I/O handlers would otherwise stamp
+    /// timestamps up to one poll timeout in the past and the ping
+    /// sweep would reap fresh connections "during authentication".
+    pub(crate) fn refresh(&mut self) {
+        self.now = Instant::now();
+    }
+
     /// True if no timers are armed. Tests use this; daemon shouldn't
     /// (it always has `pingtimer` armed).
     #[cfg(test)]
