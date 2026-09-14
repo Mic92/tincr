@@ -131,6 +131,86 @@ fn stress_asymmetric_mtu() {
     assert!(alice_log.contains("FRAG_NEEDED"), "{alice_log}");
 }
 
+/// PMTU decrease under a converged tunnel: `lo` shrinks 65536 → 1400
+/// so the kernel `EMSGSIZE`s bodies above 1400 − 61 = 1339 while
+/// `minmtu` still says ~1500. Oversized packets must fall back to TCP
+/// and the tunnel must re-fix at ≤ 1339 on its own.
+#[test]
+fn stress_pmtu_decrease_recovers() {
+    let Some(netns) = enter_netns("stress::stress_pmtu_decrease_recovers") else {
+        return;
+    };
+    let tmp = tmp!("pmtudec");
+    // `Shards = 1` keeps pings on the control path, which is where
+    // the TCP fallback lives (the shard fast path just drops).
+    let pair = TunPair::start(netns, &tmp, "PingInterval = 1\nShards = 1");
+    pair.wait_validkey();
+    pair.wait_udp_confirmed();
+
+    let flood = flood_ping();
+    let fixed = try_poll(Duration::from_secs(20), || {
+        let alice = node_pmtu(&pair.alice.ctl().dump(3), "bob")?;
+        let bob = node_pmtu(&pair.bob.ctl().dump(3), "alice")?;
+        (alice.0 != 0 && bob.0 != 0).then_some([alice, bob])
+    });
+    drop(flood);
+    let Some(fixed) = fixed else {
+        let (alice_log, bob_log) = pair.finish();
+        panic!("PMTU never fixed\n=== alice ===\n{alice_log}\n=== bob ===\n{bob_log}");
+    };
+    for (mtu, minmtu, maxmtu) in fixed {
+        assert!(
+            minmtu >= 1400,
+            "pre-shrink pmtu {mtu} min {minmtu} max {maxmtu}"
+        );
+    }
+
+    run_ip(&["link", "set", "lo", "mtu", "1400"]);
+
+    // 1378-byte IP packet: under the stale minmtu (goes UDP) but
+    // 1439 on the wire → EMSGSIZE. Only the TCP fallback delivers it.
+    let output = ping(
+        &["-c", "1", "-W", "3", "-M", "do", "-s", "1350"],
+        "10.42.0.2",
+    );
+    let first = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    let alice_nodes = pair.alice.ctl().dump(3);
+    let after = node_pmtu(&alice_nodes, "bob");
+
+    // EMSGSIZE'd steady probes → Lost → rediscovery from IP_MTU.
+    let flood = flood_ping();
+    let refixed = try_poll(Duration::from_secs(20), || {
+        let (mtu, minmtu, maxmtu) = node_pmtu(&pair.alice.ctl().dump(3), "bob")?;
+        (mtu != 0 && mtu == minmtu && minmtu == maxmtu && maxmtu <= 1339).then_some(mtu)
+    });
+    drop(flood);
+
+    let (alice_log, bob_log) = pair.finish();
+    assert!(
+        output.status.success() && first.contains("1 received"),
+        "oversized DF ping was not carried over TCP:\n{first}\n\
+         === alice ===\n{alice_log}\n=== bob ===\n{bob_log}"
+    );
+    let Some((mtu, minmtu, maxmtu)) = after else {
+        panic!("no pmtu row for bob\n{alice_nodes:?}");
+    };
+    assert!(
+        mtu <= minmtu && minmtu <= maxmtu && maxmtu <= 1377,
+        "EMSGSIZE left pmtu {mtu} (min {minmtu} max {maxmtu})\n\
+         === alice ===\n{alice_log}"
+    );
+    let Some(refixed) = refixed else {
+        panic!("never re-fixed ≤ 1339\n=== alice ===\n{alice_log}\n=== bob ===\n{bob_log}");
+    };
+    assert!((1200..=1339).contains(&refixed), "refixed {refixed}");
+    assert!(
+        alice_log.contains("Decrease in PMTU to bob detected"),
+        "{alice_log}"
+    );
+    assert_no_panic(&alice_log, &bob_log);
+}
+
 /// 20% loss on `lo` from the start: the TCP meta handshake, the
 /// per-tunnel key exchange and UDP PMTU discovery must all still
 /// converge.

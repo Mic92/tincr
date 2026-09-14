@@ -26,10 +26,8 @@ use tinc_proto::Request;
 use tinc_sptps::Output;
 
 /// Per-send result: meta-socket write readiness + whether the local
-/// UDP socket accepted a datagram. `udp_emsgsize`: the socket rejected
-/// it as oversized for the kernel's cached PMTU — local proof that the
-/// relay's `maxmtu` is wrong, which a counted revalidation probe treats
-/// as a miss (other local errors do not; see `on_counted_probe_sent`).
+/// UDP socket accepted (`udp_sent`) or rejected as oversized
+/// (`udp_emsgsize`) the datagram.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(in crate::daemon) struct TunnelSendOutcome {
     pub(in crate::daemon) needs_write: bool,
@@ -50,10 +48,9 @@ impl TunnelSendOutcome {
 enum UdpSubmit {
     /// Kernel accepted the datagram.
     Sent,
-    /// `EMSGSIZE`: over the kernel's cached PMTU; PMTU state already
-    /// clamped. The frame was not sent and can still be re-sent.
+    /// `EMSGSIZE`; PMTU state already clamped.
     TooBig,
-    /// Any other local error (dropped; UDP is unreliable).
+    /// Any other local error; frame dropped.
     Failed,
 }
 
@@ -702,12 +699,14 @@ impl Daemon {
                 udp_sent: true,
                 ..TunnelSendOutcome::default()
             },
-            // Frame dropped; `handle_udp_emsgsize` already clamped the
-            // relay's bounds so the next one takes the TCP gate. For a
-            // probe `udp_emsgsize` is the miss signal for `try_tx`.
+            // Passed the `too_big` gate on a stale minmtu; with the
+            // clamped bound it would have gone TCP, so send it there.
+            // Probes are UDP-only by definition.
             UdpSubmit::TooBig => TunnelSendOutcome {
+                needs_write: record_type != PKT_PROBE
+                    && self.send_sptps_tcp(to_nid, from_nid, record_type, ct, from_is_myself),
+                udp_sent: false,
                 udp_emsgsize: true,
-                ..TunnelSendOutcome::default()
             },
             UdpSubmit::Failed => TunnelSendOutcome::default(),
         }
@@ -715,8 +714,7 @@ impl Daemon {
 
     /// Single-frame UDP send for [`Self::send_sptps_data_relay`].
     /// `count=1` means `stride == last_len`; both `Portable` and
-    /// `linux::Fast` skip GSO. Handles `EMSGSIZE` → PMTU shrink and
-    /// reports it distinctly so the caller can re-route the frame.
+    /// `linux::Fast` skip GSO. Handles `EMSGSIZE` → PMTU shrink.
     fn send_sptps_udp_immediate(
         &mut self,
         sockaddr: &socket2::SockAddr,
