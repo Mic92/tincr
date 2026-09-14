@@ -100,7 +100,10 @@ let
             /sbin/route -n add -inet6 ${addr}/${plen} -interface "$INTERFACE" 2>/dev/null || true
           ''
         else
-          ''/sbin/ifconfig "$INTERFACE" inet ${addr}/${plen} ${addr}''
+          ''
+            /sbin/ifconfig "$INTERFACE" inet ${addr}/${plen} ${addr}
+            /sbin/route -n add -inet ${addr}/${plen} -interface "$INTERFACE" 2>/dev/null || true
+          ''
       ) net.addresses}
     '';
 
