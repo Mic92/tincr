@@ -11,6 +11,7 @@ import java.io.InputStreamReader
 class TincCtl(private val dir: File) {
     companion object {
         const val REQ_STOP = 0
+        const val REQ_RELOAD = 1
         const val REQ_DUMP_NODES = 3
         const val REQ_RETRY = 10
     }
@@ -23,7 +24,7 @@ class TincCtl(private val dir: File) {
 
     // Node name -> reachable, from `dump nodes` (status bit 4).
     fun nodes(): Map<String, Boolean> = converse(REQ_DUMP_NODES).orEmpty()
-        .mapNotNull { it.split(' ') }
+        .map { it.split(' ') }
         .filter { it.size > 12 }
         .associate { it[2] to ((it[12].toIntOrNull(16) ?: 0) and 0x10 != 0) }
 
@@ -43,12 +44,11 @@ class TincCtl(private val dir: File) {
                 r.readLine() ?: return null
                 r.readLine() ?: return null
                 sock.outputStream.write("18 $req\n".toByteArray())
+                // Dump rows have many fields, the final `18 <req> <result>` three.
                 val out = mutableListOf<String>()
-                while (true) {
-                    val line = r.readLine() ?: return null
-                    out.add(line)
-                    if (line.split(' ').size <= 3) break
-                }
+                do {
+                    out.add(r.readLine() ?: return null)
+                } while (out.last().split(' ').size > 3)
                 out
             }
         } catch (e: java.io.IOException) {
