@@ -58,7 +58,8 @@ pub(crate) struct FromMtuState {
 
 /// Snapshot of one node's PMTU convergence for [`adjust_mtu_for_send`].
 /// `minmtu == maxmtu` means PMTU discovery has converged (the probe
-/// ladder narrows until they meet).
+/// ladder narrows until they meet); before that `minmtu` is the
+/// largest size a probe reply confirmed, i.e. a usable lower bound.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PmtuSnapshot {
     pub minmtu: u16,
@@ -66,17 +67,16 @@ pub(crate) struct PmtuSnapshot {
 }
 
 impl PmtuSnapshot {
-    /// Probing converged.
-    #[must_use]
-    pub(crate) const fn converged(self) -> bool {
-        self.minmtu == self.maxmtu
-    }
-
-    /// Converged at a UDP-usable value; `None` = still probing or
-    /// converged at 0 (UDP dead).
+    /// Largest UDP-usable size known to fit; `None` = nothing
+    /// confirmed yet or converged at 0 (UDP dead, #21).
+    /// `min(minmtu, maxmtu)`, not convergence: a hop mid-rediscovery
+    /// still has a confirmed lower bound, and endpoints need *some*
+    /// clamp to emit frag-needed / MSS clamp with. Waiting for
+    /// convergence left `MTU_INFO` unclamped for the whole window.
     #[must_use]
     pub(crate) fn usable_minmtu(self) -> Option<u16> {
-        (self.converged() && self.minmtu >= MINMTU).then_some(self.minmtu)
+        let m = self.minmtu.min(self.maxmtu);
+        (m >= MINMTU).then_some(m)
     }
 }
 
@@ -281,10 +281,11 @@ pub(crate) fn should_send_mtu_info(
 
 /// Tighten the MTU about to be sent (compile-time max when originating,
 /// received value when forwarding) using what we know of the path to `from`: a
-/// converged direct measurement with no static relay (`from_via_is_myself`)
-/// overrides it outright, the only branch that can raise it; a converged static
+/// usable direct measurement with no static relay (`from_via_is_myself`)
+/// overrides it outright, the only branch that can raise it; a usable static
 /// relay (`via_pmtu`) or dynamic relay's nexthop (`via_nexthop_pmtu`) clamps
 /// with `min`; otherwise leave it, since a downstream hop may still use UDP.
+/// "Usable" = [`PmtuSnapshot::usable_minmtu`] (confirmed, not converged).
 #[must_use]
 pub(crate) fn adjust_mtu_for_send(
     mtu: i32,
@@ -293,16 +294,16 @@ pub(crate) fn adjust_mtu_for_send(
     via_pmtu: Option<PmtuSnapshot>,
     via_nexthop_pmtu: Option<PmtuSnapshot>,
 ) -> i32 {
-    // Converged usable direct measurement: override entirely. The
-    // only branch that can increase mtu.
+    // Usable direct measurement: override entirely. The only branch
+    // that can increase mtu.
     if from_via_is_myself && let Some(m) = from_pmtu.and_then(PmtuSnapshot::usable_minmtu) {
         return i32::from(m);
     }
-    // Static relay converged: clamp.
+    // Static relay usable: clamp.
     if let Some(m) = via_pmtu.and_then(PmtuSnapshot::usable_minmtu) {
         return mtu.min(i32::from(m));
     }
-    // Dynamic relay's nexthop converged: clamp.
+    // Dynamic relay's nexthop usable: clamp.
     if let Some(m) = via_nexthop_pmtu.and_then(PmtuSnapshot::usable_minmtu) {
         return mtu.min(i32::from(m));
     }
@@ -540,7 +541,10 @@ mod tests {
         type Row = (&'static str, i32, bool,
                     Option<PmtuSnapshot>, Option<PmtuSnapshot>, Option<PmtuSnapshot>, i32);
         let conv = |m| Some(PmtuSnapshot { minmtu: m, maxmtu: m });
-        let probe = Some(PmtuSnapshot { minmtu: 1000, maxmtu: 1500 }); // unconverged
+        // Mid-discovery: a 1000-byte reply landed, ladder still open.
+        let probe = Some(PmtuSnapshot { minmtu: 1000, maxmtu: 1500 });
+        // Nothing confirmed yet (or Lost reset): no bound to offer.
+        let fresh = Some(PmtuSnapshot { minmtu: 0, maxmtu: 1500 });
 
         let cases: &[Row] = &[
             // (label,                        mtu,  via_myself, from,       via,        via_nh,     want)
@@ -550,7 +554,12 @@ mod tests {
             (":314 via clamp (tighten)",        1500, false, None,       conv(1300), None,       1300),
             (":314 via clamp is min not set",   1000, false, None,       conv(1300), None,       1000),
             (":318 via_nexthop clamp",          1500, false, None,       None,       conv(1200), 1200),
-            ("unconverged → passthrough",       1400, true,  probe,      probe,      probe,      1400),
+            // Provisional lower bound clamps like a converged one;
+            // the endpoint needs it to emit frag-needed mid-rediscovery.
+            ("unconverged direct → override",  1400, true,  probe,      None,       None,       1000),
+            ("unconverged via → clamp",        1400, false, None,       probe,      None,       1000),
+            ("unconverged via_nh → clamp",     1400, false, None,       None,       probe,      1000),
+            ("unconfirmed → passthrough",      1400, true,  fresh,      fresh,      fresh,      1400),
             // #21: converged-at-0 (UDP dead) → passthrough.
             ("#21 direct converged-at-0",        1400, true,  conv(0),    None,       None,       1400),
             ("#21 via converged-at-0",           1400, false, None,       conv(0),    None,       1400),

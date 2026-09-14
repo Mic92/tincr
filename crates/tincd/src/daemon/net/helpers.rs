@@ -16,6 +16,7 @@ use crate::tunnel::TunnelState;
 use super::ListenerSlot;
 use crate::daemon::Daemon;
 use std::io;
+use std::sync::atomic;
 
 /// Re-warn cadence for [`handle_udp_unreachable`].
 const UDP_UNREACHABLE_WARN_INTERVAL: Duration = Duration::from_mins(1);
@@ -106,11 +107,17 @@ pub(super) fn handle_udp_unreachable(
     }
 }
 
-/// `EMSGSIZE` on UDP send: shrink relay's `maxmtu` so the next
-/// batch fits. Current frames are lost; inner-TCP retransmits.
+/// `EMSGSIZE` on UDP send: the kernel's cached PMTU is below the
+/// relay's `maxmtu`. Shrinks `maxmtu`/`mtu`/`minmtu` to `origlen - 1`
+/// (`PmtuState::on_emsgsize`) and mirrors the new `minmtu` into the
+/// lock-free fast-path handle, the same way the probe-reply arm does,
+/// so both the control-path `too_big` gate and the shard workers'
+/// `tx_probe` stop sending bodies above it over UDP. The frame(s) that
+/// triggered this are the caller's to re-route or drop.
 pub(super) fn handle_udp_emsgsize(
     tunnels: &mut IntHashMap<NodeId, TunnelState>,
     graph: &Graph,
+    tunnel_handles: &IntHashMap<NodeId, Arc<TunnelHandles>>,
     relay_nid: NodeId,
     origlen: u16,
 ) {
@@ -120,6 +127,9 @@ pub(super) fn handle_udp_emsgsize(
     let relay_name = graph.node(relay_nid).map_or("<gone>", |n| n.name.as_str());
     for a in p.on_emsgsize(origlen) {
         Daemon::log_pmtu_action(relay_name, &a);
+    }
+    if let Some(h) = tunnel_handles.get(&relay_nid) {
+        h.minmtu.store(p.minmtu, atomic::Ordering::Relaxed);
     }
 }
 

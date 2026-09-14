@@ -312,8 +312,10 @@ impl Daemon {
                 .pmtu
                 .get_or_insert_with(|| PmtuState::new(now, initial_maxmtu));
             // Re-seed even if pmtu state already exists (UDP timeout
-            // restarted discovery). Our get_or_insert only seeds on
-            // first construction.
+            // or the Lost reset restarted discovery; the latter
+            // deliberately leaves the stale maxmtu for us to replace
+            // with the kernel's current IP_MTU). Our get_or_insert
+            // only seeds on first construction.
             if p.phase.is_discovery_start() {
                 p.maxmtu = initial_maxmtu;
             }
@@ -323,12 +325,27 @@ impl Daemon {
                 for a in &actions {
                     Self::log_pmtu_action(&target_name, a);
                 }
+                // Lost reset zeroed minmtu: mirror it so the shard
+                // workers punt data to the TCP gate too, instead of
+                // sending at a bound that just missed three times.
+                if actions.contains(&PmtuAction::LogReset)
+                    && let Some(h) = self.tunnel_handles.get(&target)
+                {
+                    h.minmtu.store(0, atomic::Ordering::Relaxed);
+                }
                 for a in actions {
                     if let PmtuAction::SendProbe { len, counts_miss } = a {
                         let outcome = self.send_udp_probe(target, &target_name, len);
                         nw |= outcome.needs_write;
+                        // A miss needs path evidence: the datagram left
+                        // (silence = remote loss) or the kernel refused
+                        // it as over its cached PMTU (EMSGSIZE). Other
+                        // local errors (ENETUNREACH, sndbuf full) say
+                        // nothing and must not walk Steady towards Lost
+                        // (73b0573d). Without the EMSGSIZE arm a shrunk
+                        // PMTU never restarted discovery.
                         if counts_miss
-                            && outcome.udp_sent
+                            && (outcome.udp_sent || outcome.udp_emsgsize)
                             && let Some(pmtu) = self
                                 .dp
                                 .tunnels

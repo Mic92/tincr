@@ -227,11 +227,18 @@ impl PmtuState {
         self.try_fix_mtu(&mut out);
 
         // Lost-reprobes reset. After try_fix_mtu we might have just
-        // transitioned Fix→Steady; check phase fresh.
+        // transitioned Fix→Steady; check phase fresh. Return without a
+        // probe: the daemon re-seeds `maxmtu` from the kernel's PMTU
+        // cache (`choose_initial_maxmtu`) only while
+        // `is_discovery_start()`, and the old `maxmtu` is exactly
+        // what just failed three times. Probe #0 is ungated, so the
+        // next tick sends it at the fresh bound.
         if self.phase == PmtuPhase::Lost {
             out.push(PmtuAction::LogReset);
             self.phase = PmtuPhase::Discovery { sent: 0 };
             self.minmtu = 0;
+            self.debug_check_bounds();
+            return out;
         }
 
         // Steady / re-validate: probe maxmtu, in Steady also maxmtu+1
@@ -277,12 +284,16 @@ impl PmtuState {
                 };
             }
         }
+        self.debug_check_bounds();
         out
     }
 
-    /// Commit one unanswered `maxmtu` probe after the local socket
-    /// accepted the datagram. Failed submissions leave the phase
-    /// unchanged.
+    /// Commit one unanswered `maxmtu` probe: the socket accepted the
+    /// datagram (silence = remote loss) or rejected it with `EMSGSIZE`
+    /// (the kernel already knows `maxmtu` doesn't fit). Other local
+    /// errors (`ENETUNREACH`, sndbuf full) say nothing about the path;
+    /// the caller filters them. Three misses reach `Lost`, as C tinc's
+    /// `try_mtu` does with `mtuprobes--` regardless of `sendto`.
     pub(crate) const fn on_counted_probe_sent(&mut self) {
         self.phase = match self.phase {
             PmtuPhase::Steady => PmtuPhase::Revalidate { misses: 1 },
@@ -325,6 +336,7 @@ impl PmtuState {
         if len >= MINMTU && len > self.minmtu {
             self.minmtu = len;
         }
+        self.debug_check_bounds();
         true
     }
 
@@ -370,10 +382,17 @@ impl PmtuState {
             self.try_fix_mtu(&mut out);
         }
 
+        self.debug_check_bounds();
         out
     }
 
-    /// EMSGSIZE at `at_len`: cap maxmtu/mtu. Floor at MINMTU.
+    /// `EMSGSIZE` at `at_len`: cap `maxmtu`, `mtu` *and* `minmtu` at
+    /// `at_len - 1` (floored at [`MINMTU`]). `minmtu` is the UDP-vs-TCP
+    /// send gate; left above the kernel's PMTU it kept routing bodies in
+    /// `(at_len - 1, minmtu]` over UDP where each failed locally and was
+    /// dropped: a silent blackhole (`pmtu 1293 (min 1319 max 1488)`).
+    /// Post-condition: `minmtu <= maxmtu <= max(at_len - 1, MINMTU)`; in
+    /// a fixed phase all three collapse onto the new bound.
     pub(crate) fn on_emsgsize(&mut self, at_len: u16) -> Vec<PmtuAction> {
         let mtu = at_len.saturating_sub(1).max(MINMTU);
         if self.maxmtu > mtu {
@@ -382,8 +401,18 @@ impl PmtuState {
         if self.mtu > mtu {
             self.mtu = mtu;
         }
+        // `mtu >= MINMTU`, so the clamped value keeps the floor.
+        if self.minmtu > mtu {
+            self.minmtu = mtu;
+        }
         let mut out = Vec::new();
         self.try_fix_mtu(&mut out);
+        debug_assert!(
+            self.maxmtu <= mtu,
+            "on_emsgsize({at_len}): maxmtu {} above {mtu}",
+            self.maxmtu
+        );
+        self.debug_check_bounds();
         out
     }
 
@@ -403,6 +432,21 @@ impl PmtuState {
         self.start_discovery();
         self.minmtu = 0;
         self.maxmtu = MTU;
+        self.debug_check_bounds();
+    }
+
+    /// Bounds every transition must leave intact: `minmtu` is `0` or
+    /// in `MINMTU..=MTU`, and `minmtu <= maxmtu` (the send gate and
+    /// the probe ladder both assume a non-inverted range). `mtu` is
+    /// deliberately not related to `minmtu` here: it is the last
+    /// fixed / `MTU_INFO`-provisional value and survives rediscovery
+    /// (`minmtu = 0`) so `dump nodes` and MTU hints keep a number.
+    const fn debug_check_bounds(&self) {
+        debug_assert!(
+            self.minmtu == 0 || (self.minmtu >= MINMTU && self.minmtu <= MTU),
+            "minmtu outside 0 / MINMTU..=MTU"
+        );
+        debug_assert!(self.minmtu <= self.maxmtu, "minmtu > maxmtu");
     }
 
     /// Lock in the MTU: 20 probes (timeout) or `minmtu >= maxmtu`
@@ -719,29 +763,6 @@ mod tests {
     }
 
     #[test]
-    fn failed_revalidation_submissions_do_not_count() {
-        let now = t0();
-        let mut s = PmtuState::new(now, MTU);
-        s.mtu = 1400;
-        s.minmtu = 1400;
-        s.maxmtu = 1400;
-        s.phase = PmtuPhase::Steady;
-        let pi = Duration::from_mins(1);
-
-        for second in [61, 122, 183] {
-            let out = s.tick(now + Duration::from_secs(second), pi);
-            assert!(matches!(
-                out.first(),
-                Some(PmtuAction::SendProbe {
-                    len: 1400,
-                    counts_miss: true
-                })
-            ));
-            assert_eq!(s.phase, PmtuPhase::Steady);
-        }
-    }
-
-    #[test]
     fn four_lost_reprobes_reset() {
         let now = t0();
         let mut s = PmtuState::new(now, MTU);
@@ -763,14 +784,155 @@ mod tests {
         assert_eq!(s.phase, PmtuPhase::Revalidate { misses: 2 });
         s.on_counted_probe_sent();
         assert_eq!(s.phase, PmtuPhase::Lost);
-        // Lost → reset
+        // Lost → reset. No probe in this tick: Discovery{0} is what
+        // gates the daemon's maxmtu re-seed from the kernel, and the
+        // old bound is the one that just missed three times.
         let out = s.tick(now + Duration::from_secs(64), pi);
-        assert!(out.contains(&PmtuAction::LogReset));
-        // Reset to Discovery{0}, then discovery ran one probe → {1}.
-        assert_eq!(s.phase, PmtuPhase::Discovery { sent: 1 });
+        assert_eq!(out, vec![PmtuAction::LogReset]);
+        assert!(s.phase.is_discovery_start());
         assert_eq!(s.minmtu, 0);
-        // The lost-reprobes reset leaves maxmtu alone (on_udp_timeout resets it).
+        // The state machine can't read IP_MTU; maxmtu is left for
+        // the daemon to overwrite (on_udp_timeout resets it to MTU).
         assert_eq!(s.maxmtu, 1400);
+        // Probe #0 is ungated and goes out on the very next tick.
+        let out = s.tick(now + Duration::from_secs(64), pi);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0],
+            PmtuAction::SendProbe {
+                len: 1400,
+                counts_miss: false
+            }
+        ));
+        assert_eq!(s.phase, PmtuPhase::Discovery { sent: 1 });
+    }
+
+    /// Production failure (retiolum, 2026-09-14): the kernel's PMTU
+    /// cache shrank under a Steady tunnel; `on_emsgsize` lowered only
+    /// maxmtu/mtu and left `pmtu 1293 (min 1319 max 1488)`. Bodies in
+    /// (1293, 1319] passed the `origlen > minmtu` gate, went UDP, hit
+    /// EMSGSIZE and were dropped. The gate must move with the kernel.
+    #[test]
+    fn on_emsgsize_in_steady_lowers_minmtu() {
+        let now = t0();
+        let mut s = PmtuState::new(now, MTU);
+        s.mtu = 1400;
+        s.minmtu = 1400;
+        s.maxmtu = 1400;
+        s.phase = PmtuPhase::Steady;
+        let out = s.on_emsgsize(1294);
+        // Already fixed: no LogFixed, phase untouched.
+        assert!(out.is_empty());
+        assert_eq!(s.phase, PmtuPhase::Steady);
+        assert_eq!((s.mtu, s.minmtu, s.maxmtu), (1293, 1293, 1293));
+
+        // Larger EMSGSIZE than the current bound is a no-op.
+        let out = s.on_emsgsize(1500);
+        assert!(out.is_empty());
+        assert_eq!((s.mtu, s.minmtu, s.maxmtu), (1293, 1293, 1293));
+
+        // Floor: minmtu stays 0-or-≥MINMTU (#28), never a tiny value.
+        let _ = s.on_emsgsize(100);
+        assert_eq!((s.mtu, s.minmtu, s.maxmtu), (MINMTU, MINMTU, MINMTU));
+    }
+
+    #[test]
+    fn on_emsgsize_in_discovery_keeps_minmtu_zero() {
+        // Nothing confirmed yet: clamping must not invent a lower
+        // bound (0 stays 0 so data stays on TCP).
+        let now = t0();
+        let mut s = PmtuState::new(now, MTU);
+        let _ = s.on_emsgsize(1294);
+        assert_eq!(s.minmtu, 0);
+        assert_eq!(s.maxmtu, 1293);
+        // A confirmed lower bound above the new cap is pulled down.
+        s.minmtu = 1400;
+        s.maxmtu = 1450;
+        let out = s.on_emsgsize(1350);
+        // minmtu == maxmtu → converges.
+        assert_eq!(
+            out,
+            vec![PmtuAction::LogFixed {
+                mtu: 1349,
+                probes: 0
+            }]
+        );
+        assert_eq!((s.mtu, s.minmtu, s.maxmtu), (1349, 1349, 1349));
+    }
+
+    /// Steady probes whose `sendto` fails with EMSGSIZE count as misses
+    /// (the daemon calls `on_counted_probe_sent` for them), so a path
+    /// whose kernel PMTU keeps shrinking below every clamped bound
+    /// reaches Lost and restarts discovery instead of walking maxmtu
+    /// down one byte per pinginterval with a stale minmtu. Mirrors C
+    /// tinc's `try_mtu`: `mtuprobes--` regardless of sendto success.
+    #[test]
+    fn repeated_emsgsize_steady_probes_reach_lost() {
+        let now = t0();
+        let mut s = PmtuState::new(now, MTU);
+        s.mtu = 1400;
+        s.minmtu = 1400;
+        s.maxmtu = 1400;
+        s.phase = PmtuPhase::Steady;
+        s.udp_confirmed = true;
+        let pi = Duration::from_mins(1);
+
+        let mut expected = [
+            PmtuPhase::Revalidate { misses: 1 },
+            PmtuPhase::Revalidate { misses: 2 },
+            PmtuPhase::Lost,
+        ]
+        .into_iter();
+        for second in [61, 62, 63] {
+            let out = s.tick(now + Duration::from_secs(second), pi);
+            let Some(PmtuAction::SendProbe {
+                len,
+                counts_miss: true,
+            }) = out.first()
+            else {
+                panic!("expected counted maxmtu probe, got {out:?}");
+            };
+            // The kernel rejects the probe: clamp, then commit the miss.
+            let _ = s.on_emsgsize(*len);
+            s.on_counted_probe_sent();
+            assert_eq!(s.phase, expected.next().unwrap());
+            assert_eq!(s.minmtu, s.maxmtu, "gate tracks the kernel's bound");
+        }
+        assert_eq!(s.maxmtu, 1397);
+
+        let out = s.tick(now + Duration::from_secs(64), pi);
+        assert_eq!(out, vec![PmtuAction::LogReset]);
+        assert!(s.phase.is_discovery_start());
+        assert_eq!(s.minmtu, 0);
+    }
+
+    /// ENETUNREACH & co. are routing failures, not path evidence: the
+    /// daemon does not call `on_counted_probe_sent` for them, so
+    /// Steady must survive any number of such ticks (73b0573d).
+    #[test]
+    fn unreachable_steady_probes_do_not_count() {
+        let now = t0();
+        let mut s = PmtuState::new(now, MTU);
+        s.mtu = 1400;
+        s.minmtu = 1400;
+        s.maxmtu = 1400;
+        s.phase = PmtuPhase::Steady;
+        let pi = Duration::from_mins(1);
+
+        for second in [61, 122, 183] {
+            let out = s.tick(now + Duration::from_secs(second), pi);
+            assert!(matches!(
+                out.first(),
+                Some(PmtuAction::SendProbe {
+                    len: 1400,
+                    counts_miss: true
+                })
+            ));
+            // No on_emsgsize, no on_counted_probe_sent: bounds and
+            // phase untouched.
+            assert_eq!(s.phase, PmtuPhase::Steady);
+            assert_eq!((s.mtu, s.minmtu, s.maxmtu), (1400, 1400, 1400));
+        }
     }
 
     #[test]
