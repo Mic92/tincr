@@ -53,16 +53,23 @@ pub(super) fn confirm_udp_addr(
     }
 }
 
-/// Returns `true` for `sendmsg` errnos meaning "destination not
-/// locally routable" (`ENETUNREACH`, `EHOSTUNREACH`, `EAFNOSUPPORT`,
-/// `EADDRNOTAVAIL`).
+/// `sendmsg` errnos meaning the destination address is unusable from
+/// here, so it should be forgotten. `EPERM` is a firewall reject; `EIO`
+/// is what Android returns when a protected socket targets an address
+/// routed back into the VPN.
 pub(super) fn is_udp_unreachable_errno(e: &io::Error) -> bool {
     let Some(raw) = e.raw_os_error() else {
         return false;
     };
     matches!(
         raw,
-        libc::ENETUNREACH | libc::EHOSTUNREACH | libc::EAFNOSUPPORT | libc::EADDRNOTAVAIL
+        libc::ENETUNREACH
+            | libc::EHOSTUNREACH
+            | libc::ENETDOWN
+            | libc::EAFNOSUPPORT
+            | libc::EADDRNOTAVAIL
+            | libc::EPERM
+            | libc::EIO
     )
 }
 
@@ -182,8 +189,11 @@ mod tests {
         for raw in [
             libc::ENETUNREACH,
             libc::EHOSTUNREACH,
+            libc::ENETDOWN,
             libc::EAFNOSUPPORT,
             libc::EADDRNOTAVAIL,
+            libc::EPERM,
+            libc::EIO,
         ] {
             let e = io::Error::from_raw_os_error(raw);
             assert!(

@@ -232,7 +232,8 @@ impl Daemon {
         }
 
         let from_is_self = from.is_none();
-        log::debug!(target: "tincd::net",
+        // Per-packet; mDNS/SSDP make this several lines a second.
+        log::trace!(target: "tincd::net",
                     "Broadcasting packet of {} bytes from {}",
                     data.len(),
                     if from_is_self { "MYSELF" } else { "peer" });
