@@ -178,13 +178,24 @@ prop_compose! {
             any::<i32>(),
             proptest::option::of(arb_token()),
         ).prop_map(|(reqno, payload)| ReqKeyExt { reqno, payload })),
+        cap in proptest::option::of("[0-9a-f]{2}"),
     ) -> ReqKey {
         // udp_addr None: only round-trips when ext.payload is Some
         // (positional tail); relay path guarantees that, generator doesn't.
-        ReqKey { from, to, ext, udp_addr: None }
+        ReqKey { from, to, ext, cap, udp_addr: None }
     }
 }
-roundtrip!(req_key, ReqKey, arb_req_key(), ReqKey::format);
+// The parser only reads a cap token after the payload on the
+// SPTPS-init reqno, and the formatter only emits it inside `ext` —
+// outside that slot it is invisible on the wire.
+roundtrip!(
+    req_key,
+    ReqKey,
+    arb_req_key().prop_filter("cap needs init reqno with payload", |rk| rk.cap.is_none()
+        || matches!(&rk.ext, Some(e) if e.reqno == tinc_proto::Request::ReqKey as i32
+            && e.payload.is_some())),
+    ReqKey::format
+);
 
 prop_compose! {
     fn arb_ans_key()(

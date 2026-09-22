@@ -78,6 +78,17 @@ impl SptpsKex {
             Self::X25519MlKem768 => "x25519-mlkem768",
         }
     }
+
+    /// Inverse of [`Self::discriminator`]; `None` for unknown values so
+    /// a peer advertising a future mode reads as "not supported here".
+    #[must_use]
+    pub fn from_discriminant(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::X25519),
+            1 => Some(Self::X25519MlKem768),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for SptpsKex {

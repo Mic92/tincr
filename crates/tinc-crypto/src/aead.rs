@@ -66,6 +66,28 @@ impl SptpsAead {
         }
     }
 
+    /// 2-digit lowercase-hex capability-byte nibble for this mode.
+    /// Same numbering as the PRF label suffix `[kex_byte, cipher_byte]`
+    /// (see `docs/PROTOCOL.md`); 0 is the C-wire-compatible default.
+    #[must_use]
+    pub const fn discriminant(self) -> u8 {
+        match self {
+            Self::ChaCha20Poly1305 => 0,
+            Self::Aes256Gcm => 1,
+        }
+    }
+
+    /// Inverse of [`Self::discriminant`]; `None` for unknown values so
+    /// a peer advertising a future mode reads as "not supported here".
+    #[must_use]
+    pub fn from_discriminant(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::ChaCha20Poly1305),
+            1 => Some(Self::Aes256Gcm),
+            _ => None,
+        }
+    }
+
     /// Canonical config spelling. Round-trips through
     /// [`from_config_str`](Self::from_config_str).
     #[must_use]

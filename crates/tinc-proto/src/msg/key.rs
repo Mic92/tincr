@@ -85,6 +85,16 @@ pub struct ReqKey {
     pub to: String,
     /// `None` for legacy (3-token) form. `Some` for extended (4+ token).
     pub ext: Option<ReqKeyExt>,
+    /// SPTPS crypto capability token: the raw 4th-slot text (a 2-digit
+    /// lowercase-hex KEX/AEAD discriminant pair) stamped by the
+    /// initiator right after the payload. `None` on legacy peers —
+    /// C `req_key_ext_h` reads at most one token past `reqno` and
+    /// relays forward verbatim, so a trailing token is invisible to
+    /// everything that doesn't understand it. Kept as text, not a
+    /// parsed byte: a garbage token must not poison the forward path,
+    /// and the daemon maps unknown values to "peer can't follow our
+    /// config".
+    pub cap: Option<String>,
     /// Reflexive UDP address of `from`, appended by a relay during forward.
     /// Rust extension mirroring `AnsKey::udp_addr` on the request leg, so the
     /// responder also learns the initiator's NAT address and both sides can
@@ -115,6 +125,24 @@ impl ReqKey {
             }),
         };
 
+        // Capability stamp (Rust extension): one optional token after
+        // the payload, before the reflexive pair. Only stamped — and
+        // only consumed — on the SPTPS-init reqno (15); SPTPS_PACKET,
+        // punch and legacy forms never carry one, which keeps the
+        // slot unambiguous against a relay's appended `(addr, port)`
+        // pair even for lone 2-digit ports. Peeked, never greedily
+        // taken, so a mis-stamped third digit can't steal the addr.
+        let init_req = ext
+            .as_ref()
+            .is_some_and(|e| e.reqno == Request::ReqKey as i32);
+        let cap = match (init_req, t.peek()) {
+            (true, Some(tok)) if is_cap_token(tok) => {
+                let _ = t.s()?;
+                Some(tok.to_string())
+            }
+            _ => None,
+        };
+
         // Reflexive append (Rust extension): two more optional tokens after
         // the payload. C peers never send these and never read past `payload`;
         // a Rust relay appends them, a Rust endpoint consumes them. Atomic
@@ -126,14 +154,15 @@ impl ReqKey {
             from: from.to_string(),
             to: to.to_string(),
             ext,
+            cap,
             udp_addr,
         })
     }
 
     /// Format as `%d %s %s`, `.. %d`, or `.. %d %s` depending on `ext` (the
-    /// forwarding case re-emits input verbatim and isn't ours). `udp_addr` goes
-    /// last, relay-only, and only round-trips when `ext.payload` is `Some` —
-    /// mirrors `AnsKey::format`.
+    /// forwarding case re-emits input verbatim and isn't ours), then the
+    /// capability stamp, then `udp_addr`. Both Rust extensions ride after
+    /// every field a legacy peer parses.
     #[must_use]
     pub fn format(&self) -> String {
         let mut s = format!("{} {} {}", Request::ReqKey, self.from, self.to);
@@ -142,12 +171,26 @@ impl ReqKey {
             if let Some(p) = payload {
                 write!(s, " {p}").unwrap();
             }
+            if let Some(c) = &self.cap {
+                write!(s, " {c}").unwrap();
+            }
         }
         if let Some((a, p)) = &self.udp_addr {
             write!(s, " {a} {p}").unwrap();
         }
         s
     }
+}
+
+/// A capability token is exactly two lowercase hex digits (`"00"`..`"ff"`).
+/// Deliberately strict: anything else (including an addr-looking token)
+/// must fall through to the reflexive-pair / unknown-token paths.
+#[must_use]
+fn is_cap_token(s: &str) -> bool {
+    s.len() == 2
+        && s.bytes().all(|b| {
+            b.is_ascii_digit() || (b.is_ascii_lowercase() && (b | 0x20).is_ascii_hexdigit())
+        })
 }
 
 /// Body of `ANS_KEY`, the session-key reply: seven mandatory fields plus an
@@ -335,6 +378,59 @@ mod tests {
         // "51234" → atomic-pair error. This is fine: the relay only appends
         // when `ext.reqno == REQ_KEY` (which always has a payload).
         assert!(ReqKey::parse("15 alice bob 19 192.0.2.7 51234").is_err());
+    }
+
+    #[test]
+    fn req_key_cap_token() {
+        // SPTPS-init stamp (tincr extension): token rides right after
+        // the payload. Round-trips through format().
+        let line = "15 alice bob 15 SGVsbG8 11";
+        let m = ReqKey::parse(line).unwrap();
+        assert_eq!(m.ext.as_ref().unwrap().payload.as_deref(), Some("SGVsbG8"));
+        assert_eq!(m.cap.as_deref(), Some("11"));
+        assert!(m.udp_addr.is_none());
+        assert_eq!(m.format(), line);
+
+        // Cap + reflexive pair together (stamped relay append).
+        let line = "15 alice bob 15 SGVsbG8 00 192.0.2.7 51234";
+        let m = ReqKey::parse(line).unwrap();
+        assert_eq!(m.cap.as_deref(), Some("00"));
+        let (a, p) = m.udp_addr.as_ref().unwrap();
+        assert_eq!(a.as_str(), "192.0.2.7");
+        assert_eq!(p.as_str(), "51234");
+        assert_eq!(m.format(), line);
+
+        // Only consumed on reqno 15. The same token after a
+        // REQ_PUBKEY (19) payload is NOT a cap: the atomic addr-pair
+        // gate rejects the lone trailing token, exactly as it did
+        // before the extension existed.
+        assert!(ReqKey::parse("15 alice bob 19 SGVsbG8 11").is_err());
+
+        // SPTPS_PACKET (21) never carries a stamp.
+        let m = ReqKey::parse("15 alice bob 21 SGVsbG8").unwrap();
+        assert_eq!(m.cap, None);
+
+        // Lone 2-digit token on a non-15 reqno is pair fodder, not a
+        // cap: the cap gate is reqno-15-only, so "11 51234" parses as
+        // a (junk-addr, port) reflexive pair instead.
+        let m = ReqKey::parse("15 alice bob 19 SGVsbG8 11 51234").unwrap();
+        assert_eq!(m.cap, None);
+        assert!(m.udp_addr.is_some());
+    }
+
+    #[test]
+    fn req_key_cap_non_hex_token_ignored() {
+        // "1g" is not two hex digits; it must not be consumed as cap,
+        // and (as a lone trailing token) the atomic addr pair rejects.
+        assert!(ReqKey::parse("15 alice bob 15 SGVsbG8 1g").is_err());
+        // With two more tokens following, the non-cap falls into the
+        // addr-pair slot. AddrStr only rejects whitespace/empty, so it
+        // parses as junk addr — same silent tolerance C's sscanf has
+        // for trailing garbage. Not a cap either way.
+        let m = ReqKey::parse("15 alice bob 15 SGVsbG8 1g 192.0.2.7 51234").unwrap();
+        assert_eq!(m.cap, None);
+        let (a, _) = m.udp_addr.as_ref().unwrap();
+        assert_eq!(a.as_str(), "1g");
     }
 
     #[test]

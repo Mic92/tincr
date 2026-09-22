@@ -76,6 +76,20 @@ impl<'a> Tok<'a> {
         self.s().map(|_| ())
     }
 
+    /// Next token without consuming it, or `None` at end of input (or on
+    /// an oversized token, which `s` will then reject). For slots where
+    /// consumption is value-dependent: `REQ_KEY`'s optional capability
+    /// token is followed by an optional reflexive addr/port pair, so the
+    /// parser must not greedily eat the address.
+    #[must_use]
+    pub fn peek(&self) -> Option<&'a str> {
+        let s = self
+            .rest
+            .trim_start_matches(|c: char| c.is_ascii_whitespace());
+        let end = s.find(|c: char| c.is_ascii_whitespace()).unwrap_or(s.len());
+        (end > 0 && end <= MAX_STRING).then(|| &s[..end])
+    }
+
     /// `%d`. `sscanf %d` accepts a leading `+` or `-`; the protocol
     /// only emits unsigned via `%d` so we don't bother with `+`, but
     /// `-` is observably parsed (e.g. `mtu_info_h` checks `mtu < 512`
