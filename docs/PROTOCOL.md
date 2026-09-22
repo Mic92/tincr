@@ -167,13 +167,30 @@ default configuration remains byte-identical to C tinc on the wire.
 is 0 for `chacha20-poly1305`, 1 for `aes-256-gcm`. The two knobs are
 independent and may be combined.
 
-**No negotiation.** `SPTPSKex` is static per-host configuration; both
-ends must set the same value out of band. A mismatch fails at
-`BadKex` (wrong KEX body length) or, if a future change made the
-length check lenient, at `BadSig` (the label suffix desyncs the
-transcript). C tinc silently ignores unknown host-file keys, so a
-C↔Rust pair with the key set on the Rust side just fails the
-handshake — it doesn't crash the C daemon.
+**Capability stamp (tincr extension).** `SPTPSKex`/`SPTPSCipher`
+remain static per-host configuration, but tincr nodes advertise the
+pair they intend to use so a peer that can't follow it fails into the
+defaults instead of failing outright. Two tokens carry the
+advertisement, each a two-character hex pair (one digit per axis,
+`0` = compiled default, unknown digit = absent):
+
+- a fourth token on the `ID` line — `ID <name> <maj>.<min> <cap>`.
+  A responder that parsed it echoes the same token back in its own
+  `ID`; the echo is the "I understand stamps" signal.
+- a token after the base64 payload on the extended `REQ_KEY`
+  (`REQ_KEY <from> <to> 4 <b64> <cap>`), which C relays forward
+  verbatim, so it survives multi-hop paths.
+
+Adoption: an ID initiator uses the echoed pair; no echo (or an
+unparseable one) pins *both* directions to the compiled defaults,
+which is exactly what tinc-pre speaks. A `REQ_KEY` responder adopts a
+parseable stamp for that tunnel; an absent stamp keeps its own config
+unless the connection's peer is known C-compatible. C tinc ignores
+unknown tokens on both lines (`sscanf` leaves them unread), so the
+extension is invisible — and harmless — to it. A handshake that keeps
+stalling toward one destination (three `REQ_KEY` rounds with no
+direct connection) demotes that tunnel's stamp to the defaults too,
+covering the indirect path through a stamp-unaware relay.
 
 The handshake runs over the TCP meta-connection (and the
 meta-forwarded `REQ_KEY`/`ANS_KEY` for per-tunnel SPTPS), so the
@@ -240,11 +257,15 @@ sequenceDiagram
 Why ASCII lines in 2026? Because that's what's deployed, and goal one
 is interop. But the format has a property worth pointing out: parsing
 is permissive, and extra trailing tokens on a line are ignored. That's
-the entire extension mechanism. tincr uses it in three places —
+the entire extension mechanism. tincr uses it in four places —
 
 - an extra "your UDP probe arrived" length on `MTU_INFO`, so a node
   whose inbound UDP is filtered can still learn its *outbound* UDP
   works;
+- a two-character SPTPS capability stamp on the `ID` line and on
+  `REQ_KEY` (see "Capability stamp" above), so a peer that can't
+  follow our configured KEX/AEAD pair demotes to the compiled
+  defaults instead of failing;
 - an extra reflexive address on `REQ_KEY` in the reverse direction,
   doubling the NAT-punch hit rate;
 - re-advertising `ADD_EDGE` when measured RTT drifts, rather than
@@ -252,7 +273,8 @@ the entire extension mechanism. tincr uses it in three places —
   measure;
 
 — and a C tinc node parses the part it understands and ignores the
-rest. No version negotiation, no capability bits, no flag day.
+rest. No version negotiation, no capability bits beyond the
+SPTPS-pair stamp, no flag day.
 
 A separate `ID`-line form, with a hash in place of the name, drives
 the invitation protocol: a fresh node connects with an invite cookie

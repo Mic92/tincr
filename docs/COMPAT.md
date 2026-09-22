@@ -78,12 +78,15 @@ participate.
 - **`SPTPSCipher` host key.** Selects AES-256-GCM instead of
   ChaCha20-Poly1305 for the SPTPS record AEAD on a per-edge basis.
   On AES-NI/PMULL hardware this roughly doubles tunnel throughput.
-  Both ends must be tincr and must agree. C tinc ignores the key,
-  so leave it at the default for any C↔Rust edge. See
+  Against a peer that doesn't understand the capability stamp (any
+  C tinc, or a tincr predating it) both directions demote to the
+  C-compatible defaults automatically, so a C↔Rust edge works even
+  with the key set. See
   [OPERATING.md](OPERATING.md#sptpscipher--aes-256-gcm-opt-in).
 - **`SPTPSKex` host key.** `x25519-mlkem768` adds an ML-KEM-768
   encapsulation to the SPTPS key exchange for post-quantum forward
-  secrecy. Both ends must be tincr and must agree. See
+  secrecy. Same fallback as `SPTPSCipher`: a stamp-unaware peer gets
+  the compiled defaults instead of a `BadKex` death spiral. See
   [OPERATING.md](OPERATING.md#post-quantum-key-exchange).
 
 ## Changed behaviour

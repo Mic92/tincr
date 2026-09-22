@@ -182,17 +182,23 @@ from PING/PONG and re-gossiped within a few `PingInterval`s.
 ## Post-quantum key exchange
 
 Opt-in via `SPTPSKex = x25519-mlkem768`, settable in `tinc.conf`
-(mesh-wide default) and overridable per peer in `hosts/PEER`. **Both
-ends must agree**; there is no negotiation. A mismatch logs `BadKex`
-and the connection retries on the usual back-off, so a half-rolled-out
-mesh degrades to "those two nodes can't reach each other directly"
-rather than anything noisier.
+(mesh-wide default) and overridable per peer in `hosts/PEER`. Between
+tincr nodes the pair is negotiated: each side stamps a two-digit
+capability token on the `ID` line and on `REQ_KEY` (see
+`docs/PROTOCOL.md`), and a peer that doesn't echo/parse one is pinned
+to the C-compatible defaults (`x25519` + `chacha20-poly1305`) instead
+of failing. A tincr↔tinc-pre pair therefore works out of the box even
+when only the tincr side is configured for the hybrid KEX; the
+demotion is logged at info level ("falling back to C-compatible
+defaults").
 
-Rollout: set it in every node's `tinc.conf`, then restart the mesh
-(or per peer-pair in `hosts/*` if you need to stage it). C tinc
-ignores the unknown key, so a mixed C/Rust mesh must leave the key
-unset for any C↔Rust pair. Default (`x25519`) is byte-identical to C
-tinc on the wire.
+What still needs out-of-band agreement: two tincr nodes that both
+understand the token but were configured to *different* non-default
+pairs (rare), and any C↔Rust pair, which the fallback resolves in
+favour of the C defaults. Rollout: set it in every node's
+`tinc.conf`, then restart the mesh (or per peer-pair in `hosts/*` if
+you need to stage it). C tinc ignores the unknown keys. Default
+(`x25519`) is byte-identical to C tinc on the wire.
 
 Cost: ~2.3 KB extra per handshake (1184 B encapsulation key +
 1088 B ciphertext), sub-millisecond CPU. No
@@ -312,15 +318,17 @@ side reads the *peer's* file and both arrive at the same answer):
 SPTPSCipher = aes-256-gcm
 ```
 
-or set it once in `tinc.conf` as a mesh-wide default and leave
-per-host overrides for the C-tinc peers.
+or set it once in `tinc.conf` as a mesh-wide default: C-tinc peers
+need no per-host override, the stamp fallback pins those edges to
+the defaults by themselves.
 
-**Both sides must agree.** There is no negotiation; the choice is
-mixed into the SPTPS handshake transcript, so a mismatch fails the
-key exchange with `BadSig` in the log instead of corrupting traffic.
-C tinc 1.1 ignores the key entirely and always behaves as
-`chacha20-poly1305`, so leave it at the default for any edge that
-touches a C node.
+**Negotiated, not pinned.** tincr advertises the choice with the
+capability stamp (see the post-quantum section), so a peer that
+doesn't understand it — C tinc ignores the key and always behaves as
+`chacha20-poly1305` — is served the compiled defaults in both
+directions instead of a `BadSig` failure. Two tincr nodes that both
+understand the stamp always arrive at the same answer, because the
+host files are synced.
 
 If `aes-256-gcm` is configured on a CPU without the AES/PMULL
 extensions, tincr logs a one-time warning at startup: ring's

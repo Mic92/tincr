@@ -115,9 +115,10 @@ long as the C nodes set `ExperimentalProtocol=yes`. Differences:
   `Ed25519PublicKey` are refused. The legacy RSA-based meta
   protocol is not implemented (`generate-rsa-keys` is a no-op
   stub).
-- `SPTPSCipher` and `SPTPSKex` are tincr extensions. Leave them at
-  their defaults (ChaCha20-Poly1305, X25519) on any edge that
-  involves a C node.
+- `SPTPSCipher` and `SPTPSKex` are tincr extensions. Edges that
+  involve a C node fall back to the C-compatible defaults
+  (ChaCha20-Poly1305, X25519) automatically via the capability
+  stamp, so they can be set mesh-wide.
 - There is no `tincctl` binary. The `tinc` CLI covers the same
   functionality.
 - `tinc init` is non-interactive and does not probe for a free port.
