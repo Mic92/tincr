@@ -182,12 +182,21 @@ impl Daemon {
 
         // Counter-driven rekey + stalled-handshake retry. Before
         // prev_sptps reap so `send_req_key` can salvage into it.
-        let mut rekey: Vec<NodeId> = Vec::new();
+        let mut rekey: Vec<(NodeId, bool)> = Vec::new();
         for (&nid, tunnel) in &self.dp.tunnels {
             let rekey_due = tunnel
                 .sptps
                 .as_deref()
                 .is_some_and(tinc_sptps::Sptps::rekey_due);
+            // Stalled = waiting for a REQ_KEY answer for longer than
+            // PingInterval (the retry gate), not counter-driven. A
+            // handshake that never completes with our stamped pair
+            // feeds the cap demotion below.
+            let stalled = tunnel.status.waitingforkey
+                && !tunnel.status.validkey
+                && tunnel
+                    .last_req_key
+                    .is_some_and(|lrk| now.saturating_duration_since(lrk) > pinginterval);
             if tunnel::periodic_rekey_due(
                 tunnel.status.validkey,
                 tunnel.status.waitingforkey,
@@ -196,14 +205,27 @@ impl Daemon {
                 now,
                 pinginterval,
             ) {
-                rekey.push(nid);
+                rekey.push((nid, stalled));
             }
         }
         let mut nw = false;
-        for nid in rekey {
+        for (nid, stalled) in rekey {
             log::info!(target: "tincd::net",
                        "Restarting SPTPS for {} (seqno threshold or stalled handshake)",
                        self.graph.node(nid).map_or("<unknown>", |n| n.name.as_str()));
+            if stalled
+                && self.nodes.get(&nid).is_none_or(|ns| ns.conn.is_none())
+                && let Some(t) = self.dp.tunnels.get_mut(&nid)
+                && !t.cap_demoted
+            {
+                t.cap_stalls = t.cap_stalls.saturating_add(1);
+                if t.cap_stalls >= 3 {
+                    t.cap_demoted = true;
+                    log::info!(target: "tincd::net",
+                               "SPTPS handshake to {} keeps stalling; demoting to C-compatible parameters",
+                               self.graph.node(nid).map_or("<unknown>", |n| n.name.as_str()));
+                }
+            }
             nw |= self.send_req_key(nid);
         }
         if nw {

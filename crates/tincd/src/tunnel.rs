@@ -122,6 +122,22 @@ pub(crate) struct TunnelState {
     /// `max()` + store per probe (seconds apart).
     pub udp_rx_maxlen: u16,
 
+    /// tincr cap extension. Consecutive `REQ_KEY` rounds toward this
+    /// destination that timed out (`waitingforkey` older than
+    /// `PingInterval`). Three stalls with no direct connection demote
+    /// the stamp we send to the C-compatible defaults: a destination
+    /// that never completes a handshake with our stamped pair is
+    /// almost certainly a node that can't parse the stamp (C tinc or
+    /// an old tincr behind the relay), and legacy peers only ever
+    /// agree on the compiled defaults.
+    pub cap_stalls: u8,
+
+    /// Sticky once demoted: subsequent rekeys keep the defaults so a
+    /// half-agreed peer isn't ping-ponged between parameter sets.
+    /// The direct-connection path (observed peer cap) ignores this
+    /// flag; it clears on daemon restart.
+    pub cap_demoted: bool,
+
     /// Level the peer advertised in `ANS_KEY`; we compress to them
     /// at this level.
     pub outcompression: u8,
@@ -377,6 +393,8 @@ mod tests {
             out_bytes_prev: 0,
             relay_rate_bps: 0,
             tx_rate_bps: 0,
+            cap_stalls: 2,
+            cap_demoted: true,
         };
 
         t.reset_unreachable();
@@ -404,6 +422,11 @@ mod tests {
         // decide_autoconnect would go negative (saturate to 0) if
         // this reset, masking real relay traffic across a flap.
         assert_eq!(t.relay_tx_bytes, 12345);
+        // Cap demotion is about the destination's SPTPS capability,
+        // not our UDP reachability — an unreachable flap says nothing
+        // new, so it survives.
+        assert_eq!(t.cap_stalls, 2);
+        assert!(t.cap_demoted);
     }
 
     #[test]

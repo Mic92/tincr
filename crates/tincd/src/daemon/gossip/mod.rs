@@ -85,6 +85,24 @@ impl Daemon {
         })
     }
 
+    /// The capability stamp we advertise toward `name`: the per-host
+    /// `SPTPSKex`/`SPTPSCipher` (falling back to the tinc.conf
+    /// globals), rendered as the two-character token. Used on the
+    /// outgoing ID line and on `REQ_KEY` toward destinations with no
+    /// observed peer cap.
+    pub(super) fn cap_token_for(&self, name: &str) -> String {
+        use crate::cap::Cap;
+        let cfg = hostkeys::read_host_config(&self.hosts, name);
+        let kex = daemon::read_sptps_kex(&cfg, self.settings.sptps_kex).unwrap_or_else(|v| {
+            log::warn!(target: "tincd::net",
+                       "hosts/{name}: SPTPSKex = {v}: invalid, using {}",
+                       self.settings.sptps_kex);
+            self.settings.sptps_kex
+        });
+        let aead = hostkeys::read_sptps_cipher(&cfg, name).unwrap_or(self.settings.sptps_cipher);
+        Cap::new(kex, aead).token()
+    }
+
     /// Resolve a routed message's `from`/`to` names to known `NodeId`s.
     /// Logs the C-parity "unknown" error and returns `None` so callers
     /// can `let-else return Ok(false)` without repeating the two blocks.

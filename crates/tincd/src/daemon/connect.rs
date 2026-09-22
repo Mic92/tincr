@@ -606,12 +606,16 @@ impl Daemon {
                     log::info!(target: "tincd::conn",
                                 "Connected to {} ({}) via proxy exec",
                                 conn.name, conn.hostname);
+                    let peer_name = conn.name.clone();
+                    let cap_token = self.cap_token_for(&peer_name);
+                    let conn = self.conns.get_mut(id).expect("ConnId not live");
                     let needs_write = conn.send(format_args!(
-                        "{} {} {}.{}",
+                        "{} {} {}.{} {}",
                         Request::Id,
                         self.name,
                         tinc_proto::request::PROT_MAJOR,
-                        tinc_proto::request::PROT_MINOR
+                        tinc_proto::request::PROT_MINOR,
+                        cap_token
                     ));
                     if needs_write
                         && let Some(io_id) = self.conns[id].io_id
@@ -837,13 +841,21 @@ impl Daemon {
 
         // send_id. We go first (initiator); peer replies.
         // Split borrow: helper would lock all of `self`.
+        //
+        // The cap token announces our intended SPTPS pair. A C peer
+        // ignores the extra token; a new tincr echoes it back, which
+        // is what lets `id_peer` fall back to the C-compatible pair
+        // when nobody understands stamps.
+        let peer_name = conn.name.clone();
+        let cap_token = self.cap_token_for(&peer_name);
         let conn = self.conns.get_mut(id).expect("ConnId not live");
         needs_write |= conn.send(format_args!(
-            "{} {} {}.{}",
+            "{} {} {}.{} {}",
             Request::Id,
             self.name,
             tinc_proto::request::PROT_MAJOR,
-            tinc_proto::request::PROT_MINOR
+            tinc_proto::request::PROT_MINOR,
+            cap_token
         ));
 
         // Re-register: was ReadWrite (probe); now READ (or RW if

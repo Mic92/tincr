@@ -186,6 +186,9 @@ impl Daemon {
                     if !tunnel.status.validkey {
                         tunnel.status.validkey = true;
                         tunnel.status.waitingforkey = false;
+                        // The stamped pair worked; the demotion
+                        // counter is only about consecutive stalls.
+                        tunnel.cap_stalls = 0;
                         log::info!(target: "tincd::net",
                                    "SPTPS key exchange with {peer_name} successful");
                     }

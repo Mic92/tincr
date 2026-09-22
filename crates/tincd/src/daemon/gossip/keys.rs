@@ -37,6 +37,36 @@ impl Daemon {
             return false;
         };
 
+        // Capability stamp policy:
+        //  - direct connection with an observed peer cap -> the peer's
+        //    own pair (it echoes our stamps, so mirroring keeps both
+        //    directions symmetric),
+        //  - direct connection, no cap -> the peer is a C node; it
+        //    always uses the compiled defaults, so we must too,
+        //  - indirect (relayed) destination -> our intended pair,
+        //    stamped so the responder mirrors it. If handshakes keep
+        //    stalling the destination is probably C (or an old tincr)
+        //    behind the relay: demote to the defaults, since a stamp
+        //    a C responder never sees cannot save a mismatched pair.
+        let direct_cap = self
+            .nodes
+            .get(&to_nid)
+            .and_then(|ns| ns.conn)
+            .and_then(|cid| self.conns.get(cid))
+            .map(|c| c.peer_cap);
+        let cap = match direct_cap {
+            Some(Some(c)) => c,
+            Some(None) => crate::cap::Cap::DEFAULT,
+            None => {
+                let intended = crate::cap::Cap::new(self.peer_sptps_kex(&to_name), aead);
+                if self.dp.tunnels.get(&to_nid).is_some_and(|t| t.cap_demoted) {
+                    crate::cap::Cap::DEFAULT
+                } else {
+                    intended
+                }
+            }
+        };
+
         // Initiator name first in label.
         let label = make_udp_label(&self.name, &to_name);
 
@@ -44,10 +74,10 @@ impl Daemon {
         let (sptps, outs) = Sptps::start_with(
             Role::Initiator,
             Framing::Datagram,
-            self.peer_sptps_kex(&to_name),
+            cap.kex,
             mykey,
             hiskey,
-            tinc_sptps::SptpsLabel::with_aead(label, aead),
+            tinc_sptps::SptpsLabel::with_aead(label, cap.aead),
             self.settings.replaywin,
             &mut os_rng(),
         );
@@ -91,12 +121,16 @@ impl Daemon {
                         return false;
                     };
                     nw |= conn.send(format_args!(
-                        "{} {} {} {} {}",
+                        "{} {} {} {} {} {}",
                         Request::ReqKey,
                         self.name,
                         to_name,
                         Request::ReqKey,
                         b64,
+                        // Tincr extension: our stamp rides after the
+                        // payload; C relays forward the line verbatim
+                        // and C parsers sscanf past it.
+                        cap.token(),
                     ));
                 } else {
                     // start() emits one Wire; defensive.
@@ -388,13 +422,54 @@ impl Daemon {
             return Ok(false);
         };
 
+        // Adoption: an initiator stamp wins over our own config, so a
+        // responder with different (or unknown-to-it) parameters still
+        // mirrors the initiator and the two datagram sessions agree.
+        // No stamp means the initiator's software never emits one for
+        // this message, which pins the pair as follows:
+        //  - direct connection with no parsed cap -> the peer is a C
+        //    node (or an old tincr): it always runs the compiled
+        //    defaults on its own initiations, so mirror DEFAULT or the
+        //    KEX body length mismatches and the handshake never
+        //    completes (a C initiator never learns to stamp — unlike
+        //    a tincr initiator, whose echo teaches it),
+        //  - no stamp over a tincr-to-tincr path (extension-aware
+        //    config, or a relayed line whose stamp an old initiator
+        //    never added) -> keep the configured pair, the legacy
+        //    out-of-band-agreement behaviour both ends still share,
+        //  - demoted after repeated stalls -> defaults, same rule the
+        //    initiator side applies.
+        let direct_cap = self
+            .nodes
+            .get(&from_nid)
+            .and_then(|ns| ns.conn)
+            .and_then(|cid| self.conns.get(cid))
+            .map(|c| c.peer_cap);
+        let (kex, aead) = match (
+            msg.cap.as_deref().and_then(crate::cap::Cap::parse),
+            direct_cap,
+        ) {
+            (Some(c), _) => (c.kex, c.aead),
+            (None, Some(None)) => (crate::cap::Cap::DEFAULT.kex, crate::cap::Cap::DEFAULT.aead),
+            (None, _)
+                if self
+                    .dp
+                    .tunnels
+                    .get(&from_nid)
+                    .is_some_and(|t| t.cap_demoted) =>
+            {
+                (crate::cap::Cap::DEFAULT.kex, crate::cap::Cap::DEFAULT.aead)
+            }
+            (None, _) => (self.peer_sptps_kex(&msg.from), aead),
+        };
+
         // Label has initiator's name first (same both sides).
         let label = make_udp_label(&msg.from, &self.name);
         let mykey = SigningKey::from_blob(&self.mykey.to_blob());
         let (mut sptps, init_outs) = Sptps::start_with(
             Role::Responder,
             Framing::Datagram,
-            self.peer_sptps_kex(&msg.from),
+            kex,
             mykey,
             hiskey,
             tinc_sptps::SptpsLabel::with_aead(label, aead),
