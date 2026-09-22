@@ -261,6 +261,12 @@ pub(crate) struct Connection {
     /// folded in (`load_peer_host_config` applies the fallback). Read
     /// by `id_h`'s `Sptps::start_with`.
     pub sptps_kex: tinc_sptps::SptpsKex,
+    /// Capability token parsed from the peer's `ID` line (`cap.rs`).
+    /// `Some` = Rust peer that understands our `REQ_KEY` stamps and
+    /// hybrid KEX bodies; `None` = it sent none (C tinc / old tincr),
+    /// so every handshake over this conn must use the C-compatible
+    /// defaults. Set by `handle_id`.
+    pub peer_cap: Option<crate::cap::Cap>,
     /// When `Some`, this conn receives `REQ_LOG` records for messages at
     /// or above the level (the wire's debug-level int is mapped at the
     /// `REQ_LOG` arm). No colour: we send the bare message.
@@ -343,6 +349,7 @@ impl Connection {
             sptps_cipher: tinc_sptps::SptpsAead::default(),
             pmtu_cap: None,
             sptps_kex: tinc_sptps::SptpsKex::default(),
+            peer_cap: None,
             log_level: None,
             prev_debug_level: None,
             flood: FloodLimiter::new(),

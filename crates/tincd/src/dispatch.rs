@@ -12,6 +12,8 @@ use tinc_proto::Request;
 use tinc_proto::request::{PROT_MAJOR, PROT_MINOR};
 use tinc_sptps::{Framing, Output, Role, Sptps, SptpsKex, SptpsLabel};
 
+use crate::cap::Cap;
+
 use crate::conn::Connection;
 use crate::daemon;
 use crate::keys;
@@ -381,7 +383,7 @@ pub(crate) fn handle_id(
     now: Instant,
     rng: &mut impl rand_core::CryptoRng,
 ) -> Result<IdOk, DispatchError> {
-    let (name_tok, major, minor) = parse_id_line(line)?;
+    let (name_tok, major, minor, cap_tok) = parse_id_line(line)?;
 
     // Dispatch on name-token sigil. The three branches share nothing
     // after this point: control uses cookie + pid, invitation uses the
@@ -410,7 +412,7 @@ pub(crate) fn handle_id(
         return id_invitation(conn, throwaway_b64, ctx, rng);
     }
 
-    id_peer(conn, name_tok, major, minor, ctx, rng)
+    id_peer(conn, name_tok, major, minor, cap_tok, ctx, rng)
 }
 
 /// Bare-name peer branch of the ID handshake (legacy protocol not
@@ -422,6 +424,7 @@ fn id_peer(
     name_tok: &[u8],
     major: u8,
     minor: u8,
+    cap_tok: Option<&str>,
     ctx: &IdCtx<'_>,
     rng: &mut impl rand_core::CryptoRng,
 ) -> Result<IdOk, DispatchError> {
@@ -483,19 +486,42 @@ fn id_peer(
 
     conn.allow_request = Some(Request::Ack);
 
+    // The initiator stamps its chosen pair on its ID line; the
+    // responder echoes it verbatim, so both sides converge on the same
+    // cipher suite for the two independent SPTPS sessions. This runs
+    // *after* the peer's ID line arrives and *before* `init` emits our
+    // KEX bytes, so the decision is race-free in both directions:
+    //  - token parsed  -> adopt it (the peer is a new tincr; for an
+    //    outgoing connection the echo is our own stamp),
+    //  - no usable token -> the C-compatible pair. A C peer never
+    //    stamps and negotiates with its stock defaults (x25519 +
+    //    chacha20Poly1305) in both directions, so our own config would
+    //    BadKex against it even as initiator.
+    conn.peer_cap = cap_tok.and_then(Cap::parse);
+
     // Our ID line must go before SPTPS KEX bytes — the peer reads our
     // ID, learns minor>=2, then reads KEX. KEX-first would
     // make its line reader parse ciphertext.
+    //
+    // The reply echoes the peer's stamp verbatim iff it parsed: the
+    // token is the signal "I understand stamps". A C peer (no token,
+    // or garbage we dropped) sees a plain ID line, exactly as before.
     let needs_write = if is_outgoing {
         false // initiator already sent in `finish_connecting`
     } else {
-        conn.send(format_args!(
+        let mut line = format!(
             "{} {} {}.{}",
             Request::Id,
             ctx.my_name,
             PROT_MAJOR,
             PROT_MINOR
-        ))
+        );
+        if conn.peer_cap.is_some() {
+            line.push(' ');
+            line.push_str(cap_tok.expect("parsed from token"));
+        }
+        line.push('\n');
+        conn.send_raw(line.as_bytes())
     };
 
     // Label order: always (initiator, responder).
@@ -507,7 +533,18 @@ fn id_peer(
 
     // SigningKey deliberately isn't Clone; blob roundtrip makes copy visible.
     let mykey_clone = SigningKey::from_blob(&ctx.mykey.to_blob());
-
+    let (kex, cipher) = if let Some(c) = conn.peer_cap {
+        (c.kex, c.aead)
+    } else {
+        if cap_tok.is_none()
+            && (conn.sptps_kex != Cap::DEFAULT.kex || conn.sptps_cipher != Cap::DEFAULT.aead)
+        {
+            log::info!(target: "tincd::auth",
+                       "peer {} advertises no SPTPS capability; falling back to C-compatible defaults",
+                       conn.name);
+        }
+        (Cap::DEFAULT.kex, Cap::DEFAULT.aead)
+    };
     let role = if is_outgoing {
         Role::Initiator
     } else {
@@ -516,10 +553,10 @@ fn id_peer(
     let (sptps, init) = Sptps::start_with(
         role,
         Framing::Stream,
-        conn.sptps_kex,
+        kex,
         mykey_clone,
         ecdsa,
-        SptpsLabel::with_aead(label, conn.sptps_cipher),
+        SptpsLabel::with_aead(label, cipher),
         0, // replaywin: ignored in stream mode
         rng,
     );
@@ -533,9 +570,15 @@ fn id_peer(
     Ok(IdOk::Peer { needs_write, init })
 }
 
-/// Parse `<reqno> <name> <major>[.<minor>]`. Major is required, minor
+/// `(name, major, minor, cap-stamp)` of a parsed ID line.
+type IdLine<'a> = (&'a [u8], u8, u8, Option<&'a str>);
+
+/// Parse `<reqno> <name> <major>[.<minor>] [cap]`. Major is required, minor
 /// optional: control connections send `"0"` (no dot) and minor stays 0.
-fn parse_id_line(line: &[u8]) -> Result<(&[u8], u8, u8), DispatchError> {
+/// The optional fourth token is a tincr SPTPS capability stamp; it's
+/// returned verbatim (`None` for C tinc, which sends three tokens) so the
+/// caller can echo it back and record it on the connection.
+fn parse_id_line(line: &[u8]) -> Result<IdLine<'_>, DispatchError> {
     let mut toks = line
         .split(|&b| b.is_ascii_whitespace())
         .filter(|t| !t.is_empty());
@@ -553,7 +596,10 @@ fn parse_id_line(line: &[u8]) -> Result<(&[u8], u8, u8), DispatchError> {
         .parse()
         .map_err(|_| DispatchError::BadId(format!("bad major in {ver:?}")))?;
     let minor = minor.parse().unwrap_or(0);
-    Ok((name_tok, major, minor))
+    // Unknown extra tokens are tolerated; only an exact, known stamp
+    // parses (Cap::parse is strict about the alphabet).
+    let cap_tok = toks.next().and_then(|t| str::from_utf8(t).ok());
+    Ok((name_tok, major, minor, cap_tok))
 }
 
 /// The `^cookie` control-connection branch. Reachable only from the

@@ -313,6 +313,101 @@ fn id_peer_no_dot_minor_zero() {
     assert_eq!(c.protocol_minor, 0);
 }
 
+// tincr cap-stamp extension in the ID handshake.
+
+/// `IdCtx` with an intentionally non-default cipher pair so the
+/// fallback to the C-compatible defaults is observable.
+fn peer_ctx_hybrid<'a>(setup: &'a PeerSetup, mykey: &'a SigningKey) -> IdCtx<'a> {
+    IdCtx {
+        cookie: "",
+        my_name: "testd",
+        mykey,
+        hosts: &setup.hosts,
+        invitation_key: None,
+        global_pmtu: None,
+        sptps_cipher: tinc_sptps::SptpsAead::Aes256Gcm,
+        sptps_kex: SptpsKex::X25519MlKem768,
+    }
+}
+
+/// Responder with a parsed stamp: adopt it, echo it verbatim.
+#[test]
+fn id_peer_adopts_and_echoes_cap() {
+    let mykey = SigningKey::from_seed(&[1; 32]);
+    let peerkey = SigningKey::from_seed(&[2; 32]);
+    let setup = PeerSetup::new("capadopt", "alice", peerkey.public_key());
+
+    let mut c = mkconn();
+    let ctx = peer_ctx(&setup, &mykey, "a");
+    handle_id(
+        &mut c,
+        b"0 alice 17.7 11",
+        &ctx,
+        Instant::now(),
+        &mut os_rng(),
+    )
+    .expect("id ok");
+
+    assert_eq!(
+        c.peer_cap,
+        Some(Cap::new(
+            SptpsKex::X25519MlKem768,
+            tinc_sptps::SptpsAead::Aes256Gcm
+        ))
+    );
+    let sptps = c.sptps.as_ref().expect("sptps installed");
+    assert_eq!(sptps.kex(), SptpsKex::X25519MlKem768);
+    assert_eq!(sptps.aead(), tinc_sptps::SptpsAead::Aes256Gcm);
+    // Echo verbatim: the token is the "I understand stamps" signal.
+    assert_eq!(c.outbuf.live(), b"0 testd 17.7 11\n");
+}
+
+/// C-style responder traffic (no token): our configured hybrid pair
+/// must NOT reach the session — it would `BadKex` against a C peer that
+/// only ever uses the compiled defaults.
+#[test]
+fn id_peer_falls_back_to_default_without_cap() {
+    let mykey = SigningKey::from_seed(&[1; 32]);
+    let peerkey = SigningKey::from_seed(&[2; 32]);
+    let setup = PeerSetup::new("capfallback", "alice", peerkey.public_key());
+
+    let mut c = mkconn();
+    let ctx = peer_ctx_hybrid(&setup, &mykey);
+    handle_id(&mut c, b"0 alice 17.7", &ctx, Instant::now(), &mut os_rng()).expect("id ok");
+
+    assert_eq!(c.peer_cap, None);
+    let sptps = c.sptps.as_ref().expect("sptps installed");
+    assert_eq!(sptps.kex(), SptpsKex::X25519);
+    assert_eq!(sptps.aead(), tinc_sptps::SptpsAead::ChaCha20Poly1305);
+    // Plain ID reply: no token echoed (we never parse one from C).
+    assert_eq!(c.outbuf.live(), b"0 testd 17.7\n");
+}
+
+/// Garbage token ≡ absent token: no echo (so the initiator learns we
+/// didn't understand it), default pair.
+#[test]
+fn id_peer_garbage_cap_treated_as_absent() {
+    let mykey = SigningKey::from_seed(&[1; 32]);
+    let peerkey = SigningKey::from_seed(&[2; 32]);
+    let setup = PeerSetup::new("capgarbage", "alice", peerkey.public_key());
+
+    let mut c = mkconn();
+    let ctx = peer_ctx(&setup, &mykey, "a");
+    handle_id(
+        &mut c,
+        b"0 alice 17.7 zz",
+        &ctx,
+        Instant::now(),
+        &mut os_rng(),
+    )
+    .expect("id ok");
+
+    assert_eq!(c.peer_cap, None);
+    let sptps = c.sptps.as_ref().expect("sptps installed");
+    assert_eq!(sptps.kex(), SptpsKex::X25519);
+    assert_eq!(c.outbuf.live(), b"0 testd 17.7\n");
+}
+
 // invitation `?` branch.
 //
 // Happy path covered by `tests/two_daemons.rs::tinc_join_against_real_daemon`.

@@ -688,6 +688,14 @@ impl Sptps {
         self.aead
     }
 
+    /// Which key exchange this session negotiated. Pairs with
+    /// [`aead`](Self::aead) for telemetry and tests that must prove
+    /// the daemon's cap-based fallback actually reached the session.
+    #[must_use]
+    pub const fn kex(&self) -> SptpsKex {
+        self.kex
+    }
+
     /// Which side of the handshake this instance is. Used by the
     /// daemon's crossed-`REQ_KEY` tie-break (`gossip::on_req_key`).
     #[must_use]
