@@ -31,4 +31,28 @@
     '';
     ed25519Public = "4Rki6fj1BxpyDLQKOkv+BO9gFA2rptNJyKEIUZa6qTM";
   };
+  # Fourth node: the tinc-pre peer in the SPTPS-fallback test
+  # (nix/nixos-test-sptps-fallback.nix). Its host file is written by
+  # hand there, so tinc-pre never has to generate this keypair itself.
+  pre = {
+    ed25519Private = ''
+      -----BEGIN ED25519 PRIVATE KEY-----
+      Yb8KT89r8bztR1IYKvznj2T0MKwUTlXNc38erxE8manpVhcIi0JIIXwtCSkvA/v9
+      izqTVatlpQy2WE/wG71YyvRSGWcY6KTEJ+iGriczOZLd85Mr6KSpI/kw/J0M9Lyo
+      -----END ED25519 PRIVATE KEY-----
+    '';
+    ed25519Public = "bkkhFHmuyERivoxqI3sT2SHfOzquiUKyPJ8fCNT/iMK";
+  };
+  # Fifth node: the tinc 1.0.37 peer in the SPTPS-fallback test. 1.0
+  # never reads Ed25519, but the upstream module writes the key line
+  # unconditionally, so give it a real key instead of an empty file.
+  stable = {
+    ed25519Private = ''
+      -----BEGIN ED25519 PRIVATE KEY-----
+      gEzOlcd/ed82KQfsbX6q3rPrU0ICgIRHuJtKWzGu7dVHQFk4gQncutezFt8Zo9Yd
+      60GPcMJD+9yISIXnAn35MaAuSRnk8qf+K6YdWwvLDApWqKdeoms95DHb/weNCJiA
+      -----END ED25519 PRIVATE KEY-----
+    '';
+    ed25519Public = "GgrU0JJv6nviOWnF87yAQqlqSnHqJbf+wx2PsXjQiIA";
+  };
 }

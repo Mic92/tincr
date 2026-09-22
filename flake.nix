@@ -125,6 +125,13 @@
             inherit tincd;
             tincrModule = self.nixosModules.tincr;
           };
+          # tincr hybrid-KEX config against tinc-pre + tinc 1.0 peers
+          # (cap.rs fallback negotiation).
+          nixos-tinc-sptps-fallback = pkgs.callPackage ./nix/nixos-test-sptps-fallback.nix {
+            inherit tincd;
+            tincrModule = self.nixosModules.tincr;
+            inherit (pkgs) tinc_pre tinc;
+          };
         }
       );
 
