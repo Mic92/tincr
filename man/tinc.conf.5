@@ -295,9 +295,9 @@ direct UDP would be possible.
 Never send UDP to this node.
 .It Va SPTPSCipher Li = chacha20-poly1305 | aes-256-gcm Po chacha20-poly1305 Pc Bq server, host, tincr extension
 AEAD for SPTPS records on edges to this node.
-Both ends must agree; the choice is mixed into the handshake
-transcript, so a mismatch fails authentication rather than corrupting
-traffic.
+Used on a link only if both nodes' host files ask for it; otherwise the
+link uses
+.Sy chacha20-poly1305 .
 The default is wire-identical to C tinc, which ignores this key.
 A one-time warning is logged if
 .Sy aes-256-gcm
@@ -316,7 +316,9 @@ Key-exchange mode for SPTPS sessions with this node.
 .Sy x25519-mlkem768
 adds an ML-KEM-768 encapsulation alongside the X25519 ECDH for
 post-quantum ("harvest now, decrypt later") resistance.
-Both ends must agree; there is no negotiation.
+Used on a link only if both nodes' host files ask for it (or, without a
+host-file value, tinc.conf does); otherwise the link uses
+.Sy x25519 .
 The default is wire-identical to C tinc.
 .El
 .Ss Accepted but ignored

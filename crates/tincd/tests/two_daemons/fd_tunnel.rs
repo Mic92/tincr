@@ -91,14 +91,27 @@ impl FdPair {
     /// Configs written, bob started (alice needs his port), alice not
     /// yet — so callers can drop scripts into her confbase first.
     pub(crate) fn new(dir: &Path, alice_conf: &str, bob_conf: &str) -> Self {
+        Self::with_host_conf(dir, alice_conf, bob_conf, "", "")
+    }
+
+    /// Like `new`, plus extra lines in each node's own host file.
+    pub(crate) fn with_host_conf(
+        dir: &Path,
+        alice_conf: &str,
+        bob_conf: &str,
+        alice_host: &str,
+        bob_host: &str,
+    ) -> Self {
         let (alice_dev, alice_daemon_end) = sockpair_datagram();
         let (bob_dev, bob_daemon_end) = sockpair_datagram();
         let alice = Node::new(dir, "alice", 0xA7)
             .with_conf(alice_conf)
+            .with_host_conf(alice_host)
             .fd(alice_daemon_end.as_raw_fd())
             .subnet("10.0.0.1/32");
         let mut bob = Node::new(dir, "bob", 0xB7)
             .with_conf(bob_conf)
+            .with_host_conf(bob_host)
             .fd(bob_daemon_end.as_raw_fd())
             .subnet("10.0.0.2/32");
         bob.write_config(&alice, false);

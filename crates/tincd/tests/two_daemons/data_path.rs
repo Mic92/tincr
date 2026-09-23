@@ -64,6 +64,37 @@ fn packet_crosses_tunnel_and_is_counted() {
     );
 }
 
+/// A peer that doesn't advertise the hybrid KEX gets classic, not `BadKex`.
+#[test]
+fn link_falls_back_when_peer_lacks_pq_kex() {
+    let tmp = tmp!("kex-fallback");
+    let pair = FdPair::with_host_conf(
+        tmp.path(),
+        "",
+        "",
+        "SPTPSKex = x25519-mlkem768\nSPTPSCipher = aes-256-gcm\n",
+        "",
+    )
+    .start();
+    pair.establish_udp_key();
+    pair.alice_to_bob(b"classic fallback");
+    pair.bob_to_alice(b"classic fallback");
+
+    let logs = pair.logs();
+    assert!(!logs.contains("BadKex"), "{logs}");
+    assert!(!logs.contains("BadSig"), "{logs}");
+}
+
+#[test]
+fn link_uses_pq_kex_when_both_advertise() {
+    let tmp = tmp!("kex-both");
+    let host = "SPTPSKex = x25519-mlkem768\nSPTPSCipher = aes-256-gcm\n";
+    let pair = FdPair::with_host_conf(tmp.path(), "", "", host, host).start();
+    pair.establish_udp_key();
+    pair.alice_to_bob(b"hybrid");
+    pair.bob_to_alice(b"hybrid");
+}
+
 /// Each side compresses at the level the *receiver* asked for: alice
 /// asks zlib-6, bob asks LZ4 (12). Zeros make both codecs kick in.
 #[test]

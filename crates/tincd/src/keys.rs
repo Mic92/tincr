@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 
+use crate::daemon::read_sptps_kex;
 use std::env;
 use std::fs;
 use std::io;
@@ -31,6 +32,7 @@ use tinc_conf::HostDirs;
 use tinc_conf::{Config, read_pem};
 use tinc_crypto::aead::{SptpsAead, hw_aes_available};
 use tinc_crypto::b64;
+use tinc_crypto::hybrid::SptpsKex;
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 
 type Stamp = (Option<SystemTime>, u64);
@@ -80,6 +82,38 @@ pub(crate) fn read_sptps_cipher(host_config: &Config, name: &str) -> Option<Sptp
         warn_aes_no_hw_once();
     }
     Some(aead)
+}
+
+/// KEX mode and record AEAD for the link to `peer_name`. The non-classic
+/// value is used only when our own host file (else `default`) and the peer's
+/// both ask for it: each end reads the same two files, so both pick the same
+/// mode, and a peer that lacks it gets classic instead of a failed handshake.
+#[must_use]
+pub(crate) fn link_sptps_modes(
+    hosts: &HostDirs,
+    my_name: &str,
+    peer: &Config,
+    peer_name: &str,
+    default: (SptpsKex, SptpsAead),
+) -> (SptpsKex, SptpsAead) {
+    let own = read_host_config(hosts, my_name);
+    let kex = |cfg: &Config, name: &str| {
+        read_sptps_kex(cfg, default.0).unwrap_or_else(|v| {
+            log::warn!(target: "tincd::keys",
+                       "hosts/{name}: SPTPSKex = {v}: invalid, using {}", default.0);
+            default.0
+        })
+    };
+    let aead = |cfg: &Config, name: &str| read_sptps_cipher(cfg, name).unwrap_or(default.1);
+
+    (
+        agree(kex(&own, my_name), &kex(peer, peer_name)),
+        agree(aead(&own, my_name), &aead(peer, peer_name)),
+    )
+}
+
+fn agree<T: PartialEq + Default>(own: T, peer: &T) -> T {
+    if own == *peer { own } else { T::default() }
 }
 
 /// One-shot CPU-feature warning. `Once` so the per-handshake host-file
@@ -311,6 +345,46 @@ mod tests {
             .unwrap();
         let mut w = BufWriter::new(f);
         tinc_conf::write_pem(&mut w, TY_PRIVATE, &sk.to_blob()).unwrap();
+    }
+
+    fn link_modes(own: &str, peer: &str, default_kex: SptpsKex) -> (SptpsKex, SptpsAead) {
+        let tmp = TmpDir::new("link-modes");
+        fs::create_dir(tmp.path().join("hosts")).unwrap();
+        fs::write(tmp.path().join("hosts/me"), own).unwrap();
+        fs::write(tmp.path().join("hosts/peer"), peer).unwrap();
+        let hosts = HostDirs::new(tmp.path(), None);
+        let peer = read_host_config(&hosts, "peer");
+        let default = (default_kex, SptpsAead::default());
+        link_sptps_modes(&hosts, "me", &peer, "peer", default)
+    }
+
+    const PQ: &str = "SPTPSKex = x25519-mlkem768\nSPTPSCipher = aes-256-gcm\n";
+    const PQ_KEX: SptpsKex = SptpsKex::X25519MlKem768;
+    const CLASSIC: (SptpsKex, SptpsAead) = (SptpsKex::X25519, SptpsAead::ChaCha20Poly1305);
+
+    #[test]
+    fn link_modes_need_both_sides() {
+        let c = SptpsKex::X25519;
+        assert_eq!(link_modes(PQ, PQ, c), (PQ_KEX, SptpsAead::Aes256Gcm));
+        assert_eq!(link_modes(PQ, "", c), CLASSIC);
+        assert_eq!(link_modes("", PQ, c), CLASSIC);
+        assert_eq!(link_modes("", "", c), CLASSIC);
+    }
+
+    #[test]
+    fn link_modes_kex_and_cipher_are_independent() {
+        let kex_only = "SPTPSKex = x25519-mlkem768\n";
+        let want = (PQ_KEX, SptpsAead::ChaCha20Poly1305);
+        assert_eq!(link_modes(PQ, kex_only, SptpsKex::X25519), want);
+    }
+
+    #[test]
+    fn link_modes_global_default_applies_to_silent_hosts() {
+        assert_eq!(link_modes("", "", PQ_KEX).0, PQ_KEX);
+        assert_eq!(
+            link_modes("SPTPSKex = x25519\n", "", PQ_KEX).0,
+            SptpsKex::X25519
+        );
     }
 
     // pubkey_from_b64

@@ -13,7 +13,6 @@ use tinc_proto::request::{PROT_MAJOR, PROT_MINOR};
 use tinc_sptps::{Framing, Output, Role, Sptps, SptpsKex, SptpsLabel};
 
 use crate::conn::Connection;
-use crate::daemon;
 use crate::keys;
 use crate::keys::read_ecdsa_public_key;
 use std::fmt;
@@ -355,12 +354,9 @@ pub(crate) struct IdCtx<'a> {
     /// Global tinc.conf `PMTU`. Clamps in addition to per-host (min
     /// wins).
     pub global_pmtu: Option<u16>,
-    /// Global `SPTPSCipher` default. Per-peer override comes from
-    /// `hosts/NAME` in [`load_peer_host_config`]; this is the fallback
-    /// when the host file doesn't set one.
+    /// tinc.conf `SPTPSCipher` and `SPTPSKex`, the defaults for
+    /// [`keys::link_sptps_modes`].
     pub sptps_cipher: tinc_sptps::SptpsAead,
-    /// Global tinc.conf `SPTPSKex`. Per-host override is read in
-    /// `load_peer_host_config` and stashed on the connection.
     pub sptps_kex: SptpsKex,
 }
 
@@ -698,12 +694,13 @@ fn load_peer_host_config(
         .lookup("Weight")
         .next()
         .and_then(|e| e.get_int().ok());
-    // Per-peer AEAD override, falling back to the global default.
-    // Unknown values are dropped (the daemon already warned at the
-    // global parse if its own setting was bad; a bad per-peer value
-    // surfaces as a `BadSig` against a correctly-configured peer,
-    // which is the documented mismatch failure mode).
-    conn.sptps_cipher = keys::read_sptps_cipher(&host_config, name).unwrap_or(ctx.sptps_cipher);
+    (conn.sptps_kex, conn.sptps_cipher) = keys::link_sptps_modes(
+        ctx.hosts,
+        ctx.my_name,
+        &host_config,
+        name,
+        (ctx.sptps_kex, ctx.sptps_cipher),
+    );
     let host_pmtu = host_config
         .lookup("PMTU")
         .next()
@@ -714,15 +711,6 @@ fn load_peer_host_config(
     // None if EITHER is None (wrong: absent should mean "no clamp");
     // `flatten().min()` skips Nones — correct.
     conn.pmtu_cap = [host_pmtu, ctx.global_pmtu].into_iter().flatten().min();
-
-    // Per-host override; tinc.conf default if absent. Warn-and-
-    // default on parse error: a malformed `hosts/PEER` shouldn't be
-    // fatal at handshake time (it wasn't for any other key above).
-    conn.sptps_kex = daemon::read_sptps_kex(&host_config, ctx.sptps_kex).unwrap_or_else(|v| {
-        log::warn!(target: "tincd::auth",
-                       "hosts/{name}: SPTPSKex = {v}: invalid, using {}", ctx.sptps_kex);
-        ctx.sptps_kex
-    });
 
     ecdsa
 }
