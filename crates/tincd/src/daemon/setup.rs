@@ -419,7 +419,14 @@ pub(super) fn read_daemon_config(
     if host.entries().is_empty() {
         log::warn!(target: "tincd", "hosts/{name} empty or unreadable, using defaults");
     }
-    config.merge(host.entries().iter().cloned());
+    // Per-link settings: as global defaults they break C tinc peers.
+    config.merge(
+        host.entries()
+            .iter()
+            .filter(|e| !e.variable.eq_ignore_ascii_case("SPTPSKex"))
+            .filter(|e| !e.variable.eq_ignore_ascii_case("SPTPSCipher"))
+            .cloned(),
+    );
     Ok((config, name, hosts))
 }
 
@@ -1110,6 +1117,25 @@ mod tests {
             .collect();
         c.merge(entries);
         c
+    }
+
+    /// Own host file SPTPS modes must not become defaults for other peers.
+    #[test]
+    fn own_host_sptps_modes_are_not_global_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("hosts")).unwrap();
+        fs::write(dir.path().join("tinc.conf"), "Name = me\n").unwrap();
+        fs::write(
+            dir.path().join("hosts/me"),
+            "SPTPSKex = x25519-mlkem768\nSPTPSCipher = aes-256-gcm\nWeight = 5\n",
+        )
+        .unwrap();
+
+        let (config, _, _) = read_daemon_config(dir.path(), &tinc_conf::Config::new()).unwrap();
+        assert!(config.lookup("SPTPSKex").next().is_none());
+        assert!(config.lookup("SPTPSCipher").next().is_none());
+        // Other own-host keys are still merged.
+        assert!(config.lookup("Weight").next().is_some());
     }
 
     #[test]
