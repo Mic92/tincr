@@ -249,17 +249,13 @@ pub(crate) struct Connection {
     pub host_clamp_mss: Option<bool>,
     /// `hosts/NAME` `Weight`.
     pub host_weight: Option<i32>,
-    /// `hosts/NAME` `SPTPSCipher` (or the global default). Consumed by
-    /// `handle_id` when starting the meta-conn SPTPS. Stored on the
-    /// connection because `load_peer_host_config` runs before
-    /// `Sptps::start` and the host config isn't kept around.
+    /// Link AEAD from `link_sptps_modes`, read by `handle_id` when it
+    /// starts the meta-conn SPTPS.
     pub sptps_cipher: tinc_sptps::SptpsAead,
     /// PMTU clamp: min of per-host and global `PMTU`. `None` = neither
     /// set. Named `cap` not `host_` since it may come from tinc.conf.
     pub pmtu_cap: Option<u16>,
-    /// `hosts/NAME` `SPTPSKex`, with the tinc.conf global already
-    /// folded in (`load_peer_host_config` applies the fallback). Read
-    /// by `id_h`'s `Sptps::start_with`.
+    /// Link KEX mode from `link_sptps_modes`.
     pub sptps_kex: tinc_sptps::SptpsKex,
     /// When `Some`, this conn receives `REQ_LOG` records for messages at
     /// or above the level (the wire's debug-level int is mapped at the

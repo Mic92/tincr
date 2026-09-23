@@ -90,8 +90,9 @@ all. That's a deliberate reduction in attack surface — see
 ### `SPTPSCipher` (tincr extension)
 
 tincr can swap the record AEAD for **AES-256-GCM** on a per-edge
-basis via the `SPTPSCipher` host-file key. This is *not* negotiated:
-both ends read the value from static config, and the choice is mixed
+basis via the `SPTPSCipher` host-file key. This is *not* negotiated
+on the wire: both ends derive the choice from the same two host files
+(AES-GCM only if both ask for it, else ChaCha20-Poly1305), and it is mixed
 into the SPTPS label (and therefore the SIG transcript and the PRF
 seed). A mismatch fails the handshake at the SIG step with a clean
 authentication error — no record key is ever derived, so misconfigured
@@ -167,13 +168,13 @@ default configuration remains byte-identical to C tinc on the wire.
 is 0 for `chacha20-poly1305`, 1 for `aes-256-gcm`. The two knobs are
 independent and may be combined.
 
-**No negotiation.** `SPTPSKex` is static per-host configuration; both
-ends must set the same value out of band. A mismatch fails at
-`BadKex` (wrong KEX body length) or, if a future change made the
-length check lenient, at `BadSig` (the label suffix desyncs the
-transcript). C tinc silently ignores unknown host-file keys, so a
-C↔Rust pair with the key set on the Rust side just fails the
-handshake — it doesn't crash the C daemon.
+**No wire negotiation.** Each end derives the mode from the two host
+files it reads (hybrid only if both ask for it), so synced host files
+give the same answer on both sides. A mismatch, e.g. from out-of-sync
+host files or an older build, fails at `BadKex` (wrong KEX body length)
+or, if a future change made the length check lenient, at `BadSig` (the
+label suffix desyncs the transcript). C tinc silently ignores unknown
+host-file keys, so it always gets the classic exchange.
 
 The handshake runs over the TCP meta-connection (and the
 meta-forwarded `REQ_KEY`/`ANS_KEY` for per-tunnel SPTPS), so the

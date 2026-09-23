@@ -182,17 +182,14 @@ from PING/PONG and re-gossiped within a few `PingInterval`s.
 ## Post-quantum key exchange
 
 Opt-in via `SPTPSKex = x25519-mlkem768`, settable in `tinc.conf`
-(mesh-wide default) and overridable per peer in `hosts/PEER`. **Both
-ends must agree**; there is no negotiation. A mismatch logs `BadKex`
-and the connection retries on the usual back-off, so a half-rolled-out
-mesh degrades to "those two nodes can't reach each other directly"
-rather than anything noisier.
-
-Rollout: set it in every node's `tinc.conf`, then restart the mesh
-(or per peer-pair in `hosts/*` if you need to stage it). C tinc
-ignores the unknown key, so a mixed C/Rust mesh must leave the key
-unset for any C↔Rust pair. Default (`x25519`) is byte-identical to C
-tinc on the wire.
+(mesh-wide default) and overridable per node in `hosts/NODE`. The
+hybrid exchange is used on a link only if **both** nodes ask for it,
+judged from the two host files each end reads. Otherwise the link
+falls back to `x25519`, so a half-rolled-out mesh or a C tinc peer
+just gets the classic exchange. Both ends must run a tincr that
+implements this rule; older builds read only the peer's file and fail
+with `BadKex` against a node that advertises the key. Default
+(`x25519`) is byte-identical to C tinc on the wire.
 
 Cost: ~2.3 KB extra per handshake (1184 B encapsulation key +
 1088 B ciphertext), sub-millisecond CPU. No
@@ -305,8 +302,8 @@ faster than the default ChaCha20-Poly1305. End to end this roughly
 doubles single-flow throughput (measured: 3.2 → 5.7 Gbit/s on
 Zen 5). To enable it for an edge
 between two **tincr** nodes `alice` and `bob`, add to *both*
-`hosts/alice` and `hosts/bob` (the host files are synced, so each
-side reads the *peer's* file and both arrive at the same answer):
+`hosts/alice` and `hosts/bob` (the host files are synced, so both
+sides read the same two files and arrive at the same answer):
 
 ```
 SPTPSCipher = aes-256-gcm
@@ -315,12 +312,9 @@ SPTPSCipher = aes-256-gcm
 or set it once in `tinc.conf` as a mesh-wide default and leave
 per-host overrides for the C-tinc peers.
 
-**Both sides must agree.** There is no negotiation; the choice is
-mixed into the SPTPS handshake transcript, so a mismatch fails the
-key exchange with `BadSig` in the log instead of corrupting traffic.
-C tinc 1.1 ignores the key entirely and always behaves as
-`chacha20-poly1305`, so leave it at the default for any edge that
-touches a C node.
+AES-GCM is used on an edge only if both nodes ask for it; otherwise
+the edge uses `chacha20-poly1305`. C tinc 1.1 ignores the key and
+always behaves as `chacha20-poly1305`.
 
 If `aes-256-gcm` is configured on a CPU without the AES/PMULL
 extensions, tincr logs a one-time warning at startup: ring's

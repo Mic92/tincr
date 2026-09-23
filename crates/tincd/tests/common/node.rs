@@ -42,6 +42,8 @@ pub struct Node {
     /// default, and tinc-conf is first-occurrence-wins, so they can
     /// override it.
     pub extra_conf: String,
+    /// Extra lines in `hosts/SELF`, also written to every peer's copy.
+    pub host_conf: String,
     /// `DeviceType = tun` (or `tap`) + `Interface =`; netns tests
     /// precreate it. On macOS: `DeviceType = utun` + `Device =`,
     /// the spelling C tincd needs there too.
@@ -67,6 +69,7 @@ impl Node {
             socket: dir.join(format!("{name}.socket")),
             port: 0,
             extra_conf: String::new(),
+            host_conf: String::new(),
             iface: None,
             tap: false,
             c_tincd: None,
@@ -83,6 +86,11 @@ impl Node {
         if !lines.is_empty() && !lines.ends_with('\n') {
             self.extra_conf.push('\n');
         }
+        self
+    }
+    #[must_use]
+    pub fn with_host_conf(mut self, lines: &str) -> Self {
+        self.host_conf.push_str(lines);
         self
     }
     #[must_use]
@@ -158,6 +166,7 @@ impl Node {
         for subnet in &self.subnets {
             writeln!(own_host, "Subnet = {subnet}").unwrap();
         }
+        own_host.push_str(&self.host_conf);
         fs::write(self.confbase.join("hosts").join(&self.name), own_host).unwrap();
 
         for peer in peers {
@@ -182,6 +191,7 @@ impl Node {
             );
             writeln!(host, "Address = 127.0.0.1 {}", peer.port).unwrap();
         }
+        host.push_str(&peer.host_conf);
         fs::write(self.confbase.join("hosts").join(&peer.name), host).unwrap();
     }
 
