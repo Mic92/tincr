@@ -25,6 +25,8 @@ pub struct ParsedUrl {
 /// descriptively.
 #[must_use]
 pub fn parse_url(url: &str) -> Option<ParsedUrl> {
+    // The phone link form printed next to the bare URL.
+    let url = url.strip_prefix("tinc://join/").unwrap_or(url);
     let slash = url.find('/')?;
     let (addr_part, slug_with_slash) = url.split_at(slash);
     let slug = &slug_with_slash[1..]; // skip '/'

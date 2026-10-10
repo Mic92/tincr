@@ -477,9 +477,9 @@ fn cmd_fsck(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError>
     }
 }
 
-/// Prints the URL to stdout (the only thing on stdout, so
-/// `tinc invite alice | mail alice@example` works). Warnings to
-/// stderr.
+/// The bare `HOST/SLUG` goes to stdout so `tinc invite alice | mail`
+/// and C `tinc join` keep working. On a terminal the app link and a QR
+/// code follow on stderr.
 fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdError> {
     let mut replace = false;
     let mut env = Vec::new();
@@ -528,8 +528,14 @@ fn cmd_invite(paths: &Paths, g: &Globals, args: &[String]) -> Result<(), CmdErro
         }
     }
 
-    // The URL is the secret. stdout only.
     println!("{}", *r.url);
+    if io::stdout().is_terminal() {
+        let link = cmd::invite::app_link(&r.url);
+        eprintln!(
+            "\nPhone: open {link} or scan\n\n{}",
+            cmd::invite::qr_utf8(&link)
+        );
+    }
     Ok(())
 }
 

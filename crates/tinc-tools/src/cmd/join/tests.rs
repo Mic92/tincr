@@ -34,6 +34,8 @@ fn url_ok() {
             ("[::1]:655/",          "::1",          "655"),
             // IPv6 no port
             ("[fe80::1]/",          "fe80::1",      "655"),
+            // phone link form from `tinc invite`
+            ("tinc://join/host.example:1234/", "host.example", "1234"),
         ];
     for (prefix, host, port) in cases {
         let url = format!("{prefix}{slug}");
