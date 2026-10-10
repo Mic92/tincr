@@ -2,64 +2,51 @@ package io.thalheim.tincr
 
 import java.io.File
 
-data class CidrAddr(val address: String, val prefix: Int)
-
 // App-side settings from vpn.conf next to the tinc config tree.
 data class NetworkConfig(
     val dir: File,
-    val network: String?,
-    val inviter: String?,
-    val addresses: List<CidrAddr>,
-    val routes: List<CidrAddr>,
-    val dnsServers: List<String>,
-    val searchDomains: List<String>,
-    val mtu: Int,
+    val network: String? = null,
+    val inviter: String? = null,
+    val bundleUrl: String? = null,
+    val addresses: List<CidrAddr> = emptyList(),
+    val routes: List<CidrAddr> = emptyList(),
+    val dnsServers: List<String> = emptyList(),
+    val searchDomains: List<String> = emptyList(),
+    val mtu: Int = 1400,
 ) {
     val name: String?
-        get() = File(dir, "tinc.conf").takeIf { it.isFile }?.useLines { lines ->
-            lines.map { it.split("=", limit = 2) }
-                .firstOrNull { it.size == 2 && it[0].trim().equals("Name", ignoreCase = true) }
-                ?.get(1)?.trim()
-        }
+        get() = File(dir, "tinc.conf").takeIf { it.isFile }
+            ?.let { confLines(it.readLines()) }?.firstOrNull { it.first == "name" }?.second
     val hosts: List<String>
         get() = File(dir, "hosts").list()?.sorted().orEmpty()
 
+    fun render() = buildString {
+        network?.let { append("network $it\n") }
+        inviter?.let { append("inviter $it\n") }
+        bundleUrl?.let { append("bundle $it\n") }
+        addresses.forEach { append("address $it\n") }
+        routes.forEach { append("route $it\n") }
+        dnsServers.forEach { append("dns $it\n") }
+        searchDomains.forEach { append("domain $it\n") }
+        if (mtu != 1400) append("mtu $mtu\n")
+    }
+
     companion object {
         fun load(dir: File): NetworkConfig {
-            val addresses = mutableListOf<CidrAddr>()
-            val routes = mutableListOf<CidrAddr>()
-            val dns = mutableListOf<String>()
-            val domains = mutableListOf<String>()
-            var mtu = 1400
-            var network: String? = null
-            var inviter: String? = null
-
-            val f = File(dir, "vpn.conf")
-            if (f.isFile) {
-                f.forEachLine { line ->
-                    val t = line.trim()
-                    if (t.isEmpty() || t.startsWith("#")) return@forEachLine
-                    val (key, value) = t.split(Regex("\\s+"), limit = 2)
-                        .takeIf { it.size == 2 } ?: return@forEachLine
-                    when (key.lowercase()) {
-                        "network" -> network = value
-                        "inviter" -> inviter = value
-                        "address" -> cidr(value)?.let { addresses.add(it) }
-                        "route" -> cidr(value)?.let { routes.add(it) }
-                        "dns" -> dns.add(value)
-                        "domain" -> domains.add(value)
-                        "mtu" -> value.toIntOrNull()?.let { mtu = it }
-                    }
-                }
-            }
-            return NetworkConfig(dir, network, inviter, addresses, routes, dns, domains, mtu)
-        }
-
-        private fun cidr(s: String): CidrAddr? {
-            val parts = s.split("/")
-            if (parts.size != 2) return null
-            val prefix = parts[1].toIntOrNull() ?: return null
-            return CidrAddr(parts[0], prefix)
+            val f = File(dir, "vpn.conf").takeIf { it.isFile } ?: return NetworkConfig(dir)
+            val kv = confLines(f.readLines())
+            fun all(k: String) = kv.filter { it.first == k }.map { it.second }
+            return NetworkConfig(
+                dir,
+                network = all("network").lastOrNull(),
+                inviter = all("inviter").lastOrNull(),
+                bundleUrl = all("bundle").lastOrNull(),
+                addresses = all("address").mapNotNull(CidrAddr::parse),
+                routes = all("route").mapNotNull(CidrAddr::parse),
+                dnsServers = all("dns"),
+                searchDomains = all("domain"),
+                mtu = all("mtu").lastOrNull()?.toIntOrNull() ?: 1400,
+            )
         }
     }
 }

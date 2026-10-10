@@ -1,5 +1,6 @@
 package io.thalheim.tincr
 
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -33,7 +34,7 @@ class JoinTest {
         """.trimIndent().lines()
         assertEquals(
             "network mesh\ninviter gate\naddress 10.243.42.42/16\nroute 10.243.0.0/16\nroute 42::/16\n",
-            Join.vpnConf(data),
+            Join.fromInvitation(File("."), data).render(),
         )
     }
 
@@ -45,12 +46,12 @@ class JoinTest {
             Name = gate
             Address = 10.243.0.1
         """.trimIndent().lines()
-        val e = assertThrows(JoinError::class.java) { Join.vpnConf(data) }
-        assertEquals("Peer address 10.243.0.1 lies inside routed 10.243.0.0/16.", e.message)
+        val e = assertThrows(JoinError::class.java) { Join.fromInvitation(File("."), data).render() }
+        assertEquals("Peer address 10.243.0.1 lies inside routed 10.243.42.42/16.", e.message)
     }
 
     @Test
     fun missingIfconfigIsRefused() {
-        assertThrows(JoinError::class.java) { Join.vpnConf(listOf("Name = phone")) }
+        assertThrows(JoinError::class.java) { Join.fromInvitation(File("."), listOf("Name = phone")) }
     }
 }
