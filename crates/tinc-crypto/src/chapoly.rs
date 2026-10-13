@@ -228,8 +228,8 @@ mod backend {
             };
             assert_eq!(ok, 1);
             let mut key = [0u8; 32];
-            for (dst, src) in key.chunks_exact_mut(8).zip(&block[..4]) {
-                dst.copy_from_slice(&src.to_ne_bytes());
+            for (dst, src) in key.as_chunks_mut::<8>().0.iter_mut().zip(&block[..4]) {
+                *dst = src.to_ne_bytes();
             }
             block.zeroize();
             key
