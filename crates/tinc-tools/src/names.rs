@@ -56,6 +56,8 @@ const LOCALSTATEDIR: &str = match option_env!("TINC_LOCALSTATEDIR") {
     None => "/var",
 };
 
+const TINCR_RUNDIR: &str = "/run/tincr";
+
 /// All the input paths a command needs (where config lives).
 /// `tinc_conf()`/`hosts_dir()` are accessors derived from `confbase`.
 #[derive(Debug, Clone)]
@@ -142,10 +144,11 @@ impl Paths {
     }
 
     /// Resolve `pidfilename` (and implicitly the socket name); idempotent.
-    /// `/var/run/tinc[.NET].pid` if it exists; else `confbase/pid` if *that*
-    /// exists; else the `/var/run` path anyway, so a no-daemon error names the
-    /// place a daemon should have written. `&mut self` rather than a constructor
-    /// keeps `for_cli()` probe-free for tests and filesystem-only commands.
+    /// `/var/run/tinc[.NET].pid` if it exists; else `/run/tincr/NET.pid`; else
+    /// `confbase/pid` if *that* exists; else the `/var/run` path anyway, so a
+    /// no-daemon error names the place a daemon should have written. `&mut self`
+    /// rather than a constructor keeps `for_cli()` probe-free for tests and
+    /// filesystem-only commands.
     pub fn resolve_runtime(&mut self, input: &PathsInput) {
         // --pidfile wins. No probing.
         if let Some(explicit) = &input.pidfile {
@@ -173,13 +176,19 @@ impl Paths {
             .collect();
         let confbase_path = self.confbase.join("pid");
 
-        // The truth table from the doc comment, in code. If neither
-        // exists, the final else → system_path.
-        self.pidfile = Some(if !system_path.exists() && confbase_path.exists() {
-            confbase_path
-        } else {
-            system_path
-        });
+        // The NixOS module's tincd writes here (its RuntimeDirectory).
+        let tincr_path = input
+            .netname
+            .as_ref()
+            .map(|net| Path::new(TINCR_RUNDIR).join(format!("{net}.pid")));
+
+        self.pidfile = Some(
+            [Some(system_path.clone()), tincr_path, Some(confbase_path)]
+                .into_iter()
+                .flatten()
+                .find(|p| p.exists())
+                .unwrap_or(system_path),
+        );
     }
 
     /// `pidfilename`. Daemon writes; CLI reads.
