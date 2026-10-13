@@ -187,8 +187,8 @@ fn ip4_udp_frame(src: [u8; 4], dst: [u8; 4], sp: u16, dp: u16, paylen: usize) ->
     ip[12..16].copy_from_slice(&src);
     ip[16..20].copy_from_slice(&dst);
     let mut sum = 0u32;
-    for c in ip[..20].chunks_exact(2) {
-        sum += u32::from(u16::from_be_bytes([c[0], c[1]]));
+    for c in ip[..20].as_chunks::<2>().0 {
+        sum += u32::from(u16::from_be_bytes(*c));
     }
     while sum >> 16 != 0 {
         sum = (sum & 0xFFFF) + (sum >> 16);

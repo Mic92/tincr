@@ -225,10 +225,14 @@ pub fn daemonize() -> Result<(), String> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
-        // nix::unistd::daemon is Linux-only in nix 0.29.
-        // Use libc::daemon directly.
-        #[expect(unsafe_code, deprecated)]
-        let rc = unsafe { libc::daemon(1, 0) };
+        // nix wraps daemon(3) on Linux only and libc dropped it for Apple targets.
+        #[expect(unsafe_code)]
+        let rc = {
+            unsafe extern "C" {
+                fn daemon(nochdir: libc::c_int, noclose: libc::c_int) -> libc::c_int;
+            }
+            unsafe { daemon(1, 0) }
+        };
         if rc < 0 {
             Err(format!(
                 "Couldn't detach from terminal: {}",
