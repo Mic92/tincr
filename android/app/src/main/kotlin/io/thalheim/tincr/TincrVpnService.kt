@@ -57,6 +57,8 @@ class TincrVpnService : VpnService() {
         fdServer.serveOnce()
         watchNetwork(config)
         running = true
+        thread(name = "tincr-bundle") { BundleJob.refresh(config) }
+        BundleJob.schedule(this)
     }
 
     // Retry: consent may land just after service start.
