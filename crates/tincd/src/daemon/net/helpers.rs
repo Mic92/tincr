@@ -44,11 +44,11 @@ pub(super) fn publish_path(
     let Some(t) = tunnels.get_mut(&nid) else {
         return;
     };
-    let moved = t.path.refresh_target(|a, h| listener_for(listeners, a, h));
+    t.path.refresh_target(|a, h| listener_for(listeners, a, h));
+    // Unconditional: invalidation clears `target` itself, so
+    // `refresh_target` never reports that move.
     if let Some(h) = tunnel_handles.get(&nid) {
-        if moved {
-            *h.udp_addr.lock().unwrap_or_else(PoisonError::into_inner) = t.path.target().cloned();
-        }
+        *h.udp_addr.lock().unwrap_or_else(PoisonError::into_inner) = t.path.target().cloned();
         h.minmtu.store(t.path.minmtu(), atomic::Ordering::Relaxed);
     }
 }
