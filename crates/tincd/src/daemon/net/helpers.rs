@@ -74,9 +74,11 @@ pub(super) fn is_udp_unreachable_errno(e: &io::Error) -> bool {
 }
 
 /// Handle "destination unreachable" on UDP send: clear cached
-/// `udp_addr` so `choose_udp_address` picks a different candidate.
-/// Rate-limits the warn log to once per [`UDP_UNREACHABLE_WARN_INTERVAL`]
-/// per peer. Does not tear down SPTPS or pmtu — this is a routing event.
+/// `udp_addr` so `choose_udp_address` picks a different candidate, and
+/// treat it as a UDP timeout (`minmtu = 0`, rediscover) so data falls
+/// back to TCP until UDP is confirmed again; every other `minmtu`
+/// reset is gated on `udp_confirmed`. Rate-limits the warn log to once
+/// per [`UDP_UNREACHABLE_WARN_INTERVAL`] per peer. SPTPS is kept.
 pub(super) fn handle_udp_unreachable(
     tunnels: &mut IntHashMap<NodeId, TunnelState>,
     tunnel_handles: &IntHashMap<NodeId, Arc<TunnelHandles>>,
@@ -94,17 +96,18 @@ pub(super) fn handle_udp_unreachable(
         tunnel.udp_addr_cached = None;
         tunnel.status.udp_confirmed = false;
         if let Some(p) = tunnel.pmtu.as_mut() {
-            p.udp_confirmed = false;
+            p.on_udp_timeout();
         }
         warn_now
     } else {
         true
     };
 
-    if let Some(h) = tunnel_handles.get(&relay_nid)
-        && let Ok(mut g) = h.udp_addr.lock()
-    {
-        *g = None;
+    if let Some(h) = tunnel_handles.get(&relay_nid) {
+        if let Ok(mut g) = h.udp_addr.lock() {
+            *g = None;
+        }
+        h.minmtu.store(0, atomic::Ordering::Relaxed);
     }
 
     if warn_now {
@@ -181,8 +184,11 @@ pub(crate) fn gro_offer_or_write(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pmtu::{MTU, PmtuPhase, PmtuState};
     use crate::tunnel::TunnelState;
     use std::io;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64};
 
     #[test]
     fn is_udp_unreachable_errno_matches_routing_failures() {
@@ -251,5 +257,57 @@ mod tests {
 
         let missing = NodeId(99);
         handle_udp_unreachable(&mut tunnels, &tunnel_handles, missing, "ghost", &err, now);
+    }
+
+    /// Regression (retiolum radio→styx): only `udp_confirmed` was
+    /// cleared, so `minmtu` kept data on UDP to a dead address and no
+    /// `udp_confirmed`-gated path ever reset it. Must end where a UDP
+    /// timeout does: `minmtu` 0 in both copies, discovery restarted.
+    #[test]
+    fn handle_udp_unreachable_drops_minmtu() {
+        let now = Instant::now();
+        let nid = NodeId(42);
+        let mut p = PmtuState::new(now, MTU);
+        (p.mtu, p.minmtu, p.maxmtu) = (1400, 1400, 1400);
+        p.phase = PmtuPhase::Steady;
+        p.udp_confirmed = true;
+        let mut tunnels: IntHashMap<NodeId, TunnelState> = IntHashMap::default();
+        tunnels.insert(
+            nid,
+            TunnelState {
+                udp_addr: Some("[2001:db8::1]:655".parse().unwrap()),
+                pmtu: Some(p),
+                ..TunnelState::default()
+            },
+        );
+        let cipher =
+            || tinc_crypto::aead::SptpsCipher::new(tinc_sptps::SptpsAead::default(), &[0u8; 64]);
+        let addr: SocketAddr = "[2001:db8::1]:655".parse().unwrap();
+        let h = Arc::new(TunnelHandles {
+            outseqno: Arc::new(AtomicU64::new(0)),
+            out_key_base: 0,
+            replay: Arc::default(),
+            outcipher: cipher(),
+            incipher: cipher(),
+            udp_addr: Mutex::new(Some((SockAddr::from(addr), 0))),
+            validkey: AtomicBool::new(true),
+            minmtu: AtomicU16::new(1400),
+            outcompression: 0,
+            stats: Arc::default(),
+        });
+        let mut tunnel_handles: IntHashMap<NodeId, Arc<TunnelHandles>> = IntHashMap::default();
+        tunnel_handles.insert(nid, Arc::clone(&h));
+
+        let err = io::Error::from_raw_os_error(libc::ENETUNREACH);
+        handle_udp_unreachable(&mut tunnels, &tunnel_handles, nid, "styx", &err, now);
+
+        let t = &tunnels[&nid];
+        assert_eq!(t.minmtu(), 0, "data must take the TCP gate");
+        let p = t.pmtu.as_ref().unwrap();
+        assert!(!p.udp_confirmed);
+        assert!(p.phase.is_discovery_start());
+        assert_eq!((p.mtu, p.maxmtu), (1400, MTU));
+        assert_eq!(h.minmtu.load(atomic::Ordering::Relaxed), 0);
+        assert!(h.udp_addr.lock().unwrap().is_none());
     }
 }

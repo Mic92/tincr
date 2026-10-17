@@ -211,6 +211,86 @@ fn stress_pmtu_decrease_recovers() {
     assert_no_panic(&alice_log, &bob_log);
 }
 
+/// UDP turns `ENETUNREACH` under a converged tunnel (retiolum: an
+/// IPv4-only node handed a v6 address). `handle_udp_unreachable`
+/// cleared `udp_confirmed` but left `minmtu`, so data kept passing the
+/// UDP gate and failing locally: no TCP fallback until a restart.
+#[test]
+fn stress_udp_unreachable_falls_back_to_tcp() {
+    let Some(netns) = enter_netns("stress::stress_udp_unreachable_falls_back_to_tcp") else {
+        return;
+    };
+    let tmp = tmp!("udpunreach");
+    // `Shards = 1`: the unreachable errno is handled on the control path.
+    let pair = TunPair::start(netns, &tmp, "PingInterval = 1\nShards = 1");
+    pair.wait_validkey();
+    pair.wait_udp_confirmed();
+
+    let flood = flood_ping();
+    let fixed = try_poll(Duration::from_secs(20), || {
+        let alice = node_pmtu(&pair.alice.ctl().dump(3), "bob")?;
+        let bob = node_pmtu(&pair.bob.ctl().dump(3), "alice")?;
+        (alice.0 != 0 && bob.0 != 0).then_some(())
+    });
+    drop(flood);
+    if fixed.is_none() {
+        let (alice_log, bob_log) = pair.finish();
+        panic!("PMTU never fixed\n=== alice ===\n{alice_log}\n=== bob ===\n{bob_log}");
+    }
+
+    // Daemon UDP now fails with ENETUNREACH; TCP is untouched. The
+    // local rule moves behind ours so loopback is affected too, and
+    // 10.42/16 stays routable (ping `connect()`s a UDP socket).
+    run_ip(&["rule", "add", "pref", "100", "lookup", "local"]);
+    run_ip(&["rule", "del", "pref", "0", "lookup", "local"]);
+    run_ip(&[
+        "rule",
+        "add",
+        "pref",
+        "10",
+        "to",
+        "127.0.0.0/8",
+        "ipproto",
+        "udp",
+        "unreachable",
+    ]);
+
+    let output = ping(&["-c", "5", "-i", "0.5", "-W", "2"], "10.42.0.2");
+    let received = ping_received(&output);
+    let alice_nodes = pair.alice.ctl().dump(3);
+
+    run_ip(&["rule", "del", "pref", "10"]);
+    // UDP must come back once the address works again.
+    let flood = flood_ping();
+    let recovered = try_poll(Duration::from_secs(20), || {
+        let nodes = pair.alice.ctl().dump(3);
+        (node_status(&nodes, "bob")? & 0x80 != 0 && node_pmtu(&nodes, "bob")?.1 != 0).then_some(())
+    });
+    drop(flood);
+
+    let (alice_log, bob_log) = pair.finish();
+    assert!(
+        alice_log.contains("Network is unreachable"),
+        "rule did not produce ENETUNREACH\n=== alice ===\n{alice_log}"
+    );
+    let status = node_status(&alice_nodes, "bob").unwrap_or(0);
+    let pmtu = node_pmtu(&alice_nodes, "bob");
+    assert!(
+        received >= 3,
+        "{received}/5 over TCP fallback; status {status:#x} pmtu {pmtu:?}\n\
+         === alice ===\n{alice_log}\n=== bob ===\n{bob_log}"
+    );
+    assert!(
+        status & 0x80 == 0 && pmtu.is_some_and(|p| p.1 == 0),
+        "unconfirmed UDP must imply minmtu 0: status {status:#x} pmtu {pmtu:?}"
+    );
+    assert!(
+        recovered.is_some(),
+        "UDP never re-confirmed\n=== alice ===\n{alice_log}\n=== bob ===\n{bob_log}"
+    );
+    assert_no_panic(&alice_log, &bob_log);
+}
+
 /// 20% loss on `lo` from the start: the TCP meta handshake, the
 /// per-tunnel key exchange and UDP PMTU discovery must all still
 /// converge.
