@@ -91,7 +91,9 @@ pub(super) fn handle_udp_unreachable(
         let warn_now = tunnel
             .udp_send_failed_at
             .is_none_or(|t| now.saturating_duration_since(t) >= UDP_UNREACHABLE_WARN_INTERVAL);
-        tunnel.udp_send_failed_at = Some(now);
+        if warn_now {
+            tunnel.udp_send_failed_at = Some(now);
+        }
         tunnel.udp_addr = None;
         tunnel.udp_addr_cached = None;
         tunnel.status.udp_confirmed = false;
@@ -254,6 +256,14 @@ mod tests {
             Some(now),
             "still stamped, not regressed"
         );
+        // Continuous failure re-warns once per interval instead of
+        // pushing the deadline out on every send.
+        let later = now + Duration::from_secs(30);
+        handle_udp_unreachable(&mut tunnels, &tunnel_handles, nid, "peer", &err, later);
+        assert_eq!(tunnels[&nid].udp_send_failed_at, Some(now));
+        let later = now + UDP_UNREACHABLE_WARN_INTERVAL;
+        handle_udp_unreachable(&mut tunnels, &tunnel_handles, nid, "peer", &err, later);
+        assert_eq!(tunnels[&nid].udp_send_failed_at, Some(later));
 
         let missing = NodeId(99);
         handle_udp_unreachable(&mut tunnels, &tunnel_handles, missing, "ghost", &err, now);

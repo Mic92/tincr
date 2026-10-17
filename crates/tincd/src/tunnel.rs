@@ -102,9 +102,8 @@ pub(crate) struct TunnelState {
     /// `try_udp` keepalive gate.
     pub udp_reply_sent: Option<Instant>,
 
-    /// Last "destination unreachable" timestamp for this peer's UDP
-    /// path. Used to rate-limit warnings and deprioritise the
-    /// reflexive arm in `choose_udp_address`.
+    /// When the last "destination unreachable" warning for this
+    /// peer's UDP path was logged; rate-limits the next one.
     pub udp_send_failed_at: Option<Instant>,
 
     /// `send_udp_info` debounce. Only when we originate; forwarding skips.
