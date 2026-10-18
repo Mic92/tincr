@@ -17,6 +17,7 @@ mod crossimpl;
 mod nat_hub;
 mod ping;
 mod portmap;
+mod rekey_udp_path;
 mod sandbox;
 mod stress;
 mod tcp_fallback;
