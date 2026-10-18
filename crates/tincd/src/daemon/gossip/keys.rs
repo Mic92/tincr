@@ -10,6 +10,7 @@ use crate::tunnel::{MTU, make_udp_label};
 use crate::dispatch;
 use crate::graph::NodeId;
 use crate::tunnel::TunnelState;
+use std::net::SocketAddr;
 use tinc_crypto::os_rng;
 use tinc_crypto::sign::SigningKey;
 use tinc_proto::Request;
@@ -428,19 +429,17 @@ impl Daemon {
         hint_nw |= self.send_udp_info(from_nid, &msg.from, true);
 
         // Punch coordination, responder side: stash the reflexive address a relay may
-        // have appended (REQ_KEY arrives before validkey, unlike ANS_KEY). A lying
-        // relay can already drop our handshake; worst case here is one probe to a
-        // wrong address, since `udp_confirmed` needs an authenticated reply. Same
-        // trust as ADD_EDGE's unauthenticated address.
+        // have appended (REQ_KEY arrives before validkey, unlike ANS_KEY). Ignored
+        // while the UDP path is confirmed, so a rekey keeps the working address;
+        // otherwise worst case is probes to a wrong address, since `udp_confirmed`
+        // needs an authenticated reply. Same trust as ADD_EDGE's address.
         if let Some((addr_s, port_s)) = &msg.udp_addr
             && let Some(addr) = local_addr::parse_addr_port(addr_s.as_str(), port_s.as_str())
+            && self.take_udp_hint(from_nid, addr, &msg.from, "REQ_KEY")
         {
             log::debug!(target: "tincd::proto",
                         "Relay-observed UDP address for {} (REQ_KEY): {addr}",
                         msg.from);
-            let t = self.dp.tunnels.entry(from_nid).or_default();
-            t.udp_addr = Some(addr);
-            t.udp_addr_cached = None;
         }
 
         // Responder start() always emits KEX (→ ANS_KEY via
@@ -605,8 +604,9 @@ impl Daemon {
             .dispatch_tunnel_outputs(from_nid, &msg.from, outs)
             .needs_write;
 
-        // Two gates - validkey (set above on HandshakeDone; without
-        // it the addr could be a replay) + relay appended one.
+        // Gates: validkey (set above on HandshakeDone; without it
+        // the addr could be a replay), a relay appended one, and
+        // `take_udp_hint` (no confirmed path).
         if let Some((addr_s, port_s)) = &msg.udp_addr {
             let validkey = self
                 .dp
@@ -615,13 +615,11 @@ impl Daemon {
                 .is_some_and(|t| t.status.validkey);
             if validkey
                 && let Some(addr) = local_addr::parse_addr_port(addr_s.as_str(), port_s.as_str())
+                && self.take_udp_hint(from_nid, addr, &msg.from, "ANS_KEY")
             {
                 log::debug!(target: "tincd::proto",
                                 "Using reflexive UDP address from {}: {addr}",
                                 msg.from);
-                let t = self.dp.tunnels.entry(from_nid).or_default();
-                t.udp_addr = Some(addr);
-                t.udp_addr_cached = None; // stale: reflexive addr supersedes
 
                 // Punch coordination, initiator side: validkey just went true and we hold a
                 // fresh relay-observed address, so probe now rather than on the next `try_tx`
@@ -635,6 +633,18 @@ impl Daemon {
 
         nw |= self.send_mtu_info(from_nid, &msg.from, i32::from(MTU), true);
         Ok(nw)
+    }
+
+    /// Stash a relay-appended UDP address for `nid` via
+    /// [`TunnelState::take_udp_hint`]; logs when it is ignored
+    /// because the UDP path is confirmed. Returns whether it was taken.
+    fn take_udp_hint(&mut self, nid: NodeId, addr: SocketAddr, name: &str, source: &str) -> bool {
+        if self.dp.tunnels.entry(nid).or_default().take_udp_hint(addr) {
+            return true;
+        }
+        log::debug!(target: "tincd::proto",
+                    "Ignoring UDP address {addr} for {name} ({source}): UDP path confirmed");
+        false
     }
 
     /// `key_changed_h`. SPTPS-only build doesn't act on it; just

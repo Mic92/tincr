@@ -178,6 +178,19 @@ impl TunnelState {
         self.udp_send_failed_at = None;
         self.status = TunnelStatus::default();
     }
+
+    /// Stash a hinted UDP endpoint (unconfirmed; the next probe
+    /// decides). Refused while the UDP path is confirmed: the
+    /// confirmed address stays until the path times out. Returns
+    /// whether it was taken.
+    pub(crate) fn take_udp_hint(&mut self, addr: SocketAddr) -> bool {
+        if self.status.udp_confirmed {
+            return false;
+        }
+        self.udp_addr = Some(addr);
+        self.udp_addr_cached = None; // stale: new candidate supersedes
+        true
+    }
 }
 
 /// Reap predicate for [`TunnelState::prev_sptps`]: the new session is healthy
@@ -566,5 +579,38 @@ mod tests {
         for (vk, wfk, due, lrk, now, want) in cases {
             assert_eq!(periodic_rekey_due(vk, wfk, due, lrk, now, pi), want);
         }
+    }
+
+    /// A rekey's relay-appended `REQ_KEY`/`ANS_KEY` address must not
+    /// move a confirmed UDP path to a different (here: other-family)
+    /// address.
+    #[test]
+    fn udp_hint_keeps_confirmed_path() {
+        let confirmed: SocketAddr = "[2001:db8::2]:655".parse().unwrap();
+        let mut t = TunnelState {
+            udp_addr: Some(confirmed),
+            ..TunnelState::default()
+        };
+        t.status.udp_confirmed = true;
+
+        let taken = t.take_udp_hint("192.0.2.2:655".parse().unwrap());
+        assert_eq!(t.udp_addr, Some(confirmed));
+        assert!(!taken);
+        assert!(t.status.udp_confirmed);
+    }
+
+    /// Unconfirmed (punch, or after the confirmed path timed out):
+    /// the hint becomes the next probe target.
+    #[test]
+    fn udp_hint_replaces_unconfirmed_addr() {
+        let hint: SocketAddr = "192.0.2.2:655".parse().unwrap();
+        let mut t = TunnelState {
+            udp_addr: Some("[2001:db8::2]:655".parse().unwrap()),
+            ..TunnelState::default()
+        };
+
+        assert!(t.take_udp_hint(hint));
+        assert_eq!(t.udp_addr, Some(hint));
+        assert!(t.udp_addr_cached.is_none());
     }
 }
