@@ -25,6 +25,10 @@ impl Daemon {
     ///
     /// `REQ_PUBKEY`: hard-errored. Operator provisions `hosts/{to}`.
     pub(in crate::daemon) fn send_req_key(&mut self, to_nid: NodeId) -> bool {
+        if to_nid == self.myself {
+            log::debug!(target: "tincd::net", "Not starting a tunnel to ourselves");
+            return false;
+        }
         let Some(to_name) = self.graph.node(to_nid).map(|n| n.name.clone()) else {
             return false;
         };

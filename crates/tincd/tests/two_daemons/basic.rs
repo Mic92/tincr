@@ -2,9 +2,10 @@ use nix::sys::signal::Signal;
 use std::time::Duration;
 
 use super::common::node::has_active_peer;
-use super::common::{Node, node_reachable, wait_for_file};
+use super::common::{Node, node_reachable, poll_until, wait_for_file};
 use std::fs;
 use std::fs::Permissions;
+use std::net::UdpSocket;
 use std::os::unix::fs::PermissionsExt;
 use std::thread;
 use std::time::Instant;
@@ -234,4 +235,31 @@ fn autoconnect_converges_to_three() {
         thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(alice.stop().matches("Autoconnecting to ").count(), 3);
+}
+
+/// A datagram carrying our own source id (e.g. our traffic to a peer
+/// hairpinned back by a NAT) is dropped instead of starting a tunnel
+/// to ourselves.
+#[test]
+fn own_udp_datagram_dropped() {
+    let tmp = tmp!("own-udp");
+    let mut alice = Node::new(tmp.path(), "alice", 0xA6).log_level("tincd=debug");
+    alice.write_config_multi(&[], &[]);
+    alice.start();
+
+    let mut pkt = tincd::node_id::NodeId6::NULL.as_bytes().to_vec();
+    pkt.extend_from_slice(tincd::node_id::NodeId6::from_name("alice").as_bytes());
+    pkt.extend_from_slice(&[0xAA; 100]);
+    UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .send_to(&pkt, alice.tcp_addr())
+        .unwrap();
+    poll_until(Duration::from_secs(10), || {
+        let log = alice.log();
+        (log.contains("our own source ID") || log.contains("Got packet from alice")).then_some(())
+    });
+
+    let log = alice.stop();
+    assert!(log.contains("our own source ID"), "{log}");
+    assert!(!log.contains("toward alice"), "{log}");
 }

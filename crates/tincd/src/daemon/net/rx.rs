@@ -362,6 +362,12 @@ impl Daemon {
                         "Received UDP packet from unknown source ID {src_id} ({peer:?})");
             return;
         };
+        if from_nid == self.myself {
+            // Our own datagram looped back, e.g. by a NAT hairpin.
+            log::debug!(target: "tincd::net",
+                        "Dropping UDP packet with our own source ID ({peer:?})");
+            return;
+        }
         let from_name = self.node_log_name(from_nid).to_owned();
 
         // `dst==null` → direct-to-us. `dst!=null`: either still for
