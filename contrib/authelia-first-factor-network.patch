@@ -46,10 +46,10 @@ Signed-off-by: Jörg Thalheim <joerg@thalheim.io>
  create mode 100644 internal/handlers/handler_firstfactor_network_test.go
 
 diff --git a/internal/authorization/amr.go b/internal/authorization/amr.go
-index ea2bd8998..ddf5dc5b5 100644
+index 09b354e..d42ee3a 100644
 --- a/internal/authorization/amr.go
 +++ b/internal/authorization/amr.go
-@@ -64,7 +64,10 @@ type AuthenticationMethodsReferences struct {
+@@ -68,7 +68,10 @@ type AuthenticationMethodsReferences struct {
  	WebAuthnSoftware             bool
  	WebAuthnUserPresence         bool
  	WebAuthnUserVerified         bool
@@ -61,7 +61,7 @@ index ea2bd8998..ddf5dc5b5 100644
  }
  
  // FactorKnowledge returns true if a "something you know" factor of authentication was used.
-@@ -74,7 +77,7 @@ func (r AuthenticationMethodsReferences) FactorKnowledge() bool {
+@@ -78,7 +81,7 @@ func (r AuthenticationMethodsReferences) FactorKnowledge() bool {
  
  // FactorPossession returns true if a "something you have" factor of authentication was used.
  func (r AuthenticationMethodsReferences) FactorPossession() bool {
@@ -70,7 +70,7 @@ index ea2bd8998..ddf5dc5b5 100644
  }
  
  // MultiFactorAuthentication returns true if multiple factors were used.
-@@ -120,7 +123,7 @@ func (r AuthenticationMethodsReferences) MarshalRFC8176() []string {
+@@ -124,7 +127,7 @@ func (r AuthenticationMethodsReferences) MarshalRFC8176() []string {
  		amr = append(amr, AMRShortMessageService)
  	}
  
@@ -79,7 +79,7 @@ index ea2bd8998..ddf5dc5b5 100644
  		amr = append(amr, AMRProofOfPossession)
  	}
  
-@@ -128,7 +131,7 @@ func (r AuthenticationMethodsReferences) MarshalRFC8176() []string {
+@@ -132,7 +135,7 @@ func (r AuthenticationMethodsReferences) MarshalRFC8176() []string {
  		amr = append(amr, AMRHardwareSecuredKey)
  	}
  
@@ -89,10 +89,10 @@ index ea2bd8998..ddf5dc5b5 100644
  	}
  
 diff --git a/internal/authorization/amr_test.go b/internal/authorization/amr_test.go
-index 042d2a3bc..55efdf18a 100644
+index cfa6620..ad40122 100644
 --- a/internal/authorization/amr_test.go
 +++ b/internal/authorization/amr_test.go
-@@ -84,6 +84,20 @@ func TestAuthenticationMethodsReferences(t *testing.T) {
+@@ -88,6 +88,20 @@ func TestAuthenticationMethodsReferences(t *testing.T) {
  				RFC8176:                    []string{"otp"},
  			},
  		},
@@ -114,10 +114,10 @@ index 042d2a3bc..55efdf18a 100644
  			name: "WebAuthn",
  
 diff --git a/internal/configuration/schema/configuration.go b/internal/configuration/schema/configuration.go
-index a787e3047..908999bf2 100644
+index e2d9447..0c8b5d5 100644
 --- a/internal/configuration/schema/configuration.go
 +++ b/internal/configuration/schema/configuration.go
-@@ -12,6 +12,7 @@ type Configuration struct {
+@@ -16,6 +16,7 @@ type Configuration struct {
  
  	Log                   Log                   `koanf:"log" yaml:"log,omitempty" toml:"log,omitempty" json:"log,omitempty" jsonschema:"title=Log" jsonschema_description:"Logging Configuration."`
  	IdentityProviders     IdentityProviders     `koanf:"identity_providers" yaml:"identity_providers,omitempty" toml:"identity_providers,omitempty" json:"identity_providers,omitempty" jsonschema:"title=Identity Providers" jsonschema_description:"Identity Providers Configuration."`
@@ -127,7 +127,7 @@ index a787e3047..908999bf2 100644
  	TOTP                  TOTP                  `koanf:"totp" yaml:"totp,omitempty" toml:"totp,omitempty" json:"totp,omitempty" jsonschema:"title=TOTP" jsonschema_description:"Time-based One-Time Password Configuration."`
 diff --git a/internal/configuration/schema/first_factor_network.go b/internal/configuration/schema/first_factor_network.go
 new file mode 100644
-index 000000000..844c77c6a
+index 0000000..844c77c
 --- /dev/null
 +++ b/internal/configuration/schema/first_factor_network.go
 @@ -0,0 +1,13 @@
@@ -145,10 +145,10 @@ index 000000000..844c77c6a
 +	Header string `koanf:"header" yaml:"header,omitempty" toml:"header,omitempty" json:"header,omitempty" jsonschema:"default=Remote-User,title=Identity Header" jsonschema_description:"The whois response header which carries the username."`
 +}
 diff --git a/internal/configuration/schema/keys.go b/internal/configuration/schema/keys.go
-index 5b8b133d9..f902d7f0f 100644
+index b15e45c..8ccbc9d 100644
 --- a/internal/configuration/schema/keys.go
 +++ b/internal/configuration/schema/keys.go
-@@ -128,6 +128,9 @@ var Keys = []string{
+@@ -132,6 +132,9 @@ var Keys = []string{
  	"duo_api.hostname",
  	"duo_api.integration_key",
  	"duo_api.secret_key",
@@ -159,10 +159,10 @@ index 5b8b133d9..f902d7f0f 100644
  	"identity_providers.oidc.authorization_policies",
  	"identity_providers.oidc.authorization_policies.*",
 diff --git a/internal/configuration/validator/configuration.go b/internal/configuration/validator/configuration.go
-index 177ca7a12..d76267629 100644
+index 385a4a7..731c8b5 100644
 --- a/internal/configuration/validator/configuration.go
 +++ b/internal/configuration/validator/configuration.go
-@@ -41,6 +41,8 @@ func ValidateConfiguration(config *schema.Configuration, validator *schema.Struc
+@@ -45,6 +45,8 @@ func ValidateConfiguration(config *schema.Configuration, validator *schema.Struc
  
  	ValidateDuo(config, validator)
  
@@ -173,7 +173,7 @@ index 177ca7a12..d76267629 100644
  	ValidateWebAuthn(config, validator)
 diff --git a/internal/configuration/validator/first_factor_network.go b/internal/configuration/validator/first_factor_network.go
 new file mode 100644
-index 000000000..1092dd2af
+index 0000000..1092dd2
 --- /dev/null
 +++ b/internal/configuration/validator/first_factor_network.go
 @@ -0,0 +1,22 @@
@@ -201,7 +201,7 @@ index 000000000..1092dd2af
 +}
 diff --git a/internal/handlers/handler_firstfactor_network.go b/internal/handlers/handler_firstfactor_network.go
 new file mode 100644
-index 000000000..ea6b1cb04
+index 0000000..ea6b1cb
 --- /dev/null
 +++ b/internal/handlers/handler_firstfactor_network.go
 @@ -0,0 +1,194 @@
@@ -401,7 +401,7 @@ index 000000000..ea6b1cb04
 +}
 diff --git a/internal/handlers/handler_firstfactor_network_test.go b/internal/handlers/handler_firstfactor_network_test.go
 new file mode 100644
-index 000000000..0e5f2df5c
+index 0000000..0e5f2df
 --- /dev/null
 +++ b/internal/handlers/handler_firstfactor_network_test.go
 @@ -0,0 +1,105 @@
@@ -511,10 +511,10 @@ index 000000000..0e5f2df5c
 +	assert.ErrorIs(t, err, os.ErrNotExist)
 +}
 diff --git a/internal/handlers/types.go b/internal/handlers/types.go
-index 1bf069186..0768ff65e 100644
+index 5f24367..6b9d587 100644
 --- a/internal/handlers/types.go
 +++ b/internal/handlers/types.go
-@@ -136,6 +136,16 @@ type bodySecondFactorPasswordRequest struct {
+@@ -129,6 +129,16 @@ type bodySecondFactorPasswordRequest struct {
  	UserCode  string `json:"userCode"`
  }
  
@@ -528,14 +528,14 @@ index 1bf069186..0768ff65e 100644
 +	UserCode       string `json:"userCode"`
 +}
 +
- // bodyFirstFactorRequest represents the JSON body received by the endpoint.
  type bodyFirstFactorReauthenticateRequest struct {
  	Password      string `json:"password" valid:"required"`
+ 	TargetURL     string `json:"targetURL"`
 diff --git a/internal/server/handlers.go b/internal/server/handlers.go
-index fdee33b41..4d660382e 100644
+index 8509c7a..89a4457 100644
 --- a/internal/server/handlers.go
 +++ b/internal/server/handlers.go
-@@ -256,6 +256,10 @@ func handlerMain(ctx context.Context, config *schema.Configuration, providers mi
+@@ -256,6 +256,10 @@ func handlerMain(config *schema.Configuration, providers middlewares.Providers)
  	delayerPassword := middlewares.NewTimingAttackDelay(10, time.Second).SetRecord(true)
  
  	r.POST("/api/firstfactor", middlewareAPI(handlers.FirstFactorPasswordPOST(delayerPassword)))
@@ -547,7 +547,7 @@ index fdee33b41..4d660382e 100644
  	r.POST("/api/logout", middlewareAPI(handlers.LogoutPOST))
  
 diff --git a/internal/server/public_html/index.html b/internal/server/public_html/index.html
-index 81a37a399..f8a1d3384 100644
+index 81a37a3..f8a1d33 100644
 --- a/internal/server/public_html/index.html
 +++ b/internal/server/public_html/index.html
 @@ -3,6 +3,7 @@
@@ -559,10 +559,10 @@ index 81a37a399..f8a1d3384 100644
    "ResetPassword":"{{ .ResetPassword }}",
    "ResetPasswordCustomURL":"{{ .ResetPasswordCustomURL }}",
 diff --git a/internal/server/template.go b/internal/server/template.go
-index 50445f494..2bb5b1cc0 100644
+index f57c360..9497cd1 100644
 --- a/internal/server/template.go
 +++ b/internal/server/template.go
-@@ -223,6 +223,7 @@ func NewTemplatedFileOptions(config *schema.Configuration) (opts *TemplatedFileO
+@@ -219,6 +219,7 @@ func NewTemplatedFileOptions(config *schema.Configuration) (opts *TemplatedFileO
  		AssetPath:               config.Server.AssetPath,
  		DuoSelfEnrollment:       strFalse,
  		PasskeyLogin:            strconv.FormatBool(config.WebAuthn.EnablePasskeyLogin),
@@ -570,7 +570,7 @@ index 50445f494..2bb5b1cc0 100644
  		RememberMe:              strconv.FormatBool(!config.Session.DisableRememberMe),
  		ResetPassword:           strconv.FormatBool(!config.AuthenticationBackend.PasswordReset.Disable),
  		ResetPasswordCustomURL:  config.AuthenticationBackend.PasswordReset.CustomURL.String(),
-@@ -258,6 +259,7 @@ type TemplatedFileOptions struct {
+@@ -254,6 +255,7 @@ type TemplatedFileOptions struct {
  	AssetPath              string
  	DuoSelfEnrollment      string
  	PasskeyLogin           string
@@ -578,7 +578,7 @@ index 50445f494..2bb5b1cc0 100644
  	RememberMe             string
  	ResetPassword          string
  	ResetPasswordCustomURL string
-@@ -294,6 +296,7 @@ func (options *TemplatedFileOptions) CommonData(base, baseURL, domain, nonce, la
+@@ -290,6 +292,7 @@ func (options *TemplatedFileOptions) CommonData(base, baseURL, domain, nonce, la
  		LogoOverride:           logoOverride,
  		DuoSelfEnrollment:      options.DuoSelfEnrollment,
  		PasskeyLogin:           options.PasskeyLogin,
@@ -586,7 +586,7 @@ index 50445f494..2bb5b1cc0 100644
  		RememberMe:             options.RememberMe,
  		ResetPassword:          options.ResetPassword,
  		ResetPasswordCustomURL: options.ResetPasswordCustomURL,
-@@ -315,6 +318,7 @@ func (options *TemplatedFileOptions) commonDataWithRememberMe(base, baseURL, dom
+@@ -310,6 +313,7 @@ func (options *TemplatedFileOptions) commonDataWithRememberMe(base, baseURL, dom
  		LogoOverride:           logoOverride,
  		DuoSelfEnrollment:      options.DuoSelfEnrollment,
  		PasskeyLogin:           options.PasskeyLogin,
@@ -594,7 +594,7 @@ index 50445f494..2bb5b1cc0 100644
  		RememberMe:             rememberMe,
  		ResetPassword:          options.ResetPassword,
  		ResetPasswordCustomURL: options.ResetPasswordCustomURL,
-@@ -354,6 +358,7 @@ type TemplatedFileCommonData struct {
+@@ -349,6 +353,7 @@ type TemplatedFileCommonData struct {
  	LogoOverride           string
  	DuoSelfEnrollment      string
  	PasskeyLogin           string
@@ -603,10 +603,10 @@ index 50445f494..2bb5b1cc0 100644
  	ResetPassword          string
  	ResetPasswordCustomURL string
 diff --git a/internal/session/user_session.go b/internal/session/user_session.go
-index c091fab41..a563c348a 100644
+index 32d02fc..16734ae 100644
 --- a/internal/session/user_session.go
 +++ b/internal/session/user_session.go
-@@ -44,6 +44,14 @@ func (s *UserSession) SetOneFactorPassword(now time.Time, details *authenticatio
+@@ -49,6 +49,14 @@ func (s *UserSession) SetOneFactorPassword(now time.Time, details *authenticatio
  	s.AuthenticationMethodRefs.UsernameAndPassword = true
  }
  
@@ -622,10 +622,10 @@ index c091fab41..a563c348a 100644
  func (s *UserSession) SetOneFactorPasskey(now time.Time, details *authentication.UserDetails, keepMeLoggedIn, hardware, userPresence, userVerified bool) {
  	s.setOneFactor(now, details, keepMeLoggedIn)
 diff --git a/internal/session/user_session_test.go b/internal/session/user_session_test.go
-index 9fdd5f0c5..9ebdfeb83 100644
+index 18e1ea1..2be2224 100644
 --- a/internal/session/user_session_test.go
 +++ b/internal/session/user_session_test.go
-@@ -54,6 +54,23 @@ func TestUserSession_SetFactors(t *testing.T) {
+@@ -58,6 +58,23 @@ func TestUserSession_SetFactors(t *testing.T) {
  				},
  			},
  		},
@@ -649,6 +649,3 @@ index 9fdd5f0c5..9ebdfeb83 100644
  		{
  			"ShouldSetTwoFactorPassword",
  			func(session *UserSession) {
--- 
-2.55.0
-

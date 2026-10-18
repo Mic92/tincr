@@ -38,10 +38,10 @@ Signed-off-by: Jörg Thalheim <joerg@thalheim.io>
  create mode 100644 web/src/services/NetworkLogin.ts
 
 diff --git a/web/.env.production b/web/.env.production
-index c8036b5c0..7c7138e05 100644
+index 2641274..4229010 100644
 --- a/web/.env.production
 +++ b/web/.env.production
-@@ -4,6 +4,7 @@ VITE_LOGO_OVERRIDE={{ .LogoOverride }}
+@@ -8,6 +8,7 @@ VITE_LOGO_OVERRIDE={{ .LogoOverride }}
  VITE_PRIVACY_POLICY_ACCEPT={{ .PrivacyPolicyAccept }}
  VITE_PRIVACY_POLICY_URL={{ .PrivacyPolicyURL }}
  VITE_PASSKEY_LOGIN={{ .PasskeyLogin }}
@@ -50,10 +50,10 @@ index c8036b5c0..7c7138e05 100644
  VITE_RESET_PASSWORD={{ .ResetPassword }}
  VITE_RESET_PASSWORD_CUSTOM_URL={{ .ResetPasswordCustomURL }}
 diff --git a/web/index.html b/web/index.html
-index c203c48a1..66b9e3104 100644
+index ebbe9f5..6c05096 100644
 --- a/web/index.html
 +++ b/web/index.html
-@@ -18,6 +18,7 @@
+@@ -24,6 +24,7 @@ SPDX-License-Identifier: Apache-2.0
          data-privacypolicyurl="%VITE_PRIVACY_POLICY_URL%"
          data-privacypolicyaccept="%VITE_PRIVACY_POLICY_ACCEPT%"
          data-passkeylogin="%VITE_PASSKEY_LOGIN%"
@@ -62,30 +62,30 @@ index c203c48a1..66b9e3104 100644
          data-resetpassword="%VITE_RESET_PASSWORD%"
          data-resetpasswordcustomurl="%VITE_RESET_PASSWORD_CUSTOM_URL%"
 diff --git a/web/src/App.tsx b/web/src/App.tsx
-index 00b6fb6a9..d87764226 100644
+index 1fbaec5..fe71dec 100644
 --- a/web/src/App.tsx
 +++ b/web/src/App.tsx
-@@ -22,6 +22,7 @@ import ThemeContextProvider from "@contexts/ThemeContext";
- import { getBasePath } from "@utils/BasePath";
+@@ -27,6 +27,7 @@ import { getBasePath } from "@utils/BasePath";
  import {
+     getCSPNonce,
      getDuoSelfEnrollment,
 +    getNetworkLogin,
      getPasskeyLogin,
      getRememberMe,
      getResetPassword,
-@@ -67,6 +68,7 @@ function App() {
-                                             <LoginPortal
-                                                 duoSelfEnrollment={getDuoSelfEnrollment()}
-                                                 passkeyLogin={getPasskeyLogin()}
-+                                                networkLogin={getNetworkLogin()}
-                                                 rememberMe={getRememberMe()}
-                                                 resetPassword={getResetPassword()}
-                                                 resetPasswordCustomURL={getResetPasswordCustomURL()}
+@@ -72,6 +73,7 @@ function App() {
+                                                     <LoginPortal
+                                                         duoSelfEnrollment={getDuoSelfEnrollment()}
+                                                         passkeyLogin={getPasskeyLogin()}
++                                                        networkLogin={getNetworkLogin()}
+                                                         rememberMe={getRememberMe()}
+                                                         resetPassword={getResetPassword()}
+                                                         resetPasswordCustomURL={getResetPasswordCustomURL()}
 diff --git a/web/src/services/Api.ts b/web/src/services/Api.ts
-index 2bf276094..d91e4d231 100644
+index 902ce63..2ef5a76 100644
 --- a/web/src/services/Api.ts
 +++ b/web/src/services/Api.ts
-@@ -9,6 +9,7 @@ export const OpenIDConnectDeviceAuthorizationPath = basePath + "/api/oidc/device
+@@ -13,6 +13,7 @@ export const OpenIDConnectDeviceAuthorizationPath = basePath + "/api/oidc/device
  
  export const FirstFactorPath = basePath + "/api/firstfactor";
  export const FirstFactorPasskeyPath = basePath + "/api/firstfactor/passkey";
@@ -95,7 +95,7 @@ index 2bf276094..d91e4d231 100644
  export const TOTPRegistrationPath = basePath + "/api/secondfactor/totp/register";
 diff --git a/web/src/services/NetworkLogin.ts b/web/src/services/NetworkLogin.ts
 new file mode 100644
-index 000000000..6909fc15f
+index 0000000..6909fc1
 --- /dev/null
 +++ b/web/src/services/NetworkLogin.ts
 @@ -0,0 +1,36 @@
@@ -136,10 +136,10 @@ index 000000000..6909fc15f
 +    return res ?? ({} as SignInResponse);
 +}
 diff --git a/web/src/utils/Configuration.ts b/web/src/utils/Configuration.ts
-index b3e851817..29090182c 100644
+index c17481d..ef57c29 100644
 --- a/web/src/utils/Configuration.ts
 +++ b/web/src/utils/Configuration.ts
-@@ -27,6 +27,10 @@ export function getPasskeyLogin() {
+@@ -35,6 +35,10 @@ export function getPasskeyLogin() {
      return getEmbeddedVariable("passkeylogin") === "true";
  }
  
@@ -151,10 +151,10 @@ index b3e851817..29090182c 100644
      return getEmbeddedVariable("resetpasswordcustomurl");
  }
 diff --git a/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.test.tsx b/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.test.tsx
-index 9dd563b05..8033742a0 100644
+index f58170f..1aece9e 100644
 --- a/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.test.tsx
 +++ b/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.test.tsx
-@@ -56,6 +56,7 @@ vi.mock("@views/LoginPortal/FirstFactor/PasskeyForm", () => ({
+@@ -94,6 +94,7 @@ const postFirstFactorMock = vi.mocked(postFirstFactor);
  
  const defaultProps = {
      disabled: false,
@@ -163,10 +163,10 @@ index 9dd563b05..8033742a0 100644
      onAuthenticationStop: vi.fn(),
      onAuthenticationSuccess: vi.fn(),
 diff --git a/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.tsx b/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.tsx
-index f8fd6bd09..f64a6e2c0 100644
+index 0b7ff65..5a4a373 100644
 --- a/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.tsx
 +++ b/web/src/views/LoginPortal/FirstFactor/FirstFactorForm.tsx
-@@ -28,12 +28,14 @@ import { useUserCode } from "@hooks/OpenIDConnect";
+@@ -24,12 +24,14 @@ import { usePasswordVisibility } from "@hooks/PasswordVisibility";
  import { useQueryParam } from "@hooks/QueryParam";
  import LoginLayout from "@layouts/LoginLayout";
  import { IsCapsLockModified } from "@services/CapsLock";
@@ -181,7 +181,7 @@ index f8fd6bd09..f64a6e2c0 100644
      rememberMe: boolean;
      resetPassword: boolean;
      resetPasswordCustomURL: string;
-@@ -86,6 +88,37 @@ const FirstFactorForm = function (props: Props) {
+@@ -82,6 +84,37 @@ const FirstFactorForm = function (props: Props) {
          return () => clearTimeout(timeout);
      }, [focusUsername]);
  
@@ -220,10 +220,10 @@ index f8fd6bd09..f64a6e2c0 100644
          const handleMessage = (authenticated: boolean) => {
              if (authenticated) {
 diff --git a/web/src/views/LoginPortal/LoginPortal.test.tsx b/web/src/views/LoginPortal/LoginPortal.test.tsx
-index 0ff7cbe3e..00a42c551 100644
+index ab37125..d833ac5 100644
 --- a/web/src/views/LoginPortal/LoginPortal.test.tsx
 +++ b/web/src/views/LoginPortal/LoginPortal.test.tsx
-@@ -80,6 +80,7 @@ const mockCreateErrorNotification = vi.fn();
+@@ -112,6 +112,7 @@ const mockCreateErrorNotification = vi.fn();
  
  const defaultProps = {
      duoSelfEnrollment: false,
@@ -232,10 +232,10 @@ index 0ff7cbe3e..00a42c551 100644
      rememberMe: true,
      resetPassword: true,
 diff --git a/web/src/views/LoginPortal/LoginPortal.tsx b/web/src/views/LoginPortal/LoginPortal.tsx
-index b6150778c..ef8a77a89 100644
+index ed8761e..f459cc2 100644
 --- a/web/src/views/LoginPortal/LoginPortal.tsx
 +++ b/web/src/views/LoginPortal/LoginPortal.tsx
-@@ -34,6 +34,7 @@ const SecondFactorForm = lazy(() => import("@views/LoginPortal/SecondFactor/Seco
+@@ -37,6 +37,7 @@ const SecondFactorForm = lazy(() => import("@views/LoginPortal/SecondFactor/Seco
  export interface Props {
      duoSelfEnrollment: boolean;
      passkeyLogin: boolean;
@@ -243,7 +243,7 @@ index b6150778c..ef8a77a89 100644
      rememberMe: boolean;
      resetPassword: boolean;
      resetPasswordCustomURL: string;
-@@ -195,6 +196,7 @@ const LoginPortal = function (props: Props) {
+@@ -198,6 +199,7 @@ const LoginPortal = function (props: Props) {
                          <FirstFactorForm
                              disabled={firstFactorDisabled}
                              passkeyLogin={props.passkeyLogin}
@@ -251,6 +251,3 @@ index b6150778c..ef8a77a89 100644
                              rememberMe={props.rememberMe}
                              resetPassword={props.resetPassword}
                              resetPasswordCustomURL={props.resetPasswordCustomURL}
--- 
-2.55.0
-
