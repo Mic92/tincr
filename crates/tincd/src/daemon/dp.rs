@@ -54,6 +54,11 @@ pub(crate) struct DataPlane {
     /// `forward_packet`.
     pub tx_priority: u8,
 
+    /// Set with `TunnelStatus::udppacket` by the UDP receive path:
+    /// the datagram came through a relay (`dst_id6` non-null), so
+    /// its size says nothing about the direct path's PMTU.
+    pub udp_relayed: bool,
+
     /// Reused recv-side scratch for the UDP data path. Mirror of
     /// `tx_scratch`. `open_data_into` writes `[0;14] ‖ decrypted-body`
     /// here; `receive_sptps_record` then overwrites `[12..14]` with

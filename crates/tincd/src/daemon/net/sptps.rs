@@ -271,7 +271,8 @@ impl Daemon {
                 return false;
             }
             let body_len_u16 = len_u16(body_len);
-            if let Some(p) = self.dp.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
+            if !self.dp.udp_relayed
+                && let Some(p) = self.dp.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
                 && body_len_u16 > p.maxrecentlen
             {
                 p.maxrecentlen = body_len_u16;
@@ -382,9 +383,11 @@ impl Daemon {
         };
 
         // maxrecentlen for try_udp's gratuitous probe-reply size.
-        // Gated on udppacket: TCP-tunneled frames don't inform PMTU.
+        // Gated on direct UDP: TCP-tunneled and relayed frames don't
+        // inform the direct path's PMTU.
         let frame_len = len_u16(frame.len());
-        if let Some(t) = self.dp.tunnels.get_mut(&peer)
+        if !self.dp.udp_relayed
+            && let Some(t) = self.dp.tunnels.get_mut(&peer)
             && t.status.udppacket
             && let Some(p) = t.pmtu.as_mut()
             && frame_len > p.maxrecentlen

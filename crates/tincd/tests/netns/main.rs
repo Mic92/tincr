@@ -21,3 +21,4 @@ mod sandbox;
 mod stress;
 mod tcp_fallback;
 mod udp_asymmetric;
+mod udp_relayed_keepalive;

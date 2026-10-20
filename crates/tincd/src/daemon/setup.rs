@@ -698,6 +698,7 @@ impl DataPlane {
             choose_udp_x: 0,
             compressor: compress::Compressor::new(),
             tx_priority: 0,
+            udp_relayed: false,
             tx_scratch: Vec::with_capacity(12 + usize::from(MTU) + tinc_sptps::DATAGRAM_OVERHEAD),
             rx_scratch: Vec::with_capacity(14 + usize::from(MTU)),
             rx_fast_scratch: Vec::with_capacity(14 + usize::from(MTU)),

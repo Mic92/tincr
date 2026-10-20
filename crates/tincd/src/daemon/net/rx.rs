@@ -400,6 +400,7 @@ impl Daemon {
         // TCP-tunneled). Dispatch is after (Vec<Output> return), so
         // defer the clear below.
         tunnel.status.udppacket = true;
+        self.dp.udp_relayed = !dst_id.is_null();
 
         // Fast path: decrypt into `rx_scratch` with 14 bytes headroom for the
         // synthetic header; `InvalidState` (no incipher) and `BadRecord` (handshake
