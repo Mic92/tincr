@@ -83,9 +83,12 @@ pub(crate) struct PmtuState {
     /// (`udp_ping_sent` timestamps actual sends).
     pub udp_probe_attempted_at: Instant,
     pub udp_ping_sent: Instant,
+    /// First send of the current unanswered run (`ping_sent` false →
+    /// true). Keepalive resends must not push the timeout out.
+    pub udp_ping_first_sent: Instant,
     /// Last authenticated evidence that our UDP reached the peer: a
     /// probe reply or its meta-channel acknowledgement. Drives cold
-    /// idle revalidation; outstanding probes use `udp_ping_sent`.
+    /// idle revalidation and gates `udp_timed_out`.
     pub udp_reply_rx: Instant,
     pub mtu_ping_sent: Instant,
     pub maxrecentlen: u16,
@@ -131,6 +134,7 @@ impl PmtuState {
             udp_probe_attempted: false,
             udp_probe_attempted_at: now,
             udp_ping_sent: now,
+            udp_ping_first_sent: now,
             udp_reply_rx: now,
             mtu_ping_sent: now,
             maxrecentlen: 0,
@@ -154,6 +158,9 @@ impl PmtuState {
         self.udp_probe_attempted = true;
         self.udp_probe_attempted_at = now;
         if sent {
+            if !self.ping_sent {
+                self.udp_ping_first_sent = now;
+            }
             self.udp_ping_sent = now;
             self.ping_sent = true;
         }
@@ -169,13 +176,18 @@ impl PmtuState {
     }
 
     /// UDP-discovery timeout predicate. True iff a keepalive probe is
-    /// outstanding (`ping_sent`) AND was sent ≥ `timeout` ago. Checking
+    /// outstanding (`ping_sent`), the first unanswered one was sent ≥
+    /// `timeout` ago, and no UDP evidence (`udp_reply_rx`, also fed by
+    /// meta-acks) arrived since. Checking
     /// `udp_reply_rx` alone false-positives after an idle gap: `try_udp`
     /// is the only keepalive sender and is itself data-driven, so a
     /// silent period means *we* never probed, not that the path is dead.
     #[must_use]
     pub(crate) fn udp_timed_out(&self, now: Instant, timeout: Duration) -> bool {
-        self.udp_confirmed && self.ping_sent && now.duration_since(self.udp_ping_sent) >= timeout
+        self.udp_confirmed
+            && self.ping_sent
+            && now.saturating_duration_since(self.udp_ping_first_sent) >= timeout
+            && now.saturating_duration_since(self.udp_reply_rx) >= timeout
     }
 
     /// Restart discovery from scratch (peer became unreachable or UDP
@@ -937,16 +949,44 @@ mod tests {
 
         // Probe outstanding, fresh.
         s.ping_sent = true;
+        s.udp_ping_first_sent = now + Duration::from_secs(55);
         s.udp_ping_sent = now + Duration::from_secs(55);
         assert!(!s.udp_timed_out(now + Duration::from_mins(1), to));
 
         // Probe outstanding, stale.
+        s.udp_ping_first_sent = now;
         s.udp_ping_sent = now;
         assert!(s.udp_timed_out(now + Duration::from_secs(31), to));
 
         // Not confirmed.
         s.udp_confirmed = false;
         assert!(!s.udp_timed_out(now + Duration::from_secs(31), to));
+    }
+
+    /// Regression: 10s keepalive resends into a dead path re-stamped
+    /// `udp_ping_sent`, so the 30s timeout never fired and a stale
+    /// `udp_confirmed` kept PMTU looping (Fix 0 → Lost → Discovery).
+    #[test]
+    fn udp_timed_out_despite_keepalive_resends() {
+        let now = t0();
+        let to = Duration::from_secs(30);
+        let keepalive = Duration::from_secs(10);
+        let mut s = PmtuState::new(now, MTU);
+        s.on_probe_reply(MIN_PROBE_SIZE, now);
+        assert!(s.udp_confirmed);
+
+        // Path dies: every keepalive is submitted, none answered.
+        let mut t = now;
+        for _ in 0..3 {
+            t += keepalive;
+            assert!(!s.udp_timed_out(t, to));
+            s.on_udp_probe_attempt(t, true);
+        }
+        assert!(s.udp_timed_out(t + keepalive, to));
+
+        // A meta-ack is UDP evidence and holds the path open.
+        assert!(s.on_meta_ack(MIN_PROBE_SIZE, t + keepalive));
+        assert!(!s.udp_timed_out(t + keepalive, to));
     }
 
     #[test]
