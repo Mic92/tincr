@@ -53,6 +53,12 @@ impl fmt::Write for VecFmt<'_> {
 /// Read chunk size: max packet (1673, no jumbo) rounded to 2048 + 128.
 pub(crate) const MAXBUFSIZE: usize = 2176;
 
+/// C's request bound. Enforced on receive so that anything we relay,
+/// with an address appended, still fits one SPTPS record.
+fn oversize_request(o: &Output) -> bool {
+    matches!(o, Output::Record { bytes, .. } if bytes.len() > MAXBUFSIZE)
+}
+
 /// Hard cap on queued outbuf bytes. The periodic sweep also checks
 /// `settings.maxoutbufsize` but only on stale conns, leaving a full
 /// sweep-interval window in which an authenticated peer that stops
@@ -518,6 +524,12 @@ impl Connection {
                     }
                     Ok((consumed, outs)) => {
                         off += consumed;
+                        if outs.iter().any(oversize_request) {
+                            log::error!(target: "tincd::meta",
+                                        "Oversized request from {}", self.name);
+                            self.sptps = Some(sptps);
+                            return FeedResult::Dead;
+                        }
                         for o in outs {
                             // "21 LEN" peek to learn the raw-blob length.
                             if let Output::Record {
@@ -582,6 +594,10 @@ impl Connection {
                     break;
                 }
                 Ok((consumed, outs)) => {
+                    if outs.iter().any(oversize_request) {
+                        log::error!(target: "tincd::meta", "Oversized request from {name}");
+                        return FeedResult::Dead;
+                    }
                     events.extend(outs.into_iter().map(SptpsEvent::Record));
                     off += consumed;
                 }
@@ -632,22 +648,30 @@ impl Connection {
     /// `sptps_send_record` for arbitrary type + binary body. `send()`
     /// is type-0 + `\n`; invitation file chunks (`protocol_auth.c:
     /// 296,303,181`) are binary and the type-1/2 markers are empty.
-    ///
-    /// # Panics
-    /// `InvalidState` only fires pre-handshake or `type >= 128`.
-    /// Callers send post-HandshakeDone with types 0/1/2.
+    /// A failed seal marks the connection dead.
     pub(crate) fn send_sptps_record(&mut self, record_type: u8, body: &[u8]) -> bool {
         if self.dead {
             return false;
         }
         let was_empty = self.outbuf.is_empty();
-        let sptps = self
-            .sptps
-            .as_deref_mut()
-            .expect("send_sptps_record called without sptps installed");
-        let outs = sptps
-            .send_record(record_type, body)
-            .expect("send_record post-HandshakeDone, type<128: InvalidState is a bug");
+        let Some(sptps) = self.sptps.as_deref_mut() else {
+            log::error!(target: "tincd::conn", "{}: SPTPS record before SPTPS", self.name);
+            self.dead = true;
+            return false;
+        };
+        match sptps.send_record(record_type, body) {
+            Ok(outs) => self.queue_wire(outs) && was_empty,
+            Err(e) => {
+                log::error!(target: "tincd::conn",
+                            "{}: cannot send {}-byte record: {e:?}", self.name, body.len());
+                self.dead = true;
+                false
+            }
+        }
+    }
+
+    /// Queue sealed output. Returns `false` if the outbuf cap killed the conn.
+    fn queue_wire(&mut self, outs: Vec<Output>) -> bool {
         for o in outs {
             if let Output::Wire { bytes, .. } = o {
                 if self.check_outbuf_cap(bytes.len()) {
@@ -656,47 +680,28 @@ impl Connection {
                 self.outbuf.add(&bytes);
             }
         }
-        was_empty
+        true
     }
 
     /// Queue one request line. Plaintext goes straight into outbuf; SPTPS wraps it
     /// as a type-0 record (the `\n` is redundant there but sent for compat; the
     /// receiver strips it). Returns `true` if outbuf went empty→nonempty.
-    ///
-    /// # Panics
-    /// On `InvalidState` from SPTPS, which can't happen after `HandshakeDone` with
-    /// type 0.
+    /// A failed seal marks the connection dead.
     pub(crate) fn send(&mut self, args: Arguments<'_>) -> bool {
         if self.dead {
             return false;
         }
-        let was_empty = self.outbuf.is_empty();
+        let mut line = Vec::with_capacity(64);
+        let _ = write!(VecFmt(&mut line), "{args}"); // VecFmt is infallible
+        line.push(b'\n');
 
         // `id_h` calls `send()` before `Sptps::start`, so `sptps` is
         // None for the id-reply line, which goes out plaintext.
-        if let Some(sptps) = self.sptps.as_deref_mut() {
-            let mut line = Vec::with_capacity(64);
-            write!(VecFmt(&mut line), "{args}").expect("Vec<u8> write infallible");
-            line.push(b'\n');
-
-            let outs = sptps.send_record(0, &line).expect(
-                "send_record after HandshakeDone, type=0: InvalidState is a state-machine bug",
-            );
-            for o in outs {
-                if let Output::Wire { bytes, .. } = o {
-                    if self.check_outbuf_cap(bytes.len()) {
-                        return false;
-                    }
-                    self.outbuf.add(&bytes);
-                }
-            }
-            return was_empty;
+        if self.sptps.is_some() {
+            return self.send_sptps_record(0, &line);
         }
 
-        // Scratch-buffer first so check_outbuf_cap can reject atomically.
-        let mut line = Vec::with_capacity(64);
-        write!(VecFmt(&mut line), "{args}").expect("Vec<u8> write infallible");
-        line.push(b'\n');
+        let was_empty = self.outbuf.is_empty();
         if self.check_outbuf_cap(line.len()) {
             return false;
         }
