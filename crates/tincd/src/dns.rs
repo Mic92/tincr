@@ -22,10 +22,6 @@
 //! compression (RFC 1035 §4.1.4 — "MAY"); answers are tiny.
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::indexing_slicing,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -36,6 +32,7 @@ use crate::packet::ETH_P_IP;
 use crate::packet::len_u16;
 use crate::packet::{Ipv4Hdr, Ipv4Pseudo, Ipv6Hdr, Ipv6Pseudo, inet_checksum};
 use crate::subnet_tree::SubnetTree;
+use crate::wire::{array, be16};
 use tinc_proto::Subnet;
 
 // Config.
@@ -105,79 +102,48 @@ const ETH_P_IPV6: u16 = 0x86DD;
 /// and the kernel's resolver doesn't set them.
 #[must_use]
 pub(crate) fn match_v4(data: &[u8], dns_addr: Ipv4Addr) -> Option<(Ipv4Addr, u16, &[u8])> {
-    // eth + ip + udp + DNS header (12 bytes) is the floor.
-    // Shorter → not a DNS query, fall through to route().
-    let off = ETHER_SIZE;
-    if data.len() < off + IP4_SIZE + UDP_SIZE + DNS_HDR_LEN {
+    let ip = array::<IP4_SIZE>(data, ETHER_SIZE)?;
+    let [sport, dport] = udp_ports(data, ETHER_SIZE + IP4_SIZE)?;
+    // ihl=5 only: the kernel resolver sets no IP options.
+    if ip[0] != 0x45 || ip[9] != IPPROTO_UDP {
         return None;
     }
-    // ihl=5 only — no IP options. The kernel resolver doesn't set
-    // them; supporting them would mean variable UDP offset.
-    if data[off] != 0x45 {
+    let src = Ipv4Addr::from(*array::<4>(ip, 12)?);
+    let dst = Ipv4Addr::from(*array::<4>(ip, 16)?);
+    if dst != dns_addr || dport != 53 {
         return None;
     }
-    if data[off + 9] != IPPROTO_UDP {
-        return None;
-    }
-    let dst = Ipv4Addr::new(
-        data[off + 16],
-        data[off + 17],
-        data[off + 18],
-        data[off + 19],
-    );
-    if dst != dns_addr {
-        return None;
-    }
-    // UDP dport at [eth+ip+2..+4]
-    let udp_off = off + IP4_SIZE;
-    let dport = u16::from_be_bytes([data[udp_off + 2], data[udp_off + 3]]);
-    if dport != 53 {
-        return None;
-    }
-    let src = Ipv4Addr::new(
-        data[off + 12],
-        data[off + 13],
-        data[off + 14],
-        data[off + 15],
-    );
-    let sport = u16::from_be_bytes([data[udp_off], data[udp_off + 1]]);
-    // UDP length includes the 8-byte header; trust the IP totlen
-    // less (the device drain may pad). Either is fine for a stub.
-    Some((src, sport, &data[udp_off + UDP_SIZE..]))
+    Some((src, sport, data.get(ETHER_SIZE + IP4_SIZE + UDP_SIZE..)?))
 }
 
 /// IPv6 equivalent of [`match_v4`]. Only matches with no extension
-/// headers (`nxt == UDP` directly). Extension-header chains between
-/// IPv6 and UDP are legal but the kernel's resolver doesn't emit
-/// them, and chasing the chain is a parser. Same call as the
-/// `ihl == 5` gate above.
+/// headers (`nxt == UDP` directly). The kernel's resolver doesn't
+/// emit them.
 #[must_use]
 pub(crate) fn match_v6<'a>(
     data: &'a [u8],
     dns_addr: &Ipv6Addr,
 ) -> Option<(Ipv6Addr, u16, &'a [u8])> {
-    let off = ETHER_SIZE;
-    if data.len() < off + IP6_SIZE + UDP_SIZE + DNS_HDR_LEN {
+    let ip6 = array::<IP6_SIZE>(data, ETHER_SIZE)?;
+    let [sport, dport] = udp_ports(data, ETHER_SIZE + IP6_SIZE)?;
+    if ip6[6] != IPPROTO_UDP {
         return None;
     }
-    // nxt at +6. No extension-header chain walk — see above.
-    if data[off + 6] != IPPROTO_UDP {
+    let src = Ipv6Addr::from(*array::<16>(ip6, 8)?);
+    let dst = Ipv6Addr::from(*array::<16>(ip6, 24)?);
+    if &dst != dns_addr || dport != 53 {
         return None;
     }
-    let dst_bytes: [u8; 16] = data[off + 24..off + 40].try_into().ok()?;
-    let dst = Ipv6Addr::from(dst_bytes);
-    if &dst != dns_addr {
+    Some((src, sport, data.get(ETHER_SIZE + IP6_SIZE + UDP_SIZE..)?))
+}
+
+/// `[sport, dport]` of the UDP header at `udp_off`, if a DNS header
+/// follows it.
+fn udp_ports(data: &[u8], udp_off: usize) -> Option<[u16; 2]> {
+    if data.len() < udp_off + UDP_SIZE + DNS_HDR_LEN {
         return None;
     }
-    let udp_off = off + IP6_SIZE;
-    let dport = u16::from_be_bytes([data[udp_off + 2], data[udp_off + 3]]);
-    if dport != 53 {
-        return None;
-    }
-    let src_bytes: [u8; 16] = data[off + 8..off + 24].try_into().ok()?;
-    let src = Ipv6Addr::from(src_bytes);
-    let sport = u16::from_be_bytes([data[udp_off], data[udp_off + 1]]);
-    Some((src, sport, &data[udp_off + UDP_SIZE..]))
+    Some([be16(data, udp_off)?, be16(data, udp_off + 2)?])
 }
 
 // DNS query parse.
@@ -209,11 +175,9 @@ struct ParsedQuery<'a> {
 /// `Err((id, rd, rcode))` so the caller can synthesize a header-only
 /// error response.
 fn parse_query(dns: &[u8]) -> Option<Result<ParsedQuery<'_>, (u16, bool, u16)>> {
-    if dns.len() < DNS_HDR_LEN {
-        return None; // can't even read ID — drop silently
-    }
-    let id = u16::from_be_bytes([dns[0], dns[1]]);
-    let flags = u16::from_be_bytes([dns[2], dns[3]]);
+    // Too short to read the ID: drop silently.
+    let id = be16(dns, 0)?;
+    let flags = be16(dns, 2)?;
     let rd = flags & 0x0100 != 0;
     // QR bit (0x8000): 1 = this is a response, not a query. Drop
     // silently — replying to a response is a reflection-loop hazard.
@@ -225,7 +189,7 @@ fn parse_query(dns: &[u8]) -> Option<Result<ParsedQuery<'_>, (u16, bool, u16)>> 
     if (flags >> 11) & 0x0F != 0 {
         return Some(Err((id, rd, RCODE_NOTIMP)));
     }
-    let qdcount = u16::from_be_bytes([dns[4], dns[5]]);
+    let qdcount = be16(dns, 4)?;
     // RFC 1035 says QDCOUNT can be >1 but in practice every resolver
     // sends exactly 1. BIND, unbound, systemd-resolved all do. The
     // only thing that sends 0 is a malformed packet.
@@ -252,20 +216,17 @@ fn parse_query(dns: &[u8]) -> Option<Result<ParsedQuery<'_>, (u16, bool, u16)>> 
         if len & 0xC0 != 0 {
             return Some(Err((id, rd, RCODE_FORMERR)));
         }
-        if pos + len > dns.len() {
+        let Some(label) = dns.get(pos..pos + len) else {
             return Some(Err((id, rd, RCODE_FORMERR)));
-        }
-        labels.push(&dns[pos..pos + len]);
+        };
+        labels.push(label);
         pos += len;
     }
-    let qname_wire = &dns[qname_start..pos];
+    let qname_wire = dns.get(qname_start..pos)?;
 
-    // QTYPE + QCLASS (2 bytes each)
-    if pos + 4 > dns.len() {
+    let (Some(qtype), Some(qclass)) = (be16(dns, pos), be16(dns, pos + 2)) else {
         return Some(Err((id, rd, RCODE_FORMERR)));
-    }
-    let qtype = u16::from_be_bytes([dns[pos], dns[pos + 1]]);
-    let qclass = u16::from_be_bytes([dns[pos + 2], dns[pos + 3]]);
+    };
     // CLASS_IN only. CHAOS (`dig @x version.bind ch txt`) etc → NX.
     // Not strictly correct (NOTIMP would be more honest) but the
     // distinction doesn't matter for a private stub.
@@ -324,13 +285,13 @@ fn parse_ptr_v6(qname: &str) -> Option<Ipv6Addr> {
     let mut bytes = [0u8; 16];
     let mut parts = stem.split('.');
     // 32 nibbles, reversed: nibble[0] is the LOW nibble of byte 15.
-    for byte_idx in (0..16).rev() {
+    for byte in bytes.iter_mut().rev() {
         let lo = u8::from_str_radix(parts.next()?, 16).ok()?;
         let hi = u8::from_str_radix(parts.next()?, 16).ok()?;
         if lo > 0xF || hi > 0xF {
             return None;
         }
-        bytes[byte_idx] = (hi << 4) | lo;
+        *byte = (hi << 4) | lo;
     }
     if parts.next().is_some() {
         return None;
@@ -346,9 +307,10 @@ fn encode_name(name: &str) -> Vec<u8> {
         // RFC 1035 §2.3.4: labels are 63 octets max. tinc node
         // names are well under that (`check_id` rejects long ones);
         // the suffix is operator-provided. Clamp rather than error.
-        let len = label.len().min(63);
-        out.push(u8::try_from(len).unwrap_or(63));
-        out.extend_from_slice(&label.as_bytes()[..len]);
+        let label = label.as_bytes();
+        let label = label.get(..63).unwrap_or(label);
+        out.push(u8::try_from(label.len()).unwrap_or(63));
+        out.extend_from_slice(label);
     }
     out.push(0);
     out
@@ -595,11 +557,13 @@ fn build_response(
 /// too short). Shared by `wrap_v4`/`wrap_v6`; throwaway in TUN mode but
 /// `device.write` expects a full frame.
 fn write_eth_swap(out: &mut Vec<u8>, original: &[u8], ethertype: u16) {
-    if original.len() >= ETHER_SIZE {
-        out.extend_from_slice(&original[6..12]); // dst ← orig src
-        out.extend_from_slice(&original[0..6]); // src ← orig dst
-    } else {
-        out.extend_from_slice(&[0u8; 12]);
+    match array::<12>(original, 0).filter(|_| original.len() >= ETHER_SIZE) {
+        Some(macs) => {
+            let (dst, src) = macs.split_at(6);
+            out.extend_from_slice(src);
+            out.extend_from_slice(dst);
+        }
+        None => out.extend_from_slice(&[0u8; 12]),
     }
     out.extend_from_slice(&ethertype.to_be_bytes());
 }

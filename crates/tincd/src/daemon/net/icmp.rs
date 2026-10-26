@@ -62,7 +62,9 @@ impl Daemon {
         if owner == Some(&self.name) {
             return false;
         }
-        let mut reply = neighbor::build_arp_reply(data);
+        let Some(mut reply) = neighbor::build_arp_reply(data) else {
+            return false;
+        };
         log::debug!(target: "tincd::net",
                     "route: ARP reply for {target} (owner {})",
                     owner.unwrap_or("(broadcast)"));
@@ -106,23 +108,18 @@ impl Daemon {
         if owner == Some(&self.name) {
             return;
         }
-        // decrement_ttl on the SOLICIT before building the advert.
-        // Triple-gate: DecrementTTL=yes (rare) + NDP (rarer) + the
-        // from-peer arm is unreachable here (gated above).
-        // decrement_ttl(v6, hlim=255) → 254 in the original;
-        // build_ndp_advert copies that hlim into the reply.
-        if self.settings.decrement_ttl {
-            match route_decide::decrement_ttl(data) {
-                TtlResult::Decremented | TtlResult::TooShort => {}
-                TtlResult::DropSilent | TtlResult::SendIcmp { .. } => {
-                    // No ICMP synth.
-                    return;
-                }
-            }
-        }
         let Some(mut reply) = neighbor::build_ndp_advert(data) else {
             return;
         };
+        // As in C, the decrement only decides whether to answer.
+        if self.settings.decrement_ttl
+            && matches!(
+                route_decide::decrement_ttl(data),
+                TtlResult::DropSilent | TtlResult::SendIcmp { .. }
+            )
+        {
+            return;
+        }
         log::debug!(target: "tincd::net",
                     "route: NDP advert for {target} (owner {})",
                     owner.unwrap_or("(broadcast)"));

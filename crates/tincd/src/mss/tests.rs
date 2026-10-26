@@ -169,29 +169,19 @@ fn non_tcp_noop() {
 }
 
 #[test]
-fn skips_other_option_then_finds_mss() {
-    // Because the length check reads `packet[start+21]` (first option's length
-    // byte), MSS is only clamped when it is first or preceded by something whose
-    // byte there happens to be 4. `[wscale(len 3), NOP, MSS]` puts 3 at start+21 →
-    // bail. `clamps_basic_v4_syn` covers the realistic MSS-first case; this
-    // documents the C bug.
+fn skips_other_options_then_finds_mss() {
+    // [wscale(len 3), NOP, MSS]: C bails because it checks the first
+    // option's length byte. We check MSS's own.
     let mut pkt = build_v4_tcp(&[0x03, 0x03, 0x07, 0x01, 0x02, 0x04, 0x05, 0xb4]);
-    let before = pkt.clone();
-    assert!(!clamp(&mut pkt, 1400));
-    assert_eq!(pkt, before, "C bug: start+21 not start+21+i");
-}
-
-#[test]
-fn mss_after_len4_opt_works_by_accident() {
-    // The one case where MSS-not-first still works: the first
-    // option also has length 4. SACK-permitted is len=2; make
-    // up a len-4 opt (kind 30, MPTCP, can be 4 bytes).
-    // [kind=30, len=4, 0, 0, MSS=1460].
-    let mut pkt = build_v4_tcp(&[30, 4, 0, 0, 0x02, 0x04, 0x05, 0xb4]);
     assert!(clamp(&mut pkt, 1400));
-    // MSS is at start+20+4+2 = 14+20+20+6 = 60,61
     assert_eq!(u16::from_be_bytes([pkt[60], pkt[61]]), 1346);
     assert!(verify_v4_tcp_csum(&pkt, 14));
+
+    // A short MSS option at the end of the options region, no payload.
+    let mut pkt = build_v4_tcp(&[0xFD, 4, 0, 0, 1, 1, 2, 2]);
+    let before = pkt.clone();
+    assert!(!clamp(&mut pkt, 1400));
+    assert_eq!(pkt, before);
 }
 
 #[test]

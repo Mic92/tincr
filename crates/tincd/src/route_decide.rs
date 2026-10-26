@@ -3,16 +3,12 @@
 //! `route_ipv4`/`route_ipv6` call `send_packet()` directly.
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::packet::{ETH_P_ARP, ETH_P_IP};
 use crate::subnet_tree::SubnetTree;
+use crate::wire::{array, array_mut, be16, u8_at};
 
 // Wire constants.
 
@@ -92,22 +88,13 @@ pub(crate) fn route_ipv4<T>(
     subnets: &SubnetTree,
     mut resolve: impl FnMut(&str) -> Option<T>,
 ) -> RouteResult<T> {
-    let need = ETHER_SIZE + IP_SIZE;
-    if data.len() < need {
+    let Some(&ip) = array::<IP_SIZE>(data, ETHER_SIZE) else {
         return RouteResult::TooShort {
-            need,
+            need: ETHER_SIZE + IP_SIZE,
             have: data.len(),
         };
-    }
-
-    // DATA[30] = ETHER_SIZE + offsetof(ip, ip_dst) = 14+16
-    let dst_off = ETHER_SIZE + 16;
-    let dest = Ipv4Addr::new(
-        data[dst_off],
-        data[dst_off + 1],
-        data[dst_off + 2],
-        data[dst_off + 3],
-    );
+    };
+    let dest = Ipv4Addr::new(ip[16], ip[17], ip[18], ip[19]);
 
     let Some((_subnet, owner)) = subnets.lookup_ipv4(dest, |n| resolve(n).is_some()) else {
         // no covering subnet
@@ -153,27 +140,23 @@ pub(crate) fn route_ipv6<T>(
     subnets: &SubnetTree,
     mut resolve: impl FnMut(&str) -> Option<T>,
 ) -> RouteResult<T> {
-    let need = ETHER_SIZE + IP6_SIZE;
-    if data.len() < need {
+    // ip6_dst is the last 16 bytes of the fixed header.
+    let (Some(&nxt), Some(&dest)) = (data.get(ETHER_SIZE + 6), array::<16>(data, ETHER_SIZE + 24))
+    else {
         return RouteResult::TooShort {
-            need,
+            need: ETHER_SIZE + IP6_SIZE,
             have: data.len(),
         };
-    }
+    };
 
-    // NDP divert. [20]=ip6_nxt (14+6), [54]=icmp6_type (14+40).
-    if data[20] == IPPROTO_ICMPV6
+    // NDP divert: ip6_nxt, then the ICMPv6 type after the fixed header.
+    if nxt == IPPROTO_ICMPV6
         && data.len() >= ETHER_SIZE + IP6_SIZE + ICMP6_SIZE
-        && data[54] == ND_NEIGHBOR_SOLICIT
+        && u8_at(data, ETHER_SIZE + IP6_SIZE) == Some(ND_NEIGHBOR_SOLICIT)
     {
         return RouteResult::NeighborSolicit;
     }
 
-    // DATA[38] = ETHER_SIZE + offsetof(ip6_hdr, ip6_dst) = 14+24
-    let dst_off = ETHER_SIZE + 24;
-    let dest: [u8; 16] = data[dst_off..dst_off + 16]
-        .try_into()
-        .expect("len-checked above");
     let dest = Ipv6Addr::from(dest);
 
     let Some((_subnet, owner)) = subnets.lookup_ipv6(&dest, |n| resolve(n).is_some()) else {
@@ -226,36 +209,29 @@ pub(crate) enum TtlResult {
 /// checksum adjust (RFC 1624 incremental: `csum +=
 /// old + ~new` then fold —). v6 has no IP checksum.
 pub(crate) fn decrement_ttl(data: &mut [u8]) -> TtlResult {
-    // Read ethertype, skip 8021Q tag if present.
-    if data.len() < ETHER_SIZE {
+    let Some(mut ethertype) = be16(data, 12) else {
         return TtlResult::TooShort;
-    }
-    let mut ethertype = u16::from_be_bytes([data[12], data[13]]);
+    };
     let mut ethlen = ETHER_SIZE;
     if ethertype == ETH_P_8021Q {
-        if data.len() < ETHER_SIZE + 4 {
+        let Some(inner) = be16(data, 16) else {
             return TtlResult::TooShort;
-        }
-        ethertype = u16::from_be_bytes([data[16], data[17]]);
+        };
+        ethertype = inner;
         ethlen += 4;
     }
 
     match ethertype {
         ETH_P_IP => {
-            // :339-341 checklength
-            if data.len() < ethlen + IP_SIZE {
+            // C bug (since 2012), ported as-is: the storm guard reads the
+            // protocol at +11 (the ip_sum low byte, where +9 is right) and the ICMP
+            // type at +32, so it almost never matches.
+            let icmp_type = u8_at(data, ethlen + 32);
+            let Some(ip) = array_mut::<IP_SIZE>(data, ethlen) else {
                 return TtlResult::TooShort;
-            }
-
-            // :343-349. TTL at [ethlen+8]. C bug (since 2012): the
-            // storm-guard reads proto at [ethlen+11] (ip_sum low byte;
-            // should be +9) and ICMP type at [ethlen+32] (wrong too).
-            // The check almost never matches. Ported AS-is; `.get()`
-            // for the +32 read (checklength only guarantees +20).
-            if data[ethlen + 8] <= 1 {
-                if data[ethlen + 11] != IPPROTO_ICMP
-                    || data.get(ethlen + 32).copied() != Some(ICMP_TIME_EXCEEDED)
-                {
+            };
+            if ip[8] <= 1 {
+                if ip[11] != IPPROTO_ICMP || icmp_type != Some(ICMP_TIME_EXCEEDED) {
                     return TtlResult::SendIcmp {
                         icmp_type: ICMP_TIME_EXCEEDED,
                         icmp_code: ICMP_EXC_TTL,
@@ -264,39 +240,29 @@ pub(crate) fn decrement_ttl(data: &mut [u8]) -> TtlResult {
                 return TtlResult::DropSilent;
             }
 
-            // :351-353: TTL+proto as one 16-bit word (checksum unit).
-            let old = u16::from_be_bytes([data[ethlen + 8], data[ethlen + 9]]);
-            data[ethlen + 8] -= 1;
-            let new = u16::from_be_bytes([data[ethlen + 8], data[ethlen + 9]]);
-
-            // :355-363 RFC 1624 incremental adjust
-            let mut csum = u32::from(u16::from_be_bytes([data[ethlen + 10], data[ethlen + 11]]));
+            // TTL+proto is one checksum word. RFC 1624 incremental adjust.
+            let old = u16::from_be_bytes([ip[8], ip[9]]);
+            ip[8] -= 1;
+            let new = u16::from_be_bytes([ip[8], ip[9]]);
+            let mut csum = u32::from(u16::from_be_bytes([ip[10], ip[11]]));
             csum += u32::from(old) + u32::from(!new);
             while csum >> 16 != 0 {
                 csum = (csum & 0xFFFF) + (csum >> 16);
             }
-            #[expect(clippy::cast_possible_truncation)] // fold guarantees <0x10000
-            {
-                data[ethlen + 10] = (csum >> 8) as u8;
-                data[ethlen + 11] = csum as u8;
-            }
+            #[expect(clippy::cast_possible_truncation)] // folded to 16 bits
+            let csum = csum as u16;
+            [ip[10], ip[11]] = csum.to_be_bytes();
 
             TtlResult::Decremented
         }
 
         ETH_P_IPV6 => {
-            // :368-370 checklength
-            if data.len() < ethlen + IP6_SIZE {
+            let icmp_type = u8_at(data, ethlen + IP6_SIZE);
+            let Some(ip6) = array_mut::<IP6_SIZE>(data, ethlen) else {
                 return TtlResult::TooShort;
-            }
-
-            // :372-381. hlim at [ethlen+7], nxt at [+6], ICMP type
-            // at [+40] (correct this time — v6 hdr is fixed 40B).
-            // `.get()`: checklength only guarantees +40.
-            if data[ethlen + 7] <= 1 {
-                if data[ethlen + 6] != IPPROTO_ICMPV6
-                    || data.get(ethlen + 40).copied() != Some(ICMP6_TIME_EXCEEDED)
-                {
+            };
+            if ip6[7] <= 1 {
+                if ip6[6] != IPPROTO_ICMPV6 || icmp_type != Some(ICMP6_TIME_EXCEEDED) {
                     return TtlResult::SendIcmp {
                         icmp_type: ICMP6_TIME_EXCEEDED,
                         icmp_code: ICMP6_TIME_EXCEED_TRANSIT,
@@ -304,14 +270,12 @@ pub(crate) fn decrement_ttl(data: &mut [u8]) -> TtlResult {
                 }
                 return TtlResult::DropSilent;
             }
-
-            // :383. No IP checksum in v6 (RFC 8200 §3).
-            data[ethlen + 7] -= 1;
-
+            // No IP checksum in v6 (RFC 8200 §3).
+            ip6[7] -= 1;
             TtlResult::Decremented
         }
 
-        // :386: unknown ethertype — no TTL, forward as-is.
+        // Unknown ethertype: no TTL, forward as-is.
         _ => TtlResult::Decremented,
     }
 }
@@ -321,15 +285,10 @@ pub(crate) fn decrement_ttl(data: &mut [u8]) -> TtlResult {
 /// the version nibble). `None` for non-IP or short frames, leaving priority 0.
 #[must_use]
 pub(crate) fn extract_tos(data: &[u8]) -> Option<u8> {
-    if data.len() < ETHER_SIZE {
-        return None;
-    }
-    let ethertype = u16::from_be_bytes([data[12], data[13]]);
-    match ethertype {
-        ETH_P_IP if data.len() >= ETHER_SIZE + IP_SIZE => Some(data[15]),
-        ETH_P_IPV6 if data.len() >= ETHER_SIZE + IP6_SIZE => {
-            Some((data[14] & 0x0f) << 4 | data[15] >> 4)
-        }
+    let &[b14, b15] = array(data, ETHER_SIZE)?;
+    match be16(data, 12)? {
+        ETH_P_IP if data.len() >= ETHER_SIZE + IP_SIZE => Some(b15),
+        ETH_P_IPV6 if data.len() >= ETHER_SIZE + IP6_SIZE => Some((b14 & 0x0f) << 4 | b15 >> 4),
         _ => None,
     }
 }
@@ -345,14 +304,12 @@ pub(crate) fn route<T>(
 ) -> RouteResult<T> {
     // DEFERRED(chunk-9): pcap; FMODE_KERNEL.
 
-    if data.len() < ETHER_SIZE {
+    let Some(ethertype) = be16(data, 12) else {
         return RouteResult::TooShort {
             need: ETHER_SIZE,
             have: data.len(),
         };
-    }
-
-    let ethertype = u16::from_be_bytes([data[12], data[13]]);
+    };
 
     // DEFERRED(chunk-9): RMODE_SWITCH/RMODE_HUB.
     match ethertype {

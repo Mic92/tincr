@@ -135,6 +135,8 @@ Things that work in both daemons but not identically.
   such byte
   in a key or value is replaced with U+FFFD rather than passed
   through verbatim.
+- **`ClampMSS` finds the MSS option anywhere.** C only clamps it when
+  it is the first TCP option or follows another 4-byte option.
 
 ## Config key summary
 
