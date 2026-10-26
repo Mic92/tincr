@@ -85,6 +85,7 @@
           default = pkgs.callPackage ./nix/devshell.nix {
             inherit (self.packages.${system}) tincd-c sptps-test-c;
           };
+          fuzz = pkgs.callPackage ./nix/fuzz-shell.nix { };
         }
         // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
           android = (androidPkgsFor system).callPackage ./nix/devshell-android.nix {

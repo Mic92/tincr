@@ -53,5 +53,9 @@ nix = { version = "0.31", default-features = false, features = ["ioctl", "fs"] }
 # fail with EACCES). The test skip is the only consumer.
 nix = { version = "0.31", default-features = false, features = ["user", "fs", "event"] }
 
+[features]
+# Exposes `tinc_device::fuzz` for the cargo-fuzz targets in /fuzz.
+fuzzing = []
+
 [lints]
 workspace = true

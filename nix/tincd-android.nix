@@ -22,6 +22,8 @@ let
         ../Cargo.toml
         ../Cargo.lock
         ../crates
+        ../fuzz/Cargo.toml
+        ../fuzz/fuzz_targets
       ];
     };
     pname = "tincd-android";

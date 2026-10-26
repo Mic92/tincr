@@ -37,6 +37,9 @@ mod dns;
 mod egress;
 pub(crate) mod event;
 mod fragment;
+#[cfg(any(test, feature = "fuzzing"))]
+#[doc(hidden)]
+pub mod fuzz;
 pub mod graph;
 mod icmp;
 mod ids;
