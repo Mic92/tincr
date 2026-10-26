@@ -222,7 +222,7 @@ impl Daemon {
         mtu: i32,
         from_is_myself: bool,
     ) -> bool {
-        self.send_mtu_info_from(self.myself, to_nid, to_name, mtu, from_is_myself)
+        self.send_mtu_info_from(self.myself, to_nid, to_name, mtu, from_is_myself, 0)
     }
 
     /// `send_mtu_info` with explicit `from`. `from_is_myself` separate
@@ -234,6 +234,7 @@ impl Daemon {
         to_name: &str,
         mtu: i32,
         from_is_myself: bool,
+        forwarded_rx_len: u16,
     ) -> bool {
         let to_is_myself = to_nid == self.myself;
         let to_reachable = self.graph.node(to_nid).is_some_and(|n| n.reachable);
@@ -295,18 +296,13 @@ impl Daemon {
             .graph
             .node(from_nid)
             .map_or_else(|| self.name.clone(), |n| n.name.clone());
-        // Piggy-back the udp-rx ack on outgoing MTU_INFOs we
-        // originate (forwarded ones carry the originator's view, not
-        // ours). The dedicated `send_udp_rx_ack` covers the direct-
-        // peer case this gate excludes; this catches the relayed-
-        // peer case for free.
         let udp_rx_len = if from_is_myself {
             self.dp
                 .tunnels
                 .get_mut(&to_nid)
                 .map_or(0, |t| mem::take(&mut t.udp_rx_maxlen))
         } else {
-            0
+            forwarded_rx_len
         };
         let msg = MtuInfo {
             from: from_name,
@@ -471,12 +467,19 @@ impl Daemon {
                                 "Ignoring off-path MTU_INFO for {} via {conn_name}",
                                 parsed.from);
                 }
-                Ok(self.send_mtu_info_from(from, to, &parsed.to, i32::from(new_mtu), false))
+                Ok(self.send_mtu_info_from(
+                    from,
+                    to,
+                    &parsed.to,
+                    i32::from(new_mtu),
+                    false,
+                    parsed.udp_rx_len,
+                ))
             }
             MtuInfoAction::Forward { from, to } => {
                 // adjust_mtu_for_send may tighten further with our knowledge.
                 let mtu = parsed.mtu.min(udp_info::MTU_MAX);
-                Ok(self.send_mtu_info_from(from, to, &parsed.to, mtu, false))
+                Ok(self.send_mtu_info_from(from, to, &parsed.to, mtu, false, parsed.udp_rx_len))
             }
         }
     }

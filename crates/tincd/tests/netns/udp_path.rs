@@ -162,11 +162,21 @@ fn drop_input(matches: &[&str]) -> bool {
 /// while bob→alice must stay on TCP (`minmtu == 0`).
 #[test]
 fn asymmetric_confirm_via_meta() {
+    asymmetric_confirm("asymmetric_confirm_via_meta", Topology::Direct, 1400);
+}
+
+/// Acks are debounced per hop, so only confirmation is checked.
+#[test]
+fn asymmetric_confirm_via_relayed_meta() {
+    asymmetric_confirm("asymmetric_confirm_via_relayed_meta", Topology::ViaRelay, 0);
+}
+
+fn asymmetric_confirm(test: &str, topology: Topology, want_minmtu: u16) {
     // The meta ack is debounced by MTUInfoInterval and driven by the
     // ping tick. Defaults would exceed the test budget.
     let Some(s) = Scenario::start(
-        "asymmetric_confirm_via_meta",
-        Topology::Direct,
+        test,
+        topology,
         "MTUInfoInterval = 1\nPingInterval = 1",
         &[Drop::UdpToAlice],
     ) else {
@@ -179,7 +189,7 @@ fn asymmetric_confirm_via_meta() {
         let nodes = s.alice_view();
         let udp_confirmed = node_status(&nodes, "bob")? & UDP_CONFIRMED != 0;
         let (_, minmtu, _) = node_pmtu(&nodes, "bob")?;
-        (udp_confirmed && minmtu >= 1400).then_some(())
+        (udp_confirmed && minmtu >= want_minmtu).then_some(())
     });
     let bob_nodes = s.bob_view();
     let logs = s.finish();
