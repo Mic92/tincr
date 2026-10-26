@@ -4,7 +4,7 @@ use super::intervals::{
     EDGE_STORM_THRESHOLD, HOUSEKEEP_SWEEP, PERIODIC_TICK, PING_SWEEP, SLEEPTIME_MAX, SLEEPTIME_MIN,
 };
 use super::{
-    ConnId, Daemon, SignalWhat, TimerWhat, apply_reloadable_settings, parse_connect_to_from_config,
+    ConnId, Daemon, SignalWhat, TimerWhat, load_settings, parse_connect_to_from_config,
     parse_subnets_from_config,
 };
 
@@ -13,14 +13,13 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::outgoing::{Outgoing, resolve_config_addrs};
+use crate::outgoing::Outgoing;
 use crate::script::{ScriptEnv, ScriptResult};
 use crate::{invitation_serve, reload, script};
 
 use super::setup;
 use crate::addrcache::AddressCache;
 use crate::graph::NodeId;
-use crate::listen::AddrFamily;
 use crate::outgoing::OutOrigin;
 use crate::portmap::PortmapEvent;
 use crate::scriptworker::Job;
@@ -572,9 +571,6 @@ impl Daemon {
     }
 
     /// False if config re-read failed; daemon continues either way.
-    ///
-    /// not reloadable: Port, `AddressFamily`, `DeviceType` (need re-bind/
-    /// re-open). Not-yet: Compression, Forwarding.
     pub(super) fn reload_configuration(&mut self) -> bool {
         let (config, new_hosts) =
             match setup::read_daemon_config(&self.confbase, &self.cmdline_conf) {
@@ -586,49 +582,31 @@ impl Daemon {
                 }
             };
 
-        // Warn about edits to keys that need a full restart, so an
-        // operator who changed Port= and ran `tinc reload` is told
-        // why nothing happened instead of silently keeping the old
-        // bind. Compared as raw strings (first value) against what
-        // we are actually running with; only the keys that map to
-        // listener/device/key state are checked.
+        let mut settings = match load_settings(&config) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!(target: "tincd", "Unable to reload configuration: {e}");
+                return false;
+            }
+        };
+        let mut ignored = settings.keep_restart_only(&self.settings);
+        // These have no live settings value to compare against.
+        if config
+            .lookup("Interface")
+            .next()
+            .is_some_and(|e| e.get_str() != self.iface)
         {
-            let lookup = |k: &str| config.lookup(k).next().map(|e| e.get_str().to_owned());
-            let warn = |k: &str| {
-                log::warn!(target: "tincd",
-                    "{k} changed in configuration but requires a restart to take effect");
-            };
-            if let Some(p) = lookup("Port")
-                && p.parse::<u16>().ok() != Some(self.settings.port)
-            {
-                warn("Port");
-            }
-            if let Some(af) = lookup("AddressFamily")
-                && AddrFamily::from_config(&af) != Some(self.settings.addressfamily)
-            {
-                warn("AddressFamily");
-            }
-            // Keys with no live value to compare against — just
-            // detect that they were touched since the last check by
-            // diffing against what setup() stashed. We don't stash
-            // those, so use the simpler heuristic: warn if the key
-            // is present and differs from the device/iface we have.
-            if let Some(iface) = lookup("Interface")
-                && iface != self.iface
-            {
-                warn("Interface");
-            }
-            // The sandbox grant was computed at startup.
-            if new_hosts.overlay() != self.hosts.overlay() {
-                warn("HostsOverlayDirectory");
-            }
-            // BindToAddress / ListenAddress / Device / DeviceType /
-            // Mode / key paths are also restart-only but have no
-            // single live value to diff against here; covered in
-            // docs/OPERATING.md instead of a noisy per-reload note.
+            ignored.push("Interface");
         }
-
-        apply_reloadable_settings(&config, &mut self.settings);
+        // The sandbox grant was computed at startup.
+        if new_hosts.overlay() != self.hosts.overlay() {
+            ignored.push("HostsOverlayDirectory");
+        }
+        for k in ignored {
+            log::warn!(target: "tincd",
+                "{k} changed in configuration but requires a restart to take effect");
+        }
+        self.settings = settings;
 
         if let Some(dns) = &mut self.dns {
             dns.aliases = setup::load_aliases(&self.hosts);
@@ -732,8 +710,7 @@ impl Daemon {
         // Add: same path as setup()
         for peer in to_add {
             self.lookup_or_add_node(&peer);
-            let config_addrs = resolve_config_addrs(&self.hosts, &peer);
-            let addr_cache = AddressCache::open(&self.confbase, &peer, config_addrs);
+            let addr_cache = AddressCache::open(&self.confbase, &peer);
             let oid = self.outgoings.insert(Outgoing {
                 node_name: peer,
                 origin: OutOrigin::ConfigConnectTo,

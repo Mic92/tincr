@@ -116,20 +116,19 @@ impl AddressCache {
         }
     }
 
-    /// Load `<state-dir>/addrcache/<peer>` (if present) and seed tier
-    /// 3 from `config_addrs`. Never fails: unreadable / malformed
-    /// cache files degrade to empty.
+    /// Load `<state-dir>/addrcache/<peer>` (if present). Tier 3 is
+    /// filled per round by [`Self::set_config`]. Never fails: unreadable
+    /// or malformed cache files degrade to empty.
     #[must_use]
-    pub(crate) fn open(confbase: &Path, peer: &str, config_addrs: Vec<(String, u16)>) -> Self {
+    pub(crate) fn open(confbase: &Path, peer: &str) -> Self {
         let state_dir = env::var_os("STATE_DIRECTORY").map(PathBuf::from);
         let path = resolve_cache_dir(confbase, state_dir.as_deref()).join(peer);
-        let (config, hostnames) = split_config(config_addrs);
         Self {
             recent: load(&path),
             known: Vec::new(),
-            config,
+            config: Vec::new(),
             resolved: Vec::new(),
-            hostnames,
+            hostnames: Vec::new(),
             cursor: 0,
             path: Some(path),
         }
@@ -148,6 +147,12 @@ impl AddressCache {
             cursor: 0,
             path: None,
         }
+    }
+
+    /// Replace tier 3 with the current `Address =` lines, so an edited
+    /// host file takes effect on the next round.
+    pub(crate) fn set_config(&mut self, config_addrs: Vec<(String, u16)>) {
+        (self.config, self.hostnames) = split_config(config_addrs);
     }
 
     /// Replace tier 2 with a fresh snapshot. Called once per retry
@@ -364,11 +369,12 @@ mod tests {
     fn roundtrip_file() {
         let tmp = tmpdir("roundtrip");
         {
-            let mut c = AddressCache::open(&tmp, "bob", vec![("10.0.0.1".into(), 655)]);
+            let mut c = AddressCache::open(&tmp, "bob");
             c.add_recent(sa("[::1]:655"));
             c.add_recent(sa("192.168.1.1:655"));
         }
-        let mut c = AddressCache::open(&tmp, "bob", vec![("10.0.0.1".into(), 655)]);
+        let mut c = AddressCache::open(&tmp, "bob");
+        c.set_config(vec![("10.0.0.1".into(), 655)]);
         assert_eq!(
             drain(&mut c),
             vec![sa("192.168.1.1:655"), sa("[::1]:655"), sa("10.0.0.1:655")]
@@ -380,7 +386,7 @@ mod tests {
         let tmp = tmpdir("cap");
         let path = tmp.join("addrcache").join("bob");
         {
-            let mut c = AddressCache::open(&tmp, "bob", vec![]);
+            let mut c = AddressCache::open(&tmp, "bob");
             for i in 0..10u8 {
                 c.add_recent(sa(&format!("10.0.0.{i}:655")));
             }
@@ -419,11 +425,11 @@ mod tests {
     #[test]
     fn hostname_not_resolved_inline() {
         let tmp = tmpdir("host");
-        let mut c = AddressCache::open(
-            &tmp,
-            "bob",
-            vec![("10.0.0.1".into(), 655), ("bob.example.com".into(), 655)],
-        );
+        let mut c = AddressCache::open(&tmp, "bob");
+        c.set_config(vec![
+            ("10.0.0.1".into(), 655),
+            ("bob.example.com".into(), 655),
+        ]);
         assert_eq!(c.unresolved_hosts(), vec![("bob.example.com".into(), 655)]);
         assert_eq!(c.next_addr(), Some(sa("10.0.0.1:655")));
         assert_eq!(c.next_addr(), None);

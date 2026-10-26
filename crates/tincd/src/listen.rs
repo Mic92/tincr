@@ -26,7 +26,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 /// Per-listener socket options from config, threaded through `open_listeners`
 /// so the socket helpers stay config-free. All but `bind_to_interface` are
 /// best-effort: failure logs and continues.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SockOpts {
     /// UDP `SO_RCVBUF`. Default 1MB (kernel default on Linux is
     /// ~200KB; bumped to handle burst traffic). 0 = skip the

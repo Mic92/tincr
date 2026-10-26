@@ -73,7 +73,7 @@ impl Daemon {
 
         // strictsubnets - hosts/ file is authority. Forward (others
         // may not be strict) but don't add locally.
-        if self.settings.strictsubnets {
+        if self.settings.strict_subnets() {
             log::warn!(target: "tincd::proto",
                        "Ignoring unauthorized ADD_SUBNET for {owner_name} \
                         ({subnet}) (strictsubnets)");
@@ -182,7 +182,7 @@ impl Daemon {
         // after forward, before del. (not-found-strictsubnets case
         // folds into del()==false below: same observable behavior -
         // forward, no del.)
-        if self.settings.strictsubnets {
+        if self.settings.strict_subnets() {
             return Ok(nw);
         }
 

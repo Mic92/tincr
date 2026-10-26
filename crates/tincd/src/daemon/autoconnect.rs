@@ -10,7 +10,7 @@ use std::time::Duration;
 use crate::addrcache::AddressCache;
 use crate::autoconnect::{self, AutoAction, NodeSnapshot, OutgoingSnapshot, ShortcutKnobs};
 use crate::keys;
-use crate::outgoing::{OutOrigin, Outgoing, OutgoingId, resolve_config_addrs};
+use crate::outgoing::{OutOrigin, Outgoing, OutgoingId};
 use tinc_crypto::os_rng;
 
 impl Daemon {
@@ -46,7 +46,7 @@ impl Daemon {
             // Preload authorized subnets. Skip our own name (setup()
             // already added them; add is idempotent but skipping
             // saves a parse).
-            if self.settings.strictsubnets && fname != self.name {
+            if self.settings.strict_subnets() && fname != self.name {
                 for s in parse_subnets_from_config(&cfg, &fname) {
                     self.subnets.add(s, fname.clone());
                 }
@@ -194,8 +194,7 @@ impl Daemon {
                                "Autoconnecting to {name}");
                 }
                 self.lookup_or_add_node(&name);
-                let config_addrs = resolve_config_addrs(&self.hosts, &name);
-                let addr_cache = AddressCache::open(&self.confbase, &name, config_addrs);
+                let addr_cache = AddressCache::open(&self.confbase, &name);
                 let oid = self.outgoings.insert(Outgoing {
                     node_name: name,
                     origin,

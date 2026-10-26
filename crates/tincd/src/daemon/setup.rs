@@ -42,7 +42,7 @@ use crate::listen::{
 };
 use crate::mac_lease;
 use crate::node_id::NodeId6Table;
-use crate::outgoing::{Outgoing, resolve_config_addrs};
+use crate::outgoing::Outgoing;
 use crate::seen::SeenRequests;
 use crate::shard::runtime::{ShardRuntime, resolve as resolve_shards};
 use crate::subnet_tree::SubnetTree;
@@ -1020,8 +1020,7 @@ impl Daemon {
     /// an `ADD_EDGE` arriving via another path can find it.
     fn add_config_outgoing(&mut self, peer: String) {
         self.lookup_or_add_node(&peer);
-        let config_addrs = resolve_config_addrs(&self.hosts, &peer);
-        let addr_cache = AddressCache::open(&self.confbase, &peer, config_addrs);
+        let addr_cache = AddressCache::open(&self.confbase, &peer);
         let oid = self.outgoings.insert(Outgoing {
             node_name: peer,
             origin: OutOrigin::ConfigConnectTo,

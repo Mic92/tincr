@@ -1,6 +1,6 @@
 //! Reloadable config layer. Pure `tinc_conf::Config → DaemonSettings`;
 //! NO event loop / device / socket deps. `load_settings` is the
-//! setup-time entry point; `apply_reloadable_settings` is the
+//! setup-time entry point; `parse_reloadable` is the
 //! SIGHUP-time subset.
 
 use std::collections::HashSet;
@@ -298,6 +298,54 @@ pub enum RoutingMode {
     Hub,
 }
 
+impl DaemonSettings {
+    /// `TunnelServer` implies `StrictSubnets`.
+    #[must_use]
+    pub fn strict_subnets(&self) -> bool {
+        self.strictsubnets || self.tunnelserver
+    }
+
+    /// Restore fields from `running` that only take effect at startup.
+    /// Returns the config keys whose change is being ignored.
+    pub(crate) fn keep_restart_only(&mut self, running: &Self) -> Vec<&'static str> {
+        let mut ignored = Vec::new();
+        // Derived at setup, not configured.
+        self.sockopts.shard_group = running.sockopts.shard_group;
+        macro_rules! keep {
+            ($($key:literal => $($f:ident).+),* $(,)?) => {$(
+                if self.$($f).+ != running.$($f).+ {
+                    ignored.push($key);
+                    self.$($f).+ = running.$($f).+.clone();
+                }
+            )*};
+        }
+        keep!(
+            "Port" => port,
+            "AddressFamily" => addressfamily,
+            "Compression" => compression,
+            "Mode" => routing_mode,
+            "Shards" => shards,
+            "BindToAddress" => bind_to_address,
+            "Proxy" => proxy,
+            "UDPRcvBuf/UDPSndBuf/FWMark/BindToInterface" => sockopts,
+            "DeviceStandby" => device_standby,
+            "SPTPSKex" => sptps_kex,
+            "UPnP" => upnp,
+            "UPnPDiscoverWait" => upnp_discover_wait,
+            "UPnPRefreshPeriod" => upnp_refresh_period,
+            "MaxConnectionBurst" => max_connection_burst,
+        );
+        if self.scripts_interpreter != running.scripts_interpreter
+            && !sandbox::can(Action::UseNewPaths)
+        {
+            ignored.push("ScriptsInterpreter");
+            self.scripts_interpreter
+                .clone_from(&running.scripts_interpreter);
+        }
+        ignored
+    }
+}
+
 impl Default for DaemonSettings {
     fn default() -> Self {
         Self {
@@ -351,7 +399,7 @@ impl Default for DaemonSettings {
 /// from `setup()` and `reload_configuration()`. Non-reloadable
 /// settings (Port, `AddressFamily`, `DeviceType`) are not here - they
 /// need re-bind / re-open which `setup()` does inline.
-pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &mut DaemonSettings) {
+fn parse_reloadable(config: &tinc_conf::Config, settings: &mut DaemonSettings) {
     cfg_int!(config, "PingInterval", u32, |v| if v >= 1 {
         settings.pinginterval = v.min(MAX_DURATION_SECS);
     });
@@ -389,8 +437,6 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
     cfg_bool!(config, "DecrementTTL" => settings.decrement_ttl);
     cfg_bool!(config, "TunnelServer" => settings.tunnelserver);
     cfg_bool!(config, "StrictSubnets" => settings.strictsubnets);
-    // tunnelserver implies strictsubnets. Applied after both parsed.
-    settings.strictsubnets |= settings.tunnelserver;
     cfg_bool!(config, "LocalDiscovery" => settings.local_discovery);
     if let Some(e) = config.lookup("Shards").next() {
         match e.get_str() {
@@ -405,16 +451,10 @@ pub(crate) fn apply_reloadable_settings(config: &tinc_conf::Config, settings: &m
     cfg_bool!(config, "PriorityInheritance" => settings.priorityinheritance);
     cfg_bool!(config, "AutoConnect" => settings.autoconnect);
     // ScriptsExtension is not parsed (Windows-only).
-    let new_interp = config
+    settings.scripts_interpreter = config
         .lookup("ScriptsInterpreter")
         .next()
         .map(|e| e.get_str().to_owned());
-    if new_interp == settings.scripts_interpreter || sandbox::can(Action::UseNewPaths) {
-        settings.scripts_interpreter = new_interp;
-    } else {
-        log::warn!(target: "tincd",
-            "Ignoring ScriptsInterpreter change: not allowed at current sandbox level");
-    }
     cfg_bool!(config, "UDPDiscovery" => settings.udp_discovery);
     cfg_int!(config, "UDPDiscoveryKeepaliveInterval", u32, |v| {
         settings.udp_discovery_keepalive_interval = v;
@@ -563,12 +603,10 @@ pub(super) fn parse_bind_addr(s: &str, default_port: u16) -> (&str, u16) {
     (host, port.parse().unwrap_or(default_port))
 }
 
-/// Parse the non-reloadable settings from `config` into a fresh
-/// `DaemonSettings`. Called once from `setup()`. Reloadable settings
-/// are folded in via `apply_reloadable_settings`; the rest (Port,
-/// `AddressFamily`, Mode, sockopts, Proxy, Compression,
-/// `DeviceStandby`) need re-bind / re-open and are setup-only.
-pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings, SetupError> {
+/// Every setting, from defaults. Reload parses afresh too, so a removed
+/// key returns to its default, and [`DaemonSettings::keep_restart_only`]
+/// then pins what needs a restart.
+pub(crate) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings, SetupError> {
     let mut settings = DaemonSettings::default();
 
     // Port. HOST-tagged. `Port = 0` is valid: kernel picks (tests
@@ -592,10 +630,7 @@ pub(super) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings
         }
     }
 
-    // Reloadable settings. Factored into a helper so
-    // reload_configuration can call it too.
-    // not Port/AddressFamily (those need re-bind, setup-only).
-    apply_reloadable_settings(config, &mut settings);
+    parse_reloadable(config, &mut settings);
 
     // BindToAddress for outgoing source-addr selection. Non-
     // reloadable. We only stash the first entry here for the
@@ -750,6 +785,23 @@ mod tests {
         assert_eq!(parse_bind_addr("10.0.0.1 http", 655), ("10.0.0.1", 655));
     }
 
+    /// Reload parses afresh: removed keys return to their defaults, and
+    /// restart-only keys keep the running value.
+    #[test]
+    fn reload_is_a_fresh_parse() {
+        let running = load_settings(&cfg(&[
+            "DirectOnly = yes",
+            "TunnelServer = yes",
+            "Port = 1",
+        ]))
+        .unwrap();
+        assert!(running.directonly && running.strict_subnets());
+        let mut fresh = load_settings(&cfg(&["Port = 2"])).unwrap();
+        assert_eq!(fresh.keep_restart_only(&running), ["Port"]);
+        assert!(!fresh.directonly && !fresh.strict_subnets());
+        assert_eq!(fresh.port, 1);
+    }
+
     #[test]
     fn udp_discovery_timeout_clamped_above_keepalive() {
         let c = cfg(&[
@@ -757,7 +809,7 @@ mod tests {
             "UDPDiscoveryKeepaliveInterval = 10",
         ]);
         let mut s = DaemonSettings::default();
-        apply_reloadable_settings(&c, &mut s);
+        parse_reloadable(&c, &mut s);
         assert!(
             s.udp_discovery_timeout > s.udp_discovery_keepalive_interval,
             "timeout {} must exceed keepalive interval {}",
@@ -768,7 +820,7 @@ mod tests {
         // Keepalive raised past the default timeout also trips.
         let c = cfg(&["UDPDiscoveryKeepaliveInterval = 60"]);
         let mut s = DaemonSettings::default();
-        apply_reloadable_settings(&c, &mut s);
+        parse_reloadable(&c, &mut s);
         assert!(s.udp_discovery_timeout > s.udp_discovery_keepalive_interval);
     }
 
@@ -819,7 +871,7 @@ mod tests {
     fn forwarding_is_reloadable() {
         let mut s = DaemonSettings::default();
         assert_eq!(s.forwarding_mode, ForwardingMode::Internal);
-        apply_reloadable_settings(&cfg(&["Forwarding = off"]), &mut s);
+        parse_reloadable(&cfg(&["Forwarding = off"]), &mut s);
         assert_eq!(
             s.forwarding_mode,
             ForwardingMode::Off,
@@ -830,16 +882,16 @@ mod tests {
     #[test]
     fn pingtimeout_out_of_range_snaps_to_pinginterval() {
         let mut s = DaemonSettings::default();
-        apply_reloadable_settings(&cfg(&["PingTimeout = 0"]), &mut s);
+        parse_reloadable(&cfg(&["PingTimeout = 0"]), &mut s);
         assert_eq!(
             s.pingtimeout, s.pinginterval,
             "C tinc snaps out-of-range PingTimeout to pinginterval, not 1"
         );
         let mut s = DaemonSettings::default();
-        apply_reloadable_settings(&cfg(&["PingInterval = 10", "PingTimeout = 30"]), &mut s);
+        parse_reloadable(&cfg(&["PingInterval = 10", "PingTimeout = 30"]), &mut s);
         assert_eq!(s.pingtimeout, 10);
         let mut s = DaemonSettings::default();
-        apply_reloadable_settings(&cfg(&["PingTimeout = 3"]), &mut s);
+        parse_reloadable(&cfg(&["PingTimeout = 3"]), &mut s);
         assert_eq!(s.pingtimeout, 3);
     }
 
@@ -847,7 +899,7 @@ mod tests {
     fn keyexpire_clamped() {
         for (raw, want) in [("31536000", 3600), ("5", 5), ("1800", 1800)] {
             let mut s = DaemonSettings::default();
-            apply_reloadable_settings(&cfg(&[&format!("KeyExpire = {raw}")]), &mut s);
+            parse_reloadable(&cfg(&[&format!("KeyExpire = {raw}")]), &mut s);
             assert_eq!(s.keylifetime, want, "KeyExpire = {raw}");
         }
     }
