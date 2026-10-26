@@ -45,10 +45,6 @@
 //! ping` pins that as intentional.
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 #[cfg(target_os = "linux")]
 use landlock::{
@@ -351,12 +347,12 @@ fn build_and_apply_ruleset(p: SandboxPaths, level: Level) -> Result<(), String> 
 
     // Touch logfile so PathBeneath can open it (init_logging
     // already created it; belt-and-braces).
-    if p.has_logfile {
-        let lf = p.runtime_files.last().expect("has_logfile invariant");
-        if let Err(e) = OpenOptions::new().append(true).create(true).open(lf) {
-            log::warn!(target: "tincd",
-                "Sandbox: touch {}: {e}", lf.display());
-        }
+    if p.has_logfile
+        && let Some(lf) = p.runtime_files.last()
+        && let Err(e) = OpenOptions::new().append(true).create(true).open(lf)
+    {
+        log::warn!(target: "tincd",
+            "Sandbox: touch {}: {e}", lf.display());
     }
 
     // confbase + subdirs are NO EXEC. Landlock rules are additive,

@@ -49,11 +49,6 @@
 
 #![forbid(unsafe_code)]
 #![cfg(feature = "upnp")]
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 mod igd;
 mod pcp;
@@ -220,6 +215,7 @@ impl Portmapper {
     /// # Panics
     /// `thread::spawn` failure.
     #[must_use]
+    #[expect(clippy::expect_used, reason = "documented panic")]
     pub(crate) fn spawn(
         local_port: u16,
         mode: UpnpMode,
@@ -457,7 +453,7 @@ fn worker(
         }
         first = false;
 
-        for (i, &(af, proto)) in SLOTS.iter().enumerate() {
+        for ((&(af, proto), nonce), last) in SLOTS.iter().zip(&nonces).zip(last.iter_mut()) {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
@@ -478,19 +474,19 @@ fn worker(
                     proto,
                     lease,
                     discover_wait,
-                    &nonces[i],
+                    nonce,
                 )),
                 // v6 has no IGD fallback (igd-next lacks
                 // `WANIPv6FirewallControl::AddPinhole`). PCP only;
                 // no v6 default route ⇒ nothing to do, not an error.
                 Af::V6 => gw.v6.map(|(gw6, scope, gua)| {
-                    pcp::map_v6(gw6, scope, gua, proto, local_port, lease, &nonces[i])
+                    pcp::map_v6(gw6, scope, gua, proto, local_port, lease, nonce)
                         .and_then(|ext| check_ext(ext, "PCP"))
                         .map(|ext| (ext, "PCP"))
                 }),
             };
             let Some(res) = res else {
-                if let Some(ext) = last[i].take()
+                if let Some(ext) = last.take()
                     && tx
                         .send(PortmapEvent::Lost {
                             af,
@@ -506,8 +502,8 @@ fn worker(
             };
             match res {
                 Ok((ext, via)) => {
-                    if last[i] != Some(ext) {
-                        last[i] = Some(ext);
+                    if *last != Some(ext) {
+                        *last = Some(ext);
                         if tx
                             .send(PortmapEvent::Mapped {
                                 af,
@@ -528,7 +524,7 @@ fn worker(
                     // `Mapped` and `Lost` to the operator.
                     log::debug!(target: "tincd::portmap",
                                 "map {af:?}/{proto:?} {local_port}: {e}");
-                    if let Some(ext) = last[i].take()
+                    if let Some(ext) = last.take()
                         && tx
                             .send(PortmapEvent::Lost {
                                 af,

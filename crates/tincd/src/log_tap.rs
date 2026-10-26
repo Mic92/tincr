@@ -36,10 +36,6 @@
 //! panic is loud and points here.
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::cell::RefCell;
 use std::mem;
@@ -156,6 +152,7 @@ impl log::Log for TapLogger {
 ///
 /// # Panics
 /// As `env_logger::Builder::init`: called twice or another logger installed.
+#[expect(clippy::expect_used, reason = "documented panic, same as env_logger")]
 pub fn init(inner: env_logger::Logger) {
     let max_level = inner.filter();
     log::set_boxed_logger(Box::new(TapLogger { inner }))

@@ -6,13 +6,9 @@
 //! can take the direct-UDP path with no per-chunk side effects. No
 //! `&mut Daemon` reborrow: the `Arc<AtomicU64>` outseqno is the seqno
 //! allocator now.
-#![expect(
-    clippy::indexing_slicing,
-    clippy::unwrap_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::sync::Arc;
+use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 
 use super::{TunnelHandles, TxSnapshot};
@@ -61,7 +57,9 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
     // ARP gate (`forward_packet:1009`). `route()` returns `Unsupported`
     // for ARP anyway, but checking it explicitly skips the trie probe.
     // `chunk0.len() < 14` falls through `route()`'s `TooShort`.
-    if chunk0.len() >= 14 && u16::from_be_bytes([chunk0[12], chunk0[13]]) == ETH_P_ARP {
+    if let Some(&[hi, lo]) = chunk0.get(12..14)
+        && u16::from_be_bytes([hi, lo]) == ETH_P_ARP
+    {
         return None;
     }
 
@@ -112,7 +110,11 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
     }
     // `udp_addr` set ⇔ `udp_confirmed` flipped. Cold `choose_udp_
     // address` builds a stack-local; can't copy what isn't cached.
-    let (dst, sock) = handles.udp_addr.lock().unwrap().clone()?;
+    let (dst, sock) = handles
+        .udp_addr
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()?;
 
     // all GATES PASSED. The one side effect: burn `count` seqnos.
     // The `Arc<AtomicU64>` is shared with the control-side `Sptps`;

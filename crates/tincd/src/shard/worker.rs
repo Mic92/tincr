@@ -6,14 +6,10 @@
 //! `Arc<TunnelHandles>` inside it.
 
 #![cfg(target_os = "linux")]
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -50,7 +46,7 @@ impl SnapMailbox {
     }
 
     pub(crate) fn publish(&self, snap: Arc<TxSnapshot>) {
-        *self.snap.lock().expect("snap lock") = Some(snap);
+        *self.snap.lock().unwrap_or_else(PoisonError::into_inner) = Some(snap);
         self.epoch.fetch_add(1, Ordering::Release);
     }
 
@@ -60,7 +56,10 @@ impl SnapMailbox {
             return None;
         }
         *seen = e;
-        self.snap.lock().expect("snap lock").clone()
+        self.snap
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -91,7 +90,8 @@ impl Drop for WorkerHandle {
 /// Spawn worker `idx` (1-based; shard 0 is the control thread).
 ///
 /// # Panics
-/// Thread spawn failure.
+/// Thread spawn or eventfd failure.
+#[expect(clippy::expect_used, reason = "documented panic")]
 pub(crate) fn spawn(
     idx: usize,
     udp: Vec<OwnedFd>,
@@ -252,7 +252,7 @@ fn tun_drain(
                     csum_offset,
                 };
                 let Ok(count) = tso_split(
-                    &tx.arena.as_contiguous()[..len],
+                    tx.arena.as_contiguous().get(..len).unwrap_or_default(),
                     &hdr,
                     gso_type,
                     &mut tx.tso_scratch,
@@ -272,15 +272,18 @@ fn tun_drain(
 /// Seal-send one split super; punts the segments when the fast path
 /// doesn't apply.
 fn tx_super(snap: Option<&TxSnapshot>, punt: &PuntQueue, tx: &mut TxState, count: usize) -> bool {
+    let first = tx.tso_lens.first().and_then(|&n| tx.tso_scratch.get(..n));
     #[expect(clippy::cast_possible_truncation)] // count <= DRAIN_CAP
-    let target = snap.and_then(|s| tx_probe(s, &tx.tso_scratch[..tx.tso_lens[0]], count as u32));
+    let target = snap
+        .zip(first)
+        .and_then(|(s, first)| tx_probe(s, first, count as u32));
     if let Some(target) = target
         && let Some(egress) = tx.egress.get_mut(usize::from(target.sock))
     {
         let r = seal_super(
             &target,
             DeviceArena::STRIDE,
-            &tx.tso_lens[..count],
+            tx.tso_lens.get(..count).unwrap_or_default(),
             &tx.tso_scratch,
             &mut tx.tx_scratch,
             &mut tx.batch,
@@ -295,9 +298,11 @@ fn tx_super(snap: Option<&TxSnapshot>, punt: &PuntQueue, tx: &mut TxState, count
         }
     }
     let mut punted = false;
-    for i in 0..count {
+    for (i, &n) in tx.tso_lens.iter().take(count).enumerate() {
         let off = i * DeviceArena::STRIDE;
-        punted |= punt.push(&tx.tso_scratch[off..off + tx.tso_lens[i]], None);
+        if let Some(seg) = tx.tso_scratch.get(off..off + n) {
+            punted |= punt.push(seg, None);
+        }
     }
     punted
 }
@@ -338,17 +343,18 @@ fn rx_batch(
     };
     let mut punted = false;
     let mut memo = RxDstMemo::default();
-    for (i, &(n, src)) in metas.iter().enumerate() {
-        if n == 0 {
+    for (buf, &(n, src)) in bufs.iter().zip(&metas) {
+        let Some(pkt) = buf.get(..n).filter(|p| !p.is_empty()) else {
             continue;
-        }
-        let pkt = &bufs[i][..n];
+        };
         if let Some(s) = snap
             && let Some(target) = rx_probe(s, pkt)
             && let Ok(len) = rx_open(&target, s, scratch, &mut memo)
         {
             target.handles.stats.add_in(1, len as u64);
-            gro_offer_or_write(&mut **tun, gro, &mut scratch[..len]);
+            if let Some(plain) = scratch.get_mut(..len) {
+                gro_offer_or_write(&mut **tun, gro, plain);
+            }
             continue;
         }
         let Some(src) = src else { continue };

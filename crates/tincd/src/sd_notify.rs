@@ -16,10 +16,6 @@
 //! blocks and nothing more.
 
 #![cfg(unix)]
-#![expect(
-    clippy::indexing_slicing,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::env;
 use std::ffi::OsStr;
@@ -66,7 +62,7 @@ fn notify_to(path: &OsStr, state: &str) -> io::Result<()> {
             // name *without* the leading NUL.
             #[cfg(target_os = "linux")]
             {
-                SocketAddr::from_abstract_name(&bytes[1..])?
+                SocketAddr::from_abstract_name(bytes.get(1..).unwrap_or_default())?
             }
             #[cfg(not(target_os = "linux"))]
             {

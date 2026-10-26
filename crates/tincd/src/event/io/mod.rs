@@ -15,11 +15,6 @@
 //! This means `EventLoop` stores `RawFd` per slot (so it can
 //! reregister/deregister later), but doesn't `close()` on drop.
 //! Closing is the `connection_t` equivalent's job.
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
@@ -151,11 +146,13 @@ impl<W: Copy> EventLoop<W> {
             self.free.push(idx);
             return Err(e);
         }
-        self.slots[idx] = Some(Slot {
-            fd: raw,
-            interest,
-            what,
-        });
+        if let Some(slot) = self.slots.get_mut(idx) {
+            *slot = Some(Slot {
+                fd: raw,
+                interest,
+                what,
+            });
+        }
         self.live += 1;
         Ok(IoId(idx))
     }
@@ -163,12 +160,14 @@ impl<W: Copy> EventLoop<W> {
     /// Change interest on a registered fd; no syscall if unchanged.
     ///
     /// # Errors
-    /// `epoll_ctl(MOD)` failures.
-    ///
-    /// # Panics
-    /// If `id` is dangling (C would use-after-free).
+    /// `epoll_ctl(MOD)` failures, or `NotFound` if `id` is dangling (C
+    /// would use-after-free).
     pub(crate) fn set(&mut self, id: IoId, interest: Io) -> io::Result<()> {
-        let slot = self.slots[id.0].as_mut().expect("dangling IoId");
+        let slot = self
+            .slots
+            .get_mut(id.0)
+            .and_then(Option::as_mut)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
         if slot.interest == interest {
             return Ok(());
         }
@@ -227,7 +226,7 @@ impl<W: Copy> EventLoop<W> {
             Err(e) => return Err(e),
         };
 
-        for ev in &self.events[..n_events] {
+        for ev in self.events.iter().take(n_events) {
             let idx = ev_token(ev);
             // Generation-guard substitute, part 1: slot still exists.
             let Some(slot) = self.slots.get(idx).and_then(Option::as_ref) else {

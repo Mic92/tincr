@@ -14,10 +14,6 @@
 //!     `(dst, sock, relay, origlen)` tuple, same egress trait
 //!   - `PKT_NORMAL` only ([`tx_probe`](super::tx_probe) gates
 //!     `outcompression == 0`)
-#![expect(
-    clippy::indexing_slicing,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use super::probe::TxTarget;
 use crate::daemon::PKT_NORMAL;
@@ -62,8 +58,10 @@ pub(crate) fn seal_super(
         let off = i * stride;
         // Body: frame minus eth header. tso_split guarantees len > 14
         // (frame_len = ETH_HLEN + total_len, total_len ≥ iphlen ≥ 20).
-        let body = &scratch_in[off + 14..off + len];
-        let body_len = len - 14;
+        let Some(body) = scratch_in.get(off + 14..off + len) else {
+            continue;
+        };
+        let body_len = body.len();
         // i < lens.len() ≤ DEVICE_DRAIN_CAP = 64; `as u32` is fine.
         let seqno = target.seqno_base.wrapping_add(i as u32);
 

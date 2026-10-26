@@ -16,11 +16,6 @@
 //! silently degrading to per-frame sendto.
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::io;
 use std::io::IoSlice;
@@ -60,10 +55,11 @@ impl UdpEgress for Fast {
         // frame; the batch is only armed for drains >1). `frames[..last_len]` makes
         // the `frames.len() == last_len` invariant local.
         if b.count == 1 {
-            return self
-                .sock
-                .send_to(&b.frames[..usize::from(b.last_len)], b.dst)
-                .map(|_| ());
+            let frame = b
+                .frames
+                .get(..usize::from(b.last_len))
+                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+            return self.sock.send_to(frame, b.dst).map(|_| ());
         }
 
         // GSO path: one iovec over the dense run, split by the kernel at `b.stride`;
@@ -76,7 +72,7 @@ impl UdpEgress for Fast {
         let dst = SockaddrStorage::from(
             b.dst
                 .as_socket()
-                .expect("UDP egress destination is always an IP socket address"),
+                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?,
         );
 
         let iov = [IoSlice::new(b.frames)];

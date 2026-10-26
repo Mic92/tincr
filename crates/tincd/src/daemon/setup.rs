@@ -2,11 +2,6 @@
 //! and the giant `Daemon` struct literal. Everything here runs once.
 //! `SetupError` lives in the parent so `settings.rs` and this file
 //! both reach it via `super::` without a sibling cycle.
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use crate::node_id::NodeId6;
 use nix::sys::signal::{SigHandler, Signal, signal};
@@ -363,6 +358,7 @@ fn register_listeners(
 ) -> Result<Vec<ListenerSlot>, SetupError> {
     let mut listener_slots = Vec::with_capacity(listeners.len());
     for (i, l) in listeners.into_iter().enumerate() {
+        #[expect(clippy::expect_used, reason = "at most MAXSOCKETS listeners")]
         let i = u8::try_from(i).expect("MAXSOCKETS fits u8");
         ev.add(l.tcp_fd(), Io::Read, IoWhat::Tcp(i))
             .map_err(|e| SetupError::io("register TCP listener with event loop", e))?;
@@ -604,6 +600,7 @@ fn add_broadcast_subnets(subnets: &mut SubnetTree, config: &tinc_conf::Config) {
         "224.0.0.0/4",
         "ff00::/8",
     ] {
+        #[expect(clippy::expect_used, reason = "static literals")]
         subnets.add_broadcast(s.parse().expect("hard-coded broadcast subnet"));
     }
     for e in config.lookup("BroadcastSubnet") {
@@ -816,6 +813,10 @@ impl Daemon {
         });
 
         let listeners = open_all_listeners(&config, &settings, socket_activation)?;
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "open_all_listeners errors when empty"
+        )]
         let my_udp_port = listeners[0].udp_port();
         // Computed before `listeners` is consumed into `ListenerSlot`s.
         let address = pidfile_addr(&listeners);

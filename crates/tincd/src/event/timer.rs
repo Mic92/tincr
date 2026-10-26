@@ -5,11 +5,6 @@
 //! same instant — without it, two timers set in the same tick to the
 //! same offset would collide in the map. Same disambiguation as a
 //! pointer compare, but stable across runs.
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -79,8 +74,14 @@ impl<W: Copy> Timers<W> {
     pub(crate) fn add(&mut self, what: W) -> TimerId {
         let slot = Some(Slot { what, at: None });
         let idx = if let Some(idx) = self.free.pop() {
-            debug_assert!(self.slots[idx].is_none(), "freelist held live slot");
-            self.slots[idx] = slot;
+            #[expect(
+                clippy::indexing_slicing,
+                reason = "freelist only holds in-range indices"
+            )]
+            {
+                debug_assert!(self.slots[idx].is_none(), "freelist held live slot");
+                self.slots[idx] = slot;
+            }
             idx
         } else {
             self.slots.push(slot);
@@ -93,6 +94,11 @@ impl<W: Copy> Timers<W> {
     ///
     /// # Panics
     /// If `id` was `del`'d (C would dereference freed memory; we are louder).
+    #[expect(
+        clippy::indexing_slicing,
+        clippy::expect_used,
+        reason = "documented panic: callers never set a del'd TimerId"
+    )]
     pub(crate) fn set(&mut self, id: TimerId, after: Duration) {
         let slot = self.slots[id.0].as_mut().expect("dangling TimerId");
         if let Some(old_key) = slot.at.take() {
@@ -131,19 +137,15 @@ impl<W: Copy> Timers<W> {
     /// return time until the next one (`None` = none armed) for the poll timeout.
     /// Callbacks aren't fired inline as in C since the daemon owns both `&mut
     /// Timers` and everything else; consequently a fired timer stays allocated but
-    /// disarmed until the daemon `set`s it again. The `expect` below can't fire:
-    /// the key was just peeked from the same map.
+    /// disarmed until the daemon `set`s it again.
     pub(crate) fn tick(&mut self, out: &mut Vec<W>) -> Option<Duration> {
         out.clear();
         // Single clock read per execute.
         self.now = Instant::now();
 
-        // peek-copy-remove: can't `while let Some((k,_)) =
-        // first_key_value()` then `remove(k)` — the &k borrow
-        // outlives into remove.
         loop {
-            let key = match self.by_deadline.first_key_value() {
-                Some((k, _)) if k.0 <= self.now => *k,
+            match self.by_deadline.first_key_value() {
+                Some((k, _)) if k.0 <= self.now => {}
                 Some((k, _)) => {
                     return Some(k.0 - self.now);
                 }
@@ -151,13 +153,13 @@ impl<W: Copy> Timers<W> {
                     // No more timers. `epoll_wait(-1)` is infinite wait.
                     return None;
                 }
-            };
-            let idx = self.by_deadline.remove(&key).expect("just peeked");
-            // Invariant: anything in `by_deadline` has a live slot.
-            let slot = self.slots[idx].as_mut().expect("armed slot is live");
-            // Disarm; auto-del not ported (see doc).
-            slot.at = None;
-            out.push(slot.what);
+            }
+            let (_, idx) = self.by_deadline.pop_first()?;
+            if let Some(slot) = self.slots.get_mut(idx).and_then(Option::as_mut) {
+                // Disarm. Auto-del not ported (see doc).
+                slot.at = None;
+                out.push(slot.what);
+            }
         }
     }
 

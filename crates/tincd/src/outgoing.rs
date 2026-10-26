@@ -15,11 +15,6 @@
 //! between-fork-and-exec child path is libc-only (no `std`, no
 //! allocator, no formatting) because the surviving thread inherits
 //! arbitrary held locks from the multi-threaded parent.
-#![expect(
-    clippy::indexing_slicing,
-    clippy::unwrap_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::ffi::CString;
 use std::io;
@@ -512,16 +507,16 @@ pub(crate) fn do_outgoing_pipe(
         CString::new(format!("NAME={my_name}")).map_err(|_| nul_err("my_name has interior NUL"))?;
     let node_env = CString::new(format!("NODE={node_name}"))
         .map_err(|_| nul_err("node_name has interior NUL"))?;
-    let ours = [
-        CString::new(format!("REMOTEADDRESS={}", addr.ip())).unwrap(),
-        CString::new(format!("REMOTEPORT={}", addr.port())).unwrap(),
-        name_env,
-        node_env,
-    ];
+    let addr_env = CString::new(format!("REMOTEADDRESS={}", addr.ip()))
+        .map_err(|_| nul_err("address has interior NUL"))?;
+    let port_env = CString::new(format!("REMOTEPORT={}", addr.port()))
+        .map_err(|_| nul_err("port has interior NUL"))?;
+    let ours = [addr_env, port_env, name_env, node_env];
     let override_key = |kv: &[u8]| {
         ours.iter().any(|o| {
-            let k = &o.as_bytes()[..=o.as_bytes().iter().position(|&b| b == b'=').unwrap()];
-            kv.starts_with(k)
+            let o = o.as_bytes();
+            let key_len = o.iter().position(|&b| b == b'=').map_or(o.len(), |i| i + 1);
+            o.get(..key_len).is_some_and(|k| kv.starts_with(k))
         })
     };
     let mut env_strs: Vec<CString> = env::vars_os()

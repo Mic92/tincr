@@ -32,10 +32,6 @@
 //! cache; it's a warm-start hint, never load-bearing.
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::indexing_slicing,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::env;
 use std::fmt::Write as _;
@@ -201,9 +197,9 @@ impl AddressCache {
         let r = self.recent.len();
         let k = r + self.known.len();
         let addr = if i < r {
-            Some(self.recent[i])
+            self.recent.get(i).copied()
         } else if i < k {
-            Some(self.known[i - r])
+            self.known.get(i - r).copied()
         } else {
             // Tiers 3+4 dedup at read time: an addr already covered by
             // tiers 1/2 is skipped without burning a connect attempt.

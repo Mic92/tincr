@@ -8,10 +8,6 @@
 //! `SocketAddr`s arrive here through `open_listener_pair`.
 //!
 //! Deferred: `IP_TOS`/`IPV6_TCLASS`.
-#![expect(
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::io;
 #[cfg(all(test, any(target_os = "linux", target_os = "android")))]
@@ -317,7 +313,7 @@ pub(crate) fn adopt_listeners_from(
     // main.rs unset LISTEN_FDS so nobody else will close them).
     // Collecting into a Vec<OwnedFd> first means an early return
     // from the second loop drops every remaining fd.
-    // n <= MAXSOCKETS, checked above.
+    #[expect(clippy::expect_used, reason = "n <= MAXSOCKETS, checked above")]
     let end_fd = start_fd + RawFd::try_from(n).expect("n <= MAXSOCKETS");
     let owned: Vec<OwnedFd> = (start_fd..end_fd)
         .map(|tcp_fd| {

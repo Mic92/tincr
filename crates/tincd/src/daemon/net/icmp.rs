@@ -1,7 +1,3 @@
-#![expect(
-    clippy::indexing_slicing,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 use super::super::Daemon;
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -48,8 +44,10 @@ impl Daemon {
         // so [6..12] is safe. Snatch before the subnet lookup; the
         // snatch is the only useful side effect even if no subnet
         // owns the target.
-        if self.overwrite_mac {
-            self.mymac.copy_from_slice(&data[6..12]);
+        if self.overwrite_mac
+            && let Some(mac) = data.get(6..12)
+        {
+            self.mymac.copy_from_slice(mac);
         }
         // No reachability check — ARP just answers "does someone own
         // this", not "are they up".
@@ -95,8 +93,10 @@ impl Daemon {
         // data.len()≥78. Snatch before the subnet lookup; the snatch
         // is the only useful side effect even if no subnet owns the
         // target (we still learned the kernel's MAC).
-        if self.overwrite_mac {
-            self.mymac.copy_from_slice(&data[6..12]);
+        if self.overwrite_mac
+            && let Some(mac) = data.get(6..12)
+        {
+            self.mymac.copy_from_slice(mac);
         }
         let Some((_, owner)) = self.subnets.lookup_ipv6(&target, |_| true) else {
             log::debug!(target: "tincd::net",
@@ -144,7 +144,10 @@ impl Daemon {
         if self.icmp_ratelimit.should_drop(now_sec, 3) {
             return false;
         }
-        let ethertype = u16::from_be_bytes([data[12], data[13]]);
+        let Some(&[hi, lo]) = data.get(12..14) else {
+            return false;
+        };
+        let ethertype = u16::from_be_bytes([hi, lo]);
         let is_v6 = ethertype == 0x86DD; // ETH_P_IPV6
         let reply = match kind {
             IcmpKind::Unreach { t, c, discover_src } if is_v6 => {

@@ -1,8 +1,4 @@
 //! argv parsing and the config-derived paths/log level.
-#![expect(
-    clippy::unwrap_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use nix::unistd::{AccessFlags, access};
 use std::ffi::OsString;
@@ -192,11 +188,9 @@ where
             // Peek gated on `!starts_with('-')` so `--logfile -d 5`
             // doesn't eat `-d`.
             "--logfile" => {
-                if let Some(next) = args.peek()
-                    && let Some(s) = next.to_str()
-                    && !s.starts_with('-')
+                if let Some(v) =
+                    args.next_if(|next| next.to_str().is_some_and(|s| !s.starts_with('-')))
                 {
-                    let v = args.next().unwrap();
                     logfile = Some(Some(PathBuf::from(v)));
                 } else {
                     // Bare form; netname may be set by a later `-n`.

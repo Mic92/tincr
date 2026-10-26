@@ -11,10 +11,6 @@
 //! direction). Factor trigger is a third crate — there isn't one.
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::indexing_slicing,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -193,7 +189,8 @@ pub(crate) fn serve_cookie(
     let first_line = contents
         .iter()
         .position(|&b| b == b'\n')
-        .map_or(contents, |i| &contents[..i]);
+        .and_then(|i| contents.get(..i))
+        .unwrap_or(contents);
     let first_line = str::from_utf8(first_line)
         .map_err(|_| ServeError::BadInvitationFile("first line not UTF-8".into()))?;
 

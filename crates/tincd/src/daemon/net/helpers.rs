@@ -1,12 +1,8 @@
 //! Shared helpers for the net layer.
-#![expect(
-    clippy::indexing_slicing,
-    clippy::unwrap_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::PoisonError;
 use std::time::{Duration, Instant};
 
 use crate::graph::{Graph, NodeId};
@@ -54,7 +50,7 @@ pub(super) fn confirm_udp_addr(
     let cached = (SockAddr::from(peer_addr), sock);
     tunnel.udp_addr_cached = Some(cached.clone());
     if let Some(h) = tunnel_handles.get(&nid) {
-        *h.udp_addr.lock().unwrap() = Some(cached);
+        *h.udp_addr.lock().unwrap_or_else(PoisonError::into_inner) = Some(cached);
     }
 }
 
@@ -160,13 +156,13 @@ pub(crate) fn gro_offer_or_write(
         }
     };
     if let Some(bucket) = gro.as_mut()
-        && data.len() > ETH_HLEN
+        && let Some(ip) = data.get(ETH_HLEN..).filter(|ip| !ip.is_empty())
     {
-        match bucket.offer(&data[ETH_HLEN..]) {
+        match bucket.offer(ip) {
             GroVerdict::Coalesced => return,
             GroVerdict::FlushFirst => {
                 flush(device, bucket);
-                let v = bucket.offer(&data[ETH_HLEN..]);
+                let v = bucket.offer(ip);
                 debug_assert_ne!(v, GroVerdict::FlushFirst);
                 if v == GroVerdict::Coalesced {
                     return;

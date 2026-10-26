@@ -32,6 +32,16 @@ use std::mem::size_of;
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
+/// Ethertype at bytes `[12..14]`. Returns `None` if the frame is shorter.
+#[must_use]
+pub(crate) fn ethertype(frame: &[u8]) -> Option<u16> {
+    frame
+        .get(12..)?
+        .first_chunk()
+        .copied()
+        .map(u16::from_be_bytes)
+}
+
 /// Narrow a packet/buffer length to a 16-bit wire field. Callers pass
 /// lengths bounded by `MTU` or a fixed buffer; debug builds assert it.
 #[inline]

@@ -24,10 +24,6 @@
 //! from the original offset. The C handles this; we port it.
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::indexing_slicing,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use zerocopy::{FromBytes, IntoBytes};
 
@@ -50,7 +46,7 @@ pub(crate) fn fragment_v4(frame: &[u8], dest_mtu: u16) -> Option<Vec<Vec<u8>>> {
         return None;
     }
 
-    let ip_bytes: &[u8; 20] = frame[ETH_SIZE..ETH_SIZE + IP_SIZE].try_into().ok()?;
+    let ip_bytes: &[u8; 20] = frame.get(ETH_SIZE..ETH_SIZE + IP_SIZE)?.try_into().ok()?;
     let mut ip = Ipv4Hdr::read_from_bytes(ip_bytes).ok()?;
 
     // ip.ip_hl != ip_size/4 — options? bail. RFC 791 permits
@@ -93,8 +89,8 @@ pub(crate) fn fragment_v4(frame: &[u8], dest_mtu: u16) -> Option<Vec<Vec<u8>>> {
     let origf = ip_off_full & !IP_OFFMASK;
     let mut ip_off = ip_off_full & IP_OFFMASK;
 
-    let eth_hdr = &frame[..ETH_SIZE];
-    let payload = &frame[ETH_SIZE + IP_SIZE..];
+    let eth_hdr = frame.get(..ETH_SIZE)?;
+    let payload = frame.get(ETH_SIZE + IP_SIZE..)?;
     let mut offset = 0usize;
     let mut out = Vec::new();
 
@@ -115,7 +111,7 @@ pub(crate) fn fragment_v4(frame: &[u8], dest_mtu: u16) -> Option<Vec<Vec<u8>>> {
         let mut frag = Vec::with_capacity(ETH_SIZE + IP_SIZE + len);
         frag.extend_from_slice(eth_hdr);
         frag.extend_from_slice(ip.as_bytes());
-        frag.extend_from_slice(&payload[offset..offset + len]);
+        frag.extend_from_slice(payload.get(offset..offset + len)?);
         out.push(frag);
 
         // Offset in 8-byte units (RFC 791). `len` is a multiple of 8

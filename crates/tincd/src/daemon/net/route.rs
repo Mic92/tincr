@@ -1,8 +1,3 @@
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 use super::super::{ConnId, Daemon, ForwardingMode, RoutingMode, TimerWhat};
 
 use std::time::Duration;
@@ -18,7 +13,7 @@ use crate::dns;
 use crate::fragment;
 use crate::graph::{EdgeId, NodeId};
 use crate::packet::ETH_P_ARP;
-use crate::packet::ETH_P_IP;
+use crate::packet::{ETH_P_IP, ethertype};
 use tinc_proto::{Request, Subnet};
 
 /// Cap on locally-learned MAC subnets (switch mode).
@@ -64,7 +59,7 @@ impl Daemon {
         // eth, returned above). `handle_arp` does its own subnet
         // lookup so handle it before `route()` (which would return
         // `Unsupported{"arp"}`).
-        if data.len() >= 14 && u16::from_be_bytes([data[12], data[13]]) == ETH_P_ARP {
+        if ethertype(data) == Some(ETH_P_ARP) {
             return nw | self.handle_arp(data, from);
         }
 
@@ -124,7 +119,7 @@ impl Daemon {
             ));
             // Raw body, no `\n`. `send` is infallible (queues to
             // outbuf, write errors surface at `flush()`).
-            nw |= conn.send_raw(&data[..len]);
+            nw |= conn.send_raw(data.get(..len).unwrap_or(data));
         }
         self.any_pcap = still_armed;
         nw
@@ -380,8 +375,8 @@ impl Daemon {
                         "Forwarding=off: dropping transit packet \
                          to {to} (we are not a relay)");
             if self.settings.routing_mode == RoutingMode::Router {
-                let ethertype = u16::from_be_bytes([data[12], data[13]]);
-                let (t, c) = if ethertype == ETH_P_IP {
+                let is_v4 = ethertype(data) == Some(ETH_P_IP);
+                let (t, c) = if is_v4 {
                     (route_decide::ICMP_DEST_UNREACH, route_decide::ICMP_NET_ANO)
                 } else {
                     (
@@ -433,8 +428,8 @@ impl Daemon {
 
         // directonly — operator opts out of relay.
         if self.settings.directonly && to_nid != via_nid {
-            let ethertype = u16::from_be_bytes([data[12], data[13]]);
-            let (t, c) = if ethertype == ETH_P_IP {
+            let is_v4 = ethertype(data) == Some(ETH_P_IP);
+            let (t, c) = if is_v4 {
                 (route_decide::ICMP_DEST_UNREACH, route_decide::ICMP_NET_ANO)
             } else {
                 (
@@ -458,13 +453,12 @@ impl Daemon {
         // and the kernel caches that per destination for 10 minutes, pinning every TCP
         // flow in that window to MSS 536.
         if via_nid != self.myself && via_mtu != 0 {
-            let ethertype = u16::from_be_bytes([data[12], data[13]]);
-            let floor: u16 = if ethertype == ETH_P_IP { 590 } else { 1294 };
+            let is_v4 = ethertype(data) == Some(ETH_P_IP);
+            let floor: u16 = if is_v4 { 590 } else { 1294 };
             let limit = via_mtu.max(floor);
             if data.len() > usize::from(limit) {
-                if ethertype == ETH_P_IP {
-                    // DF flag (data.len()>590 ⇒ [20] in bounds).
-                    let df_set = data[20] & 0x40 != 0;
+                if is_v4 {
+                    let df_set = data.get(20).is_some_and(|b| b & 0x40 != 0);
                     if df_set {
                         // limit-14 = IP-layer MTU. limit≥590
                         // so sub never wraps.
@@ -574,7 +568,9 @@ impl Daemon {
     /// `device.write(&mut self)` and moves only two `Option<IpAddr>` and a
     /// `String`.
     fn try_dns_intercept(&mut self, data: &[u8]) -> bool {
-        let cfg = self.dns.take().expect("caller gated on is_some()");
+        let Some(cfg) = self.dns.take() else {
+            return false;
+        };
         // v4 path. `match_v4` does the full eth+IP+UDP+port check;
         // None means "not for us" — fall through to v6 then route().
         let hit = if let Some(dns_ip) = cfg.dns_addr4

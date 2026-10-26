@@ -1,8 +1,4 @@
 //! `ADD_EDGE` / `DEL_EDGE` — flooded topology gossip.
-#![expect(
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use super::{MAX_EDGES, MAX_NODES};
 use crate::daemon::{ConnId, Daemon};
@@ -60,6 +56,10 @@ impl Daemon {
             // must fall through to update+forward. Weight-only check
             // early-returned and broke hub-spoke (three_daemon_relay
             // regression). Check edge_addrs too.
+            #[expect(
+                clippy::expect_used,
+                reason = "`existing` came from lookup_edge just above"
+            )]
             let e = self.graph.edge(existing).expect("just looked up");
             let same_addr = self
                 .edge_addrs
@@ -98,6 +98,10 @@ impl Daemon {
             log::debug!(target: "tincd::proto",
                         "Got ADD_EDGE from {conn_name} which does not \
                          match existing entry");
+            #[expect(
+                clippy::expect_used,
+                reason = "`existing` came from lookup_edge just above"
+            )]
             self.graph
                 .update_edge(existing, edge.weight, edge.options)
                 .expect("lookup_edge just returned this EdgeId; no await, no free");
