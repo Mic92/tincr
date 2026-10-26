@@ -1037,8 +1037,7 @@ impl Daemon {
                             // file anyway so a future ConnectTo finds
                             // it.
                             if let Some(addr) = conn_addr {
-                                let mut cache =
-                                    AddressCache::open(&self.confbase, &name, Vec::new());
+                                let mut cache = AddressCache::open(&self.confbase, &name);
                                 cache.add_recent(addr);
                                 if let Some((path, bytes)) = cache.serialize() {
                                     self.script_worker.submit(Job::WriteFile { path, bytes });

@@ -83,7 +83,7 @@ impl Daemon {
                 // subnet-down already ran at BecameUnreachable
                 // (via `run_graph_and_log`); this is just the
                 // tree delete.
-                if !self.settings.strictsubnets {
+                if !self.settings.strict_subnets() {
                     self.subnets.del(&s, name);
                     // mac_table sync. Same defensive owner-match as
                     // `on_del_subnet`.
@@ -140,7 +140,7 @@ impl Daemon {
             // addressed nodes); under strictsubnets, only delete if
             // the operator's hosts/ file had no Subnet= lines.
             if !self.settings.autoconnect
-                && (!self.settings.strictsubnets || self.subnets.owned_by(&name).is_empty())
+                && (!self.settings.strict_subnets() || self.subnets.owned_by(&name).is_empty())
             {
                 // Daemon-side sweep first, then the graph slot.
                 // Pass 1 already emptied subnets+edges.

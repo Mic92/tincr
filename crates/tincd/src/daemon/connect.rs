@@ -24,6 +24,7 @@ use crate::dispatch::ConnOptions;
 use crate::dispatch::DispatchError;
 use crate::log_tap;
 use crate::outgoing;
+use crate::outgoing::resolve_config_addrs;
 use std::mem;
 use std::net::IpAddr;
 
@@ -487,8 +488,10 @@ impl Daemon {
             // `Address = localhost 655` keeps working.
             .chain(self.dns_hints.get(&name).into_iter().flatten().copied())
             .collect();
+        let config_addrs = resolve_config_addrs(&self.hosts, &name);
         // get_mut after the read-only walk (split borrow).
         if let Some(o) = self.outgoings.get_mut(oid) {
+            o.addr_cache.set_config(config_addrs);
             o.addr_cache.add_known_addresses(known);
             // Pre-resolve hostname `Address=` lines for *this* round.
             // No-op for the common all-literal-IP config (NixOS test

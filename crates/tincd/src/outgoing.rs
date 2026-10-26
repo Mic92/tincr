@@ -347,7 +347,7 @@ pub(crate) fn probe_connecting(fd: BorrowedFd<'_>) -> io::Result<bool> {
 /// Proxy configuration (`None` at the `DaemonSettings.proxy` level =
 /// direct). `socks4a` is rejected at parse time; C tinc never
 /// implemented it either.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProxyConfig {
     /// `socketpair` + `fork` + `/bin/sh -c <cmd>`. No handshake bytes.
     Exec { cmd: String },
