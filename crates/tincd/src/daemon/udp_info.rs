@@ -11,11 +11,10 @@ use std::time::Duration;
 use crate::dispatch;
 use crate::dispatch::{ConnOptions, DispatchError};
 use crate::graph::NodeId;
-use crate::tunnel::{MTU, TunnelState};
+use crate::tunnel::MTU;
 use crate::udp_info::{self, FromMtuState, FromState, MtuInfoAction, PmtuSnapshot, UdpInfoAction};
 use std::fmt;
 use std::mem;
-use std::sync::atomic;
 use tinc_proto::AddrStr;
 use tinc_proto::msg::{MtuInfo, UdpInfo};
 
@@ -50,8 +49,8 @@ impl Daemon {
         self.dp
             .tunnels
             .get(&nid)?
-            .pmtu
-            .as_ref()
+            .path
+            .pmtu()
             .map(|p| PmtuSnapshot {
                 minmtu: p.minmtu,
                 maxmtu: p.maxmtu,
@@ -200,7 +199,7 @@ impl Daemon {
             .dp
             .tunnels
             .get(&from_nid)
-            .and_then(|t| t.udp_addr)
+            .and_then(|t| t.path.addr())
             .map_or_else(
                 || (AddrStr::unspec(), AddrStr::unspec()),
                 AddrStr::from_socket_addr,
@@ -335,7 +334,7 @@ impl Daemon {
                 .dp
                 .tunnels
                 .get(&nid)
-                .is_some_and(|t| t.status.udp_confirmed);
+                .is_some_and(|t| t.path.confirmed());
             // `from->via == from`: false means "wandered past static relay".
             let via_is_self = self.route_of(nid).is_some_and(|r| r.via == nid);
             (
@@ -349,7 +348,7 @@ impl Daemon {
         });
         let to = self.node_ids.get(&parsed.to).copied();
         let current_from_addr =
-            from.and_then(|(nid, _)| self.dp.tunnels.get(&nid).and_then(|t| t.udp_addr));
+            from.and_then(|(nid, _)| self.dp.tunnels.get(&nid).and_then(|t| t.path.addr()));
 
         match udp_info::on_receive_udp_info(&parsed, from, to, current_from_addr) {
             UdpInfoAction::UnknownNode => {
@@ -368,9 +367,16 @@ impl Daemon {
                 log::debug!(target: "tincd::proto",
                             "UDP_INFO from {conn_name}: learned {} at {new_addr}",
                             parsed.from);
-                let t = self.dp.tunnels.entry(from).or_default();
-                t.udp_addr = Some(new_addr);
-                t.udp_addr_cached = None; // stale
+                if self
+                    .dp
+                    .tunnels
+                    .entry(from)
+                    .or_default()
+                    .path
+                    .on_addr_hint(new_addr)
+                {
+                    self.publish_path(from);
+                }
                 Ok(self.send_udp_info_forward(from, to))
             }
             UdpInfoAction::Forward { from, to } => Ok(self.send_udp_info_forward(from, to)),
@@ -421,9 +427,9 @@ impl Daemon {
             (
                 nid,
                 FromMtuState {
-                    mtu: t.map_or(0, TunnelState::mtu),
-                    minmtu: t.map_or(0, TunnelState::minmtu),
-                    maxmtu: t.map_or(MTU, TunnelState::maxmtu),
+                    mtu: t.map_or(0, |t| t.path.mtu()),
+                    minmtu: t.map_or(0, |t| t.path.minmtu()),
+                    maxmtu: t.map_or(MTU, |t| t.path.maxmtu()),
                 },
             )
         });
@@ -457,8 +463,8 @@ impl Daemon {
                     // matters if pmtu seeded; unseeded reads MTU anyway.
                     log::debug!(target: "tincd::proto",
                                 "Using provisional MTU {new_mtu} for {}", parsed.from);
-                    if let Some(p) = self.dp.tunnels.get_mut(&from).and_then(|t| t.pmtu.as_mut()) {
-                        p.mtu = new_mtu;
+                    if let Some(t) = self.dp.tunnels.get_mut(&from) {
+                        t.path.set_provisional_mtu(new_mtu);
                     }
                 } else {
                     log::debug!(target: "tincd::proto",
@@ -485,30 +491,16 @@ impl Daemon {
     fn apply_meta_udp_confirm(&mut self, peer: NodeId, peer_name: &str, len: u16) {
         let now = self.timers.now();
         let tunnel = self.dp.tunnels.entry(peer).or_default();
-        // No `get_or_insert`: if we've never seeded PMTU we've never
-        // sent a probe, so any ack is by definition unsolicited.
-        let Some(p) = tunnel.pmtu.as_mut() else {
+        let Some(was_confirmed) = tunnel.path.on_meta_ack(len, now) else {
             log::debug!(target: "tincd::net",
                         "ignoring unsolicited udp_rx_len from {peer_name}");
             return;
         };
-        let was_confirmed = p.udp_confirmed;
-        if !p.on_meta_ack(len, now) {
-            log::debug!(target: "tincd::net",
-                        "ignoring unsolicited udp_rx_len from {peer_name}");
-            return;
-        }
-        tunnel.status.udp_confirmed = true;
         if !was_confirmed {
             log::info!(target: "tincd::net",
                        "UDP send to {peer_name} confirmed via meta \
                         (rx-filtered, asymmetric mode)");
         }
-        // Publish minmtu to the fast path (same as the real probe-
-        // reply arm; seconds-apart, not hot).
-        if let Some(h) = self.tunnel_handles.get(&peer) {
-            let m = self.dp.tunnels.get(&peer).map_or(0, TunnelState::minmtu);
-            h.minmtu.store(m, atomic::Ordering::Relaxed);
-        }
+        self.publish_path(peer);
     }
 }

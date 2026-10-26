@@ -3,7 +3,7 @@ use super::super::{ConnId, Daemon, ForwardingMode, RoutingMode, TimerWhat};
 use std::time::Duration;
 
 use crate::route_decide::{self, RouteResult, TtlResult, route};
-use crate::tunnel::{MTU, TunnelState};
+use crate::tunnel::MTU;
 use crate::{broadcast, mss, route_mac};
 
 use super::icmp::IcmpKind;
@@ -429,7 +429,7 @@ impl Daemon {
 
         // TunnelState::default() inits to MTU (not 0); until
         // PMTU runs: 1518 ceiling.
-        let via_mtu = self.dp.tunnels.get(&via_nid).map_or(MTU, TunnelState::mtu);
+        let via_mtu = self.dp.tunnels.get(&via_nid).map_or(MTU, |t| t.path.mtu());
 
         // directonly — operator opts out of relay.
         if self.settings.directonly && to_nid != via_nid {

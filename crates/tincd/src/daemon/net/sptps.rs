@@ -212,7 +212,7 @@ impl Daemon {
                                 sptps.aead(),
                                 &sptps.incipher_key().expect("post-HandshakeDone"),
                             ),
-                            udp_addr: Mutex::new(tunnel.udp_addr_cached.clone()),
+                            udp_addr: Mutex::new(tunnel.path.target().cloned()),
                             validkey: AtomicBool::new(true),
                             minmtu: AtomicU16::new(tunnel.minmtu()),
                             outcompression: tunnel.outcompression,
@@ -243,8 +243,8 @@ impl Daemon {
     }
 
     fn note_recent_len(&mut self, peer: NodeId, len: u16) {
-        if let Some(p) = self.dp.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut()) {
-            p.maxrecentlen = p.maxrecentlen.max(len);
+        if let Some(t) = self.dp.tunnels.get_mut(&peer) {
+            t.path.note_recent_len(len);
         }
     }
 
@@ -630,7 +630,7 @@ impl Daemon {
             self.dp.tx_scratch[6..12].copy_from_slice(src_id.as_bytes());
         }
 
-        // Send to RELAY, not `to`. Fast path: udp_addr_cached set
+        // Send to RELAY, not `to`. Fast path: `path.target()` set
         // when udp_confirmed flips; once confirmed the answer is
         // deterministic. Full choose_udp_address was 2.18% self-time
         // (Vec alloc + scan per packet).
@@ -638,7 +638,7 @@ impl Daemon {
             .dp
             .tunnels
             .get(&relay_nid)
-            .and_then(|t| t.udp_addr_cached.clone());
+            .and_then(|t| t.path.target().cloned());
         let cold_sockaddr;
         let (sockaddr, sock) = if let Some((sa, sock)) = &cached {
             (sa, *sock)
@@ -740,6 +740,7 @@ impl Daemon {
             let at_len = len_u16(origlen);
             helpers::handle_udp_emsgsize(
                 &mut self.dp.tunnels,
+                &self.listeners,
                 &self.graph,
                 &self.tunnel_handles,
                 relay_nid,
@@ -751,6 +752,7 @@ impl Daemon {
             let relay_name = self.node_log_name(relay_nid).to_owned();
             helpers::handle_udp_unreachable(
                 &mut self.dp.tunnels,
+                &self.listeners,
                 &self.tunnel_handles,
                 relay_nid,
                 &relay_name,

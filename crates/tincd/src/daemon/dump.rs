@@ -27,7 +27,7 @@ impl Daemon {
                 format!("MYSELF port {}", self.my_udp_port)
             } else if let Some(ea) = self.nodes.get(&nid).and_then(|ns| ns.edge_addr.as_ref()) {
                 fmt_addr(ea) // "%s port %s", no v6 brackets
-            } else if let Some(addr) = self.dp.tunnels.get(&nid).and_then(|t| t.udp_addr) {
+            } else if let Some(addr) = self.dp.tunnels.get(&nid).and_then(|t| t.path.addr()) {
                 // Indirect node: address learned via UDP (hole-punch /
                 // UDP_INFO), not meta-conn ACK. C: update_node_udp().
                 // IpAddr Display has no v6 brackets, matches "%s port %s".
@@ -47,7 +47,7 @@ impl Daemon {
                 || {
                     if node.reachable { 1 << 4 } else { 0 }
                 },
-                |t| t.status.as_u32(node.reachable),
+                |t| t.status.as_u32(node.reachable, t.path.confirmed()),
             );
 
             // Unreachable → "-".
@@ -77,12 +77,12 @@ impl Daemon {
                 nexthop,                                            // %s
                 via,                                                // %s
                 distance,                                           // %d
-                tunnel.and_then(|t| t.pmtu.as_ref()).map_or(0, |p| p.mtu), // %d mtu
-                tunnel.and_then(|t| t.pmtu.as_ref()).map_or(0, |p| p.minmtu), // %d minmtu
-                tunnel.and_then(|t| t.pmtu.as_ref()).map_or(0, |p| p.maxmtu), // %d maxmtu
+                tunnel.and_then(|t| t.path.pmtu()).map_or(0, |p| p.mtu), // %d mtu
+                tunnel.and_then(|t| t.path.pmtu()).map_or(0, |p| p.minmtu), // %d minmtu
+                tunnel.and_then(|t| t.path.pmtu()).map_or(0, |p| p.maxmtu), // %d maxmtu
                 0,                                                  // %ld last_state_change
                 tunnel
-                    .and_then(|t| t.pmtu.as_ref())
+                    .and_then(|t| t.path.pmtu())
                     .and_then(|p| p.udp_ping_rtt)
                     .map_or(-1_i32, u32::cast_signed), // %d
                 tunnel.map_or(0, |t| t.stats.in_packets()),         // %PRIu64

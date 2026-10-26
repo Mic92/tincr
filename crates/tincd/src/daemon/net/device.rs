@@ -116,7 +116,7 @@ impl Daemon {
                         // site sees `tx_batch.is_some()` and stages;
                         // or flushes-then-stages on dst/size mismatch;
                         // or falls through to immediate send for the
-                        // cold path (no `udp_addr_cached`).
+                        // cold path (no `path.target()`).
                         if let Some(frame) = arena.slot_mut(i).get_mut(..n) {
                             nw |= self.forward_packet(frame, None);
                         }
@@ -323,7 +323,14 @@ impl Daemon {
                 // PMTU shrank under us; frames in this batch are
                 // lost (kernel rejected the whole sendmsg) — same
                 // outcome as the per-frame path, just `count×`.
-                helpers::handle_udp_emsgsize(tunnels, graph, tunnel_handles, relay_nid, origlen);
+                helpers::handle_udp_emsgsize(
+                    tunnels,
+                    listeners,
+                    graph,
+                    tunnel_handles,
+                    relay_nid,
+                    origlen,
+                );
             } else if helpers::is_udp_unreachable_errno(&e) {
                 let relay_name = graph
                     .node(relay_nid)
@@ -331,6 +338,7 @@ impl Daemon {
                     .to_owned();
                 helpers::handle_udp_unreachable(
                     tunnels,
+                    listeners,
                     tunnel_handles,
                     relay_nid,
                     &relay_name,
@@ -453,6 +461,7 @@ impl Daemon {
                 // retransmits. Cap min/maxmtu for the next super.
                 helpers::handle_udp_emsgsize(
                     &mut self.dp.tunnels,
+                    &self.listeners,
                     &self.graph,
                     &self.tunnel_handles,
                     relay,

@@ -38,7 +38,7 @@ use super::{TunnelHandles, TxSnapshot};
 use crate::graph::NodeId;
 use crate::node_id::NodeId6;
 use crate::tunnel::MTU;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 /// `PKT_NORMAL`. Re-stated (not re-exported from `daemon.rs`) so
@@ -154,12 +154,16 @@ impl RxDstMemo {
 /// Can this raw UDP payload `[dst_id6][src_id6][SPTPS]` take the RX fast path?
 /// No side effects; `None` ⇒ slow path when: `slowpath_all`; shorter than
 /// 12+21; `dst_id6` non-null (relay); unknown `src_id6`; no `TunnelHandles`
-/// yet; no cached `udp_addr` (the slow path caches it on the first valid
-/// packet). Type, dst-subnet and MTU gates need plaintext and are deferred to
+/// yet; `src` is not the confirmed `udp_addr` (the slow path follows the
+/// peer to a new address). Type, dst-subnet and MTU gates need plaintext and are deferred to
 /// [`rx_open`]. `overwrite_mac` and kernel forwarding are covered by the
 /// `!Router` fold.
 #[must_use]
-pub(crate) fn rx_probe<'a>(snap: &'a TxSnapshot, pkt: &'a [u8]) -> Option<RxTarget<'a>> {
+pub(crate) fn rx_probe<'a>(
+    snap: &'a TxSnapshot,
+    pkt: &'a [u8],
+    src: SocketAddr,
+) -> Option<RxTarget<'a>> {
     // Setup-time fold. Same gate as tx_probe; same one-bool early-out.
     if snap.slowpath_all {
         return None;
@@ -191,16 +195,12 @@ pub(crate) fn rx_probe<'a>(snap: &'a TxSnapshot, pkt: &'a [u8]) -> Option<RxTarg
     // `send_req_key`). We CAN'T run that without `&mut Daemon`; punt.
     let handles = snap.tunnels.get(&from_nid)?;
 
-    // udp_addr cached ⇔ first valid packet already went slow-path
-    // and populated it (rx.rs:325). The fast path doesn't write
-    // tunnel state; gate so we don't deadlock the cache.
-    //
-    // The lock is uncontended single-threaded. `is_none()` not
-    // `is_some()` for the `?` ergonomics: `then_some(())` would
-    // be uglier than the `if` here.
-    if handles.udp_addr.lock().ok()?.is_none() {
+    // A new source (rebinding, roaming) takes the slow path, which moves the address.
+    let cached = handles.udp_addr.lock().ok()?;
+    if cached.as_ref()?.0.as_socket() != Some(src) {
         return None;
     }
+    drop(cached);
 
     Some(RxTarget {
         from_nid,
@@ -345,7 +345,6 @@ mod tests {
     use crate::node_id::NodeId6Table;
     use crate::shard::NodeView;
     use crate::subnet_tree::SubnetTree;
-    use std::net;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64};
     use tinc_crypto::aead::SptpsCipher;
@@ -386,6 +385,10 @@ mod tests {
     /// Returns `(snap, bob_nid, inkey)`: `inkey` is what bob would
     /// have as his outbound key (the handshake derives them as a
     /// pair; here we just pick a constant).
+    fn bob_addr() -> SocketAddr {
+        "10.0.0.2:655".parse().unwrap()
+    }
+
     fn fixture() -> (TxSnapshot, NodeId, [u8; 64]) {
         let alice = NodeId(0);
         let bob = NodeId(1);
@@ -415,10 +418,7 @@ mod tests {
             replay: Arc::new(Mutex::new(ReplayWindow::default())),
             outcipher: SptpsCipher::new(aead, &[0u8; 64]),
             incipher: SptpsCipher::new(aead, &inkey),
-            udp_addr: Mutex::new(Some((
-                socket2::SockAddr::from("10.0.0.2:655".parse::<net::SocketAddr>().unwrap()),
-                0,
-            ))),
+            udp_addr: Mutex::new(Some((socket2::SockAddr::from(bob_addr()), 0))),
             validkey: AtomicBool::new(true),
             minmtu: AtomicU16::new(1400),
             outcompression: 0,
@@ -458,7 +458,8 @@ mod tests {
         let body = v4_body([10, 0, 0, 5], 100); // 120 bytes, dst in alice's /24
         let pkt = wire_packet("bob", 0, PKT_NORMAL, &body, &inkey);
 
-        let target = rx_probe(&snap, &pkt).expect("probe must pass");
+        assert!(rx_probe(&snap, &pkt, "10.0.0.2:40000".parse().unwrap()).is_none());
+        let target = rx_probe(&snap, &pkt, bob_addr()).expect("probe must pass");
         assert_eq!(target.from_nid, bob);
         assert_eq!(target.ct.len(), pkt.len() - 12);
 
@@ -492,7 +493,7 @@ mod tests {
         // Seal with WRONG key.
         let pkt = wire_packet("bob", 0, PKT_NORMAL, &body, &[0xFFu8; 64]);
 
-        let target = rx_probe(&snap, &pkt).expect("probe doesn't decrypt");
+        let target = rx_probe(&snap, &pkt, bob_addr()).expect("probe doesn't decrypt");
         let mut scratch = Vec::new();
         let mut memo = RxDstMemo::default();
         assert!(rx_open(&target, &snap, &mut scratch, &mut memo).is_err());
@@ -500,7 +501,7 @@ mod tests {
         // Now seal with the RIGHT key, same seqno. Must succeed —
         // the bad-tag attempt didn't burn seqno 0.
         let pkt2 = wire_packet("bob", 0, PKT_NORMAL, &body, &inkey);
-        let target2 = rx_probe(&snap, &pkt2).unwrap();
+        let target2 = rx_probe(&snap, &pkt2, bob_addr()).unwrap();
         assert!(rx_open(&target2, &snap, &mut scratch, &mut memo).is_ok());
     }
 
@@ -514,14 +515,14 @@ mod tests {
             "bob", 5, /* PKT_PROBE = 4, also test bit 0 noise */ 4, &body, &inkey,
         );
 
-        let target = rx_probe(&snap, &pkt).expect("probe passes — ty is encrypted");
+        let target = rx_probe(&snap, &pkt, bob_addr()).expect("probe passes — ty is encrypted");
         let mut scratch = Vec::new();
         let mut memo = RxDstMemo::default();
         assert!(rx_open(&target, &snap, &mut scratch, &mut memo).is_err());
 
         // seqno 5 not committed: a PKT_NORMAL at seqno 5 still works.
         let pkt2 = wire_packet("bob", 5, PKT_NORMAL, &body, &inkey);
-        let target2 = rx_probe(&snap, &pkt2).unwrap();
+        let target2 = rx_probe(&snap, &pkt2, bob_addr()).unwrap();
         assert!(rx_open(&target2, &snap, &mut scratch, &mut memo).is_ok());
     }
 
@@ -534,7 +535,7 @@ mod tests {
         let body = v4_body([10, 1, 0, 5], 100);
         let pkt = wire_packet("bob", 0, PKT_NORMAL, &body, &inkey);
 
-        let target = rx_probe(&snap, &pkt).unwrap();
+        let target = rx_probe(&snap, &pkt, bob_addr()).unwrap();
         let mut scratch = Vec::new();
         let mut memo = RxDstMemo::default();
         assert!(rx_open(&target, &snap, &mut scratch, &mut memo).is_err());
@@ -545,7 +546,7 @@ mod tests {
         // seqno 0 not committed.
         let body2 = v4_body([10, 0, 0, 5], 100);
         let pkt2 = wire_packet("bob", 0, PKT_NORMAL, &body2, &inkey);
-        let target2 = rx_probe(&snap, &pkt2).unwrap();
+        let target2 = rx_probe(&snap, &pkt2, bob_addr()).unwrap();
         // Memo had a v4 entry but for a DIFFERENT dst; this is a
         // miss → trie probe → cache overwrite.
         assert!(rx_open(&target2, &snap, &mut scratch, &mut memo).is_ok());
@@ -559,10 +560,10 @@ mod tests {
         // 12 + 20 = 32 bytes: id6 prefix + 1 byte short of min ct.
         let mut pkt = vec![0u8; 32];
         pkt[6..12].copy_from_slice(NodeId6::from_name("bob").as_bytes());
-        assert!(rx_probe(&snap, &pkt).is_none());
+        assert!(rx_probe(&snap, &pkt, bob_addr()).is_none());
         // 33 bytes: exactly min. Probe passes (tunnel exists,
         // udp_addr cached); rx_open fails on tag (garbage ct).
         pkt.push(0);
-        assert!(rx_probe(&snap, &pkt).is_some());
+        assert!(rx_probe(&snap, &pkt, bob_addr()).is_some());
     }
 }

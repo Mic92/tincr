@@ -197,7 +197,7 @@ impl Daemon {
             self.dp
                 .tunnels
                 .get(&from_nid)
-                .and_then(|t| t.udp_addr)
+                .and_then(|t| t.path.addr())
                 .map(|from_addr| {
                     log::debug!(target: "tincd::proto",
                                 "Appending reflexive UDP address to \
@@ -438,9 +438,16 @@ impl Daemon {
             log::debug!(target: "tincd::proto",
                         "Relay-observed UDP address for {} (REQ_KEY): {addr}",
                         msg.from);
-            let t = self.dp.tunnels.entry(from_nid).or_default();
-            t.udp_addr = Some(addr);
-            t.udp_addr_cached = None;
+            if self
+                .dp
+                .tunnels
+                .entry(from_nid)
+                .or_default()
+                .path
+                .on_addr_hint(addr)
+            {
+                self.publish_path(from_nid);
+            }
         }
 
         // Responder start() always emits KEX (→ ANS_KEY via
@@ -508,7 +515,7 @@ impl Daemon {
             // have a UDP addr for from, `to.minmtu>0` (to is actively
             // using UDP so reflexive addr is useful).
             let appended = if msg.udp_addr.is_none() {
-                let from_udp = self.dp.tunnels.get(&from_nid).and_then(|t| t.udp_addr);
+                let from_udp = self.dp.tunnels.get(&from_nid).and_then(|t| t.path.addr());
                 let to_minmtu = self.dp.tunnels.get(&to_nid).map_or(0, TunnelState::minmtu);
                 match from_udp {
                     Some(from_addr) if to_minmtu > 0 => {
@@ -619,9 +626,16 @@ impl Daemon {
                 log::debug!(target: "tincd::proto",
                                 "Using reflexive UDP address from {}: {addr}",
                                 msg.from);
-                let t = self.dp.tunnels.entry(from_nid).or_default();
-                t.udp_addr = Some(addr);
-                t.udp_addr_cached = None; // stale: reflexive addr supersedes
+                if self
+                    .dp
+                    .tunnels
+                    .entry(from_nid)
+                    .or_default()
+                    .path
+                    .on_addr_hint(addr)
+                {
+                    self.publish_path(from_nid);
+                }
 
                 // Punch coordination, initiator side: validkey just went true and we hold a
                 // fresh relay-observed address, so probe now rather than on the next `try_tx`

@@ -690,6 +690,10 @@ fn load_peer_host_config(
         .lookup("ClampMSS")
         .next()
         .and_then(|e| e.get_bool().ok());
+    conn.host_pmtu_discovery = host_config
+        .lookup("PMTUDiscovery")
+        .next()
+        .and_then(|e| e.get_bool().ok());
     conn.host_weight = host_config
         .lookup("Weight")
         .next()
@@ -747,8 +751,10 @@ pub(crate) fn send_ack(
     // — this is the load-bearing bit. Without it, per-host TCPOnly
     // still left PMTU set, peer wastes udp_discovery_timeout probing
     // a path the user already told us is broken.
-    if myself_options.contains(ConnOptions::PMTU_DISCOVERY) && !opts.contains(ConnOptions::TCPONLY)
-    {
+    let pmtu_discovery = conn
+        .host_pmtu_discovery
+        .unwrap_or_else(|| myself_options.contains(ConnOptions::PMTU_DISCOVERY));
+    if pmtu_discovery && !opts.contains(ConnOptions::TCPONLY) {
         opts |= ConnOptions::PMTU_DISCOVERY;
     }
     // Per-host ClampMSS overrides global (not OR'd); absent = global

@@ -74,6 +74,7 @@ mod subnet_tree;
 mod tcp_tunnel;
 mod tunnel;
 mod udp_info;
+mod udp_path;
 mod wire;
 pub(crate) use platform::{
     bind_to_interface, msg_nosignal, set_cloexec, set_nosigpipe, set_udp_tos, sock_cloexec_flag,

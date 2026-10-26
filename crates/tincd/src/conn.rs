@@ -258,6 +258,8 @@ pub(crate) struct Connection {
     pub host_tcponly: Option<bool>,
     /// `hosts/NAME` `ClampMSS`.
     pub host_clamp_mss: Option<bool>,
+    /// `hosts/NAME` `PMTUDiscovery`.
+    pub host_pmtu_discovery: Option<bool>,
     /// `hosts/NAME` `Weight`.
     pub host_weight: Option<i32>,
     /// Link AEAD from `link_sptps_modes`, read by `handle_id` when it
@@ -346,6 +348,7 @@ impl Connection {
             host_indirect: None,
             host_tcponly: None,
             host_clamp_mss: None,
+            host_pmtu_discovery: None,
             host_weight: None,
             sptps_cipher: tinc_sptps::SptpsAead::default(),
             pmtu_cap: None,

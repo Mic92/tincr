@@ -11,8 +11,6 @@ use crate::outgoing::{
     try_connect_via_proxy,
 };
 use crate::packet::len_u16;
-use crate::pmtu::PmtuState;
-use crate::tunnel::MTU;
 use crate::{local_addr, socks};
 
 use crate::event::Io;
@@ -57,13 +55,6 @@ impl Daemon {
             conn.options.set(ConnOptions::CLAMP_MSS, clamp);
         }
 
-        // Per-host and global PMTU clamp. We init `pmtu` lazily
-        // (try_tx); seed it now with the clamp so the first probe
-        // cycle starts from a sane ceiling instead of wasting probes
-        // above the user's known path MTU. The min(host, global) is
-        // computed in dispatch.rs::handle_id.
-        let pmtu_cap = conn.pmtu_cap;
-
         conn.allow_request = None;
 
         log::info!(target: "tincd::conn",
@@ -97,22 +88,6 @@ impl Daemon {
         // Idempotent (peer may already be in graph from transitive
         // ADD_EDGE).
         let peer_id = self.lookup_or_add_node(&name);
-
-        // Seed pmtu (or clamp existing) so try_mtu's `maxmtu` and the
-        // eventual fixed `mtu` don't exceed the user-declared ceiling.
-        // We also clamp `maxmtu` — the search converges faster and
-        // never probes above the cap.
-        if let Some(cap) = pmtu_cap {
-            let now = self.timers.now();
-            let tunnel = self.dp.tunnels.entry(peer_id).or_default();
-            let p = tunnel
-                .pmtu
-                .get_or_insert_with(|| PmtuState::new(now, cap.min(MTU)));
-            if p.mtu == 0 || cap < p.mtu {
-                p.mtu = cap;
-            }
-            p.maxmtu = p.maxmtu.min(cap);
-        }
 
         if let Some(old) = self.nodes.get(&peer_id)
             && let Some(old_conn) = old.conn

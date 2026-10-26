@@ -6,11 +6,9 @@ use std::sync::PoisonError;
 use std::time::{Duration, Instant};
 
 use crate::graph::{Graph, NodeId};
-use socket2::SockAddr;
 use tinc_device::{Device, GroBucket, GroVerdict};
 
 use crate::inthash::IntHashMap;
-use crate::local_addr;
 use crate::shard::TunnelHandles;
 use crate::tunnel::TunnelState;
 
@@ -22,35 +20,64 @@ use std::sync::atomic;
 /// Re-warn cadence for [`handle_udp_unreachable`].
 const UDP_UNREACHABLE_WARN_INTERVAL: Duration = Duration::from_mins(1);
 
-/// Confirm a peer's UDP address: flip `udp_confirmed`, cache the
-/// `SockAddr` + sock index, mirror into the lock-free fast-path handle.
-///
-/// Gates on `cached.is_none() OR addr changed` — not just addr-change —
-/// because gossip seeds `udp_addr` while clearing `udp_addr_cached`.
-pub(super) fn confirm_udp_addr(
+/// Listener index for sending to `addr`: the first of its family.
+pub(super) fn listener_for(listeners: &[ListenerSlot], addr: &SocketAddr) -> u8 {
+    listeners
+        .iter()
+        .position(|s| s.listener.local.is_ipv4() == addr.is_ipv4())
+        .and_then(|i| u8::try_from(i).ok())
+        .unwrap_or(0)
+}
+
+/// Every `UdpPath` transition ends here.
+pub(super) fn publish_path(
     tunnels: &mut IntHashMap<NodeId, TunnelState>,
     listeners: &[ListenerSlot],
     tunnel_handles: &IntHashMap<NodeId, Arc<TunnelHandles>>,
     nid: NodeId,
-    from_name: &str,
-    peer_addr: SocketAddr,
 ) {
-    let tunnel = tunnels.entry(nid).or_default();
-    if tunnel.udp_addr_cached.is_some() && tunnel.udp_addr == Some(peer_addr) {
+    let Some(t) = tunnels.get_mut(&nid) else {
         return;
-    }
-    let listener_addrs: Vec<SocketAddr> = listeners.iter().map(|s| s.listener.local).collect();
-    let sock = local_addr::adapt_socket(&peer_addr, 0, &listener_addrs);
-    if !tunnel.status.udp_confirmed {
-        log::debug!(target: "tincd::net",
-                    "UDP address of {from_name} confirmed: {peer_addr}");
-        tunnel.status.udp_confirmed = true;
-    }
-    tunnel.udp_addr = Some(peer_addr);
-    let cached = (SockAddr::from(peer_addr), sock);
-    tunnel.udp_addr_cached = Some(cached.clone());
+    };
+    let moved = t.path.refresh_target(|a| listener_for(listeners, a));
     if let Some(h) = tunnel_handles.get(&nid) {
-        *h.udp_addr.lock().unwrap_or_else(PoisonError::into_inner) = Some(cached);
+        if moved {
+            *h.udp_addr.lock().unwrap_or_else(PoisonError::into_inner) = t.path.target().cloned();
+        }
+        h.minmtu.store(t.path.minmtu(), atomic::Ordering::Relaxed);
+    }
+}
+
+impl Daemon {
+    /// Every path's send target and fast-path mirror match what
+    /// [`publish_path`] would derive now. A path transition that skipped
+    /// the publish fails here, at the end of the event-loop turn.
+    pub(in crate::daemon) fn debug_check_paths(&self) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        for (nid, t) in &self.dp.tunnels {
+            let derived = t.path.derive_target(|a| listener_for(&self.listeners, a));
+            debug_assert!(t.path.target() == derived.as_ref(), "{nid:?}: stale target");
+            if let Some(h) = self.tunnel_handles.get(nid) {
+                let published = h.udp_addr.lock().unwrap_or_else(PoisonError::into_inner);
+                debug_assert!(*published == derived, "{nid:?}: stale fast-path addr");
+                debug_assert_eq!(
+                    h.minmtu.load(atomic::Ordering::Relaxed),
+                    t.path.minmtu(),
+                    "{nid:?}: stale fast-path minmtu"
+                );
+            }
+        }
+    }
+
+    pub(in crate::daemon) fn publish_path(&mut self, nid: NodeId) {
+        publish_path(
+            &mut self.dp.tunnels,
+            &self.listeners,
+            &self.tunnel_handles,
+            nid,
+        );
     }
 }
 
@@ -74,39 +101,22 @@ pub(super) fn is_udp_unreachable_errno(e: &io::Error) -> bool {
     )
 }
 
-/// Handle "destination unreachable" on UDP send: clear cached
-/// `udp_addr` so `choose_udp_address` picks a different candidate.
-/// Rate-limits the warn log to once per [`UDP_UNREACHABLE_WARN_INTERVAL`]
-/// per peer. Does not tear down SPTPS or pmtu — this is a routing event.
+/// "Destination unreachable" on UDP send. A routing event: SPTPS stays.
 pub(super) fn handle_udp_unreachable(
     tunnels: &mut IntHashMap<NodeId, TunnelState>,
+    listeners: &[ListenerSlot],
     tunnel_handles: &IntHashMap<NodeId, Arc<TunnelHandles>>,
     relay_nid: NodeId,
     relay_name: &str,
     err: &io::Error,
     now: Instant,
 ) {
-    let warn_now = if let Some(tunnel) = tunnels.get_mut(&relay_nid) {
-        let warn_now = tunnel
-            .udp_send_failed_at
-            .is_none_or(|t| now.saturating_duration_since(t) >= UDP_UNREACHABLE_WARN_INTERVAL);
-        tunnel.udp_send_failed_at = Some(now);
-        tunnel.udp_addr = None;
-        tunnel.udp_addr_cached = None;
-        tunnel.status.udp_confirmed = false;
-        if let Some(p) = tunnel.pmtu.as_mut() {
-            p.udp_confirmed = false;
-        }
-        warn_now
-    } else {
-        true
-    };
-
-    if let Some(h) = tunnel_handles.get(&relay_nid)
-        && let Ok(mut g) = h.udp_addr.lock()
-    {
-        *g = None;
-    }
+    let warn_now = tunnels.get_mut(&relay_nid).is_none_or(|t| {
+        t.path
+            .on_unreachable(now)
+            .is_none_or(|t| now.saturating_duration_since(t) >= UDP_UNREACHABLE_WARN_INTERVAL)
+    });
+    publish_path(tunnels, listeners, tunnel_handles, relay_nid);
 
     if warn_now {
         log::warn!(target: "tincd::net",
@@ -115,27 +125,23 @@ pub(super) fn handle_udp_unreachable(
     }
 }
 
-/// `EMSGSIZE` on UDP send: clamp the relay's PMTU bounds below
-/// `origlen` and publish the new `minmtu` to the shard fast path so
-/// larger bodies go TCP. The triggering frame(s) are the caller's to
-/// re-route or drop.
+/// `EMSGSIZE` on UDP send. The frames are the caller's to re-route or drop.
 pub(super) fn handle_udp_emsgsize(
     tunnels: &mut IntHashMap<NodeId, TunnelState>,
+    listeners: &[ListenerSlot],
     graph: &Graph,
     tunnel_handles: &IntHashMap<NodeId, Arc<TunnelHandles>>,
     relay_nid: NodeId,
     origlen: u16,
 ) {
-    let Some(p) = tunnels.get_mut(&relay_nid).and_then(|t| t.pmtu.as_mut()) else {
+    let Some(t) = tunnels.get_mut(&relay_nid) else {
         return;
     };
     let relay_name = graph.node(relay_nid).map_or("<gone>", |n| n.name.as_str());
-    for a in p.on_emsgsize(origlen) {
+    for a in t.path.on_emsgsize(origlen) {
         Daemon::log_pmtu_action(relay_name, &a);
     }
-    if let Some(h) = tunnel_handles.get(&relay_nid) {
-        h.minmtu.store(p.minmtu, atomic::Ordering::Relaxed);
-    }
+    publish_path(tunnels, listeners, tunnel_handles, relay_nid);
 }
 
 /// Offer raw IP `data` to GRO bucket, flushing as needed; falls
@@ -218,39 +224,33 @@ mod tests {
         let mut tunnels: IntHashMap<NodeId, TunnelState> = IntHashMap::default();
         let tunnel_handles: IntHashMap<NodeId, Arc<TunnelHandles>> = IntHashMap::default();
         let nid = NodeId(42);
-        let mut t = TunnelState {
-            udp_addr: Some("10.0.0.1:655".parse().unwrap()),
-            ..TunnelState::default()
-        };
-        let lo: SocketAddr = "127.0.0.1:1234".parse().unwrap();
-        t.udp_addr_cached = Some((SockAddr::from(lo), 0));
-        t.status.udp_confirmed = true;
+        let now = Instant::now();
+        let mut t = TunnelState::default();
+        t.path.on_authenticated_rx("10.0.0.1:655".parse().unwrap());
+        let _ = t.path.on_probe_reply(1400, now);
+        assert!(t.path.refresh_target(|_| 0));
         tunnels.insert(nid, t);
 
-        let now = Instant::now();
         let err = io::Error::from_raw_os_error(101);
-        handle_udp_unreachable(&mut tunnels, &tunnel_handles, nid, "peer", &err, now);
+        handle_udp_unreachable(&mut tunnels, &[], &tunnel_handles, nid, "peer", &err, now);
 
         let t = tunnels.get(&nid).expect("tunnel still present");
-        assert!(t.udp_addr.is_none(), "udp_addr cleared");
-        assert!(t.udp_addr_cached.is_none(), "udp_addr_cached cleared");
-        assert!(!t.status.udp_confirmed, "udp_confirmed cleared");
-        assert_eq!(
-            t.udp_send_failed_at,
-            Some(now),
-            "failed-at timestamp stamped"
-        );
+        assert!(t.path.addr().is_none());
+        assert!(t.path.target().is_none());
+        assert!(!t.path.confirmed());
+        assert_eq!(t.path.minmtu(), 0);
+        assert_eq!(t.path.send_failed_at(), Some(now));
 
-        // Idempotent: second call on same timestamp suppresses warn.
-        handle_udp_unreachable(&mut tunnels, &tunnel_handles, nid, "peer", &err, now);
-        let t = tunnels.get(&nid).unwrap();
-        assert_eq!(
-            t.udp_send_failed_at,
-            Some(now),
-            "still stamped, not regressed"
-        );
-
+        handle_udp_unreachable(&mut tunnels, &[], &tunnel_handles, nid, "peer", &err, now);
         let missing = NodeId(99);
-        handle_udp_unreachable(&mut tunnels, &tunnel_handles, missing, "ghost", &err, now);
+        handle_udp_unreachable(
+            &mut tunnels,
+            &[],
+            &tunnel_handles,
+            missing,
+            "ghost",
+            &err,
+            now,
+        );
     }
 }

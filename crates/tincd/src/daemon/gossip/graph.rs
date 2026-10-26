@@ -61,10 +61,16 @@ impl Daemon {
                             let (a, p, _, _) = self.edge_addrs.get(&prev)?;
                             local_addr::parse_addr_port(a.as_str(), p.as_str())
                         });
-                    if let Some(addr) = addr {
-                        let tunnel = self.dp.tunnels.entry(node).or_default();
-                        tunnel.udp_addr = Some(addr);
-                        tunnel.udp_addr_cached = None;
+                    if let Some(addr) = addr
+                        && self
+                            .dp
+                            .tunnels
+                            .entry(node)
+                            .or_default()
+                            .path
+                            .on_addr_hint(addr)
+                    {
+                        self.publish_path(node);
                     }
 
                     // host-up after addr known.
@@ -91,7 +97,7 @@ impl Daemon {
                         .dp
                         .tunnels
                         .get(&node)
-                        .and_then(|t| t.udp_addr)
+                        .and_then(|t| t.path.addr())
                         .or_else(|| self.nodes.get(&node).and_then(|ns| ns.edge_addr));
 
                     self.run_host_script(false, &name_owned, addr);

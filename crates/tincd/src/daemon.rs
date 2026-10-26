@@ -677,6 +677,7 @@ impl Daemon {
         let mut fired_signals = Vec::with_capacity(4);
 
         while self.running {
+            self.debug_check_paths();
             // timers.
             // tick(): cache `now`, drain expired. Ignore returned
             // deadline — handlers below re-arm, recompute after.
