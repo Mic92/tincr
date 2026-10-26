@@ -43,6 +43,10 @@ pub use arena::{DeviceArena, DrainResult};
 // `tso_split` on it. Not cfg-gated: the function is pure header
 // arithmetic on `&[u8]`, runs anywhere.
 mod tso;
+
+#[cfg(any(test, feature = "fuzzing"))]
+#[doc(hidden)]
+pub mod fuzz;
 pub use tso::{
     GroBucket, GroVerdict, TsoError, VNET_HDR_LEN, VirtioNetHdr, gso_none_checksum, tso_split,
 };

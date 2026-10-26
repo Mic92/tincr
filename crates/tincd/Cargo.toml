@@ -142,6 +142,8 @@ rand_chacha = "0.10"
 [features]
 default = ["upnp"]
 upnp = ["dep:netdev"]
+# Exposes `tincd::fuzz` for the cargo-fuzz targets in /fuzz.
+fuzzing = []
 
 [[bench]]
 name = "throughput"

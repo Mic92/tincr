@@ -32,6 +32,8 @@ let
     ../Cargo.lock
     ../.cargo # x86-64-v3 + AVX2 flags; see config.toml
     ../crates
+    ../fuzz/Cargo.toml
+    ../fuzz/fuzz_targets
   ];
   mkSrc =
     fs:

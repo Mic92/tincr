@@ -1,0 +1,48 @@
+[package]
+name = "tincr-fuzz"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tincd = { path = "../crates/tincd", features = ["fuzzing"] }
+tinc-device = { path = "../crates/tinc-device", features = ["fuzzing"] }
+
+[[bin]]
+name = "mss_clamp"
+path = "fuzz_targets/mss_clamp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "route_frame"
+path = "fuzz_targets/route_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "socks_reply"
+path = "fuzz_targets/socks_reply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tso"
+path = "fuzz_targets/tso.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gro"
+path = "fuzz_targets/gro.rs"
+test = false
+doc = false
+bench = false

@@ -9,6 +9,19 @@ members = [
     "crates/tinc-device",
     "crates/tincd",
     "crates/tinc-tools",
+    "fuzz",
+]
+# fuzz needs cargo-fuzz (`nix develop .#fuzz`); keep it out of plain
+# `cargo build`/`cargo test`.
+default-members = [
+    "crates/tinc-crypto",
+    "crates/tinc-ffi",
+    "crates/tinc-sptps",
+    "crates/tinc-proto",
+    "crates/tinc-conf",
+    "crates/tinc-device",
+    "crates/tincd",
+    "crates/tinc-tools",
 ]
 
 [workspace.package]
