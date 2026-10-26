@@ -14,6 +14,10 @@
 //! bits. Intent is `& 0o077` (no group/other read). We port the
 //! bug; the warning is cosmetic and 1.1 users
 //! grep for the C message.
+#![expect(
+    clippy::unwrap_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::collections::HashMap;
 use std::fs::File;

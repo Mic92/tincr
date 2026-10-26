@@ -3,6 +3,10 @@
 //! is the daemon-side I/O around them.
 
 #![forbid(unsafe_code)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use super::net::TunnelSendOutcome;
 use super::{ConnId, Daemon, PKT_PROBE};

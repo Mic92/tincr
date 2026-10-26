@@ -1,3 +1,7 @@
+#![expect(
+    clippy::indexing_slicing,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 use super::super::Daemon;
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};

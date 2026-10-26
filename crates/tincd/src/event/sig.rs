@@ -30,6 +30,11 @@
 //! The handler may only call async-signal-safe functions; it does
 //! one raw `write(2)` of `signum as u8` and nothing else. The
 //! write-end fd is stashed in a `static AtomicI32`.
+#![expect(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};

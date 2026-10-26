@@ -15,6 +15,11 @@
 //! between-fork-and-exec child path is libc-only (no `std`, no
 //! allocator, no formatting) because the surviving thread inherits
 //! arbitrary held locks from the multi-threaded parent.
+#![expect(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::ffi::CString;
 use std::io;

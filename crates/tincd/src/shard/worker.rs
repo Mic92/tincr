@@ -6,6 +6,11 @@
 //! `Arc<TunnelHandles>` inside it.
 
 #![cfg(target_os = "linux")]
+#![expect(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};

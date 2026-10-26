@@ -13,6 +13,13 @@
 // New unsafe in the entrypoint should trip the lint; remaining
 // per-site uses carry an explicit `#[expect(unsafe_code)]`.
 #![deny(unsafe_code)]
+// Same C2 guard as the library. See lib.rs.
+#![deny(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
 
 mod args;
 mod procsetup;

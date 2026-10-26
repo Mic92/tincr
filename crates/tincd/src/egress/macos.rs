@@ -97,23 +97,16 @@ impl Fast {
 
         let sock = self.fallback.sock().as_raw_fd();
         let stride = usize::from(b.stride);
-        let base = b.frames.as_ptr();
-        for i in 0..usize::from(b.count) {
-            let off = i * stride;
-            let len = if i + 1 == usize::from(b.count) {
-                usize::from(b.last_len)
-            } else {
-                stride
+        // `TxBatch::stage` packs `count` frames at `stride`, the last one
+        // `last_len` long, so `chunks` yields exactly the datagrams. The
+        // kernel only reads through the iovecs.
+        let slots = self.iovs.iter_mut().zip(self.hdrs.iter_mut());
+        for (frame, (iov, hdr)) in b.frames.chunks(stride).zip(slots) {
+            *iov = libc::iovec {
+                iov_base: frame.as_ptr() as *mut libc::c_void,
+                iov_len: frame.len(),
             };
-            // SAFETY: `EgressBatch::frames` is `&[u8]` of length
-            // `(count-1)*stride + last_len`; `off+len` is in bounds
-            // for every `i < count` by construction (`TxBatch::stage`
-            // packed it). The iovec is read-only by the kernel.
-            self.iovs[i] = libc::iovec {
-                iov_base: unsafe { base.add(off) } as *mut libc::c_void,
-                iov_len: len,
-            };
-            self.hdrs[i] = MsghdrX {
+            *hdr = MsghdrX {
                 // Unconnected-socket path: `sendit()` honours this
                 // exactly like `sendmsg(2)` would. `as_ptr()` returns
                 // `*const sockaddr_storage`; the syscall reads only
@@ -121,7 +114,7 @@ impl Fast {
                 // the const→mut cast is sound.
                 msg_name: b.dst.as_ptr() as *mut libc::c_void,
                 msg_namelen: b.dst.len(),
-                msg_iov: &raw mut self.iovs[i],
+                msg_iov: &raw mut *iov,
                 msg_iovlen: 1,
                 msg_control: ptr::null_mut(),
                 msg_controllen: 0,
@@ -139,12 +132,16 @@ impl Fast {
             Ok(accepted) if accepted == usize::from(b.count) => Ok(()),
             Ok(accepted) if accepted < usize::from(b.count) => {
                 // Short return: prefix accepted. Replay only the tail.
-                let offset = accepted * stride;
+                let (Some(frames), Ok(accepted)) =
+                    (b.frames.get(accepted * stride..), u16::try_from(accepted))
+                else {
+                    return Err(io::Error::other("sendmsg_x tail out of range"));
+                };
                 let tail = EgressBatch {
                     dst: b.dst,
-                    frames: &b.frames[offset..],
+                    frames,
                     stride: b.stride,
-                    count: b.count - u16::try_from(accepted).expect("accepted < u16 count"),
+                    count: b.count - accepted,
                     last_len: b.last_len,
                 };
                 self.fallback.send_batch(&tail)

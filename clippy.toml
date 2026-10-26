@@ -15,3 +15,9 @@ doc-valid-idents = [
     "..",
 ]
 too-many-lines-threshold = 200
+
+# tincd denies these outside tests (PLAN.md C2); tests may assert freely.
+allow-indexing-slicing-in-tests = true
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

@@ -30,6 +30,10 @@
 //! kernel sources from our link-local and the server's
 //! `ADDRESS_MISMATCH` check rejects it (and even if it didn't, a
 //! pinhole to a link-local addr is useless).
+#![expect(
+    clippy::indexing_slicing,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::time::Duration;

@@ -1,4 +1,9 @@
 //! Shared helpers for the net layer.
+#![expect(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::net::SocketAddr;
 use std::sync::Arc;

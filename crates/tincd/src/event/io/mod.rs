@@ -15,6 +15,11 @@
 //! This means `EventLoop` stores `RawFd` per slot (so it can
 //! reregister/deregister later), but doesn't `close()` on drop.
 //! Closing is the `connection_t` equivalent's job.
+#![expect(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};

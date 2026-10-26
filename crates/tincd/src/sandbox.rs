@@ -45,6 +45,10 @@
 //! ping` pins that as intentional.
 
 #![forbid(unsafe_code)]
+#![expect(
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 #[cfg(target_os = "linux")]
 use landlock::{

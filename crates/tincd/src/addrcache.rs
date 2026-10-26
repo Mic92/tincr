@@ -32,6 +32,10 @@
 //! cache; it's a warm-start hint, never load-bearing.
 
 #![forbid(unsafe_code)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::env;
 use std::fmt::Write as _;

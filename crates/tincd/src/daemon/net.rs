@@ -1,3 +1,7 @@
+#![expect(
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 pub(super) use super::ListenerSlot;
 
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};

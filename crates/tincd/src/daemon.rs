@@ -2,6 +2,11 @@
 //!
 //! Loop shape: tick → turn → match. `IoWhat` is the `W` in
 //! `EventLoop<W>`. `run()` consumes `self`; teardown is `Drop`.
+#![expect(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

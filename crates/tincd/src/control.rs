@@ -33,6 +33,10 @@
 //! bind` doesn't expose mode. We bracket `bind()` with a tightened
 //! `umask(0o077)` so the inode is never observable with group/other
 //! bits, then `chmod()` 0700 for good measure.
+#![expect(
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::fmt::Write as _;
 use std::fs::OpenOptions;

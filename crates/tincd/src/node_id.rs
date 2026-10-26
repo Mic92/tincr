@@ -21,6 +21,10 @@
 //! `SRCID`). Same data, two indices, like the C's two trees.
 
 #![forbid(unsafe_code)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::fmt;
 

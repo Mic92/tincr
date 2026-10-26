@@ -12,6 +12,10 @@
 //! this on the per-forward hot path; we do too. No alloc.
 
 #![forbid(unsafe_code)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 // Ethertypes. `ETH_P_IP`/`ETH_P_IPV6` are also in
 // `tinc-device/src/ether.rs` but those are crate-private; we only

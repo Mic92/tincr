@@ -3,6 +3,10 @@
 //! `host-up → subnet-up` ordering a per-job `spawn()` would race.
 
 #![forbid(unsafe_code)]
+#![expect(
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::path::PathBuf;
 use std::sync::Mutex;
