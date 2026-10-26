@@ -26,26 +26,19 @@
 //! source.
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::indexing_slicing,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use zerocopy::{FromBytes, IntoBytes};
 
 use crate::packet::{Icmp6Hdr, IcmpHdr, Ipv4Hdr, Ipv6Hdr, Ipv6Pseudo, inet_checksum};
+use crate::wire::array;
 
 const ETHER_SIZE: usize = 14;
 const IP_SIZE: usize = 20;
 
 /// Reply ethernet header: dst←orig src, src←orig dst, ethertype copied.
-/// Caller has already length-checked `original` to ≥ `ETHER_SIZE`.
-fn eth_reply_hdr(original: &[u8]) -> [u8; ETHER_SIZE] {
-    let mut eth = [0u8; ETHER_SIZE];
-    eth[0..6].copy_from_slice(&original[6..12]);
-    eth[6..12].copy_from_slice(&original[0..6]);
-    eth[12..14].copy_from_slice(&original[12..14]);
-    eth
+fn eth_reply_hdr(original: &[u8]) -> Option<[u8; ETHER_SIZE]> {
+    let &[d0, d1, d2, d3, d4, d5, s0, s1, s2, s3, s4, s5, t0, t1] = array(original, 0)?;
+    Some([s0, s1, s2, s3, s4, s5, d0, d1, d2, d3, d4, d5, t0, t1])
 }
 
 const ICMP_SIZE: usize = 8;
@@ -76,25 +69,17 @@ pub(crate) fn build_v4_unreachable(
     frag_mtu: Option<u16>,
     src_override: Option<[u8; 4]>,
 ) -> Option<Vec<u8>> {
-    // Need at least eth + IP hdr to parse src/dst.
-    if original.len() < ETHER_SIZE + IP_SIZE {
-        return None;
-    }
-
-    let eth = eth_reply_hdr(original);
-
-    // Length checked above; .ok()? is unreachable but quiets clippy.
-    let orig_ip_bytes: &[u8; IP_SIZE] =
-        original[ETHER_SIZE..ETHER_SIZE + IP_SIZE].try_into().ok()?;
-    let orig_ip = Ipv4Hdr::read_from_bytes(orig_ip_bytes).ok()?;
+    let eth = eth_reply_hdr(original)?;
+    let orig_ip = Ipv4Hdr::read_from_bytes(array::<IP_SIZE>(original, ETHER_SIZE)?).ok()?;
     // Reply source is the original destination unless the caller
     // overrides it (TTL-exceeded case).
     let ip_src = orig_ip.ip_src;
     let ip_dst = src_override.unwrap_or(orig_ip.ip_dst);
 
     // Quote the whole original IP datagram (header + payload), capped.
-    let oldlen = (original.len() - ETHER_SIZE).min(V4_QUOTE_CAP);
-    let quote = &original[ETHER_SIZE..ETHER_SIZE + oldlen];
+    let quote = original.get(ETHER_SIZE..)?;
+    let quote = quote.get(..V4_QUOTE_CAP).unwrap_or(quote);
+    let oldlen = quote.len();
 
     let mut ip = Ipv4Hdr::default();
     ip.set_vhl(4, 5);
@@ -147,25 +132,17 @@ pub(crate) fn build_v6_unreachable(
     pkt_too_big_mtu: Option<u32>,
     src_override: Option<[u8; 16]>,
 ) -> Option<Vec<u8>> {
-    if original.len() < ETHER_SIZE + IP6_SIZE {
-        return None;
-    }
-
-    let eth = eth_reply_hdr(original);
-
-    // Length checked above; .ok()? is unreachable but quiets clippy.
-    let orig_ip6_bytes: &[u8; IP6_SIZE] = original[ETHER_SIZE..ETHER_SIZE + IP6_SIZE]
-        .try_into()
-        .ok()?;
-    let orig_ip6 = Ipv6Hdr::read_from_bytes(orig_ip6_bytes).ok()?;
+    let eth = eth_reply_hdr(original)?;
+    let orig_ip6 = Ipv6Hdr::read_from_bytes(array::<IP6_SIZE>(original, ETHER_SIZE)?).ok()?;
 
     // Reply source is the original destination unless the caller
     // overrides it (TTL-exceeded case).
     let new_src = src_override.unwrap_or(orig_ip6.ip6_dst);
     let new_dst = orig_ip6.ip6_src;
 
-    let quote_len = (original.len() - ETHER_SIZE).min(V6_QUOTE_CAP);
-    let quote = &original[ETHER_SIZE..ETHER_SIZE + quote_len];
+    let quote = original.get(ETHER_SIZE..)?;
+    let quote = quote.get(..V6_QUOTE_CAP).unwrap_or(quote);
+    let quote_len = quote.len();
 
     let mut ip6 = Ipv6Hdr::default();
     ip6.set_flow(0x6000_0000);

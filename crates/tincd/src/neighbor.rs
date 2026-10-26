@@ -14,11 +14,6 @@
 
 #![forbid(unsafe_code)]
 #![expect(clippy::cast_possible_truncation)] // header-size constants, max 32
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::mem;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -29,8 +24,7 @@ use crate::packet::{
     ARPHRD_ETHER, ARPOP_REPLY, ARPOP_REQUEST, ETH_P_IP, EtherArp, Ipv6Hdr, Ipv6Pseudo,
     inet_checksum,
 };
-
-// Sizes.
+use crate::wire::array;
 
 const ETHER_SIZE: usize = 14;
 const ETH_ALEN: usize = 6;
@@ -47,18 +41,22 @@ pub(crate) const ND_NEIGHBOR_ADVERT: u8 = 136;
 pub(crate) const ND_OPT_SOURCE_LINKADDR: u8 = 1;
 pub(crate) const ND_OPT_TARGET_LINKADDR: u8 = 2;
 
-// ARP.
+/// The kernel's MAC with the last byte flipped.
+fn fake_mac(frame: &[u8]) -> Option<[u8; ETH_ALEN]> {
+    let mut mac = *array::<ETH_ALEN>(frame, ETH_ALEN)?;
+    mac[ETH_ALEN - 1] ^= 0xFF;
+    Some(mac)
+}
+
+fn arp(frame: &[u8]) -> Option<EtherArp> {
+    EtherArp::read_from_bytes(array::<ARP_SIZE>(frame, ETHER_SIZE)?).ok()
+}
 
 /// Returns `arp_tpa` iff `frame` is a valid Ethernet/IP ARP
 /// who-has. Caller does subnet lookup.
 #[must_use]
 pub(crate) fn parse_arp_req(frame: &[u8]) -> Option<Ipv4Addr> {
-    if frame.len() < ETHER_SIZE + ARP_SIZE {
-        return None;
-    }
-    let arp_bytes: &[u8; ARP_SIZE] = frame[ETHER_SIZE..ETHER_SIZE + ARP_SIZE].try_into().ok()?;
-    let arp = EtherArp::read_from_bytes(arp_bytes).ok()?;
-
+    let arp = arp(frame)?;
     if arp.ea_hdr.hrd() != ARPHRD_ETHER
         || arp.ea_hdr.pro() != ETH_P_IP
         || arp.ea_hdr.ar_hln != ETH_ALEN as u8
@@ -67,171 +65,104 @@ pub(crate) fn parse_arp_req(frame: &[u8]) -> Option<Ipv4Addr> {
     {
         return None;
     }
-
     Some(Ipv4Addr::from(arp.arp_tpa))
 }
 
-/// `arp_sha` = orig eth-src XOR `0xFF` on last byte (the fake-MAC
-/// trick).
-///
-/// # Panics
-/// If `original.len() < 42`. Caller validates with [`parse_arp_req`].
+/// Reply to an ARP request. The eth header is copied unchanged, as in C.
 #[must_use]
-pub(crate) fn build_arp_reply(original: &[u8]) -> Vec<u8> {
-    debug_assert!(original.len() >= ETHER_SIZE + ARP_SIZE);
+pub(crate) fn build_arp_reply(original: &[u8]) -> Option<Vec<u8>> {
+    let mut arp = arp(original)?;
+    mem::swap(&mut arp.arp_tpa, &mut arp.arp_spa);
+    arp.arp_tha = arp.arp_sha;
+    arp.arp_sha = fake_mac(original)?;
+    arp.ea_hdr.set_op(ARPOP_REPLY);
 
-    let mut out = original[..ETHER_SIZE + ARP_SIZE].to_vec();
-
-    // C does not touch the eth header (only :1022 copies arp back).
-    // Eth-dst is ignored on a tap read.
-
-    let arp_bytes: &[u8; ARP_SIZE] = original[ETHER_SIZE..ETHER_SIZE + ARP_SIZE]
-        .try_into()
-        .expect("validated");
-    let mut arp = EtherArp::read_from_bytes(arp_bytes).expect("28 bytes");
-
-    mem::swap(&mut arp.arp_tpa, &mut arp.arp_spa); // :1011-1013
-    arp.arp_tha = arp.arp_sha; // :1014
-
-    // :1015-1016 fake-MAC: orig eth-src, last byte flipped
-    let eth_src: [u8; ETH_ALEN] = original[ETH_ALEN..ETH_ALEN * 2]
-        .try_into()
-        .expect("validated");
-    arp.arp_sha = eth_src;
-    arp.arp_sha[ETH_ALEN - 1] ^= 0xFF;
-
-    arp.ea_hdr.set_op(ARPOP_REPLY); // :1017
-    out[ETHER_SIZE..ETHER_SIZE + ARP_SIZE].copy_from_slice(arp.as_bytes()); // :1022
-    out
+    let mut out = original.get(..ETHER_SIZE)?.to_vec();
+    out.extend_from_slice(arp.as_bytes());
+    Some(out)
 }
 
-// NDP.
+/// `ICMPv6` length of a solicit/advert: with the link-layer option iff
+/// the frame has room for it.
+fn ndp_icmp_len(frame: &[u8]) -> Option<usize> {
+    let avail = frame.len().checked_sub(ETHER_SIZE + IP6_SIZE)?;
+    if avail >= NS_SIZE + OPT_SIZE + ETH_ALEN {
+        Some(NS_SIZE + OPT_SIZE + ETH_ALEN)
+    } else if avail >= NS_SIZE {
+        Some(NS_SIZE)
+    } else {
+        None
+    }
+}
+
+fn icmp6_checksum(ip6: &Ipv6Hdr, icmp: &[u8]) -> u16 {
+    let mut pseudo = Ipv6Pseudo::default();
+    pseudo.ip6_src = ip6.ip6_src;
+    pseudo.ip6_dst = ip6.ip6_dst;
+    pseudo.set_length(icmp.len() as u32);
+    pseudo.set_next(u32::from(IPPROTO_ICMPV6));
+    inet_checksum(icmp, inet_checksum(pseudo.as_bytes(), 0xFFFF))
+}
 
 /// Returns `nd_ns_target` iff: long enough, `ip6_nxt == ICMPV6`,
-/// type 135, opt-type ok, and **`ICMPv6` checksum verifies**.
-/// Hop-limit (RFC 4861
-/// §7.1.1) is the kernel's job. We add the `ip6_nxt` check (C gets
-/// it from route dispatch; we're freestanding).
+/// type 135, opt-type ok, and the `ICMPv6` checksum verifies.
+/// Hop limit (RFC 4861 §7.1.1) is the kernel's job.
 #[must_use]
 pub(crate) fn parse_ndp_solicit(frame: &[u8]) -> Option<Ipv6Addr> {
-    if frame.len() < ETHER_SIZE + IP6_SIZE + NS_SIZE {
-        return None;
-    }
-    let has_opt = frame.len() >= ETHER_SIZE + IP6_SIZE + NS_SIZE + OPT_SIZE + ETH_ALEN;
-
-    let ip6_bytes: &[u8; IP6_SIZE] = frame[ETHER_SIZE..ETHER_SIZE + IP6_SIZE].try_into().ok()?;
-    let ip6 = Ipv6Hdr::read_from_bytes(ip6_bytes).ok()?;
-
-    // Not in C (route dispatch already branched); we're freestanding.
+    let icmp_len = ndp_icmp_len(frame)?;
+    let ip6 = Ipv6Hdr::read_from_bytes(array::<IP6_SIZE>(frame, ETHER_SIZE)?).ok()?;
     if ip6.ip6_nxt != IPPROTO_ICMPV6 {
         return None;
     }
-
-    let ns_off = ETHER_SIZE + IP6_SIZE;
-    let ns = &frame[ns_off..ns_off + NS_SIZE];
-
-    // :835-838
-    if ns[0] != ND_NEIGHBOR_SOLICIT {
+    let icmp = frame.get(ETHER_SIZE + IP6_SIZE..)?.get(..icmp_len)?;
+    if icmp.first() != Some(&ND_NEIGHBOR_SOLICIT) {
         return None;
     }
-    if has_opt {
-        let opt_type = frame[ns_off + NS_SIZE];
-        if opt_type != ND_OPT_SOURCE_LINKADDR {
-            return None;
-        }
-    }
-
-    // :843-861 checksum verify
-    let icmp_len = if has_opt {
-        NS_SIZE + OPT_SIZE + ETH_ALEN
-    } else {
-        NS_SIZE
-    };
-    let mut pseudo = Ipv6Pseudo::default();
-    pseudo.ip6_src = ip6.ip6_src;
-    pseudo.ip6_dst = ip6.ip6_dst;
-    pseudo.set_length(icmp_len as u32);
-    pseudo.set_next(u32::from(IPPROTO_ICMPV6));
-
-    // C feeds 4 separate calls (stack structs); we have contiguous bytes.
-    let mut ck = inet_checksum(pseudo.as_bytes(), 0xFFFF);
-    ck = inet_checksum(&frame[ns_off..ns_off + icmp_len], ck);
-    if ck != 0 {
+    if icmp
+        .get(NS_SIZE)
+        .is_some_and(|&t| t != ND_OPT_SOURCE_LINKADDR)
+    {
         return None;
     }
-
-    let target: [u8; 16] = ns[8..24].try_into().ok()?;
-    Some(Ipv6Addr::from(target))
+    if icmp6_checksum(&ip6, icmp) != 0 {
+        return None;
+    }
+    Some(Ipv6Addr::from(*array::<16>(icmp, 8)?))
 }
 
-/// Eth: dst←orig-src, src←orig-src⊕FF. Ip6: dst←orig-src,
-/// src←target (hlim untouched; kernel set 255, RFC 4861 §7.2.2).
-/// Icmp6: type←ADVERT, reserved←Solicited.
-/// Opt: `type←TARGET_LLADDR`, lladdr←fake MAC.
-///
-/// `decrement_ttl`: gated at the daemon callsite (`handle_ndp`)
-/// before this fn is called — keeps this module pure.
+/// Advert for a solicit. Eth: both MACs ← orig src, src's last byte
+/// flipped. Ip6: dst ← orig src, src ← target, hlim 255 (RFC 4861
+/// §7.1.2). Icmp6: ADVERT with the Solicited flag. The option carries
+/// the fake MAC.
 #[must_use]
 pub(crate) fn build_ndp_advert(original: &[u8]) -> Option<Vec<u8>> {
-    if original.len() < ETHER_SIZE + IP6_SIZE + NS_SIZE {
-        return None;
+    let icmp_len = ndp_icmp_len(original)?;
+    let fake = fake_mac(original)?;
+    let src = *array::<ETH_ALEN>(original, ETH_ALEN)?;
+
+    let mut ip6 = Ipv6Hdr::read_from_bytes(array::<IP6_SIZE>(original, ETHER_SIZE)?).ok()?;
+    let ns = original.get(ETHER_SIZE + IP6_SIZE..)?.get(..icmp_len)?;
+    ip6.ip6_dst = ip6.ip6_src;
+    ip6.ip6_src = *array::<16>(ns, 8)?;
+    ip6.ip6_hlim = 255;
+
+    let mut icmp = ns.to_vec();
+    // [type][code][cksum:2][flags:4]: tinc sets only Solicited.
+    icmp.get_mut(..8)?
+        .copy_from_slice(&[ND_NEIGHBOR_ADVERT, 0, 0, 0, 0x40, 0, 0, 0]);
+    if let Some((kind, mac)) = icmp.get_mut(NS_SIZE..).and_then(<[u8]>::split_first_mut) {
+        *kind = ND_OPT_TARGET_LINKADDR;
+        mac.get_mut(1..)?.copy_from_slice(&fake);
     }
-    let has_opt = original.len() >= ETHER_SIZE + IP6_SIZE + NS_SIZE + OPT_SIZE + ETH_ALEN;
-    let icmp_len = if has_opt {
-        NS_SIZE + OPT_SIZE + ETH_ALEN
-    } else {
-        NS_SIZE
-    };
-    let total = ETHER_SIZE + IP6_SIZE + icmp_len;
+    let ck = icmp6_checksum(&ip6, &icmp);
+    icmp.get_mut(2..4)?.copy_from_slice(&ck.to_ne_bytes()); // ne-order (packet.rs)
 
-    let mut out = original[..total].to_vec();
-
-    // Ethernet.
-    // memcpy leaves dst=src=orig-src, then XOR hits the src half.
-    let eth_src: [u8; ETH_ALEN] = original[ETH_ALEN..ETH_ALEN * 2].try_into().ok()?;
-    out[..ETH_ALEN].copy_from_slice(&eth_src);
-    out[ETH_ALEN..ETH_ALEN * 2].copy_from_slice(&eth_src);
-    out[ETH_ALEN * 2 - 1] ^= 0xFF;
-    let fake_mac: [u8; ETH_ALEN] = out[ETH_ALEN..ETH_ALEN * 2].try_into().ok()?;
-
-    // IPv6.
-    let ip6_off = ETHER_SIZE;
-    let ip6_bytes: &[u8; IP6_SIZE] = original[ip6_off..ip6_off + IP6_SIZE].try_into().ok()?;
-    let mut ip6 = Ipv6Hdr::read_from_bytes(ip6_bytes).ok()?;
-
-    let ns_off = ETHER_SIZE + IP6_SIZE;
-    let target: [u8; 16] = original[ns_off + 8..ns_off + 24].try_into().ok()?;
-
-    ip6.ip6_dst = ip6.ip6_src; // :902
-    ip6.ip6_src = target; //       :903
-    out[ip6_off..ip6_off + IP6_SIZE].copy_from_slice(ip6.as_bytes());
-
-    // ICMPv6 / NS.
-    // [type][code][cksum:2][reserved:4][target:16]
-    out[ns_off] = ND_NEIGHBOR_ADVERT;
-    out[ns_off + 2] = 0; // :909
-    out[ns_off + 3] = 0;
-    // :911 Solicited flag (spec says R|S|O for proxy; tinc sets S only).
-    out[ns_off + 4..ns_off + 8].copy_from_slice(&0x4000_0000u32.to_be_bytes());
-
-    // Option.
-    if has_opt {
-        let opt_off = ns_off + NS_SIZE;
-        out[opt_off] = ND_OPT_TARGET_LINKADDR; // :912
-        out[opt_off + OPT_SIZE..opt_off + OPT_SIZE + ETH_ALEN].copy_from_slice(&fake_mac); // :905-907
-    }
-
-    // Checksum.
-    let mut pseudo = Ipv6Pseudo::default();
-    pseudo.ip6_src = ip6.ip6_src;
-    pseudo.ip6_dst = ip6.ip6_dst;
-    pseudo.set_length(icmp_len as u32);
-    pseudo.set_next(u32::from(IPPROTO_ICMPV6));
-
-    let mut ck = inet_checksum(pseudo.as_bytes(), 0xFFFF);
-    ck = inet_checksum(&out[ns_off..ns_off + icmp_len], ck);
-    out[ns_off + 2..ns_off + 4].copy_from_slice(&ck.to_ne_bytes()); // ne-order (packet.rs)
-
+    let mut out = Vec::with_capacity(ETHER_SIZE + IP6_SIZE + icmp_len);
+    out.extend_from_slice(&src);
+    out.extend_from_slice(&fake);
+    out.extend_from_slice(original.get(12..14)?);
+    out.extend_from_slice(ip6.as_bytes());
+    out.extend_from_slice(&icmp);
     Some(out)
 }
 
@@ -292,7 +223,7 @@ mod tests {
     #[test]
     fn build_arp_reply_swaps() {
         let f = mk_arp_req([10, 42, 0, 1], [10, 42, 0, 2]);
-        let r = build_arp_reply(&f);
+        let r = build_arp_reply(&f).unwrap();
         assert_eq!(r.len(), ETHER_SIZE + ARP_SIZE);
 
         let arp_bytes: &[u8; ARP_SIZE] = r[ETHER_SIZE..].try_into().unwrap();
@@ -338,7 +269,7 @@ mod tests {
     fn arp_roundtrip() {
         let f = mk_arp_req([192, 168, 1, 100], [192, 168, 1, 200]);
         assert_eq!(parse_arp_req(&f), Some(Ipv4Addr::new(192, 168, 1, 200)));
-        let r = build_arp_reply(&f);
+        let r = build_arp_reply(&f).unwrap();
         assert_eq!(parse_arp_req(&r), None); // reply, not request
         let arp_bytes: &[u8; ARP_SIZE] = r[ETHER_SIZE..].try_into().unwrap();
         let arp = EtherArp::read_from_bytes(arp_bytes).unwrap();
@@ -434,9 +365,10 @@ mod tests {
 
     #[test]
     fn build_ndp_advert_hlim_255() {
-        // RFC 4861 §7.2.2. C relies on solicit having hlim=255 (§7.1.1).
+        // RFC 4861 §7.1.2, even if the solicit was already decremented.
         let target: Ipv6Addr = "2001:db8::1".parse().unwrap();
-        let f = mk_ndp_solicit(target);
+        let mut f = mk_ndp_solicit(target);
+        f[ETHER_SIZE + 7] = 254;
         let r = build_ndp_advert(&f).expect("valid");
         assert_eq!(r[ETHER_SIZE + 7], 255);
     }

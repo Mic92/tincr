@@ -46,10 +46,3 @@ cargo fuzz tmin -s none <target> fuzz/artifacts/<target>/crash-<hash>
 Fix the class, not the input (see PLAN.md, C2). If the fix is not
 covered by a type or lint, add the minimised input as a `#[test]` next
 to the harness in `src/fuzz.rs`.
-
-Known crashes, fixed in PLAN.md Phase 1:
-
-- `mss_clamp`: `mss.rs` reads past the frame on a truncated MSS option
-  (bug_001).
-- `tso`: `tso_split` slices the IPv6 address span before checking that
-  `csum_start` covers an IPv6 header.
