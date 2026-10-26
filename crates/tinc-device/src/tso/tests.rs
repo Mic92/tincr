@@ -294,6 +294,19 @@ fn split_v6_even() {
         u32::from_be_bytes([ip1[44], ip1[45], ip1[46], ip1[47]]),
         1100
     );
+
+    // An 8-byte Destination Options header counts towards plen.
+    let mut ext = build_v6_tcp(200);
+    ext[6] = 60;
+    ext.splice(40..40, [IPPROTO_TCP, 0, 0, 0, 0, 0, 0, 0]);
+    let hdr = VirtioNetHdr {
+        csum_start: 48,
+        ..hdr_v6(100)
+    };
+    let n = tso_split(&ext, &hdr, GsoType::TcpV6, &mut out, 1600, &mut lens).unwrap();
+    assert_eq!(n, 2);
+    let ip = &out[ETH_HLEN..];
+    assert_eq!(u16::from_be_bytes([ip[4], ip[5]]), 8 + 20 + 100);
 }
 
 /// Seqno wrap. RFC 793: seqno is mod 2^32. A long-lived flow
@@ -337,6 +350,9 @@ fn split_errors() {
     let cases = [
         // Can't even read TCP data offset.
         ("too_short",   vec![0x45; 30],     hdr_v4(100), GsoType::TcpV4, 1, TsoError::TooShort),
+        // csum_start inside the fixed IPv6 header.
+        ("v6_csum_start", build_v6_tcp(100), VirtioNetHdr { csum_start: 20, ..hdr_v6(100) }, GsoType::TcpV6, 1, TsoError::TooShort),
+        ("csum_in_payload", build_v4_tcp(200), VirtioNetHdr { csum_offset: 100, ..hdr_v4(100) }, GsoType::TcpV4, 4, TsoError::BadCsumOffset),
         ("bad_tcphlen", bad_hlen,           hdr_v4(100), GsoType::TcpV4, 1, TsoError::BadTcpHlen),
         // hdr says v6, packet is v4.
         ("ip_mismatch", build_v4_tcp(100),  hdr_v6(100), GsoType::TcpV6, 1, TsoError::IpVersionMismatch),
