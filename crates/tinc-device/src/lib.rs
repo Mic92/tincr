@@ -15,7 +15,10 @@
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
-#![cfg_attr(not(target_os = "linux"), expect(unused_imports))]
+#![cfg_attr(
+    not(any(target_os = "linux", target_os = "android")),
+    expect(unused_imports)
+)]
 
 use std::io;
 use std::os::fd::BorrowedFd;

@@ -58,6 +58,7 @@ use super::{Daemon, IoWhat, ListenerSlot, SetupError, SignalWhat, TimerWhat, net
 use crate::addrcache::AddressCache;
 use crate::bgresolve::DnsWorker;
 use crate::control::BindError;
+use crate::daemon::Bound;
 use crate::dns::DnsConfig;
 use crate::egress::TxBatch;
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -72,7 +73,7 @@ use crate::portmap::UpnpMode;
 use crate::scriptworker::ScriptWorker;
 use crate::sd_notify;
 use crate::shard::TxSnapshot;
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(target_os = "linux")]
 use crate::shard::runtime;
 use crate::tunnel::MTU;
 use std::env;
@@ -742,7 +743,7 @@ impl Daemon {
         socket: &Path,
         cmdline_conf: &tinc_conf::Config,
         socket_activation: Option<usize>,
-    ) -> Result<Self, SetupError> {
+    ) -> Result<Bound, SetupError> {
         let (config, name, hosts) = read_daemon_config(confbase, cmdline_conf)?;
         log::info!(target: "tincd", "tincd starting, name={name}");
         let mykey = load_private_key(&config, confbase)?;
@@ -824,7 +825,7 @@ impl Daemon {
 
         #[cfg(target_os = "linux")]
         let shard_runtime = if n_shards > 1 {
-            runtime::spawn_all(
+            runtime::prepare_all(
                 n_shards,
                 shard_tuns,
                 &listener_slots,
@@ -968,7 +969,7 @@ impl Daemon {
             watchdog,
             running: true,
             any_pcap: false,
-            dns_worker: DnsWorker::spawn(),
+            dns_worker: DnsWorker::new(),
             dns_hints: HashMap::new(),
             addr_owners: HashMap::new(),
             proxy_addrs: Vec::new(),
@@ -988,8 +989,6 @@ impl Daemon {
             daemon.add_config_outgoing(peer);
         }
         daemon.load_all_nodes();
-        #[cfg(feature = "upnp")]
-        daemon.spawn_portmapper();
 
         // tinc-up
         // The script typically does `ip addr add` / `ip link set up`
@@ -1012,7 +1011,7 @@ impl Daemon {
         // routes/ns/tunnels fill on the first run_graph_and_log.
         daemon.tx_snap = Some(daemon.initial_tx_snapshot());
 
-        Ok(daemon)
+        Ok(Bound(daemon))
     }
 }
 
@@ -1035,10 +1034,9 @@ impl Daemon {
         self.setup_outgoing_connection(oid);
     }
 
-    /// PCP/UPnP portmapper; needs the resolved port. Spawned early so the
-    /// first refresh runs while tinc-up is still configuring the iface.
+    /// PCP/UPnP portmapper; needs the resolved port.
     #[cfg(feature = "upnp")]
-    fn spawn_portmapper(&mut self) {
+    pub(super) fn spawn_portmapper(&mut self) {
         if self.settings.upnp == UpnpMode::No {
             return;
         }

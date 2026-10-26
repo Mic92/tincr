@@ -1,6 +1,7 @@
 use nix::sys::signal::Signal;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::Stdio;
@@ -51,11 +52,15 @@ fn greeting_then_req_stop_exits_cleanly() {
 
 /// `tinc start` end to end: tinc-tools forks our tincd with
 /// `TINC_UMBILICAL`, tincd signals readiness after setup, `start()`
-/// returns. The daemon detaches, so it is stopped over the socket.
+/// returns. The daemon detaches, so it is stopped over the socket. A
+/// child tinc-up leaves behind must not hold the umbilical open.
 #[test]
 fn tinc_start_waits_for_umbilical() {
     let tmp = tmp!("umbilical");
     let node = testnode(tmp.path());
+    let up = node.confbase.join("tinc-up");
+    fs::write(&up, "#!/bin/sh\nsleep 30 </dev/null >/dev/null 2>&1 &\n").unwrap();
+    fs::set_permissions(&up, fs::Permissions::from_mode(0o755)).unwrap();
     let pidfile = node.pidfile.clone();
     let input = tinc_tools::names::PathsInput {
         confbase: Some(node.confbase.clone()),
@@ -66,7 +71,12 @@ fn tinc_start_waits_for_umbilical() {
     paths.resolve_runtime(&input);
     let tincd = Path::new(env!("CARGO_BIN_EXE_tincd"));
 
+    let t0 = Instant::now();
     tinc_tools::cmd::start::start_with(&paths, &[], tincd).expect("tinc start");
+    assert!(
+        t0.elapsed() < Duration::from_secs(10),
+        "waited for tinc-up's child"
+    );
     // Readiness is the umbilical's whole point: no polling here.
     assert!(paths.unix_socket().exists());
     assert!(pidfile.exists());

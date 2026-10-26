@@ -14,6 +14,14 @@ use std::path::{Path, PathBuf};
 use crate::Config;
 use crate::name::check_id;
 
+/// `p` as seen after `chroot(root)`. Paths outside `root` are
+/// unreachable there and stay as they are.
+#[must_use]
+pub fn rebase_path(p: &Path, root: &Path) -> PathBuf {
+    p.strip_prefix(root)
+        .map_or_else(|_| p.to_path_buf(), |rest| Path::new("/").join(rest))
+}
+
 #[derive(Debug, Clone)]
 pub struct HostDirs {
     primary: PathBuf,
@@ -77,6 +85,15 @@ impl HostDirs {
                 .is_some_and(|o| present(&o.join(name)))
     }
 
+    /// The same dirs as seen after `chroot(root)`.
+    #[must_use]
+    pub fn rebased(&self, root: &Path) -> Self {
+        Self {
+            primary: rebase_path(&self.primary, root),
+            overlay: self.overlay.as_deref().map(|o| rebase_path(o, root)),
+        }
+    }
+
     /// Where new host files are created.
     #[must_use]
     pub fn write_path(&self, name: &str) -> PathBuf {
@@ -131,6 +148,15 @@ fn collect(dir: &Path, into: &mut BTreeSet<String>) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn rebased_after_chroot() {
+        let root = Path::new("/etc/tinc/vpn");
+        let d = HostDirs::new(root, Some("/etc/tinc/vpn/ov".into())).rebased(root);
+        assert_eq!(d.primary(), Path::new("/hosts"));
+        assert_eq!(d.overlay(), Some(Path::new("/ov")));
+        assert_eq!(rebase_path(Path::new("/var/x"), root), Path::new("/var/x"));
+    }
 
     /// A dangling symlink still occupies the name, so an invitee cannot
     /// claim it.

@@ -5,7 +5,6 @@
 #![forbid(unsafe_code)]
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
@@ -13,7 +12,6 @@ use std::thread::JoinHandle;
 use crate::addrcache;
 use crate::script::{self, ScriptEnv, ScriptResult};
 use std::io;
-use std::sync::PoisonError;
 use std::thread::Builder;
 
 /// Bounded so a hung script can't make a flapping mesh eat RAM.
@@ -34,40 +32,51 @@ pub(crate) enum Job {
     WriteFile { path: PathBuf, bytes: Vec<u8> },
 }
 
-/// FIFO worker. Thread spawns lazily on first `submit` so it
-/// inherits the post-`sandbox::enter` Landlock domain. `Drop` joins
-/// so shutdown drains queued `host-down`/`subnet-down`.
-#[derive(Default)]
+/// FIFO worker. Jobs queue until [`Self::start`], which runs after
+/// `sandbox::enter` so the thread inherits the Landlock domain. `Drop`
+/// joins so shutdown drains queued `host-down`/`subnet-down`.
 pub(crate) struct ScriptWorker {
-    inner: Mutex<Option<(SyncSender<Job>, JoinHandle<()>)>>,
+    tx: Option<SyncSender<Job>>,
+    pending: Option<Receiver<Job>>,
+    join: Option<JoinHandle<()>>,
     full_warned: AtomicBool,
 }
 
 impl ScriptWorker {
     #[must_use]
     pub(crate) fn new() -> Self {
-        Self::default()
+        let (tx, rx) = sync_channel(QUEUE_CAP);
+        Self {
+            tx: Some(tx),
+            pending: Some(rx),
+            join: None,
+            full_warned: AtomicBool::new(false),
+        }
+    }
+
+    /// # Panics
+    /// If the OS refuses to spawn the worker thread.
+    pub(crate) fn start(&mut self) {
+        let Some(rx) = self.pending.take() else {
+            return;
+        };
+        #[expect(
+            clippy::expect_used,
+            reason = "thread spawn failure is fatal (resource exhaustion)"
+        )]
+        let handle = Builder::new()
+            .name("tinc-script".into())
+            .spawn(move || run(&rx))
+            .expect("spawn script worker thread");
+        self.join = Some(handle);
     }
 
     /// Enqueue. On a full queue the job is **dropped** + warned once
     /// — better a missed `subnet-up` than a frozen data plane.
-    ///
-    /// # Panics
-    /// If the OS refuses to spawn the worker thread on first call.
     pub(crate) fn submit(&self, job: Job) {
-        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        let (tx, _) = guard.get_or_insert_with(|| {
-            let (tx, rx) = sync_channel(QUEUE_CAP);
-            #[expect(
-                clippy::expect_used,
-                reason = "thread spawn failure is fatal (resource exhaustion)"
-            )]
-            let handle = Builder::new()
-                .name("tinc-script".into())
-                .spawn(move || run(&rx))
-                .expect("spawn script worker thread");
-            (tx, handle)
-        });
+        let Some(tx) = &self.tx else {
+            return;
+        };
         if let Err(TrySendError::Full(_)) = tx.try_send(job)
             && !self.full_warned.swap(true, Ordering::Relaxed)
         {
@@ -81,8 +90,8 @@ impl Drop for ScriptWorker {
     fn drop(&mut self) {
         // Hang up the sender so `rx.recv()` returns Err and the
         // worker exits after draining what's already queued.
-        if let Some((tx, h)) = self.inner.get_mut().ok().and_then(Option::take) {
-            drop(tx);
+        drop(self.tx.take());
+        if let Some(h) = self.join.take() {
             let _ = h.join();
         }
     }
@@ -151,7 +160,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(&s, Permissions::from_mode(0o755)).unwrap();
 
-        let w = ScriptWorker::new();
+        let mut w = ScriptWorker::new();
         for i in 0..5 {
             let mut env = ScriptEnv::base(None, "x", None, None, None);
             env.add("N", i.to_string());
@@ -162,6 +171,7 @@ mod tests {
                 interpreter: None,
             });
         }
+        w.start(); // jobs queued before start run too
         drop(w); // joins → all 5 done in order
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "01234");
     }

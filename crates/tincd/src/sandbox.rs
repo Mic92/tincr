@@ -53,7 +53,7 @@ use landlock::{
 };
 #[cfg(target_os = "linux")]
 use std::env;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
@@ -182,6 +182,14 @@ pub fn enter(level: Level, paths: &Paths, chrooted: bool) -> Result<(), String> 
     if level == Level::None {
         log::debug!(target: "tincd", "Sandbox is disabled");
         return Ok(());
+    }
+
+    // Landlock and no_new_privs only reach threads created afterwards.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Ok(tasks) = fs::read_dir("/proc/self/task")
+        && tasks.count() > 1
+    {
+        return Err("sandbox entered with threads already running".into());
     }
 
     if chrooted {

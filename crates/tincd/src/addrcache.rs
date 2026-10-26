@@ -39,6 +39,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use tinc_conf::hostdirs::rebase_path;
 
 /// Only this many `recent` entries are written to disk. The in-memory
 /// list is uncapped (config might list more; we try them all, persist
@@ -109,6 +110,12 @@ fn split_config(lines: Vec<(String, u16)>) -> (Vec<SocketAddr>, Vec<(String, u16
 }
 
 impl AddressCache {
+    pub(crate) fn rebase(&mut self, root: &Path) {
+        if let Some(p) = &mut self.path {
+            *p = rebase_path(p, root);
+        }
+    }
+
     /// Load `<state-dir>/addrcache/<peer>` (if present) and seed tier
     /// 3 from `config_addrs`. Never fails: unreadable / malformed
     /// cache files degrade to empty.
