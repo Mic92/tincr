@@ -16,7 +16,7 @@ use crate::dispatch::ConnOptions;
 use crate::graph::{NodeId, Route};
 use crate::packet::len_u16;
 use crate::pmtu::{PmtuAction, PmtuState};
-use crate::tunnel::{MTU, TunnelState};
+use crate::tunnel::{MTU, TunnelState, Via};
 use crate::{local_addr, pmtu};
 use rand_core::Rng;
 use tinc_crypto::os_rng;
@@ -90,7 +90,13 @@ fn choose_initial_maxmtu(peer: SocketAddr) -> u16 {
 impl Daemon {
     /// One probe record arrived: byte[0] == 0 is a request (echo it),
     /// otherwise a type 1/2 reply for `pmtu.on_probe_reply`.
-    pub(super) fn udp_probe_h(&mut self, peer: NodeId, peer_name: &str, body: &[u8]) -> bool {
+    pub(super) fn udp_probe_h(
+        &mut self,
+        peer: NodeId,
+        peer_name: &str,
+        body: &[u8],
+        via: Via,
+    ) -> bool {
         let Some(&kind) = body.first() else {
             return false;
         };
@@ -99,14 +105,11 @@ impl Daemon {
                         "Got UDP probe request {} from {peer_name}",
                         body.len());
             let body_len = len_u16(body.len());
-            // Asymmetric-UDP meta-ack: remember the largest probe
-            // request we've seen so `try_udp` can tell `peer` over
-            // the meta connection. If `peer`'s inbound UDP is
-            // filtered, the type-2 reply we send next never arrives;
-            // the meta-ack is the only way they learn their outbound
-            // leg works. Hot path: 1 max() + store, no I/O here.
-            let t = self.dp.tunnels.entry(peer).or_default();
-            t.udp_rx_maxlen = t.udp_rx_maxlen.max(body_len);
+            // Acked over meta in case `peer`'s inbound UDP is filtered.
+            if matches!(via, Via::Udp(_)) {
+                let t = self.dp.tunnels.entry(peer).or_default();
+                t.udp_rx_maxlen = t.udp_rx_maxlen.max(body_len);
+            }
             return self.send_udp_probe_reply(peer, peer_name, body_len);
         }
 
@@ -118,6 +121,9 @@ impl Daemon {
         };
         log::debug!(target: "tincd::net",
                     "Got type {kind} UDP probe reply {len} from {peer_name}");
+        if !matches!(via, Via::Udp(_)) {
+            return false;
+        }
 
         // Fresh Instant::now() — RTT measurement needs sub-ms accuracy;
         // self.timers.now() is cached once per event-loop turn and can be
@@ -207,7 +213,7 @@ impl Daemon {
             }
         };
         // relay decision always prefers `via` for PKT_PROBE.
-        self.dispatch_tunnel_outputs(peer, peer_name, outs)
+        self.dispatch_tunnel_outputs(peer, peer_name, outs, Via::Tcp)
     }
 
     /// The improve-the-tunnel tick: from `on_ping_tick` per active conn with

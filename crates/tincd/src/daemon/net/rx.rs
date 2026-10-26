@@ -19,11 +19,10 @@ use crate::conn::Connection;
 use crate::listen::{configure_tcp, fmt_addr, is_local, unmap};
 use crate::node_id::NodeId6;
 use crate::packet::len_u16;
-use crate::tunnel::MTU;
+use crate::tunnel::{MTU, Via};
 
 use crate::event::Io;
 use crate::graph::NodeId;
-use tinc_crypto::os_rng;
 use tinc_device::{Device, GroBucket};
 
 use super::helpers;
@@ -402,17 +401,15 @@ impl Daemon {
             return;
         };
 
-        // The bit tells `receive_sptps_record` this came via UDP (vs
-        // TCP-tunneled). Dispatch is after (Vec<Output> return), so
-        // defer the clear below.
-        tunnel.status.udppacket = true;
+        // Relayed-to-us: `peer` is the relay's address.
+        let via = match peer {
+            Some(src) if dst_id.is_null() => Via::Udp(src),
+            _ => Via::UdpRelayed,
+        };
 
-        // Fast path: decrypt into `rx_scratch` with 14 bytes headroom for the
-        // synthetic header; `InvalidState` (no incipher) and `BadRecord` (handshake
-        // record, replay untouched) fall to the `Vec<Output>` path. Across a REQ_KEY
-        // restart in-flight datagrams are still under the old key, so `prev_sptps` is
-        // retried on `InvalidState` and `DecryptFailed`; `BadRecord`/`BadSeqno` mean
-        // the new session authenticated the packet, so no retry.
+        // Datagrams in flight across a rekey are under the old key.
+        // Handshakes only travel over meta, so whatever neither session opens
+        // is dropped: `Sptps::receive` would accept an unauthenticated KEX.
         let mut open_result = sptps.open_data_into(ct, &mut self.dp.rx_scratch, 14);
         if matches!(
             open_result,
@@ -421,74 +418,10 @@ impl Daemon {
         {
             open_result = prev.open_data_into(ct, &mut self.dp.rx_scratch, 14);
         }
-        match open_result {
-            Ok(record_type) => {
-                // Only direct (dst == nullid) confirms udp_addr;
-                // relayed-to-us would cache the relay's addr.
-                let direct = dst_id.is_null();
-                if let Some(peer_addr) = peer.filter(|_| direct) {
-                    helpers::confirm_udp_addr(
-                        &mut self.dp.tunnels,
-                        &self.listeners,
-                        &self.tunnel_handles,
-                        from_nid,
-                        &from_name,
-                        peer_addr,
-                    );
-                }
-                let mut nw = false;
-                if !direct {
-                    // Relayed-to-us: tell sender our MTU floor.
-                    nw |= self.send_mtu_info(from_nid, &from_name, i32::from(MTU), true);
-                }
-                nw |= self.receive_sptps_record(from_nid, &from_name, record_type);
-                // Clear udppacket after the call: the PROBE gate and
-                // maxrecentlen update inside need to see the true value.
-                if let Some(t) = self.dp.tunnels.get_mut(&from_nid) {
-                    t.status.udppacket = false;
-                }
-                if nw {
-                    self.maybe_set_write_any();
-                }
-                return;
-            }
-            Err(tinc_sptps::SptpsError::InvalidState | tinc_sptps::SptpsError::BadRecord) => {
-                // Fall through to slow path below. After the
-                // `prev_sptps` retry above, `InvalidState` here means
-                // neither session has an incipher (initial cold
-                // start) and `BadRecord` means it's a handshake
-                // record for one of them — `receive()` sorts both.
-            }
+        let record_type = match open_result {
+            Ok(t) => t,
             Err(e) => {
-                // DecryptFailed / BadSeqno on a single datagram. Log
-                // and drop; only restart SPTPS if the session was
-                // already not delivering (`!validkey`). See
-                // `maybe_restart_stuck_tunnel` doc for why a healthy
-                // session must not be torn down here.
-                tunnel.status.udppacket = false;
-                log::debug!(target: "tincd::net",
-                            "Failed to decode UDP packet from {from_name}: {e:?}");
-                if self.maybe_restart_stuck_tunnel(from_nid) {
-                    self.maybe_set_write_any();
-                }
-                return;
-            }
-        }
-
-        // Slow path stays exactly as-is.
-        let Some(sptps) = self
-            .dp
-            .tunnels
-            .get_mut(&from_nid)
-            .and_then(|t| t.sptps.as_deref_mut())
-        else {
-            return;
-        };
-        let result = sptps.receive(ct, &mut os_rng());
-        let outs = match result {
-            Ok((_consumed, outs)) => outs,
-            Err(e) => {
-                // Same gate as the open_data_into arm above.
+                // See `maybe_restart_stuck_tunnel` for why a healthy session stays.
                 log::debug!(target: "tincd::net",
                             "Failed to decode UDP packet from {from_name}: {e:?}");
                 if self.maybe_restart_stuck_tunnel(from_nid) {
@@ -498,12 +431,7 @@ impl Daemon {
             }
         };
 
-        // `direct` only when dst_id == nullid. On relayed-to-us
-        // (`dst != null && to == myself`), `peer_addr` is the
-        // RELAY's address; caching would pin direct sends to the
-        // relay forever (bug audit `deef1268`).
-        let direct = dst_id.is_null();
-        if let Some(peer_addr) = peer.filter(|_| direct) {
+        if let Via::Udp(peer_addr) = via {
             helpers::confirm_udp_addr(
                 &mut self.dp.tunnels,
                 &self.listeners,
@@ -513,22 +441,11 @@ impl Daemon {
                 peer_addr,
             );
         }
-        // Tell `from` our MTU floor so they can switch to direct
-        // UDP. Bug audit `deef1268`: was missing entirely.
-        if !direct {
-            let nw = self.send_mtu_info(from_nid, &from_name, i32::from(MTU), true);
-            if nw {
-                self.maybe_set_write_any();
-            }
+        let mut nw = false;
+        if via == Via::UdpRelayed {
+            nw |= self.send_mtu_info(from_nid, &from_name, i32::from(MTU), true);
         }
-
-        let nw = self
-            .dispatch_tunnel_outputs(from_nid, &from_name, outs)
-            .needs_write;
-        // Clear udppacket (deferred, see above).
-        if let Some(t) = self.dp.tunnels.get_mut(&from_nid) {
-            t.status.udppacket = false;
-        }
+        nw |= self.receive_sptps_record(from_nid, &from_name, record_type, via);
         if nw {
             self.maybe_set_write_any();
         }

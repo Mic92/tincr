@@ -232,7 +232,6 @@ fn blackhole_stays_on_tcp() {
 /// relay. Frames relayed to alice over UDP must not count as direct
 /// receptions, or her keepalive reply teaches bob a bogus minmtu.
 #[test]
-#[ignore = "PR #151 issue; fixed by UdpPath (PLAN.md Phase 2)"]
 fn relayed_frames_do_not_confirm_direct_pmtu() {
     let Some(s) = Scenario::start(
         "relayed_frames_do_not_confirm_direct_pmtu",
