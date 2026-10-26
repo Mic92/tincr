@@ -319,7 +319,8 @@ fn replace_invite_rekeys_node_and_drops_old_device() {
 
 /// Android bundle update: rename-swap `hosts/` and reload over the
 /// control socket. A peer whose key changed must be dropped and must
-/// not get back in with the old key.
+/// not get back in with the old key, even with the mtime pinned the way
+/// the Nix store does.
 #[test]
 fn control_reload_after_hosts_swap_drops_rekeyed_peer() {
     let tmp = tmp!("hswap");
@@ -327,7 +328,6 @@ fn control_reload_after_hosts_swap_drops_rekeyed_peer() {
     let mut bob = Node::new(tmp.path(), "bob", 0xBB);
     bob.start_dialing(&mut alice);
 
-    thread::sleep(Duration::from_millis(1100));
     let hosts = bob.confbase.join("hosts");
     let new_hosts = bob.confbase.join("hosts.new");
     fs::create_dir(&new_hosts).unwrap();
@@ -341,6 +341,8 @@ fn control_reload_after_hosts_swap_drops_rekeyed_peer() {
         ),
     )
     .unwrap();
+    let pin = fs::File::options().write(true).open(new_hosts.join("alice"));
+    pin.unwrap().set_modified(SystemTime::UNIX_EPOCH).unwrap();
     fs::rename(&hosts, bob.confbase.join("hosts.old")).unwrap();
     fs::rename(&new_hosts, &hosts).unwrap();
 

@@ -8,6 +8,7 @@ use super::{
     parse_subnets_from_config,
 };
 
+use crate::keys;
 use std::collections::BTreeSet;
 use std::io;
 use std::net::SocketAddr;
@@ -572,6 +573,7 @@ impl Daemon {
 
     /// False if config re-read failed; daemon continues either way.
     pub(super) fn reload_configuration(&mut self) -> bool {
+        keys::clear_host_cache();
         let (config, new_hosts) =
             match setup::read_daemon_config(&self.confbase, &self.cmdline_conf) {
                 Ok((c, _, h)) => (c, h),
@@ -729,15 +731,26 @@ impl Daemon {
             self.setup_outgoing_connection(oid);
         }
 
-        // host file mtime check.
+        // host file mtime check. Plus a changed key, which a pinned
+        // mtime (Nix store) would hide.
+        let mut rekeyed = Vec::new();
         let conn_names: Vec<String> = self
             .conns
             .values()
             .filter(|c| !c.control)
-            .map(|c| c.name.clone())
+            .map(|c| {
+                if let Some(old) = c.ecdsa {
+                    let cfg = keys::read_host_config(&self.hosts, &c.name);
+                    if keys::read_ecdsa_public_key(&cfg, &self.hosts, &c.name) != Some(old) {
+                        rekeyed.push(c.name.clone());
+                    }
+                }
+                c.name.clone()
+            })
             .collect();
         let host_mtimes: Vec<(String, SystemTime)> = conn_names
             .iter()
+            .filter(|name| !rekeyed.contains(name))
             .filter_map(|name| {
                 let path = self.hosts.file(name);
                 fs::metadata(&path)

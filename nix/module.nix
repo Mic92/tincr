@@ -317,6 +317,8 @@ let
       requires = mkIf net.socketActivation [ "${unitName netName}.socket" ];
 
       restartTriggers = [ (mkTincConf netName net) ];
+      # A changed key must stop authenticating without a restart.
+      reloadTriggers = [ (mkHostsDir netName net) ];
 
       serviceConfig = {
         Type = "notify";
