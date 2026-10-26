@@ -10,6 +10,22 @@ use super::common::{TmpGuard, node_status, poll_until, try_poll};
 use std::env;
 use std::path::Path;
 
+/// Run `iptables ARGS`. Returns `false` (after a `SKIP:` line) if it fails,
+/// e.g. no `ip_tables` module on the host.
+pub(crate) fn iptables(args: &[&str]) -> bool {
+    let out = Command::new("iptables")
+        .args(args)
+        .output()
+        .expect("spawn iptables");
+    if !out.status.success() {
+        eprintln!(
+            "SKIP: iptables {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    out.status.success()
+}
+
 /// Re-exec this test inside bwrap and set up the standard two-TUN
 /// topology. `Some` only in the inner (sandboxed) pass.
 pub(crate) fn enter_netns(test_name: &str) -> Option<NetNs> {

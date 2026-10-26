@@ -7,8 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::common::{KillOnDrop, TmpGuard, node_status, poll_until, try_poll};
-use super::rig::{NetNs, Node, TunPair, enter_netns};
-use super::tcp_fallback::iptables;
+use super::rig::{NetNs, Node, TunPair, enter_netns, iptables};
 use std::panic;
 use std::panic::AssertUnwindSafe;
 use std::thread;
