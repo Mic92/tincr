@@ -36,7 +36,8 @@ use crate::drain_via_read;
 use crate::ether::{ETH_HLEN, from_ip_nibble, set_etherheader};
 use crate::tso::{VNET_HDR_LEN, VirtioNetHdr, gso_none_checksum};
 use crate::{
-    Device, DeviceArena, DeviceConfig, DrainResult, GsoType, MTU, Mac, Mode, read_fd, write_fd,
+    Device, DeviceArena, DeviceConfig, DrainResult, GsoType, MTU, Mac, Mode, read_fd, tun_payload,
+    write_fd, writev_fd,
 };
 use std::mem;
 use std::os::unix::fs::OpenOptionsExt;
@@ -424,26 +425,11 @@ impl Device for Tun {
         Ok(n)
     }
 
-    fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self.mode {
-            // TUN with `IFF_NO_PI | IFF_VNET_HDR`: the kernel wants `[vnet_hdr(10)][raw
-            // IP]` (`tun_get_user`, `tun.c:1731`). `buf` is `[synthetic eth(14)][IP]`,
-            // zero except the ethertype at [12..14], so zero that and write `buf[4..]` —
-            // ten zero bytes are a gso_type=NONE header. The daemon never reads `buf` back
-            // after write. GRO-coalesced supers go through `write_super` with a real
-            // vnet_hdr instead.
-            Mode::Tun => {
-                debug_assert!(buf.len() > ETH_HLEN, "vnet write buf too short");
-                // Ethertype → 0. Bytes [4..12] are already 0
-                // (synth MACs); [12..14] is ethertype.
-                buf[12] = 0;
-                buf[13] = 0;
-                // `4 = ETH_HLEN - VNET_HDR_LEN`. Write from there:
-                // 10 zero bytes (vnet_hdr) + IP packet.
-                write_fd(self.fd.as_fd(), &buf[ETH_HLEN - VNET_HDR_LEN..])
-            }
-
-            // TAP: direct write.
+            // `IFF_VNET_HDR` wants `[vnet_hdr][IP]`. An all-zero header is
+            // gso_type NONE. Never derived from `buf`: its MACs may be a peer's.
+            Mode::Tun => writev_fd(self.fd.as_fd(), &[0; VNET_HDR_LEN], tun_payload(buf)?),
             Mode::Tap => write_fd(self.fd.as_fd(), buf),
         }
     }
@@ -542,11 +528,15 @@ impl Device for Tun {
                 // Shift IP packet right by 4 bytes: 10 → 14.
                 // `copy_within` handles overlap. The 4-byte gap at
                 // [10..14] is overwritten by `set_etherheader` next.
+                let frame_len = ETH_HLEN + pkt_len;
+                if frame_len > DeviceArena::STRIDE {
+                    // Interface MTU raised past ours.
+                    log::debug!(target: "tinc_device",
+                                "dropping {pkt_len}-byte TUN read (> MTU)");
+                    return Ok(DrainResult::Frames { count: 0 });
+                }
                 buf.copy_within(VNET_HDR_LEN..n, ETH_HLEN);
                 set_etherheader(buf, ethertype);
-                let frame_len = ETH_HLEN + pkt_len;
-                // We've written into slot 0's STRIDE region (frame
-                // is < MTU+14 < STRIDE). Record the length.
                 arena.set_len(0, frame_len);
                 Ok(DrainResult::Frames { count: 1 })
             }

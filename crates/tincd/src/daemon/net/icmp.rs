@@ -62,13 +62,13 @@ impl Daemon {
         if owner == Some(&self.name) {
             return false;
         }
-        let Some(mut reply) = neighbor::build_arp_reply(data) else {
+        let Some(reply) = neighbor::build_arp_reply(data) else {
             return false;
         };
         log::debug!(target: "tincd::net",
                     "route: ARP reply for {target} (owner {})",
                     owner.unwrap_or("(broadcast)"));
-        if let Err(e) = self.device.write(&mut reply) {
+        if let Err(e) = self.device.write(&reply) {
             log::debug!(target: "tincd::net",
                         "Error writing ARP reply to device: {e}");
         }
@@ -108,7 +108,7 @@ impl Daemon {
         if owner == Some(&self.name) {
             return;
         }
-        let Some(mut reply) = neighbor::build_ndp_advert(data) else {
+        let Some(reply) = neighbor::build_ndp_advert(data) else {
             return;
         };
         // As in C, the decrement only decides whether to answer.
@@ -123,7 +123,7 @@ impl Daemon {
         log::debug!(target: "tincd::net",
                     "route: NDP advert for {target} (owner {})",
                     owner.unwrap_or("(broadcast)"));
-        if let Err(e) = self.device.write(&mut reply) {
+        if let Err(e) = self.device.write(&reply) {
             log::debug!(target: "tincd::net",
                         "Error writing NDP advert to device: {e}");
         }
@@ -204,17 +204,17 @@ impl Daemon {
         };
         log::debug!(target: "tincd::net",
                     "route: sending ICMP {kind_name} ({} bytes)", reply.len());
-        self.write_icmp_reply(reply, from)
+        self.write_icmp_reply(&reply, from)
     }
 
     /// `from = Some(peer)`: packet originated from the mesh, so the
     /// ICMP error must go back over the mesh, not to local TUN.
     /// Best-effort: no `try_tx` (don't kick `REQ_KEY`/PMTU for an error reply).
-    pub(super) fn write_icmp_reply(&mut self, mut reply: Vec<u8>, from: Option<NodeId>) -> bool {
+    pub(super) fn write_icmp_reply(&mut self, reply: &[u8], from: Option<NodeId>) -> bool {
         if let Some(from) = from {
-            return self.send_sptps_packet(from, &reply);
+            return self.send_sptps_packet(from, reply);
         }
-        if let Err(e) = self.device.write(&mut reply) {
+        if let Err(e) = self.device.write(reply) {
             log::debug!(target: "tincd::net",
                         "Error writing ICMP to device: {e}");
         }

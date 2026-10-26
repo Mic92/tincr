@@ -150,7 +150,7 @@ fn tun_read_ipv4_via_pipe() {
 #[test]
 fn tun_write_strips_ether() {
     // Full frame: 14-byte ether header + payload.
-    let mut frame = [
+    let frame = [
         0, 0, 0, 0, 0, 0, // dhost
         0, 0, 0, 0, 0, 0, // shost
         0x08, 0x00, // ethertype IPv4
@@ -159,7 +159,7 @@ fn tun_write_strips_ether() {
 
     let (dev, test_r) = pipe_rev();
     let mut bsd = fake_bsd(dev, BsdVariant::Tun);
-    let n = bsd.write(&mut frame).unwrap();
+    let n = bsd.write(&frame).unwrap();
 
     // Wrote len-14. Not the full frame.
     assert_eq!(n, frame.len() - ETH_HLEN);
@@ -206,7 +206,7 @@ fn utun_read_ignores_prefix() {
 fn utun_write_synthesizes_prefix() {
     // Full ether frame as route.c would emit: zero MACs
     // (synthetic), real ethertype, IP payload.
-    let mut frame = [
+    let frame = [
         0, 0, 0, 0, 0, 0, // dhost (synthetic, zero)
         0, 0, 0, 0, 0, 0, // shost (synthetic, zero)
         0x08, 0x00, // ethertype: IPv4
@@ -215,7 +215,7 @@ fn utun_write_synthesizes_prefix() {
 
     let (dev, test_r) = pipe_rev();
     let mut bsd = fake_bsd(dev, BsdVariant::Utun);
-    let n = bsd.write(&mut frame).unwrap();
+    let n = bsd.write(&frame).unwrap();
 
     // Wrote len-10. (4 prefix bytes + IP. Ether MACs at
     // [0..10] stripped.)
@@ -227,17 +227,13 @@ fn utun_write_synthesizes_prefix() {
     // htonl(AF_INET) = [0,0,0,2] (AF_INET=2 everywhere).
     assert_eq!(&got[..4], &[0, 0, 0, 2]);
     assert_eq!(&got[4..], &[0x45, 0x00, 0xBE, 0xEF]);
-
-    // [10..14] clobbered by the prefix write (the trait's `&mut`).
-    assert_eq!(&frame[10..14], &[0, 0, 0, 2]);
-    assert_eq!(&frame[14..], &[0x45, 0x00, 0xBE, 0xEF]);
 }
 
 /// Utun write IPv6: prefix is `htonl(AF_INET6)`. CAN'T
 /// pin literal bytes (per-platform). Pin structure.
 #[test]
 fn utun_write_synthesizes_ipv6_prefix() {
-    let mut frame = [
+    let frame = [
         0, 0, 0, 0, 0, 0, // dhost
         0, 0, 0, 0, 0, 0, // shost
         0x86, 0xDD, // ethertype: IPv6
@@ -246,7 +242,7 @@ fn utun_write_synthesizes_ipv6_prefix() {
 
     let (dev, test_r) = pipe_rev();
     let mut bsd = fake_bsd(dev, BsdVariant::Utun);
-    bsd.write(&mut frame).unwrap();
+    bsd.write(&frame).unwrap();
 
     drop(bsd);
     let got = drain(&test_r);
@@ -264,7 +260,7 @@ fn utun_write_synthesizes_ipv6_prefix() {
 /// the ethertype.
 #[test]
 fn utun_write_unknown_ethertype_errors() {
-    let mut frame = [
+    let frame = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x08, 0x06, // ethertype: ARP
         0x00, 0x01,
     ];
@@ -273,7 +269,7 @@ fn utun_write_unknown_ethertype_errors() {
     // Use a real pipe anyway so the OwnedFd is valid.
     let (dev, _test_r) = pipe_rev();
     let mut bsd = fake_bsd(dev, BsdVariant::Utun);
-    let e = bsd.write(&mut frame).unwrap_err();
+    let e = bsd.write(&frame).unwrap_err();
 
     assert_eq!(e.kind(), io::ErrorKind::InvalidData);
     let msg = e.to_string();
@@ -311,14 +307,14 @@ fn tap_read_ether_via_seqpacket() {
 /// Tap write: full frame, no munging. `raw.rs` verbatim.
 #[test]
 fn tap_write_ether_via_seqpacket() {
-    let mut frame = [
+    let frame = [
         0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x86, 0xDD, 0xAA,
     ];
     let len = frame.len();
 
     let (peer, sock) = dgram_pair();
     let mut bsd = fake_bsd(sock, BsdVariant::Tap);
-    let n = bsd.write(&mut frame).unwrap();
+    let n = bsd.write(&frame).unwrap();
 
     assert_eq!(n, len);
     let mut recv = [0u8; 64];
@@ -406,8 +402,8 @@ fn tun_utun_write_short_buf_errors() {
         let (dev, _r) = pipe_rev();
         let mut bsd = fake_bsd(dev, variant);
         // 12B: send_packet_myself lower bound, but < ETH_HLEN.
-        let mut frame = [0u8; 12];
-        let e = bsd.write(&mut frame).unwrap_err();
+        let frame = [0u8; 12];
+        let e = bsd.write(&frame).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{variant:?}");
     }
 }

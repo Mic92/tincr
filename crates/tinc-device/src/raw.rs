@@ -159,9 +159,7 @@ impl Device for RawSocket {
         Ok(n)
     }
 
-    /// +0 write. Doesn't mutate `buf`; the trait's `&mut` is for
-    /// the linux backend's header stomp.
-    fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         write_fd(self.fd.as_fd(), buf)
     }
 
@@ -285,7 +283,7 @@ mod tests {
     /// whole thing. No strip, no header munging.
     #[test]
     fn write_ether_via_seqpacket() {
-        let mut frame = [
+        let frame = [
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, // dhost
             0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, // shost
             0x86, 0xDD, // ethertype: IPv6
@@ -296,7 +294,7 @@ mod tests {
         let (peer, sock) = seqpacket_pair();
         let mut raw = fake_raw(sock);
 
-        let n = raw.write(&mut frame).unwrap();
+        let n = raw.write(&frame).unwrap();
         // Wrote all of it. Not len-14 (that's `fd.rs`). +0.
         assert_eq!(n, frame_len);
 
