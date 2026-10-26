@@ -225,12 +225,14 @@ fn pseudo_header_checksum_nofold(proto: u8, addrs: &[u8], tcp_len: u16) -> u64 {
 // access while iterating which a `#[repr(packed)]` accessor pattern
 // doesn't give.
 
+const IPV4_MIN_HLEN: usize = 20;
 const IPV4_TOTLEN_OFF: usize = 2;
 const IPV4_ID_OFF: usize = 4;
 const IPV4_CSUM_OFF: usize = 10;
 const IPV4_SRCADDR_OFF: usize = 12; // src+dst = 8 bytes
 
 const IPV6_PLEN_OFF: usize = 4;
+const IPV6_HLEN: usize = 40;
 const IPV6_SRCADDR_OFF: usize = 8; // src+dst = 32 bytes
 
 const TCP_SEQ_OFF: usize = 4;
@@ -286,6 +288,9 @@ pub fn gso_none_checksum(pkt: &mut [u8], csum_start: u16, csum_offset: u16) {
     pkt[csum_at] = 0;
     pkt[csum_at + 1] = 0;
     let sum = checksum(&pkt[usize::from(csum_start)..], u64::from(initial));
+    // A computed 0 means "no checksum" for UDP (RFC 768). 0xFFFF is the
+    // same value in one's complement and valid for TCP too.
+    let sum = if sum == 0 { 0xFFFF } else { sum };
     pkt[csum_at..csum_at + 2].copy_from_slice(&sum.to_be_bytes());
 }
 
@@ -326,6 +331,9 @@ pub fn tso_split(
     // Recompute hdr_len from the TCP data offset — don't trust
     // hdr.hdr_len. `csum_start` is the IP header length (the L4 header offset).
     let iphlen = usize::from(hdr.csum_start);
+    if iphlen < if is_v6 { IPV6_HLEN } else { IPV4_MIN_HLEN } {
+        return Err(TsoError::TooShort);
+    }
     if pkt.len() <= iphlen + TCP_DATAOFF_OFF {
         return Err(TsoError::TooShort);
     }
@@ -343,7 +351,8 @@ pub fn tso_split(
     // The kernel always sets it correctly but a wrong value would
     // write to a random offset.
     let csum_at = iphlen + usize::from(hdr.csum_offset);
-    if csum_at + 2 > pkt.len() {
+    // Must lie in the TCP header: every segment repeats only the headers.
+    if csum_at + 2 > hdr_len {
         return Err(TsoError::BadCsumOffset);
     }
 
@@ -413,16 +422,10 @@ pub fn tso_split(
         ip[..iphlen].copy_from_slice(&hdr_buf[..iphlen]);
 
         if is_v6 {
-            // IPv6 payload length = TCP hdr + payload.
-            // RFC 8200 §3: "Length of the IPv6 payload, i.e., the
-            // rest of the packet following this IPv6 header".
-            // total_len - iphlen = tcp_hlen + seg_data_len.
-            let plen = len_u16(total_len - iphlen);
+            // RFC 8200 §3: everything after the fixed header, extension
+            // headers (copied verbatim as part of `iphlen`) included.
+            let plen = len_u16(total_len - IPV6_HLEN);
             ip[IPV6_PLEN_OFF..IPV6_PLEN_OFF + 2].copy_from_slice(&plen.to_be_bytes());
-            // No IP checksum in v6. No ID. Ext headers: copied
-            // verbatim above (they're part of `iphlen` since
-            // `csum_start` points past them). RFC 8200 §4: ext
-            // headers are immutable in transit anyway.
         } else {
             // ID++, total_len, recompute csum.
             let id = first_id.wrapping_add(len_u16(i));
