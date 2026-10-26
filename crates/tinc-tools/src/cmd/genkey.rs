@@ -34,13 +34,6 @@
 //! no interactive filename prompt, and `Paths` always resolves to
 //! absolute paths.
 //!
-//! ## Mode preservation
-//!
-//! The source file's mode (e.g. a user-set 0400) is copied to the
-//! tmpfile via `set_permissions` after write — the window is a tmpfile
-//! that is about to be renamed or unlinked, so the ordering doesn't
-//! matter.
-//!
 //! ## The two output files
 //!
 //! Same asymmetry as `init`: private PEM at `ed25519_key.priv`, public
@@ -126,12 +119,6 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
         return Ok(false);
     };
 
-    #[cfg(unix)]
-    let src_perms = r
-        .metadata()
-        .map(|m| m.permissions())
-        .map_err(io_err(path))?;
-
     let (tmp_guard, w) = TmpGuard::open(path, "tmp")?;
     let tmp_path = tmp_guard.tmp_path().to_path_buf();
 
@@ -193,12 +180,6 @@ pub fn disable_old_keys(path: &Path) -> Result<bool, CmdError> {
         return Ok(false);
     }
 
-    // Preserve mode, then atomic rename
-    // See module doc "Mode preservation" for why we do this here
-    // instead of at create.
-    #[cfg(unix)]
-    fs::set_permissions(&tmp_path, src_perms).map_err(io_err(&tmp_path))?;
-
     tmp_guard.commit()?;
 
     Ok(true)
@@ -223,6 +204,7 @@ mod tests {
     use crate::cmd;
     use crate::cmd::OpenKind;
     use crate::testutil;
+    use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
     use tinc_conf::pem::read_pem;
 
@@ -369,16 +351,23 @@ mod tests {
         );
     }
 
-    /// Mode preservation: `chmod 0400`, disable, check it's still 0400.
-    /// Unix-only.
+    /// The mode survives, and a reader holding a stale world-readable
+    /// scratch file never sees the key.
     #[cfg(unix)]
     #[test]
     fn disable_preserves_mode() {
         let (_dir, path) = testutil::scratch_file("f", "Ed25519PublicKey = x\n");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+        let stale = path.with_added_extension("tmp");
+        fs::write(&stale, "").unwrap();
+        fs::set_permissions(&stale, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut spy = fs::File::open(&stale).unwrap();
         assert!(disable_old_keys(&path).unwrap());
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o400);
+        let mut leaked = String::new();
+        spy.read_to_string(&mut leaked).unwrap();
+        assert_eq!(leaked, "");
     }
 
     /// No trailing newline on the last line: preserved.
