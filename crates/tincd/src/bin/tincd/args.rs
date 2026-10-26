@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::iter::Peekable;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
-use std::{env, iter, process};
+use std::{env, iter, path, process};
 use tinc_conf::{Config, Source, parse_line};
 
 const CONFDIR: &str = match option_env!("TINC_CONFDIR") {
@@ -368,6 +368,11 @@ where
         PathBuf::from(OsString::from_vec(s))
     });
 
+    // main() chdirs into confbase, so relative paths would resolve twice.
+    let abs = |p: PathBuf| path::absolute(&p).unwrap_or(p);
+    let (confbase, pidfile, socket) = (abs(confbase), abs(pidfile), abs(socket));
+    let logfile = logfile.map(abs);
+
     // Env alternative for wrappers that can't inject argv.
     if env::var_os("TINCR_ALLOW_COREDUMP").is_some() {
         allow_coredump = true;
@@ -467,6 +472,16 @@ mod tests {
     /// Glued short options (`-cFOO`, `-nFOO`, `-oK=V`, `-UFOO`): C
     /// `getopt_long` accepts these and existing scripts rely on the
     /// `-oKEY=VALUE` form the man page documents.
+    #[test]
+    fn relative_paths_made_absolute() {
+        let cwd = env::current_dir().unwrap();
+        let a = parse_args(argv(&["-c", "vpn", "--pidfile=p", "--logfile=l"])).unwrap();
+        assert_eq!(a.confbase, cwd.join("vpn"));
+        assert_eq!(a.pidfile, cwd.join("p"));
+        assert_eq!(a.socket, cwd.join("p.socket"));
+        assert_eq!(a.logfile, Some(cwd.join("l")));
+    }
+
     #[test]
     fn short_options_glued() {
         let a = parse_args(argv(&["-c/tmp/conf", "--pidfile=/tmp/p"])).unwrap();
