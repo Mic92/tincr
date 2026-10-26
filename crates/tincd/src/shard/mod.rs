@@ -39,7 +39,7 @@ pub(crate) use rx::{RxDstMemo, rx_open, rx_probe};
 pub(crate) use seal::seal_super;
 pub(crate) use snapshot::NodeView;
 
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64};
+use std::sync::atomic::{AtomicU16, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use crate::graph::{NodeId, Route};
@@ -54,8 +54,8 @@ use crate::tunnel::TrafficStats;
 /// Per-peer fast-path state taken from the live `Sptps` at `HandshakeDone`: the
 /// outseqno/replay Arcs (shared with the Sptps), copies of both cipher keys,
 /// and the cached `udp_addr`. The daemon and [`TxSnapshot`] hold the same
-/// `Arc<TunnelHandles>`; rekey builds a fresh one and the old drops with its
-/// last reference. Not `Debug`: live key material.
+/// `Arc<TunnelHandles>`, removed when its session is superseded. Not
+/// `Debug`: live key material.
 pub(crate) struct TunnelHandles {
     /// `Sptps::outseqno_handle()`. `fetch_add(n, Relaxed)` per super
     /// (not per packet — one alloc, N seals). Shared with the
@@ -89,13 +89,6 @@ pub(crate) struct TunnelHandles {
     /// and the slow path runs `choose_udp_address`. `Mutex` rather than atomic (128
     /// bytes); written once from `rx.rs`, read once per super.
     pub udp_addr: Mutex<Option<(socket2::SockAddr, u8)>>,
-
-    /// `false` when control starts a rekey. [`tx_probe`] checks before
-    /// seal; on `false`, returns `None` (slow path runs `send_req_key`).
-    /// Flipped back to `true` when the new `TunnelHandles` arrives.
-    /// `Relaxed` load: a stale `true` seals one packet with the old
-    /// key, peer drops it, no harm.
-    pub validkey: AtomicBool,
 
     /// `TunnelState::minmtu()` mirror. The fast-path eligibility gate
     /// (`body_len <= minmtu`). `0` until PMTU discovery converges

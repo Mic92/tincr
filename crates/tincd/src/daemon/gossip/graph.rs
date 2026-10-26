@@ -112,13 +112,7 @@ impl Daemon {
                     if let Some(tunnel) = self.dp.tunnels.get_mut(&node) {
                         tunnel.reset_unreachable();
                     }
-                    // Drop the fast-path handles. The snapshot's
-                    // `tunnels.get(&nid)` returns None next probe;
-                    // packet falls to slow path.
-                    self.tunnel_handles.remove(&node);
-                    if let Some(s) = self.tx_snap.as_mut() {
-                        s.tunnels.remove(&node);
-                    }
+                    self.drop_tunnel_handles(node);
                 }
             }
         }

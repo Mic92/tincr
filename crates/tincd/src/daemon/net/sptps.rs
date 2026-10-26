@@ -24,7 +24,6 @@ use crate::tcp_tunnel;
 use std::mem;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU16;
 use tinc_crypto::os_rng;
 use tinc_proto::Request;
@@ -213,7 +212,6 @@ impl Daemon {
                                 &sptps.incipher_key().expect("post-HandshakeDone"),
                             ),
                             udp_addr: Mutex::new(tunnel.path.target().cloned()),
-                            validkey: AtomicBool::new(true),
                             minmtu: AtomicU16::new(tunnel.minmtu()),
                             outcompression: tunnel.outcompression,
                             stats: Arc::clone(&tunnel.stats),

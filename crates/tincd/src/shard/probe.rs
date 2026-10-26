@@ -43,7 +43,7 @@ pub(crate) struct TxTarget {
 /// walks the gate chain, side-effect free except reserving `count` seqnos
 /// (gaps are valid). `None` ⇒ slow path when: `slowpath_all`; ARP; not
 /// `Forward`; `to == myself`; not direct (`via == nexthop == to`); TCPONLY;
-/// no tunnel, `!validkey` or compression; PMTU unconverged or body > minmtu;
+/// no tunnel (none during a rekey) or compression; PMTU unconverged or body > minmtu;
 /// no `udp_addr`. Forwarding-mode/TTL/`via_mtu` gates are `from.is_some()`
 /// only; `CLAMP_MSS` touches SYNs, which never arrive as `Super`.
 #[must_use]
@@ -91,9 +91,6 @@ pub(crate) fn tx_probe(snap: &TxSnapshot, chunk0: &[u8], count: u32) -> Option<T
 
     // Tunnel state. `get` not `entry`: don't insert just to fail.
     let handles = snap.tunnels.get(&to_nid)?;
-    if !handles.validkey.load(Ordering::Relaxed) {
-        return None; // send_sptps_packet:1727 → send_req_key
-    }
     if handles.outcompression != 0 {
         return None; // send_sptps_packet:1751 mutates body
     }
@@ -157,7 +154,7 @@ mod tests {
     use std::collections::HashMap;
     use std::net;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64};
+    use std::sync::atomic::{AtomicU16, AtomicU64};
     use tinc_sptps::ReplayWindow;
 
     /// 100-byte eth+v4 frame: eth(14) + ip(20) + 66 payload.
@@ -227,7 +224,6 @@ mod tests {
                 socket2::SockAddr::from("10.0.0.2:655".parse::<net::SocketAddr>().unwrap()),
                 0,
             ))),
-            validkey: AtomicBool::new(true),
             minmtu: AtomicU16::new(1400),
             outcompression: 0,
             stats: Arc::default(),
