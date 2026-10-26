@@ -251,16 +251,11 @@ impl Daemon {
             None
         };
         // RX fast path: take the snapshot out for the loop body (`rx_probe` borrows it
-        // while `rx_open` needs `&mut self.device`). `any_pcap` is checked once per
-        // batch; it flips at human rate. `rx_fast_scratch` is separate from
+        // while `rx_open` needs `&mut self.device`). `rx_fast_scratch` is separate from
         // `rx_scratch`, which the slow path `mem::take`s internally, so both paths can
         // interleave in one batch; taken rather than fresh so capacity persists across
         // wakes.
-        let snap = if self.any_pcap {
-            None
-        } else {
-            self.tx_snap.take()
-        };
+        let snap = self.tx_snap.take();
         let mut rx_fast_scratch = mem::take(&mut self.dp.rx_fast_scratch);
         let mut dst_memo = RxDstMemo::default();
         for (idx, &(n, peer)) in meta.iter().enumerate().take(count) {
@@ -308,12 +303,8 @@ impl Daemon {
             self.handle_incoming_vpn_packet(pkt, peer);
             gro = self.dp.gro_bucket.take();
         }
-        // Restore before gro_flush takes &mut self. The is_some()
-        // gate keeps tx_snap untouched on the any_pcap branch (it
-        // was never taken).
-        if snap.is_some() {
-            self.tx_snap = snap;
-        }
+        // Restore before gro_flush takes &mut self.
+        self.tx_snap = snap;
         self.dp.rx_fast_scratch = rx_fast_scratch;
         if let Err(e) = self.device.write_flush() {
             log::debug!(target: "tincd::net", "device write_flush: {e}");

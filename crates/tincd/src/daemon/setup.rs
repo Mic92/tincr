@@ -1065,15 +1065,7 @@ impl Daemon {
         id6_prefix[6..].copy_from_slice(src_id6.as_bytes());
 
         TxSnapshot {
-            // `any_pcap` is not folded: it flips at runtime via `tinc pcap` and is checked
-            // live at the call site. `overwrite_mac` (Router on TAP) is folded because the
-            // RX fast path writes the device without stamping the eth header, which only
-            // TUN tolerates; the shared gate costs TAP+Router the TX fast path too,
-            // acceptable for a fringe setup.
-            slowpath_all: self.dns.is_some()
-                || self.settings.routing_mode != RoutingMode::Router
-                || self.settings.priorityinheritance
-                || self.overwrite_mac,
+            slowpath_all: self.slowpath_gate(),
             myself: self.myself,
             myself_options: self.myself_options.bits(),
             id6_prefix,

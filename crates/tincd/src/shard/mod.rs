@@ -118,10 +118,7 @@ pub(crate) struct TunnelHandles {
 /// confirm); stale by at most one loop iteration.
 #[derive(Clone)]
 pub(crate) struct TxSnapshot {
-    /// Spawn-time fold of every config-immutable slow-path gate:
-    /// `dns.is_some() | routing_mode != Router | priorityinheritance`.
-    /// `any_pcap` is not folded — it flips at runtime; checked live
-    /// at the device.rs call site. Set once at setup; never re-read.
+    /// `Daemon::slowpath_gate`, refreshed every event-loop turn.
     pub slowpath_all: bool,
 
     /// `Daemon::myself`. The loopback gate (`to == myself`).
@@ -164,9 +161,7 @@ pub(crate) struct TxSnapshot {
     /// removes from `node_ids` without a follow-up BFS).
     pub ns: Arc<NodeView>,
 
-    /// Per-peer fast-path handles. Same `Arc` the daemon holds in
-    /// `tunnel_handles`; inserted at `HandshakeDone`, removed at
-    /// `BecameUnreachable`.
+    /// `Daemon::tunnel_handles`, refreshed every event-loop turn.
     pub tunnels: IntHashMap<NodeId, Arc<TunnelHandles>>,
 }
 

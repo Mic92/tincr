@@ -620,6 +620,41 @@ impl Daemon {
         self.publish_shard_snap();
     }
 
+    /// Whether every packet must take the slow path. `overwrite_mac`
+    /// (Router on TAP) is here because the RX fast path doesn't stamp the
+    /// eth header.
+    pub(crate) fn slowpath_gate(&self) -> bool {
+        self.any_pcap
+            || self.dns.is_some()
+            || self.settings.routing_mode != RoutingMode::Router
+            || self.settings.priorityinheritance
+            || self.overwrite_mac
+    }
+
+    /// Re-derive the snapshot parts that change outside graph events
+    /// (`tinc pcap`, reload, rekey), once per event-loop turn. Handlers
+    /// that take the snapshot out can't lose an update this way.
+    fn refresh_snapshot(&mut self) {
+        let gate = self.slowpath_gate();
+        let Some(s) = self.tx_snap.as_mut() else {
+            return;
+        };
+        let same_tunnels = s.tunnels.len() == self.tunnel_handles.len()
+            && s.tunnels.iter().all(|(nid, h)| {
+                self.tunnel_handles
+                    .get(nid)
+                    .is_some_and(|live| Arc::ptr_eq(h, live))
+            });
+        if s.slowpath_all == gate && same_tunnels {
+            return;
+        }
+        s.slowpath_all = gate;
+        if !same_tunnels {
+            s.tunnels.clone_from(&self.tunnel_handles);
+        }
+        self.publish_shard_snap();
+    }
+
     /// Push the current snapshot to the shard workers (no-op when
     /// sharding is off). Called after every `tx_snap` mutation site.
     pub(crate) fn publish_shard_snap(&self) {
@@ -677,6 +712,7 @@ impl Daemon {
         let mut fired_signals = Vec::with_capacity(4);
 
         while self.running {
+            self.refresh_snapshot();
             self.debug_check_paths();
             // timers.
             // tick(): cache `now`, drain expired. Ignore returned

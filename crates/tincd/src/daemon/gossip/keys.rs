@@ -109,16 +109,7 @@ impl Daemon {
         tunnel.status.waitingforkey = true;
         tunnel.status.sptps = true;
         tunnel.last_req_key = Some(now);
-        self.drop_tunnel_handles(nid);
-    }
-
-    pub(in crate::daemon) fn drop_tunnel_handles(&mut self, nid: NodeId) {
-        if self.tunnel_handles.remove(&nid).is_some() {
-            if let Some(s) = self.tx_snap.as_mut() {
-                s.tunnels.remove(&nid);
-            }
-            self.publish_shard_snap();
-        }
+        self.tunnel_handles.remove(&nid);
     }
 
     /// `send_req_key`, but only if the session is plausibly stuck: called from the
