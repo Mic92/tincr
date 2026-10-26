@@ -20,6 +20,7 @@
 //! boundaries), ≤2048 bytes. That's it.
 
 use core::fmt;
+use core::net::SocketAddr;
 
 use crate::MAX_STRING;
 use crate::tok::ParseError;
@@ -46,6 +47,14 @@ impl AddrStr {
     #[must_use]
     pub fn unspec() -> Self {
         Self(Self::UNSPEC.to_owned())
+    }
+
+    /// `(ip, port)` tokens for a numeric socket address, as
+    /// `sockaddr2str` emits them. Infallible: both `Display` forms are
+    /// short and whitespace-free.
+    #[must_use]
+    pub fn from_socket_addr(addr: SocketAddr) -> (Self, Self) {
+        (Self(addr.ip().to_string()), Self(addr.port().to_string()))
     }
 
     /// Construct, enforcing the `%s`-round-trip invariant: no whitespace,
