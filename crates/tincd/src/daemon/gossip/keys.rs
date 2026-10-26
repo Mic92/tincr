@@ -51,25 +51,7 @@ impl Daemon {
             self.settings.replaywin,
             &mut os_rng(),
         );
-        let now = self.timers.now();
-        let tunnel = self.dp.tunnels.entry(to_nid).or_default();
-        // Salvage the outgoing session for RX until the new one's
-        // `HandshakeDone`: peer's in-flight datagrams (and any they
-        // seal before our REQ_KEY reaches them) are still under the
-        // old key. Only keep it if it actually had an `incipher` -
-        // a half-handshaken session can't decrypt anything and would
-        // just waste a `Box`. See `TunnelState::prev_sptps`.
-        if let Some(old) = tunnel.sptps.take()
-            && old.incipher_key().is_some()
-        {
-            tunnel.prev_sptps = Some(old);
-            tunnel.prev_sptps_installed_at = Some(now);
-        }
-        tunnel.sptps = Some(Box::new(sptps));
-        tunnel.status.validkey = false;
-        tunnel.status.waitingforkey = true;
-        tunnel.status.sptps = true;
-        tunnel.last_req_key = Some(now);
+        self.start_tunnel_session(to_nid, sptps);
 
         // First Wire is KEX, goes via REQ_KEY. The doubled REQ_KEY
         // (outer=request type, inner=reqno ext) tells the receiver
@@ -107,6 +89,36 @@ impl Daemon {
             }
         }
         nw
+    }
+
+    /// Install a handshaking session. The old one keeps decrypting
+    /// in-flight datagrams on the slow path only. Its fast-path handles go
+    /// now.
+    fn start_tunnel_session(&mut self, nid: NodeId, sptps: Sptps) {
+        let now = self.timers.now();
+        let tunnel = self.dp.tunnels.entry(nid).or_default();
+        // A half-handshaken session can't decrypt anything.
+        if let Some(old) = tunnel.sptps.take()
+            && old.incipher_key().is_some()
+        {
+            tunnel.prev_sptps = Some(old);
+            tunnel.prev_sptps_installed_at = Some(now);
+        }
+        tunnel.sptps = Some(Box::new(sptps));
+        tunnel.status.validkey = false;
+        tunnel.status.waitingforkey = true;
+        tunnel.status.sptps = true;
+        tunnel.last_req_key = Some(now);
+        self.drop_tunnel_handles(nid);
+    }
+
+    pub(in crate::daemon) fn drop_tunnel_handles(&mut self, nid: NodeId) {
+        if self.tunnel_handles.remove(&nid).is_some() {
+            if let Some(s) = self.tx_snap.as_mut() {
+                s.tunnels.remove(&nid);
+            }
+            self.publish_shard_snap();
+        }
     }
 
     /// `send_req_key`, but only if the session is plausibly stuck: called from the
@@ -406,23 +418,7 @@ impl Daemon {
         let recv_result = sptps.receive(&kex_bytes, &mut os_rng());
 
         // Stash SPTPS before dispatching outputs.
-        let now = self.timers.now();
-        let tunnel = self.dp.tunnels.entry(from_nid).or_default();
-        // Same salvage as `send_req_key`: peer is re-initiating but
-        // their UDP datagrams already on the wire (and anything the
-        // RX fast path is still mirroring through stale
-        // `tunnel_handles.inkey`) are sealed under the OLD session.
-        if let Some(old) = tunnel.sptps.take()
-            && old.incipher_key().is_some()
-        {
-            tunnel.prev_sptps = Some(old);
-            tunnel.prev_sptps_installed_at = Some(now);
-        }
-        tunnel.sptps = Some(Box::new(sptps));
-        tunnel.status.validkey = false;
-        tunnel.status.waitingforkey = true;
-        tunnel.status.sptps = true;
-        tunnel.last_req_key = Some(now);
+        self.start_tunnel_session(from_nid, sptps);
 
         let mut hint_nw = self.send_mtu_info(from_nid, &msg.from, i32::from(MTU), true);
         hint_nw |= self.send_udp_info(from_nid, &msg.from, true);

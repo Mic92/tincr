@@ -49,9 +49,6 @@ pub(super) fn publish_path(
 }
 
 impl Daemon {
-    /// Every path's send target and fast-path mirror match what
-    /// [`publish_path`] would derive now. A path transition that skipped
-    /// the publish fails here, at the end of the event-loop turn.
     pub(in crate::daemon) fn debug_check_paths(&self) {
         if !cfg!(debug_assertions) {
             return;
@@ -60,6 +57,7 @@ impl Daemon {
             let derived = t.path.derive_target(|a| listener_for(&self.listeners, a));
             debug_assert!(t.path.target() == derived.as_ref(), "{nid:?}: stale target");
             if let Some(h) = self.tunnel_handles.get(nid) {
+                debug_assert!(t.status.validkey, "{nid:?}: fast path outlived its session");
                 let published = h.udp_addr.lock().unwrap_or_else(PoisonError::into_inner);
                 debug_assert!(*published == derived, "{nid:?}: stale fast-path addr");
                 debug_assert_eq!(

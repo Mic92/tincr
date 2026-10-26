@@ -346,7 +346,7 @@ mod tests {
     use crate::shard::NodeView;
     use crate::subnet_tree::SubnetTree;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64};
+    use std::sync::atomic::{AtomicU16, AtomicU64};
     use tinc_crypto::aead::SptpsCipher;
     use tinc_sptps::ReplayWindow;
 
@@ -419,7 +419,6 @@ mod tests {
             outcipher: SptpsCipher::new(aead, &[0u8; 64]),
             incipher: SptpsCipher::new(aead, &inkey),
             udp_addr: Mutex::new(Some((socket2::SockAddr::from(bob_addr()), 0))),
-            validkey: AtomicBool::new(true),
             minmtu: AtomicU16::new(1400),
             outcompression: 0,
             stats: Arc::default(),
