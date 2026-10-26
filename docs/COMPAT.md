@@ -137,6 +137,9 @@ Things that work in both daemons but not identically.
   through verbatim.
 - **`ClampMSS` finds the MSS option anywhere.** C only clamps it when
   it is the first TCP option or follows another 4-byte option.
+- **Meta requests are capped at 2176 bytes on receive.** C bounds what
+  it sends but accepts longer SPTPS records and forwards them verbatim;
+  tincr drops the sending connection instead.
 - **Oversized TUN reads are dropped.** With the interface MTU raised
   above tinc's, C forwards the packet truncated to its MTU; tincr
   drops it.

@@ -586,6 +586,27 @@ fn feed_sptpslen_then_record() {
     }
 }
 
+/// Requests over C's `MAXBUFSIZE` kill the sender's conn on receive.
+/// A send that SPTPS can't seal kills ours instead of the daemon.
+#[test]
+fn oversize_request_is_dead() {
+    let (mut conn, mut alice, wr) = sptps_conn_pair();
+    let big = vec![b'x'; MAXBUFSIZE + 1];
+    for o in alice.send_record(0, &big).unwrap() {
+        if let Output::Wire { bytes, .. } = o {
+            write_all(&wr, &bytes);
+        }
+    }
+    // The record spans several reads.
+    let dead = (0..4).any(|_| matches!(conn.feed(&mut NoRng), FeedResult::Dead));
+    assert!(dead);
+
+    let (mut conn, _alice, _wr) = sptps_conn_pair();
+    let line = "x".repeat(usize::from(u16::MAX));
+    assert!(!conn.send(format_args!("{line}")));
+    assert!(conn.dead);
+}
+
 /// No `\n` appended; 0x0a mid-body left alone.
 #[test]
 fn send_raw_no_newline() {
