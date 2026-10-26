@@ -50,7 +50,7 @@ const TX_BATCH_CAP: usize = BATCH_MAX_BYTES;
 pub(crate) struct EgressBatch<'a> {
     /// Destination. `SockAddr` not `SocketAddr` — `socket2::send_to`
     /// takes `&SockAddr` and the daemon already has one cached
-    /// (`udp_addr_cached`, the hot path; cold path builds with
+    /// (`path.target()`, the hot path; cold path builds with
     /// `SockAddr::from(SocketAddr)` once per send anyway).
     pub dst: &'a SockAddr,
     /// Contiguous: `count` chunks at `stride` each, last possibly
@@ -109,7 +109,7 @@ pub(crate) struct TxBatch {
     count: u16,
     /// Destination of this run. `None` when empty. `SockAddr` is
     /// `Clone` (`derive`, socket2 `sockaddr.rs:20`); cloning the
-    /// tunnel's `udp_addr_cached` once per RUN (not per frame) is
+    /// tunnel's `path.target()` once per RUN (not per frame) is
     /// fine. We can't borrow it: the daemon mutates `tunnels`
     /// between stage calls.
     dst: Option<SockAddr>,

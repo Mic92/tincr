@@ -689,17 +689,22 @@ fn send_ack_per_host_tcponly_clears_pmtu() {
     assert!(line.ends_with(" 700000b\n"), "got {line:?}");
 }
 
-/// `ClampMSS` per-host overrides global
-/// (not or'd). `ClampMSS = no` in hosts/NAME clears it even though
-/// the daemon default is on.
+/// `ClampMSS` and `PMTUDiscovery` per-host override global (not or'd):
+/// `= no` in hosts/NAME clears them even though the default is on.
 #[test]
-fn send_ack_per_host_clamp_mss_overrides() {
+fn send_ack_per_host_overrides() {
     let mut c = mkconn();
     c.protocol_minor = 2;
     c.host_clamp_mss = Some(false);
     send_ack(&mut c, 655, myself_options_default(), None, Instant::now());
     assert!(!c.options.contains(ConnOptions::CLAMP_MSS));
     assert!(c.options.contains(ConnOptions::PMTU_DISCOVERY));
+
+    let mut c = mkconn();
+    c.protocol_minor = 2;
+    c.host_pmtu_discovery = Some(false);
+    send_ack(&mut c, 655, myself_options_default(), None, Instant::now());
+    assert!(!c.options.contains(ConnOptions::PMTU_DISCOVERY));
 }
 
 /// `IndirectData = yes` per-host. The

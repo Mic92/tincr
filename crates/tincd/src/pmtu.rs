@@ -65,6 +65,8 @@ impl PmtuPhase {
     }
 }
 
+// Independent flags, not states.
+#[expect(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 pub(crate) struct PmtuState {
     pub mtu: u16,
@@ -88,9 +90,14 @@ pub(crate) struct PmtuState {
     /// idle revalidation; outstanding probes use `udp_ping_sent`.
     pub udp_reply_rx: Instant,
     pub mtu_ping_sent: Instant,
+    /// Later keepalives don't move it, so a dead path times out.
+    pub unanswered_since: Option<Instant>,
     pub maxrecentlen: u16,
     /// RTT µs; `None` = unknown.
     pub udp_ping_rtt: Option<u32>,
+    pub cap: u16,
+    /// When off, a confirmed path is pinned at `cap`.
+    pub discovery: bool,
 }
 
 /// Action emitted by the state machine for the daemon to dispatch.
@@ -133,8 +140,35 @@ impl PmtuState {
             udp_ping_sent: now,
             udp_reply_rx: now,
             mtu_ping_sent: now,
+            unanswered_since: None,
             maxrecentlen: 0,
             udp_ping_rtt: None,
+            cap: MTU,
+            discovery: true,
+        }
+    }
+
+    pub(crate) fn set_policy(&mut self, cap: u16, discovery: bool) {
+        let cap = cap.clamp(MINMTU, MTU);
+        self.discovery = discovery;
+        if cap != self.cap {
+            self.cap = cap;
+            self.maxmtu = self.maxmtu.min(cap);
+            self.minmtu = self.minmtu.min(cap);
+            self.mtu = self.mtu.min(cap);
+        }
+        if !discovery {
+            self.pin();
+        }
+        self.debug_check_bounds();
+    }
+
+    fn pin(&mut self) {
+        if self.udp_confirmed {
+            self.mtu = self.cap;
+            self.minmtu = self.cap;
+            self.maxmtu = self.cap;
+            self.phase = PmtuPhase::Steady;
         }
     }
 
@@ -150,12 +184,13 @@ impl PmtuState {
 
     /// Record one local probe submission attempt. Failed submissions
     /// pace retries but do not manufacture an outstanding remote probe.
-    pub(crate) const fn on_udp_probe_attempt(&mut self, now: Instant, sent: bool) {
+    pub(crate) fn on_udp_probe_attempt(&mut self, now: Instant, sent: bool) {
         self.udp_probe_attempted = true;
         self.udp_probe_attempted_at = now;
         if sent {
             self.udp_ping_sent = now;
             self.ping_sent = true;
+            self.unanswered_since.get_or_insert(now);
         }
     }
 
@@ -168,14 +203,14 @@ impl PmtuState {
             && now.saturating_duration_since(self.udp_reply_rx) >= timeout
     }
 
-    /// UDP-discovery timeout predicate. True iff a keepalive probe is
-    /// outstanding (`ping_sent`) AND was sent ≥ `timeout` ago. Checking
-    /// `udp_reply_rx` alone false-positives after an idle gap: `try_udp`
-    /// is the only keepalive sender and is itself data-driven, so a
-    /// silent period means *we* never probed, not that the path is dead.
+    /// Not `udp_reply_rx` age: `try_udp` is data-driven, so an idle gap
+    /// means we never probed, not that the path is dead.
     #[must_use]
     pub(crate) fn udp_timed_out(&self, now: Instant, timeout: Duration) -> bool {
-        self.udp_confirmed && self.ping_sent && now.duration_since(self.udp_ping_sent) >= timeout
+        self.udp_confirmed
+            && self
+                .unanswered_since
+                .is_some_and(|t| now.saturating_duration_since(t) >= timeout)
     }
 
     /// Restart discovery from scratch (peer became unreachable or UDP
@@ -192,6 +227,9 @@ impl PmtuState {
     /// not-confirmed is `on_udp_timeout`.
     pub(crate) fn tick(&mut self, now: Instant, pinginterval: Duration) -> Vec<PmtuAction> {
         // Cadence gate.
+        if !self.discovery {
+            return vec![];
+        }
         let elapsed = now.duration_since(self.mtu_ping_sent);
         match self.phase {
             PmtuPhase::Discovery { sent } => {
@@ -250,7 +288,7 @@ impl PmtuState {
                 // saturating: maxmtu is fed from peer-influenced
                 // paths (on_meta_ack/on_probe_reply) — those clamp,
                 // but don't make this the one place that cares.
-                if self.maxmtu.saturating_add(1) < MTU {
+                if self.maxmtu.saturating_add(1) < self.cap {
                     out.push(PmtuAction::SendProbe {
                         len: self.maxmtu.saturating_add(1),
                         counts_miss: false,
@@ -303,7 +341,7 @@ impl PmtuState {
     /// detector. Returns `false` when no probe is outstanding, so an unsolicited
     /// ack can't set `udp_confirmed`.
     pub(crate) fn on_meta_ack(&mut self, len: u16, now: Instant) -> bool {
-        let len = len.min(MTU);
+        let len = len.min(self.cap);
         // Steady-state confirmation as in on_probe_reply, so a peer whose UDP replies
         // are filtered (only meta-acks reach us) still rewinds Revalidate→Steady
         // instead of cycling through Lost. Deliberately before the `ping_sent` gate:
@@ -324,11 +362,15 @@ impl PmtuState {
         // enforce 1:1 pairing.
         self.udp_confirmed = true;
         self.udp_reply_rx = now;
+        self.unanswered_since = None;
         if len > self.maxmtu {
             self.maxmtu = len;
         }
         if len >= MINMTU && len > self.minmtu {
             self.minmtu = len;
+        }
+        if !self.discovery {
+            self.pin();
         }
         self.debug_check_bounds();
         true
@@ -339,7 +381,7 @@ impl PmtuState {
     pub(crate) fn on_probe_reply(&mut self, len: u16, now: Instant) -> Vec<PmtuAction> {
         // Type-2 `len` is peer-supplied; probes never exceed MTU. Clamp
         // or minmtu overruns maxmtu.
-        let len = len.min(MTU);
+        let len = len.min(self.cap);
         let mut out = Vec::new();
 
         // RTT measurement.
@@ -352,6 +394,11 @@ impl PmtuState {
 
         self.udp_confirmed = true;
         self.udp_reply_rx = now;
+        self.unanswered_since = None;
+        if !self.discovery {
+            self.pin();
+            return out;
+        }
 
         // PMTU-increase detector. Restart at sent=1 (not 0) so the
         // maxmtu re-seed doesn't undo this. Tiny replies restart
@@ -359,7 +406,7 @@ impl PmtuState {
         if len > self.maxmtu {
             out.push(PmtuAction::LogIncrease);
             self.minmtu = if len >= MINMTU { len } else { 0 };
-            self.maxmtu = MTU;
+            self.maxmtu = self.cap;
             self.phase = PmtuPhase::Discovery { sent: 1 };
             return out;
         }
@@ -402,21 +449,23 @@ impl PmtuState {
     }
 
     /// UDP probe timeout. Idempotent on already-unconfirmed.
-    pub(crate) const fn on_udp_timeout(&mut self) {
-        if !self.udp_confirmed {
-            return;
+    pub(crate) fn on_udp_timeout(&mut self) {
+        if self.udp_confirmed {
+            self.reset_path();
         }
+    }
+
+    /// `mtu` survives as the last known value.
+    pub(crate) fn reset_path(&mut self) {
         self.udp_confirmed = false;
-        // Stale outstanding-probe flag would let the next try_udp
-        // (once re-confirmed) re-evaluate udp_timed_out against the
-        // old udp_ping_sent and immediately re-trip.
         self.ping_sent = false;
+        self.unanswered_since = None;
         self.udp_probe_attempted = false;
         self.udp_ping_rtt = None;
         self.maxrecentlen = 0;
         self.start_discovery();
         self.minmtu = 0;
-        self.maxmtu = MTU;
+        self.maxmtu = self.cap;
         self.debug_check_bounds();
     }
 
@@ -921,32 +970,22 @@ mod tests {
     }
 
     #[test]
-    fn udp_timed_out_gates_on_outstanding_probe() {
+    fn udp_timed_out_from_first_unanswered_probe() {
         let now = t0();
         let to = Duration::from_secs(30);
-
-        // Regression: idle gap, no probe outstanding. Old check
-        // (`udp_reply_rx` age) would have tripped here and zeroed
-        // minmtu → relay detour on a healthy path.
         let mut s = PmtuState::new(now, MTU);
-        s.udp_confirmed = true;
-        s.ping_sent = false;
-        s.udp_ping_sent = now;
-        s.udp_reply_rx = now; // 60s old at check time
-        assert!(!s.udp_timed_out(now + Duration::from_mins(1), to));
-
-        // Probe outstanding, fresh.
         s.ping_sent = true;
-        s.udp_ping_sent = now + Duration::from_secs(55);
-        assert!(!s.udp_timed_out(now + Duration::from_mins(1), to));
+        let _ = s.on_probe_reply(MIN_PROBE_SIZE, now);
+        assert!(!s.udp_timed_out(now + Duration::from_mins(5), to));
 
-        // Probe outstanding, stale.
-        s.udp_ping_sent = now;
-        assert!(s.udp_timed_out(now + Duration::from_secs(31), to));
+        for k in 0..4 {
+            s.on_udp_probe_attempt(now + Duration::from_secs(10 * k), true);
+        }
+        assert!(!s.udp_timed_out(now + Duration::from_secs(29), to));
+        assert!(s.udp_timed_out(now + Duration::from_secs(30), to));
 
-        // Not confirmed.
-        s.udp_confirmed = false;
-        assert!(!s.udp_timed_out(now + Duration::from_secs(31), to));
+        let _ = s.on_probe_reply(MIN_PROBE_SIZE, now + Duration::from_secs(31));
+        assert!(!s.udp_timed_out(now + Duration::from_secs(45), to));
     }
 
     #[test]

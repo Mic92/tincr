@@ -276,7 +276,8 @@ impl Daemon {
             // slow share one GRO bucket (handed over via the take/restore below), so mixed
             // batches keep packet order.
             if let Some(snap) = snap.as_ref()
-                && let Some(target) = shard::rx_probe(snap, pkt)
+                && let Some(src) = peer
+                && let Some(target) = shard::rx_probe(snap, pkt, src)
                 && let Ok(len) = shard::rx_open(&target, snap, &mut rx_fast_scratch, &mut dst_memo)
             {
                 target.handles.stats.add_in(1, len as u64);
@@ -431,15 +432,17 @@ impl Daemon {
             }
         };
 
-        if let Via::Udp(peer_addr) = via {
-            helpers::confirm_udp_addr(
-                &mut self.dp.tunnels,
-                &self.listeners,
-                &self.tunnel_handles,
-                from_nid,
-                &from_name,
-                peer_addr,
-            );
+        if let Via::Udp(src) = via
+            && self
+                .dp
+                .tunnels
+                .entry(from_nid)
+                .or_default()
+                .path
+                .on_authenticated_rx(src)
+        {
+            log::debug!(target: "tincd::net", "UDP address of {from_name} is {src}");
+            self.publish_path(from_nid);
         }
         let mut nw = false;
         if via == Via::UdpRelayed {
@@ -491,7 +494,7 @@ impl Daemon {
                 self.dp
                     .tunnels
                     .values()
-                    .any(|t| t.status.udp_confirmed && t.udp_addr == Some(peer_addr))
+                    .any(|t| t.path.confirmed() && t.path.addr() == Some(peer_addr))
             });
             if !n_confirmed {
                 log::debug!(target: "tincd::net",

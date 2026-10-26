@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use tinc_sptps::Sptps;
 
-use crate::pmtu::PmtuState;
+use crate::udp_path::UdpPath;
 use std::time::Duration;
 
 /// Atomic so the shard RX fast-path can
@@ -77,35 +77,15 @@ pub(crate) struct TunnelState {
     /// backstop in [`should_reap_prev_sptps`]; cleared with it.
     pub prev_sptps_installed_at: Option<Instant>,
 
-    /// UDP send-to. Not `NodeState.edge_addr` (that's TCP
-    /// `getpeername`); may be NAT-reflexive from `ans_key_h`.
-    pub udp_addr: Option<SocketAddr>,
-
-    /// `(sockaddr, listener_index)` cached after `udp_confirmed`. The
-    /// confirmed branch of `choose_udp_address` is deterministic given
-    /// `udp_addr`; recomputing per-packet at 1.5 Mpps was 2% self-time.
-    /// `socket2::SockAddr` (not std `SocketAddr`): `sendto` wants kernel
-    /// shape; per-packet repacking was 0.37%.
-    pub udp_addr_cached: Option<(socket2::SockAddr, u8)>,
+    pub path: UdpPath,
 
     pub status: TunnelStatus,
 
     /// `REQ_KEY` debounce gate. `None` always passes.
     pub last_req_key: Option<Instant>,
 
-    /// `pmtu.udp_confirmed` is authoritative; `status.udp_confirmed`
-    /// mirrors for `dump_nodes`. `pmtu.mtu` survives
-    /// `reset_unreachable` (the others are reset). `Option` because
-    /// `PmtuState::new` needs an `Instant`; lazily seeded by `try_tx`.
-    pub pmtu: Option<PmtuState>,
-
     /// `try_udp` keepalive gate.
     pub udp_reply_sent: Option<Instant>,
-
-    /// Last "destination unreachable" timestamp for this peer's UDP
-    /// path. Used to rate-limit warnings and deprioritise the
-    /// reflexive arm in `choose_udp_address`.
-    pub udp_send_failed_at: Option<Instant>,
 
     /// `send_udp_info` debounce. Only when we originate; forwarding skips.
     pub udp_info_sent: Option<Instant>,
@@ -161,21 +141,9 @@ impl TunnelState {
         self.prev_sptps = None;
         self.prev_sptps_installed_at = None;
         self.last_req_key = None;
-        // Probe state reset; `mtu` preserved.
-        if let Some(p) = &mut self.pmtu {
-            p.maxmtu = MTU;
-            p.minmtu = 0;
-            p.start_discovery();
-            p.maxrecentlen = 0;
-            p.udp_confirmed = false;
-            p.ping_sent = false;
-            p.udp_ping_rtt = None;
-        }
+        self.path.reset();
         self.udp_reply_sent = None;
         self.udp_rx_maxlen = 0;
-        self.udp_addr = None;
-        self.udp_addr_cached = None;
-        self.udp_send_failed_at = None;
         self.status = TunnelStatus::default();
     }
 }
@@ -245,10 +213,6 @@ pub(crate) struct TunnelStatus {
     /// Bit 6. Always true (no legacy crypto); kept for `dump nodes`.
     pub sptps: bool,
 
-    /// Bit 7. Valid UDP packet received from this node. Gates
-    /// TCP-tunnel → UDP-direct switch.
-    pub udp_confirmed: bool,
-
     /// Bit 8. Transient: set/clear bracket around
     /// `send_udp_probe_packet`. Side-channel from `try_udp` to
     /// `send_sptps_data` (4 layers down).
@@ -264,20 +228,9 @@ pub(crate) enum Via {
 }
 
 impl TunnelState {
-    /// `MTU` if unseeded.
-    #[must_use]
-    pub(crate) fn mtu(&self) -> u16 {
-        self.pmtu.as_ref().map_or(MTU, |p| p.mtu)
-    }
-
     #[must_use]
     pub(crate) fn minmtu(&self) -> u16 {
-        self.pmtu.as_ref().map_or(0, |p| p.minmtu)
-    }
-
-    #[must_use]
-    pub(crate) fn maxmtu(&self) -> u16 {
-        self.pmtu.as_ref().map_or(MTU, |p| p.maxmtu)
+        self.path.minmtu()
     }
 }
 
@@ -290,7 +243,7 @@ impl TunnelStatus {
     /// ‡ transient. 0 between event-loop turns.)
     /// `reachable` is a param (owned by graph, not `TunnelStatus`).
     #[must_use]
-    pub(crate) const fn as_u32(self, reachable: bool) -> u32 {
+    pub(crate) const fn as_u32(self, reachable: bool, udp_confirmed: bool) -> u32 {
         let mut v = 0u32;
         if self.validkey {
             v |= 1 << 1;
@@ -304,7 +257,7 @@ impl TunnelStatus {
         if self.sptps {
             v |= 1 << 6;
         }
-        if self.udp_confirmed {
+        if udp_confirmed {
             v |= 1 << 7;
         }
         if self.send_locally {
@@ -331,78 +284,43 @@ pub(crate) fn make_udp_label(initiator: &str, responder: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pmtu::PmtuPhase;
     use std::time::Duration;
 
     #[test]
     fn reset_unreachable_clears_everything() {
+        let now = Instant::now();
         let mut t = TunnelState {
-            sptps: None, // can't construct without keys; test the Option
-            prev_sptps: None,
-            prev_sptps_installed_at: Some(Instant::now()),
-            udp_addr: Some("10.0.0.1:655".parse().unwrap()),
-            udp_addr_cached: None,
+            prev_sptps_installed_at: Some(now),
             status: TunnelStatus {
                 validkey: true,
                 waitingforkey: true,
                 sptps: true,
-                udp_confirmed: true,
                 send_locally: true,
             },
-            last_req_key: Some(Instant::now()),
-            pmtu: Some({
-                let mut p = PmtuState::new(Instant::now(), MTU);
-                p.mtu = 1400;
-                p.minmtu = 1200;
-                p.maxmtu = 1450;
-                p.phase = PmtuPhase::Discovery { sent: 7 };
-                p.udp_confirmed = true;
-                p
-            }),
-            udp_reply_sent: Some(Instant::now()),
-            udp_send_failed_at: Some(Instant::now()),
-            udp_info_sent: Some(Instant::now()),
-            mtu_info_sent: Some(Instant::now()),
+            last_req_key: Some(now),
+            udp_reply_sent: Some(now),
             udp_rx_maxlen: 999,
-            outcompression: 6,
-            incompression: 12,
-            stats: {
-                let s = TrafficStats::default();
-                s.add_in(100, 50000);
-                s.add_out(80, 40000);
-                Arc::new(s)
-            },
             relay_tx_bytes: 12345,
-            relay_tx_bytes_prev: 0,
-            out_bytes_prev: 0,
-            relay_rate_bps: 0,
-            tx_rate_bps: 0,
+            ..TunnelState::default()
         };
+        t.stats.add_in(100, 50000);
+        t.path.on_authenticated_rx("10.0.0.1:655".parse().unwrap());
+        let _ = t.path.on_probe_reply(1400, now);
+        t.path.pmtu_mut(now).mtu = 1400;
 
         t.reset_unreachable();
 
         assert!(t.sptps.is_none());
         assert!(t.prev_sptps_installed_at.is_none());
         assert!(t.last_req_key.is_none());
-        // `mtu` survives, rest reset.
-        let p = t.pmtu.as_ref().expect("pmtu state survives");
-        assert_eq!(p.mtu, 1400, "mtu survives unreachable");
-        assert_eq!(p.maxmtu, MTU);
-        assert_eq!(p.minmtu, 0);
-        assert!(p.phase.is_discovery_start());
-        assert!(!p.udp_confirmed);
         assert!(t.udp_reply_sent.is_none());
-        assert!(t.udp_send_failed_at.is_none());
-        assert!(t.udp_addr.is_none());
+        assert!(t.path.addr().is_none());
+        assert!(!t.path.confirmed());
+        assert_eq!((t.path.mtu(), t.path.minmtu()), (1400, 0));
         assert_eq!(t.status, TunnelStatus::default());
-        // Traffic counters are lifetime totals.
-        assert_eq!(t.stats.in_packets(), 100);
+        // Lifetime totals. The autoconnect EWMA would mask relay
+        // traffic across a flap if relay_tx_bytes reset.
         assert_eq!(t.stats.in_bytes(), 50000);
-        assert_eq!(t.stats.out_packets(), 80);
-        assert_eq!(t.stats.out_bytes(), 40000);
-        // relay_tx_bytes is lifetime too — the EWMA delta in
-        // decide_autoconnect would go negative (saturate to 0) if
-        // this reset, masking real relay traffic across a flap.
         assert_eq!(t.relay_tx_bytes, 12345);
     }
 
@@ -430,10 +348,10 @@ mod tests {
     #[test]
     fn tunnel_status_bitfield_packing() {
         let z = TunnelStatus::default();
-        assert_eq!(z.as_u32(false), 0);
+        assert_eq!(z.as_u32(false, false), 0);
 
         // Each bit in isolation.
-        let bit = |s: TunnelStatus| s.as_u32(false);
+        let bit = |s: TunnelStatus| s.as_u32(false, false);
         assert_eq!(
             bit(TunnelStatus {
                 validkey: true,
@@ -448,26 +366,19 @@ mod tests {
             }),
             1 << 2
         );
-        assert_eq!(z.as_u32(true), 1 << 4); // `reachable` is the param
+        assert_eq!(z.as_u32(true, false), 1 << 4);
         assert_eq!(bit(TunnelStatus { sptps: true, ..z }), 1 << 6);
-        assert_eq!(
-            bit(TunnelStatus {
-                udp_confirmed: true,
-                ..z
-            }),
-            1 << 7
-        );
+        assert_eq!(z.as_u32(false, true), 1 << 7);
 
         // All set.
         let all = TunnelStatus {
             validkey: true,
             waitingforkey: true,
             sptps: true,
-            udp_confirmed: true,
             send_locally: true,
         };
         assert_eq!(
-            all.as_u32(true),
+            all.as_u32(true, true),
             (1 << 1) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 8)
         );
 
@@ -476,10 +387,9 @@ mod tests {
             validkey: true,
             waitingforkey: false,
             sptps: true,
-            udp_confirmed: true,
             send_locally: false,
         };
-        assert_eq!(steady.as_u32(true), 0xd2);
+        assert_eq!(steady.as_u32(true, true), 0xd2);
     }
 
     /// S1 regression: stalled handshake (`validkey=false`,

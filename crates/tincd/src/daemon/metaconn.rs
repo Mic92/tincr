@@ -867,7 +867,7 @@ impl Daemon {
             return nw;
         }
 
-        // Deliver local. udppacket bit stays false (came via TCP).
+        // Deliver local.
         let Some(sptps) = self
             .dp
             .tunnels

@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use crate::dispatch::ConnOptions;
 use crate::graph::{NodeId, Route};
 use crate::packet::len_u16;
-use crate::pmtu::{PmtuAction, PmtuState};
-use crate::tunnel::{MTU, TunnelState, Via};
+use crate::pmtu::PmtuAction;
+use crate::tunnel::{MTU, Via};
 use crate::{local_addr, pmtu};
 use rand_core::Rng;
 use tinc_crypto::os_rng;
@@ -28,7 +28,6 @@ use nix::sys::socket::{
     AddressFamily, SockFlag, SockType, SockaddrStorage, connect, getsockopt, socket, sockopt,
 };
 use std::mem;
-use std::sync::atomic;
 
 /// Ask the kernel's PMTU cache for this peer and subtract our encapsulation
 /// overhead, so the first probe goes out at the likely-correct maxmtu and PMTU
@@ -130,33 +129,17 @@ impl Daemon {
         // a full epoll batch stale (yielding rtt=0 when probe-send and an
         // unrelated reply land in the same batch).
         let now = Instant::now();
-        let actions = if let Some(p) = self.dp.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
-        {
-            p.on_probe_reply(len, now)
-        } else {
-            // No pmtu state yet — seed now to record the floor.
-            let tunnel = self.dp.tunnels.entry(peer).or_default();
-            let mut p = PmtuState::new(now, MTU);
-            let actions = p.on_probe_reply(len, now);
-            tunnel.pmtu = Some(p);
-            actions
-        };
-        // `status.udp_confirmed` is what dump_nodes reports; pmtu is authoritative.
-        if let Some(t) = self.dp.tunnels.get_mut(&peer) {
-            t.status.udp_confirmed = true;
+        let tunnel = self.dp.tunnels.entry(peer).or_default();
+        let was_confirmed = tunnel.path.confirmed();
+        let actions = tunnel.path.on_probe_reply(len, now);
+        if !was_confirmed {
+            log::debug!(target: "tincd::net",
+                        "UDP address of {peer_name} confirmed: {:?}", tunnel.path.addr());
         }
         for a in &actions {
             Self::log_pmtu_action(peer_name, a);
         }
-        // Publish minmtu to the fast path (probe replies are seconds
-        // apart, so this isn't per-packet). Unconditional store: may
-        // have raised, capped (LogFixed clamps), or stayed put;
-        // reading the post-action value covers all three. None until
-        // first HandshakeDone (probes start after the SPTPS dance).
-        if let Some(h) = self.tunnel_handles.get(&peer) {
-            let m = self.dp.tunnels.get(&peer).map_or(0, TunnelState::minmtu);
-            h.minmtu.store(m, atomic::Ordering::Relaxed);
-        }
+        self.publish_path(peer);
         false
     }
 
@@ -288,68 +271,8 @@ impl Daemon {
 
         let mut nw = self.try_udp(target, &target_name, now);
 
-        // Don't probe MTU until UDP confirmed.
         if mtu {
-            // Re-seed maxmtu just before discovery starts. The peer
-            // addr lookup goes through `choose_udp_address` (the
-            // same path the actual probe send will use). If there's
-            // no UDP addr yet the probe wouldn't go anywhere either
-            // — fall back to MTU and let the next try_tx pick it up.
-            let needs_seed = self
-                .dp
-                .tunnels
-                .get(&target)
-                .and_then(|t| t.pmtu.as_ref())
-                .is_none_or(|p| p.phase.is_discovery_start());
-            let initial_maxmtu = if needs_seed {
-                self.choose_udp_address(target)
-                    .map_or(MTU, |(addr, _)| choose_initial_maxmtu(addr))
-            } else {
-                MTU
-            };
-
-            let tunnel = self.dp.tunnels.entry(target).or_default();
-            let p = tunnel
-                .pmtu
-                .get_or_insert_with(|| PmtuState::new(now, initial_maxmtu));
-            // Re-seed even if pmtu state already exists (UDP timeout
-            // or Lost reset restarted discovery). Our get_or_insert
-            // only seeds on first construction.
-            if p.phase.is_discovery_start() {
-                p.maxmtu = initial_maxmtu;
-            }
-            if p.udp_confirmed {
-                let pinginterval = Duration::from_secs(u64::from(self.settings.pinginterval));
-                let actions = p.tick(now, pinginterval);
-                for a in &actions {
-                    Self::log_pmtu_action(&target_name, a);
-                }
-                // Lost reset zeroed minmtu: publish to the shard fast path.
-                if actions.contains(&PmtuAction::LogReset)
-                    && let Some(h) = self.tunnel_handles.get(&target)
-                {
-                    h.minmtu.store(0, atomic::Ordering::Relaxed);
-                }
-                for a in actions {
-                    if let PmtuAction::SendProbe { len, counts_miss } = a {
-                        let outcome = self.send_udp_probe(target, &target_name, len);
-                        nw |= outcome.needs_write;
-                        // Only sent or EMSGSIZE'd probes are evidence
-                        // about the path; ENETUNREACH etc. must not
-                        // walk Steady towards Lost.
-                        if counts_miss
-                            && (outcome.udp_sent || outcome.udp_emsgsize)
-                            && let Some(pmtu) = self
-                                .dp
-                                .tunnels
-                                .get_mut(&target)
-                                .and_then(|t| t.pmtu.as_mut())
-                        {
-                            pmtu.on_counted_probe_sent();
-                        }
-                    }
-                }
-            }
+            nw |= self.try_mtu(target, &target_name, now);
         }
 
         // Nexthop dynamic-relay recursion. Warm the relay's tunnel
@@ -359,8 +282,7 @@ impl Daemon {
             .dp
             .tunnels
             .get(&target)
-            .and_then(|t| t.pmtu.as_ref())
-            .is_some_and(|p| p.udp_confirmed);
+            .is_some_and(|t| t.path.confirmed());
         if !udp_confirmed {
             let nexthop = self.route_of(target).map(|r| r.nexthop);
             if let Some(nh) = nexthop
@@ -373,6 +295,70 @@ impl Daemon {
             }
         }
 
+        nw
+    }
+
+    fn pmtu_policy(&self, target: NodeId) -> (u16, bool) {
+        let cap = self
+            .nodes
+            .get(&target)
+            .and_then(|ns| ns.conn)
+            .and_then(|c| self.conns.get(c))
+            .and_then(|c| c.pmtu_cap)
+            .or(self.settings.global_pmtu)
+            .unwrap_or(MTU);
+        let options = self.route_of(target).map_or(self.myself_options, |r| {
+            ConnOptions::from_bits_retain(r.options)
+        });
+        (cap, options.contains(ConnOptions::PMTU_DISCOVERY))
+    }
+
+    fn try_mtu(&mut self, target: NodeId, target_name: &str, now: Instant) -> bool {
+        let (cap, discovery) = self.pmtu_policy(target);
+        let needs_seed = self
+            .dp
+            .tunnels
+            .get(&target)
+            .and_then(|t| t.path.pmtu())
+            .is_none_or(|p| p.phase.is_discovery_start());
+        let initial_maxmtu = if needs_seed {
+            self.choose_udp_address(target)
+                .map_or(MTU, |(addr, _)| choose_initial_maxmtu(addr))
+        } else {
+            MTU
+        };
+
+        let tunnel = self.dp.tunnels.entry(target).or_default();
+        tunnel.path.set_policy(cap, discovery, now);
+        let confirmed = tunnel.path.confirmed();
+        let p = tunnel.path.pmtu_mut(now);
+        if p.phase.is_discovery_start() {
+            p.maxmtu = initial_maxmtu.min(p.cap);
+        }
+        let actions = if confirmed {
+            let pinginterval = Duration::from_secs(u64::from(self.settings.pinginterval));
+            p.tick(now, pinginterval)
+        } else {
+            Vec::new()
+        };
+        self.publish_path(target);
+
+        let mut nw = false;
+        for a in actions {
+            Self::log_pmtu_action(target_name, &a);
+            if let PmtuAction::SendProbe { len, counts_miss } = a {
+                let outcome = self.send_udp_probe(target, target_name, len);
+                nw |= outcome.needs_write;
+                // Only sent or EMSGSIZE'd probes are evidence about the
+                // path. ENETUNREACH etc. must not walk Steady towards Lost.
+                if counts_miss
+                    && (outcome.udp_sent || outcome.udp_emsgsize)
+                    && let Some(t) = self.dp.tunnels.get_mut(&target)
+                {
+                    t.path.pmtu_mut(now).on_counted_probe_sent();
+                }
+            }
+        }
         nw
     }
 
@@ -391,7 +377,7 @@ impl Daemon {
         // predates one timeout window. The latter catches a stale NAT
         // mapping on the first packet after a data-driven idle gap.
         let timeout = Duration::from_secs(u64::from(self.settings.udp_discovery_timeout));
-        let (timed_out, cold_stale) = tunnel.pmtu.as_ref().map_or((false, false), |p| {
+        let (timed_out, cold_stale) = tunnel.path.pmtu().map_or((false, false), |p| {
             (
                 p.udp_timed_out(now, timeout),
                 p.udp_needs_cold_revalidation(now, timeout),
@@ -405,19 +391,14 @@ impl Daemon {
                 log::info!(target: "tincd::net",
                            "Too much time has elapsed since last UDP ping response from {target_name}, stopping UDP communication");
             }
-            if let Some(p) = tunnel.pmtu.as_mut() {
-                p.on_udp_timeout();
-            }
-            tunnel.status.udp_confirmed = false;
-            tunnel.udp_addr_cached = None;
-            if let Some(h) = self.tunnel_handles.get(&target) {
-                h.minmtu.store(0, atomic::Ordering::Relaxed);
-            }
+            tunnel.path.on_timeout();
+            self.publish_path(target);
             // Fall through: discovery starts immediately, while data
             // uses the existing TCP path until UDP is authenticated.
         }
 
-        let udp_confirmed = tunnel.pmtu.as_ref().is_some_and(|p| p.udp_confirmed);
+        let tunnel = self.dp.tunnels.entry(target).or_default();
+        let udp_confirmed = tunnel.path.confirmed();
 
         // Gratuitous keepalive: a type-2 reply at the largest
         // recently-seen size tells the peer their PMTU still holds
@@ -431,10 +412,7 @@ impl Daemon {
                 .is_none_or(|last| now.duration_since(last) >= keepalive);
             if due {
                 tunnel.udp_reply_sent = Some(now);
-                let maxrecentlen = tunnel
-                    .pmtu
-                    .as_mut()
-                    .map_or(0, |p| mem::take(&mut p.maxrecentlen));
+                let maxrecentlen = tunnel.path.take_recent_len();
                 if maxrecentlen > 0 {
                     nw |= self.send_udp_probe_reply(target, target_name, maxrecentlen);
                 }
@@ -451,7 +429,7 @@ impl Daemon {
 
         // Probe request. Seed pmtu if needed (we read udp_ping_sent).
         let tunnel = self.dp.tunnels.entry(target).or_default();
-        let p = tunnel.pmtu.get_or_insert_with(|| PmtuState::new(now, MTU));
+        let p = tunnel.path.pmtu_mut(now);
         let interval = if p.udp_confirmed {
             self.settings.udp_discovery_keepalive_interval
         } else {
@@ -472,7 +450,7 @@ impl Daemon {
                     .dp
                     .tunnels
                     .get(&target)
-                    .is_some_and(|t| t.status.udp_confirmed);
+                    .is_some_and(|t| t.path.confirmed());
                 let has_prevedge = self.route_of(target).and_then(|r| r.prevedge).is_some();
                 if !confirmed && has_prevedge {
                     if let Some(t) = self.dp.tunnels.get_mut(&target) {
@@ -486,13 +464,10 @@ impl Daemon {
                     }
                 }
             }
-            if let Some(p) = self
-                .dp
-                .tunnels
-                .get_mut(&target)
-                .and_then(|t| t.pmtu.as_mut())
-            {
-                p.on_udp_probe_attempt(attempted_at, sent);
+            if let Some(t) = self.dp.tunnels.get_mut(&target) {
+                t.path
+                    .pmtu_mut(now)
+                    .on_udp_probe_attempt(attempted_at, sent);
             }
         }
 
@@ -608,11 +583,11 @@ impl Daemon {
             // Fall through if no local address found.
         }
 
-        // Reflexive (stashed udp_addr).
+        // Replies go back the way requests came.
         if let Some(t) = self.dp.tunnels.get(&to_nid)
-            && let Some(addr) = t.udp_addr
+            && let Some(addr) = t.path.addr()
         {
-            if t.status.udp_confirmed {
+            if t.path.confirmed() || t.path.addr_seen() {
                 let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
                 return Some((addr, sock));
             }

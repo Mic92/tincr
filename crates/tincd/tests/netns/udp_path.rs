@@ -187,8 +187,8 @@ fn asymmetric_confirm_via_meta() {
         confirmed.is_some(),
         "alice never confirmed bob via meta\n{logs}"
     );
-    // bob's confirmed bit does get set (he received alice's UDP), so
-    // minmtu is the invariant that keeps bob→alice on TCP.
+    // bob only receives alice's UDP, which proves nothing about his
+    // direction: minmtu keeps bob→alice on TCP.
     assert_eq!(
         node_pmtu(&bob_nodes, "alice").map(|pmtu| pmtu.1),
         Some(0),
@@ -254,4 +254,27 @@ fn relayed_frames_do_not_confirm_direct_pmtu() {
     let logs = s.finish();
     assert_eq!(bogus, None, "bob learned a minmtu to alice\n{logs}");
     assert!(confirmed, "bob lost the small-packet UDP path\n{logs}");
+}
+
+#[test]
+fn pmtu_config_pins_mtu() {
+    let Some(s) = Scenario::start(
+        "pmtu_config_pins_mtu",
+        Topology::Direct,
+        "PMTU = 1300\nPMTUDiscovery = no",
+        &[],
+    ) else {
+        return;
+    };
+    s.pair.wait_validkey();
+
+    let pinned = try_poll(Duration::from_secs(10), || {
+        ping_once("10.42.0.2");
+        node_pmtu(&s.alice_view(), "bob").filter(|&pmtu| pmtu == (1300, 1300, 1300))
+    });
+    let output = ping(&["-c", "1", "-W", "2", "-s", "1200"], "10.42.0.2");
+    let logs = s.finish();
+    assert!(pinned.is_some(), "{logs}");
+    assert!(output.status.success(), "{logs}");
+    assert!(!logs.alice.contains("Fixing MTU"), "{logs}");
 }

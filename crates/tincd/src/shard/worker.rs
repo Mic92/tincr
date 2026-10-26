@@ -348,7 +348,8 @@ fn rx_batch(
             continue;
         };
         if let Some(s) = snap
-            && let Some(target) = rx_probe(s, pkt)
+            && let Some(src) = src
+            && let Some(target) = rx_probe(s, pkt, src)
             && let Ok(len) = rx_open(&target, s, scratch, &mut memo)
         {
             target.handles.stats.add_in(1, len as u64);
