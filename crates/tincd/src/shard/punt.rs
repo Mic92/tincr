@@ -5,14 +5,10 @@
 //! The worker kicks an eventfd after pushing; control drains on wake.
 
 #![cfg_attr(not(test), expect(dead_code))]
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Mutex;
+use std::sync::PoisonError;
 
 /// Max punted frame: MTU-sized UDP payload. Supers are never punted whole.
 pub(crate) const PUNT_SLOT: usize = 2048;
@@ -53,13 +49,15 @@ impl PuntQueue {
     /// `false` = ring full, packet dropped.
     pub(crate) fn push(&self, pkt: &[u8], src: Option<SocketAddr>) -> bool {
         debug_assert!(pkt.len() <= PUNT_SLOT);
-        let mut q = self.q.lock().expect("punt lock");
-        if q.full.len() >= PUNT_CAP {
+        let mut q = self.q.lock().unwrap_or_else(PoisonError::into_inner);
+        if q.full.len() >= PUNT_CAP || pkt.len() > PUNT_SLOT {
             q.dropped += 1;
             return false;
         }
         let mut buf = q.free.pop().unwrap_or_else(|| Box::new([0u8; PUNT_SLOT]));
-        buf[..pkt.len()].copy_from_slice(pkt);
+        if let Some(dst) = buf.get_mut(..pkt.len()) {
+            dst.copy_from_slice(pkt);
+        }
         #[expect(clippy::cast_possible_truncation)] // ≤ PUNT_SLOT
         q.full.push_back(PuntPkt {
             buf,
@@ -71,18 +69,25 @@ impl PuntQueue {
 
     /// Caller returns the buffer via [`recycle`] after processing.
     pub(crate) fn pop(&self) -> Option<PuntPkt> {
-        self.q.lock().expect("punt lock").full.pop_front()
+        self.q
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .full
+            .pop_front()
     }
 
     pub(crate) fn recycle(&self, buf: Box<[u8; PUNT_SLOT]>) {
-        let mut q = self.q.lock().expect("punt lock");
+        let mut q = self.q.lock().unwrap_or_else(PoisonError::into_inner);
         if q.free.len() < PUNT_CAP {
             q.free.push(buf);
         }
     }
 
     pub(crate) fn dropped(&self) -> u64 {
-        self.q.lock().expect("punt lock").dropped
+        self.q
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .dropped
     }
 }
 

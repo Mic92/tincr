@@ -8,11 +8,6 @@
 //!, and the post-route mutations.
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::collections::HashMap;
 
@@ -43,6 +38,14 @@ pub(crate) enum LearnAction {
     Refresh(Mac),
 }
 
+/// `(dst, src)` of an ethernet header. Returns `None` if `frame` is shorter
+/// than one (ethertype included, though it is not read here).
+fn eth_macs(frame: &[u8]) -> Option<(Mac, Mac)> {
+    let hdr = frame.get(..ETH_HDR_LEN)?;
+    let (dst, rest) = hdr.split_first_chunk::<6>()?;
+    Some((*dst, *rest.first_chunk::<6>()?))
+}
+
 /// Switch-mode routing on a TAP frame with its real eth header; an unknown
 /// destination is `Broadcast` (flood), not `Unreachable`. `from_myself` gates
 /// learning, `source` feeds the loop check, `myself` the `FMODE_OFF`/TTL
@@ -56,7 +59,8 @@ pub(crate) fn route_mac<T, S: BuildHasher>(
     mac_table: &HashMap<Mac, String, S>,
     resolve: impl FnOnce(&str) -> Option<T>,
 ) -> (RouteResult<T>, LearnAction) {
-    if frame.len() < ETH_HDR_LEN {
+    // :1033, :1039
+    let Some((dst, src)) = eth_macs(frame) else {
         return (
             RouteResult::TooShort {
                 need: ETH_HDR_LEN,
@@ -64,11 +68,7 @@ pub(crate) fn route_mac<T, S: BuildHasher>(
             },
             LearnAction::NotOurs,
         );
-    }
-
-    // :1033, :1039 — expects are infallible: ETH_HDR_LEN guard above ensures 14+ bytes
-    let src: Mac = frame[6..12].try_into().expect("len-checked above");
-    let dst: Mac = frame[0..6].try_into().expect("len-checked above");
+    };
 
     // :1031-1035 learn_mac (daemon does the actual subnet_add/broadcast)
     let learn = if from_myself {

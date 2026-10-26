@@ -21,10 +21,6 @@
 //! `SRCID`). Same data, two indices, like the C's two trees.
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::indexing_slicing,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::fmt;
 
@@ -57,9 +53,8 @@ impl NodeId6 {
     #[must_use]
     pub fn from_name(name: &str) -> Self {
         let digest = Sha512::digest(name.as_bytes());
-        let mut id = [0u8; 6];
-        id.copy_from_slice(&digest[..6]);
-        Self(id)
+        // SHA-512 is 64 bytes. The default is unreachable.
+        Self(digest.first_chunk::<6>().copied().unwrap_or_default())
     }
 
     #[must_use]

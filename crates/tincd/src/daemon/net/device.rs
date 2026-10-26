@@ -1,8 +1,3 @@
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 use super::super::Daemon;
 use super::DEVICE_DRAIN_CAP;
 
@@ -56,6 +51,10 @@ impl Daemon {
             // arena slot borrow conflicts. Same dance as
             // `udp_rx_batch`. The arena is `Some` between calls
             // (set in `setup`, never taken elsewhere).
+            #[expect(
+                clippy::expect_used,
+                reason = "set in setup; every path below puts it back"
+            )]
             let mut arena = self
                 .dp
                 .device_arena
@@ -106,7 +105,9 @@ impl Daemon {
                         self.dp.tx_batch_live = true;
                     }
                     for i in 0..count {
-                        let n = arena.lens()[i];
+                        let Some(&n) = arena.lens().get(i) else {
+                            break;
+                        };
                         let myself_tunnel = self.dp.tunnels.entry(self.myself).or_default();
                         myself_tunnel.stats.add_in(1, n as u64);
 
@@ -116,7 +117,9 @@ impl Daemon {
                         // or flushes-then-stages on dst/size mismatch;
                         // or falls through to immediate send for the
                         // cold path (no `udp_addr_cached`).
-                        nw |= self.forward_packet(&mut arena.slot_mut(i)[..n], None);
+                        if let Some(frame) = arena.slot_mut(i).get_mut(..n) {
+                            nw |= self.forward_packet(frame, None);
+                        }
                     }
                     self.dp.device_arena = Some(arena);
                     if count == DEVICE_DRAIN_CAP {
@@ -171,7 +174,7 @@ impl Daemon {
                         csum_offset,
                     };
                     let split = tinc_device::tso_split(
-                        &arena.as_contiguous()[..len],
+                        arena.as_contiguous().get(..len).unwrap_or_default(),
                         &hdr,
                         gso_type,
                         &mut scratch,
@@ -210,13 +213,14 @@ impl Daemon {
                                     snap.as_ref(),
                                     count,
                                     &scratch,
-                                    &tso_lens[..count],
+                                    tso_lens.get(..count).unwrap_or_default(),
                                 )
                             {
-                                for i in 0..count {
-                                    let n = tso_lens[i];
+                                for (i, &n) in tso_lens.iter().take(count).enumerate() {
                                     let off = i * tinc_device::DeviceArena::STRIDE;
-                                    nw |= self.forward_packet(&mut scratch[off..off + n], None);
+                                    if let Some(frame) = scratch.get_mut(off..off + n) {
+                                        nw |= self.forward_packet(frame, None);
+                                    }
                                 }
                             }
                             self.tx_snap = snap;
@@ -350,12 +354,14 @@ impl Daemon {
         // Dest MAC ← the kernel's own (snatched from ARP/NDP);
         // source MAC ← dest XOR 0xFF on the last byte ("arbitrary
         // fake source" — just-different so the kernel doesn't see
-        // its own MAC as src). data.len()≥12 holds at every callsite
-        // (post-route or post-checklength).
-        if self.overwrite_mac && data.len() >= 12 {
-            data[0..6].copy_from_slice(&self.mymac);
-            data[6..12].copy_from_slice(&self.mymac);
-            data[11] ^= 0xFF;
+        // its own MAC as src).
+        if self.overwrite_mac
+            && let Some((dst, rest)) = data.split_first_chunk_mut::<6>()
+            && let Some(src) = rest.first_chunk_mut::<6>()
+        {
+            *dst = self.mymac;
+            *src = self.mymac;
+            src[5] ^= 0xFF;
         }
         let len = data.len() as u64;
         self.dp
@@ -410,7 +416,10 @@ impl Daemon {
         if alloc < 2 {
             return false;
         }
-        let Some(target) = shard::tx_probe(snap, &scratch[..lens[0]], alloc) else {
+        let Some(first) = lens.first().and_then(|&n| scratch.get(..n)) else {
+            return false;
+        };
+        let Some(target) = shard::tx_probe(snap, first, alloc) else {
             return false;
         };
         // target.sock is the listener index from udp_addr.1 — same

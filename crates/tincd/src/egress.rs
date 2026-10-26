@@ -9,10 +9,6 @@
 //!
 //! `try_clone` not borrow: `dup(2)` of `Listener.udp` — same file
 //! description, separate fd, no self-referential daemon struct.
-#![expect(
-    clippy::indexing_slicing,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 // `deny` (was `forbid`): linux stays safe via `nix::sendmsg`, but the
 // macOS `sendmsg_x` path is private API not wrapped by libc/nix and
 // needs a scoped `#[expect(unsafe_code)]` on its module.
@@ -333,7 +329,11 @@ impl UdpEgress for Portable {
             } else {
                 stride
             };
-            self.sock.send_to(&b.frames[off..off + len], b.dst)?;
+            let frame = b
+                .frames
+                .get(off..off + len)
+                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+            self.sock.send_to(frame, b.dst)?;
         }
         Ok(())
     }

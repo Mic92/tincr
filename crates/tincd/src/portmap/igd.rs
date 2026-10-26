@@ -11,10 +11,6 @@
 //! Surface matches the three calls `try_igd` made on `igd-next`:
 //! `discover` (was `search_gateway`), `Gateway::add_port`,
 //! `Gateway::external_ip`.
-#![expect(
-    clippy::indexing_slicing,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, UdpSocket};
@@ -112,7 +108,7 @@ pub(super) fn discover(timeout: Duration, gw_v4: Option<Ipv4Addr>) -> Result<Gat
                         "ignored SSDP reply from {src} (not gateway {gw})");
             continue;
         }
-        let reply = String::from_utf8_lossy(&buf[..n]);
+        let reply = String::from_utf8_lossy(buf.get(..n).unwrap_or_default());
         let Some((addr, root_path)) = parse_ssdp_location(&reply).and_then(split_http_url) else {
             continue;
         };
@@ -270,7 +266,7 @@ fn http_roundtrip(addr: SocketAddrV4, req: &str) -> Result<String, String> {
                 // the handful of XML tags) is at the front; a
                 // miniupnpd that pads with whitespace shouldn't fail.
                 let take = n.min(HTTP_MAX_RESPONSE - out.len());
-                out.extend_from_slice(&chunk[..take]);
+                out.extend_from_slice(chunk.get(..take).unwrap_or_default());
                 if out.len() >= HTTP_MAX_RESPONSE {
                     break;
                 }

@@ -14,15 +14,12 @@
 //! bits. Intent is `& 0o077` (no group/other read). We port the
 //! bug; the warning is cosmetic and 1.1 users
 //! grep for the C message.
-#![expect(
-    clippy::unwrap_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::collections::HashMap;
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::PoisonError;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 
@@ -48,7 +45,7 @@ static HOST_CACHE: LazyLock<HostCache> = LazyLock::new(HostCache::default);
 #[must_use]
 pub(crate) fn read_host_config(hosts: &HostDirs, name: &str) -> Arc<Config> {
     let path = hosts.file(name);
-    let mut cache = HOST_CACHE.lock().unwrap();
+    let mut cache = HOST_CACHE.lock().unwrap_or_else(PoisonError::into_inner);
     let Ok(meta) = fs::metadata(&path) else {
         cache.remove(&path);
         return Arc::default();

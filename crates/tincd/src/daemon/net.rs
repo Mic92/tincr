@@ -1,7 +1,3 @@
-#![expect(
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 pub(super) use super::ListenerSlot;
 
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -54,6 +50,10 @@ impl UdpRxBatch {
         // goes straight to the heap.
         let bufs: Box<[[u8; UDP_RX_BUFSZ]]> =
             vec![[0u8; UDP_RX_BUFSZ]; UDP_RX_BATCH].into_boxed_slice();
+        #[expect(
+            clippy::expect_used,
+            reason = "the vec above has exactly UDP_RX_BATCH elements"
+        )]
         let bufs: Box<[[u8; UDP_RX_BUFSZ]; UDP_RX_BATCH]> = bufs
             .try_into()
             .expect("vec![_; 64].into_boxed_slice() has length 64");

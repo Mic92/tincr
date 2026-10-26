@@ -3,10 +3,6 @@
 //! `host-up → subnet-up` ordering a per-job `spawn()` would race.
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -62,6 +58,10 @@ impl ScriptWorker {
         let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let (tx, _) = guard.get_or_insert_with(|| {
             let (tx, rx) = sync_channel(QUEUE_CAP);
+            #[expect(
+                clippy::expect_used,
+                reason = "thread spawn failure is fatal (resource exhaustion)"
+            )]
             let handle = Builder::new()
                 .name("tinc-script".into())
                 .spawn(move || run(&rx))

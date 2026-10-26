@@ -1,9 +1,4 @@
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use super::{ConnId, Daemon};
 
@@ -82,7 +77,7 @@ impl Daemon {
         if let Some(id) = self.register_conn(conn, Io::Read) {
             log::debug!(target: "tincd::conn",
                         "Connection from {} (control)",
-                        self.conns[id].hostname);
+                        self.conn(id).hostname);
         }
     }
 
@@ -128,15 +123,19 @@ impl Daemon {
         }
 
         // drain inbuf.
-        loop {
-            // Split borrow: helper would lock all of `self`.
-            let conn = self.conns.get_mut(id).expect("ConnId not live");
+        // Split borrow: `conn_mut` would lock all of `self`.
+        while let Some(conn) = self.conns.get_mut(id) {
             let Some(range) = conn.inbuf.read_line() else {
                 break;
             };
             // Copy: can't borrow bytes_raw() across &mut self calls.
             // Cheap (control lines <100 bytes).
-            let line: Vec<u8> = conn.inbuf.bytes_raw()[range].to_vec();
+            let line: Vec<u8> = conn
+                .inbuf
+                .bytes_raw()
+                .get(range)
+                .unwrap_or_default()
+                .to_vec();
 
             // HTTP proxy response intercept.
             // `read_line` excludes `\n`, includes `\r`.
@@ -149,17 +148,23 @@ impl Daemon {
                 && conn.allow_request == Some(Request::Id)
                 && matches!(self.settings.proxy, Some(ProxyConfig::Http { .. }))
             {
-                if line.is_empty() || line[0] == b'\r' {
+                if line.first().is_none_or(|&b| b == b'\r') {
                     continue; // blank line
                 }
                 // RFC 7230 case-insensitive.
-                if line.len() >= 12 && line[..9].eq_ignore_ascii_case(b"HTTP/1.1 ") {
-                    if &line[9..12] == b"200" {
+                if let Some(status) = line
+                    .split_at_checked(9)
+                    .filter(|(proto, status)| {
+                        proto.eq_ignore_ascii_case(b"HTTP/1.1 ") && status.len() >= 3
+                    })
+                    .map(|(_, status)| status)
+                {
+                    if status.starts_with(b"200") {
                         log::debug!(target: "tincd::conn",
                             "HTTP proxy request granted for {}", conn.name);
                         continue;
                     }
-                    let status = String::from_utf8_lossy(&line[9..]);
+                    let status = String::from_utf8_lossy(status);
                     log::error!(target: "tincd::conn",
                         "HTTP proxy request rejected for {}: {:?}",
                         conn.name, status.trim_end_matches('\r'));
@@ -241,8 +246,8 @@ impl Daemon {
     /// `conn.invite` and the logged name. `None` if the conn was terminated; the
     /// caller returns `FeedDrain::Done`.
     fn dispatch_request_id(&mut self, id: ConnId, line: &[u8]) -> Option<(DispatchResult, bool)> {
-        // Split borrow: helper would lock all of `self`.
-        let conn = self.conns.get_mut(id).expect("ConnId not live");
+        // Split borrow: `conn_mut` would lock all of `self`.
+        let conn = self.conns.get_mut(id)?;
         let ctx = IdCtx {
             cookie: &self.cookie,
             my_name: &self.name,
@@ -300,6 +305,7 @@ impl Daemon {
             } else {
                 &conn.name
             };
+            #[expect(clippy::expect_used, reason = "handle_id just installed it")]
             let sptps = conn
                 .sptps
                 .as_deref_mut()
@@ -510,8 +516,8 @@ impl Daemon {
         // pre-SPTPS tcplen consume (SOCKS proxy reply).
         // Mutually exclusive with the Sptps arm: SOCKS sets
         // tcplen before SPTPS starts.
-        // Split borrow: helper would lock all of `self`.
-        let conn = self.conns.get_mut(id).expect("ConnId not live");
+        // Split borrow: `conn_mut` would lock all of `self`.
+        let conn = self.conns.get_mut(id)?;
         if conn.tcplen != 0 && conn.outgoing.is_some() && conn.allow_request == Some(Request::Id) {
             let n = usize::from(conn.tcplen);
             let Some(range) = conn.inbuf.read_n(n) else {
@@ -519,7 +525,12 @@ impl Daemon {
                 // (SOCKS bytes would parse as garbage).
                 return Some(FeedDrain::Done);
             };
-            let buf: Vec<u8> = conn.inbuf.bytes_raw()[range].to_vec();
+            let buf: Vec<u8> = conn
+                .inbuf
+                .bytes_raw()
+                .get(range)
+                .unwrap_or_default()
+                .to_vec();
             conn.tcplen = 0;
 
             // Only SOCKS sets tcplen in finish_connecting.
@@ -1128,7 +1139,7 @@ impl Daemon {
             .map(|(id, _)| id)
             .collect();
         for id in dirty {
-            if let Some(io_id) = self.conns[id].io_id
+            if let Some(io_id) = self.conns.get(id).and_then(|c| c.io_id)
                 && let Err(e) = self.ev.set(io_id, Io::ReadWrite)
             {
                 log::error!(target: "tincd::conn",

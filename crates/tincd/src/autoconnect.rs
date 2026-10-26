@@ -37,10 +37,6 @@
 //!   when over-connected.
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::indexing_slicing,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -253,11 +249,9 @@ pub(crate) fn decide(
                         .is_some_and(|n| n.edge_count >= 2 && n.tx_rate_bps < knobs.relay_lo_bps)
             })
             .collect();
-        if !idle.is_empty() {
-            #[expect(clippy::cast_possible_truncation)] // ≤ conn count
-            let r = (rng.next_u32() % (idle.len() as u32)) as usize;
+        if let Some(victim) = pick_one(rng, &idle) {
             return AutoAction::Disconnect {
-                name: idle[r].name.clone(),
+                name: victim.name.clone(),
                 origin: OutOrigin::AutoShortcut,
             };
         }
@@ -304,9 +298,9 @@ fn make_new_connection(
         return AutoAction::Noop;
     }
 
-    #[expect(clippy::cast_possible_truncation)] // eligible.len() ≤ node count (~thousands)
-    let r = (rng.next_u32() % (eligible.len() as u32)) as usize;
-    let pick = eligible[r];
+    let Some(&pick) = pick_one(rng, &eligible) else {
+        return AutoAction::Noop;
+    };
 
     // Already pending? Don't duplicate, don't re-roll. Noop this tick.
     if pending_outgoings.iter().any(|p| p.name == pick.name) {
@@ -330,9 +324,9 @@ fn connect_to_unreachable(
         return AutoAction::Noop;
     }
 
-    #[expect(clippy::cast_possible_truncation)] // nodes.len() bounded by node count (≪ u32::MAX)
-    let r = (rng.next_u32() % (nodes.len() as u32)) as usize;
-    let n = &nodes[r];
+    let Some(n) = pick_one(rng, nodes) else {
+        return AutoAction::Noop;
+    };
 
     // Ineligible → return, not continue: this is the back-off.
     if n.name == myself_name || n.directly_connected || n.reachable || !n.has_address {
@@ -378,12 +372,23 @@ fn drop_superfluous_outgoing(
         return AutoAction::Noop;
     }
 
-    #[expect(clippy::cast_possible_truncation)] // droppable.len() ≤ conn count
-    let r = (rng.next_u32() % (droppable.len() as u32)) as usize;
+    let Some(victim) = pick_one(rng, &droppable) else {
+        return AutoAction::Noop;
+    };
     AutoAction::Disconnect {
-        name: droppable[r].name.clone(),
-        origin: droppable[r].origin,
+        name: victim.name.clone(),
+        origin: victim.origin,
     }
+}
+
+/// C's `prng(len)` pick: `rng % len`, one draw. `None` (no draw) if
+/// `xs` is empty.
+fn pick_one<'a, T>(rng: &mut impl rand_core::CryptoRng, xs: &'a [T]) -> Option<&'a T> {
+    if xs.is_empty() {
+        return None;
+    }
+    let len = u32::try_from(xs.len()).unwrap_or(u32::MAX);
+    xs.get(usize::try_from(rng.next_u32() % len).ok()?)
 }
 
 #[cfg(test)]

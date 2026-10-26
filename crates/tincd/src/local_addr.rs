@@ -27,10 +27,6 @@
 //! loop — `daemon/tx_control.rs`. Reflexive `ANS_KEY` append/consume —
 //! `daemon/gossip.rs` `on_ans_key`.
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::indexing_slicing,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -85,7 +81,7 @@ pub(crate) fn choose_local<R: Rng>(
     }
 
     let j = (rng.next_u32() as usize) % candidates.len();
-    let sa = candidates[j];
+    let sa = *candidates.get(j)?;
 
     // Random initial sock. Guard div-by-zero; a daemon with no
     // listeners has bigger problems but adapt_socket handles it

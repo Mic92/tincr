@@ -33,10 +33,6 @@
 //! bind` doesn't expose mode. We bracket `bind()` with a tightened
 //! `umask(0o077)` so the inode is never observable with group/other
 //! bits, then `chmod()` 0700 for good measure.
-#![expect(
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::fmt::Write as _;
 use std::fs::OpenOptions;
@@ -70,7 +66,7 @@ pub(crate) fn generate_cookie() -> String {
     os_rng().fill_bytes(&mut bytes);
     let mut hex = String::with_capacity(COOKIE_HEX_LEN);
     for b in bytes {
-        write!(hex, "{b:02x}").expect("String write infallible");
+        let _ = write!(hex, "{b:02x}"); // String writes are infallible
     }
     hex
 }

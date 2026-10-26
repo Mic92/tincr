@@ -30,11 +30,6 @@
 //! The handler may only call async-signal-safe functions; it does
 //! one raw `write(2)` of `signum as u8` and nothing else. The
 //! write-end fd is stashed in a `static AtomicI32`.
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
@@ -164,13 +159,14 @@ impl<W: Copy> SelfPipe<W> {
     /// Install the `SA_RESTART` handler for `signum` and record `what`.
     ///
     /// # Errors
-    /// `sigaction` failure.
-    ///
-    /// # Panics
-    /// `signum >= 32` (real-time signals are unused).
+    /// `sigaction` failure, or `InvalidInput` for a negative signum or
+    /// one `>= 32` (real-time signals are unused).
     pub(crate) fn add(&mut self, signum: i32, what: W) -> io::Result<()> {
-        let idx = usize::try_from(signum).expect("signum negative");
-        assert!(idx < NSIG_TABLE, "signum {signum} >= {NSIG_TABLE}");
+        let slot_err = || io::Error::new(io::ErrorKind::InvalidInput, format!("signum {signum}"));
+        let idx = usize::try_from(signum).map_err(|_| slot_err())?;
+        if idx >= NSIG_TABLE {
+            return Err(slot_err());
+        }
 
         let sig = Signal::try_from(signum).map_err(io::Error::from)?;
         let act = SigAction::new(
@@ -186,7 +182,7 @@ impl<W: Copy> SelfPipe<W> {
             sigaction(sig, &act)?;
         }
 
-        self.table[idx] = Some(what);
+        *self.table.get_mut(idx).ok_or_else(slot_err)? = Some(what);
         Ok(())
     }
 
@@ -203,7 +199,7 @@ impl<W: Copy> SelfPipe<W> {
         let Ok(n) = nix::unistd::read(&self.rd, &mut buf) else {
             return;
         };
-        for &signum in &buf[..n] {
+        for &signum in buf.iter().take(n) {
             let idx = signum as usize;
             // None → skip: signum we never registered (stray byte).
             if let Some(what) = self.table.get(idx).copied().flatten() {

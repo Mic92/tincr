@@ -3,10 +3,6 @@
 //! Two leaky buckets (same-host, all-host) plus a fixed-size ring of
 //! accepted-but-ignored fds. Peers in the pit see a connected socket
 //! that never reads — slows scanners without spending state on them.
-#![expect(
-    clippy::indexing_slicing,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::net::SocketAddr;
 use std::os::fd::OwnedFd;
@@ -132,7 +128,9 @@ impl Tarpit {
     pub(crate) fn pit(&mut self, fd: OwnedFd) {
         // Option::replace drops the old OwnedFd; Drop closes. `let _ =`
         // so clippy knows the discard is intentional.
-        let _ = self.pits[self.next_pit].replace(fd);
+        if let Some(pit) = self.pits.get_mut(self.next_pit) {
+            let _ = pit.replace(fd);
+        }
         self.next_pit = (self.next_pit + 1) % PIT_SIZE;
     }
 

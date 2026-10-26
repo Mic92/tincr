@@ -15,10 +15,6 @@
 //! hostname-only `Address=` by a few seconds; not worth the extra fd.
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::collections::HashSet;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -79,6 +75,10 @@ impl DnsWorker {
     pub(crate) fn spawn() -> Self {
         let (req_tx, req_rx) = mpsc::channel::<DnsReq>();
         let (res_tx, res_rx) = mpsc::channel::<DnsRes>();
+        #[expect(
+            clippy::expect_used,
+            reason = "thread spawn at startup; failure is fatal"
+        )]
         let join = Builder::new()
             .name("tinc-dns".into())
             .spawn(move || {

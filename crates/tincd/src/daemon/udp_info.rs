@@ -3,10 +3,6 @@
 //! the wire messages on the nexthop meta connection.
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use super::{ConnId, Daemon};
 
@@ -207,12 +203,7 @@ impl Daemon {
             .and_then(|t| t.udp_addr)
             .map_or_else(
                 || (AddrStr::unspec(), AddrStr::unspec()),
-                |a| {
-                    (
-                        AddrStr::new(a.ip().to_string()).expect("ip is valid token"),
-                        AddrStr::new(a.port().to_string()).expect("port is valid token"),
-                    )
-                },
+                AddrStr::from_socket_addr,
             );
 
         let msg = UdpInfo {

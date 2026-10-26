@@ -3,10 +3,6 @@
 //! is the daemon-side I/O around them.
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::indexing_slicing,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use super::net::TunnelSendOutcome;
 use super::{ConnId, Daemon, PKT_PROBE};
@@ -95,10 +91,10 @@ impl Daemon {
     /// One probe record arrived: byte[0] == 0 is a request (echo it),
     /// otherwise a type 1/2 reply for `pmtu.on_probe_reply`.
     pub(super) fn udp_probe_h(&mut self, peer: NodeId, peer_name: &str, body: &[u8]) -> bool {
-        if body.is_empty() {
+        let Some(&kind) = body.first() else {
             return false;
-        }
-        if body[0] == 0 {
+        };
+        if kind == 0 {
             log::debug!(target: "tincd::net",
                         "Got UDP probe request {} from {peer_name}",
                         body.len());
@@ -114,17 +110,14 @@ impl Daemon {
             return self.send_udp_probe_reply(peer, peer_name, body_len);
         }
 
-        // reply (type 1 or 2).
-        // type-2 carries probed length in bytes [1..3] (reply itself
-        // is MIN_PROBE_SIZE on wire — saves bandwidth).
-        let len: u16 = if body[0] == 2 && body.len() >= 3 {
-            u16::from_be_bytes([body[1], body[2]])
-        } else {
-            len_u16(body.len())
+        // Type 2 carries the probed length in bytes [1..3]. The reply
+        // itself is MIN_PROBE_SIZE on the wire.
+        let len: u16 = match body {
+            [2, hi, lo, ..] => u16::from_be_bytes([*hi, *lo]),
+            _ => len_u16(body.len()),
         };
         log::debug!(target: "tincd::net",
-                    "Got type {} UDP probe reply {len} from {peer_name}",
-                    body[0]);
+                    "Got type {kind} UDP probe reply {len} from {peer_name}");
 
         // Fresh Instant::now() — RTT measurement needs sub-ms accuracy;
         // self.timers.now() is cached once per event-loop turn and can be
@@ -165,10 +158,9 @@ impl Daemon {
     /// `MIN_PROBE_SIZE`. The receive path stashed `udp_addr` already, so
     /// `choose_udp_address` sends the reply back the way it came.
     pub(super) fn send_udp_probe_reply(&mut self, peer: NodeId, peer_name: &str, len: u16) -> bool {
-        let mut body = vec![0u8; usize::from(pmtu::MIN_PROBE_SIZE)];
-        body[0] = 2;
-        body[1..3].copy_from_slice(&len.to_be_bytes());
-        // recipient only reads [0..3], zero is fine.
+        let [hi, lo] = len.to_be_bytes();
+        let mut body = vec![2, hi, lo];
+        body.resize(usize::from(pmtu::MIN_PROBE_SIZE), 0);
 
         log::debug!(target: "tincd::net",
                     "Sending type 2 probe reply length {len} to {peer_name}");
@@ -181,12 +173,11 @@ impl Daemon {
     fn send_udp_probe(&mut self, peer: NodeId, peer_name: &str, len: u16) -> TunnelSendOutcome {
         let len = len.max(pmtu::MIN_PROBE_SIZE);
         let mut body = vec![0u8; usize::from(len)];
-        // zero[0..14], random[14..]. The 14-byte zero prefix is
+        // body[0] = 0 marks a request. The 14-byte zero prefix is
         // convention only.
-        if body.len() > 14 {
-            os_rng().fill_bytes(&mut body[14..]);
+        if let Some(random) = body.get_mut(14..) {
+            os_rng().fill_bytes(random);
         }
-        // body[0] = 0 (request marker) from vec init.
 
         log::debug!(target: "tincd::net",
                     "Sending UDP probe length {len} to {peer_name}");

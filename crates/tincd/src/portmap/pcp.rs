@@ -30,10 +30,6 @@
 //! kernel sources from our link-local and the server's
 //! `ADDRESS_MISMATCH` check rejects it (and even if it didn't, a
 //! pinhole to a link-local addr is useless).
-#![expect(
-    clippy::indexing_slicing,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::time::Duration;
@@ -119,9 +115,9 @@ fn build_map_request(
 /// `SUCCESS`, error string otherwise. Validates version, R-bit,
 /// opcode, nonce echo.
 fn parse_map_response(buf: &[u8], nonce: &[u8; 12]) -> Result<(IpAddr, u16), String> {
-    if buf.len() < MAP_LEN {
+    let Some(buf) = buf.first_chunk::<MAP_LEN>() else {
         return Err(format!("short response ({}B)", buf.len()));
-    }
+    };
     if buf[1] != (OP_MAP | 0x80) {
         return Err(format!("unexpected opcode 0x{:02x}", buf[1]));
     }
@@ -173,7 +169,7 @@ fn roundtrip(
     for _ in 0..2 {
         sock.send(req).map_err(|e| format!("send: {e}"))?;
         match sock.recv(&mut buf) {
-            Ok(n) => return parse_map_response(&buf[..n], nonce),
+            Ok(n) => return parse_map_response(buf.get(..n).unwrap_or_default(), nonce),
             Err(e)
                 if matches!(
                     e.kind(),

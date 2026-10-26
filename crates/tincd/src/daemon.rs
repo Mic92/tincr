@@ -2,11 +2,6 @@
 //!
 //! Loop shape: tick → turn → match. `IoWhat` is the `W` in
 //! `EventLoop<W>`. `run()` consumes `self`; teardown is `Drop`.
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -655,11 +650,13 @@ impl Daemon {
     /// Panics if `id` is not in the slotmap. Callers hold an id obtained
     /// from a live dispatch and must not have `terminate()`d it since.
     #[inline]
+    #[expect(clippy::expect_used, reason = "documented: callers hold a live ConnId")]
     pub(super) fn conn_mut(&mut self, id: ConnId) -> &mut Connection {
         self.conns.get_mut(id).expect("ConnId not live")
     }
 
     #[inline]
+    #[expect(clippy::expect_used, reason = "documented: callers hold a live ConnId")]
     pub(super) fn conn(&self, id: ConnId) -> &Connection {
         self.conns.get(id).expect("ConnId not live")
     }
@@ -764,7 +761,7 @@ impl Daemon {
                         // dispatch: the socket is writable and the ID line queued, so flush in this
                         // wake rather than the next (an optimisation under LT epoll, not a
                         // requirement). Spurious and failed probes return.
-                        if self.conns[id].connecting {
+                        if self.conn(id).connecting {
                             if !self.on_connecting(id) {
                                 // Spurious / failed.
                                 continue;

@@ -1,8 +1,3 @@
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 use super::{ConnId, Daemon, IoWhat, NodeState};
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, OwnedFd};
@@ -195,16 +190,12 @@ impl Daemon {
         });
         if let Some(ea) = edge_addr {
             // Ipv6Addr::Display doesn't bracket (matches NI_NUMERICHOST).
-            let addr = AddrStr::new(ea.ip().to_string()).expect("numeric IP is whitespace-free");
-            let port = AddrStr::new(ea.port().to_string()).expect("numeric");
+            let (addr, port) = AddrStr::from_socket_addr(ea);
             // Rewrite local port to our udp port (peer sends UDP
             // there, not the ephemeral TCP port).
             let (la, lp) = if let Some(mut local) = local_addr {
                 local.set_port(self.my_udp_port);
-                (
-                    AddrStr::new(local.ip().to_string()).expect("numeric"),
-                    AddrStr::new(local.port().to_string()).expect("numeric"),
-                )
+                AddrStr::from_socket_addr(local)
             } else {
                 let unspec = AddrStr::unspec();
                 (unspec.clone(), unspec)
@@ -284,7 +275,7 @@ impl Daemon {
         match conn.flush() {
             Ok(true) => {
                 // outbuf empty → drop WRITE interest.
-                if let Some(io_id) = self.conns[id].io_id
+                if let Some(io_id) = self.conn(id).io_id
                     && let Err(e) = self.ev.set(io_id, Io::Read)
                 {
                     log::error!(target: "tincd::conn",
@@ -548,10 +539,10 @@ impl Daemon {
         let id = self.conns.insert(conn);
         match self
             .ev
-            .add(self.conns[id].as_fd(), io_mode, IoWhat::Conn(id))
+            .add(self.conns.get(id)?.as_fd(), io_mode, IoWhat::Conn(id))
         {
             Ok(io_id) => {
-                self.conns[id].io_id = Some(io_id);
+                self.conn_mut(id).io_id = Some(io_id);
                 Some(id)
             }
             Err(e) => {
@@ -619,7 +610,7 @@ impl Daemon {
                         tinc_proto::request::PROT_MINOR
                     ));
                     if needs_write
-                        && let Some(io_id) = self.conns[id].io_id
+                        && let Some(io_id) = self.conn(id).io_id
                         && let Err(e) = self.ev.set(io_id, Io::ReadWrite)
                     {
                         log::error!(target: "tincd::conn",
@@ -811,13 +802,13 @@ impl Daemon {
                 }
                 ProxyConfig::Socks4 { .. } | ProxyConfig::Socks5 { .. } => {
                     // Target = PEER addr.
-                    let Some(target) = conn.address else {
+                    let (Some(target), Some(socks_type)) = (conn.address, proxy.socks_type())
+                    else {
                         log::error!(target: "tincd::conn",
                             "SOCKS proxy: no peer address on {}", conn.name);
                         self.terminate(id);
                         return;
                     };
-                    let socks_type = proxy.socks_type().expect("Socks4/5 arm");
                     let creds = proxy.socks_creds();
                     match socks::build_request(socks_type, target, creds.as_ref()) {
                         Ok((bytes, resp_len)) => {
@@ -841,8 +832,10 @@ impl Daemon {
         }
 
         // send_id. We go first (initiator); peer replies.
-        // Split borrow: helper would lock all of `self`.
-        let conn = self.conns.get_mut(id).expect("ConnId not live");
+        // Split borrow: `conn_mut` would lock all of `self`.
+        let Some(conn) = self.conns.get_mut(id) else {
+            return;
+        };
         needs_write |= conn.send(format_args!(
             "{} {} {}.{}",
             Request::Id,
@@ -853,7 +846,7 @@ impl Daemon {
 
         // Re-register: was ReadWrite (probe); now READ (or RW if
         // queued).
-        if let Some(io_id) = self.conns[id].io_id {
+        if let Some(io_id) = self.conn(id).io_id {
             let interest = if needs_write { Io::ReadWrite } else { Io::Read };
             if let Err(e) = self.ev.set(io_id, interest) {
                 log::error!(target: "tincd::conn",
