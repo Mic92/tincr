@@ -8,6 +8,10 @@
 //! `SocketAddr`s arrive here through `open_listener_pair`.
 //!
 //! Deferred: `IP_TOS`/`IPV6_TCLASS`.
+#![expect(
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::io;
 #[cfg(all(test, any(target_os = "linux", target_os = "android")))]

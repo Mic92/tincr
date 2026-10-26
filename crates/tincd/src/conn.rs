@@ -7,6 +7,11 @@
 //! `LineBuf::read_line` returns `Range<usize>` rather than `&str`:
 //! the equivalent `&str` is invalidated by the next push, like C's
 //! `char*` from `buffer_readline`.
+#![expect(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::fmt::Write as _;
 use std::io;

@@ -15,6 +15,10 @@
 //! hostname-only `Address=` by a few seconds; not worth the extra fd.
 
 #![forbid(unsafe_code)]
+#![expect(
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::collections::HashSet;
 use std::net::{SocketAddr, ToSocketAddrs};

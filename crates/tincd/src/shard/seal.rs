@@ -14,6 +14,10 @@
 //!     `(dst, sock, relay, origlen)` tuple, same egress trait
 //!   - `PKT_NORMAL` only ([`tx_probe`](super::tx_probe) gates
 //!     `outcompression == 0`)
+#![expect(
+    clippy::indexing_slicing,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use super::probe::TxTarget;
 use crate::daemon::PKT_NORMAL;

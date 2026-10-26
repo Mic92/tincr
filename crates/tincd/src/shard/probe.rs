@@ -6,6 +6,11 @@
 //! can take the direct-UDP path with no per-chunk side effects. No
 //! `&mut Daemon` reborrow: the `Arc<AtomicU64>` outseqno is the seqno
 //! allocator now.
+#![expect(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

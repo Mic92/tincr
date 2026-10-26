@@ -12,6 +12,12 @@
 //! direct whenever a direct path appears, even at a worse distance, so
 //! the `via` hint used for UDP hole-punching always points at the last
 //! real relay.
+#![expect(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use crate::dispatch::ConnOptions;
 use std::collections::{BTreeMap, VecDeque};

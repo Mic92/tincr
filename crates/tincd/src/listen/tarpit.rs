@@ -3,6 +3,10 @@
 //! Two leaky buckets (same-host, all-host) plus a fixed-size ring of
 //! accepted-but-ignored fds. Peers in the pit see a connected socket
 //! that never reads — slows scanners without spending state on them.
+#![expect(
+    clippy::indexing_slicing,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::net::SocketAddr;
 use std::os::fd::OwnedFd;

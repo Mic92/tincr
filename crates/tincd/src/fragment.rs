@@ -24,6 +24,10 @@
 //! from the original offset. The C handles this; we port it.
 
 #![forbid(unsafe_code)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use zerocopy::{FromBytes, IntoBytes};
 

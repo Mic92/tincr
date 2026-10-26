@@ -22,6 +22,10 @@
 //! compression (RFC 1035 §4.1.4 — "MAY"); answers are tiny.
 
 #![forbid(unsafe_code)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};

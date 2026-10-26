@@ -8,6 +8,11 @@
 //!, and the post-route mutations.
 
 #![forbid(unsafe_code)]
+#![expect(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::collections::HashMap;
 

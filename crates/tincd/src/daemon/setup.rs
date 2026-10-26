@@ -2,6 +2,11 @@
 //! and the giant `Daemon` struct literal. Everything here runs once.
 //! `SetupError` lives in the parent so `settings.rs` and this file
 //! both reach it via `super::` without a sibling cycle.
+#![expect(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use crate::node_id::NodeId6;
 use nix::sys::signal::{SigHandler, Signal, signal};

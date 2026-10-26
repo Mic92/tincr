@@ -37,6 +37,10 @@
 //!   when over-connected.
 
 #![forbid(unsafe_code)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};

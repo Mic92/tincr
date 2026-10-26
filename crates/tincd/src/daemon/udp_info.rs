@@ -3,6 +3,10 @@
 //! the wire messages on the nexthop meta connection.
 
 #![forbid(unsafe_code)]
+#![expect(
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use super::{ConnId, Daemon};
 

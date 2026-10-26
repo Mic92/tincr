@@ -11,6 +11,10 @@
 //! Surface matches the three calls `try_igd` made on `igd-next`:
 //! `discover` (was `search_gateway`), `Gateway::add_port`,
 //! `Gateway::external_ip`.
+#![expect(
+    clippy::indexing_slicing,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, UdpSocket};

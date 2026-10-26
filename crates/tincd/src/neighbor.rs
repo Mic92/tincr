@@ -14,6 +14,11 @@
 
 #![forbid(unsafe_code)]
 #![expect(clippy::cast_possible_truncation)] // header-size constants, max 32
+#![expect(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::mem;
 use std::net::{Ipv4Addr, Ipv6Addr};

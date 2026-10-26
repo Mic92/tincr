@@ -101,7 +101,7 @@ fn changes(fd: RawFd, token: usize, i: Io, delete_unwanted: bool) -> ([KEvent; 2
 
 pub(super) fn add(kq: &Poller, fd: BorrowedFd<'_>, token: usize, i: Io) -> io::Result<()> {
     let (ch, n) = changes(fd.as_raw_fd(), token, i, false);
-    kq.kevent(&ch[..n], &mut [], None)
+    kq.kevent(ch.get(..n).unwrap_or_default(), &mut [], None)
         .map(|_| ())
         .map_err(Into::into)
 }
@@ -111,7 +111,7 @@ pub(super) fn modify(kq: &Poller, fd: RawFd, token: usize, i: Io) -> io::Result<
     // EV_DELETE on a non-existing filter returns ENOENT — tolerate it
     // by submitting changes one at a time.
     let (ch, n) = changes(fd, token, i, true);
-    for ch in &ch[..n] {
+    for ch in ch.iter().take(n) {
         match kq.kevent(slice::from_ref(ch), &mut [], None) {
             Ok(_) | Err(nix::errno::Errno::ENOENT) => {}
             Err(e) => return Err(e.into()),

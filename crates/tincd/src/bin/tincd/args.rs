@@ -1,4 +1,8 @@
 //! argv parsing and the config-derived paths/log level.
+#![expect(
+    clippy::unwrap_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use nix::unistd::{AccessFlags, access};
 use std::ffi::OsString;

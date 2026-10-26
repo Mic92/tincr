@@ -3,6 +3,11 @@
 //! `route_ipv4`/`route_ipv6` call `send_packet()` directly.
 
 #![forbid(unsafe_code)]
+#![expect(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 

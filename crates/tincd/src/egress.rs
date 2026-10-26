@@ -9,7 +9,10 @@
 //!
 //! `try_clone` not borrow: `dup(2)` of `Listener.udp` — same file
 //! description, separate fd, no self-referential daemon struct.
-
+#![expect(
+    clippy::indexing_slicing,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 // `deny` (was `forbid`): linux stays safe via `nix::sendmsg`, but the
 // macOS `sendmsg_x` path is private API not wrapped by libc/nix and
 // needs a scoped `#[expect(unsafe_code)]` on its module.

@@ -1,4 +1,8 @@
 //! `ADD_EDGE` / `DEL_EDGE` — flooded topology gossip.
+#![expect(
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use super::{MAX_EDGES, MAX_NODES};
 use crate::daemon::{ConnId, Daemon};

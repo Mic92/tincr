@@ -5,6 +5,11 @@
 //! same instant — without it, two timers set in the same tick to the
 //! same offset would collide in the map. Same disambiguation as a
 //! pointer compare, but stable across runs.
+#![expect(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};

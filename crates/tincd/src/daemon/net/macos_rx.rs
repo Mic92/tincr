@@ -70,20 +70,23 @@ pub(super) fn phase1(
     if x.disabled {
         return None;
     }
-    let bufs = batch.bufs.as_mut_ptr();
-    for i in 0..UDP_RX_BATCH {
-        // SAFETY: `i < UDP_RX_BATCH`; `bufs`/`addrs` are exclusively
-        // borrowed via `&mut batch`. The kernel writes at most
-        // `iov_len`/`msg_namelen` bytes respectively.
-        x.iovs[i] = libc::iovec {
-            iov_base: unsafe { bufs.add(i) }.cast(),
+    // The kernel writes at most `iov_len`/`msg_namelen` bytes into the
+    // exclusively borrowed `batch` buffers and `addrs`.
+    let slots = x
+        .iovs
+        .iter_mut()
+        .zip(x.hdrs.iter_mut())
+        .zip(x.addrs.iter_mut());
+    for (buf, ((iov, hdr), addr)) in batch.bufs.iter_mut().zip(slots) {
+        *iov = libc::iovec {
+            iov_base: buf.as_mut_ptr().cast(),
             iov_len: UDP_RX_BUFSZ,
         };
-        x.hdrs[i] = MsghdrX {
-            msg_name: (&raw mut x.addrs[i]).cast(),
+        *hdr = MsghdrX {
+            msg_name: (&raw mut *addr).cast(),
             #[expect(clippy::cast_possible_truncation)] // 128 fits socklen_t
             msg_namelen: size_of::<libc::sockaddr_storage>() as libc::socklen_t,
-            msg_iov: &raw mut x.iovs[i],
+            msg_iov: &raw mut *iov,
             msg_iovlen: 1,
             // No cmsgs: avoids the 10.15 `msg_controllen` quirk and
             // we don't need pktinfo on the listener.
@@ -118,9 +121,13 @@ pub(super) fn phase1(
     // `ret` ∈ [0, UDP_RX_BATCH]; non-negative checked above.
     #[expect(clippy::cast_sign_loss)]
     let n = ret as usize;
-    for (i, m) in meta.iter_mut().enumerate().take(n) {
-        let len = len_u16(x.hdrs[i].msg_datalen.min(UDP_RX_BUFSZ));
-        let peer = ss_to_socketaddr(&x.addrs[i], x.hdrs[i].msg_namelen);
+    for (m, (hdr, addr)) in meta
+        .iter_mut()
+        .zip(x.hdrs.iter().zip(x.addrs.iter()))
+        .take(n)
+    {
+        let len = len_u16(hdr.msg_datalen.min(UDP_RX_BUFSZ));
+        let peer = ss_to_socketaddr(addr, hdr.msg_namelen);
         *m = (len, peer.map(unmap));
     }
     Some(n)

@@ -28,6 +28,11 @@
 //! - `overwrite_mac` stamp (device.rs:410) — Router+TAP only;
 //!   `slowpath_all` already gates `!= Router`, and TAP is irrelevant
 //!   to TUN (kernel doesn't read the eth header on a TUN write).
+#![expect(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
+)]
 
 use super::{TunnelHandles, TxSnapshot};
 use crate::graph::NodeId;
