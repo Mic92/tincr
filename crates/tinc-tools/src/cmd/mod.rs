@@ -196,14 +196,22 @@ pub(crate) struct TmpGuard {
 }
 
 impl TmpGuard {
-    /// Open `<target>.<suffix>` for writing (`O_CREAT | O_TRUNC`).
-    /// A leftover scratch file from a crashed previous run is simply
-    /// overwritten.
+    /// Open `<target>.<suffix>` with `target`'s permissions (0600 if it
+    /// doesn't exist) before any byte is written, so a reader can't get
+    /// an fd while the file is wider. A stale scratch file is unlinked
+    /// first, since `O_EXCL` is what guarantees the mode.
     pub(crate) fn open(target: &Path, suffix: &str) -> Result<(Self, File), CmdError> {
         // Appends; `with_extension` would replace an existing extension.
         let tmp = target.with_added_extension(suffix);
-
-        let f = File::create(&tmp).map_err(io_err(&tmp))?;
+        let perms = fs::metadata(target)
+            .map_or_else(|_| fs::Permissions::from_mode(0o600), |m| m.permissions());
+        match fs::remove_file(&tmp) {
+            Err(e) if e.kind() != ErrorKind::NotFound => return Err(io_err(&tmp)(e)),
+            _ => {}
+        }
+        // The create mode is narrowed by umask only, then set exactly.
+        let f = open_nofollow(&tmp, OpenKind::CreateExcl, perms.mode() & 0o7777)?;
+        f.set_permissions(perms).map_err(io_err(&tmp))?;
 
         Ok((
             Self {
@@ -214,8 +222,6 @@ impl TmpGuard {
         ))
     }
 
-    /// Path to the scratch file, for callers that need to `chmod`
-    /// before committing.
     pub(crate) fn tmp_path(&self) -> &Path {
         &self.tmp
     }
