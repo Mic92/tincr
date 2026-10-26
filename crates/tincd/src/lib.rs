@@ -81,7 +81,7 @@ pub(crate) use platform::{
 };
 pub use platform::{daemonize, initgroups};
 
-pub use daemon::{Daemon, DaemonSettings, RunOutcome};
+pub use daemon::{Bound, Daemon, DaemonSettings, RunOutcome};
 
 #[cfg(test)]
 pub(crate) mod testutil;

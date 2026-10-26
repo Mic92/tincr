@@ -8,30 +8,22 @@ use std::{env, process};
 use tinc_conf::Config;
 use tincd::sandbox;
 
-/// `tinc start` umbilical handshake: write a nul byte and close so
-/// the spawning `tinc start` exits 0. We don't tee log output
-/// through the umbilical (`env_logger` has no hook); the
-/// detach-without-logfile warning in `init_logging` covers that gap.
-/// No-op when `TINC_UMBILICAL` is unset.
-pub(crate) fn cut_umbilical() {
-    let Ok(spec) = env::var("TINC_UMBILICAL") else {
-        return;
-    };
+/// Claim the `tinc start` umbilical fd and set CLOEXEC on it, before
+/// any child (tinc-up, `Proxy = exec`) can inherit it and keep `tinc
+/// start` waiting for EOF. `None` when `TINC_UMBILICAL` is unset.
+pub(crate) fn take_umbilical() -> Option<OwnedFd> {
+    let spec = env::var("TINC_UMBILICAL").ok()?;
     // First token is the fd; second (`colorize`) is ignored — we don't tee.
-    let Some(fd) = spec
+    let fd = spec
         .split_whitespace()
         .next()
-        .and_then(|s| s.parse::<RawFd>().ok())
-    else {
-        return;
-    };
+        .and_then(|s| s.parse::<RawFd>().ok())?;
     // Reject stdio: taking ownership of 0/1/2 would close it and
     // let the next open() reuse the slot. `tinc start` always
     // passes a socketpair half (≥3).
     if fd <= 2 {
-        log::warn!(target: "tincd",
-            "TINC_UMBILICAL={spec}: fd {fd} is stdio/invalid, ignoring");
-        return;
+        eprintln!("tincd: TINC_UMBILICAL={spec}: fd {fd} is stdio/invalid, ignoring");
+        return None;
     }
     // SAFETY: fd > 2 checked above. The TINC_UMBILICAL env var is
     // the ownership transfer protocol — spawner set it, no one else
@@ -39,12 +31,17 @@ pub(crate) fn cut_umbilical() {
     // we drop (close) harmlessly.
     #[expect(unsafe_code)]
     let f = unsafe { OwnedFd::from_raw_fd(fd) };
-    if fcntl(&f, FcntlArg::F_GETFL).is_err() {
-        return; // drop closes the fd
-    }
+    fcntl(&f, FcntlArg::F_GETFL).ok()?;
     let _ = fcntl(&f, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
+    Some(f)
+}
+
+/// Write a nul byte and close, so the spawning `tinc start` exits 0. We
+/// don't tee log output through the umbilical (`env_logger` has no
+/// hook); the detach-without-logfile warning covers that gap.
+pub(crate) fn cut_umbilical(f: OwnedFd) {
     let _ = nix::unistd::write(&f, b"\0");
-    // Drop closes. snip!
+    drop(f);
 }
 
 pub(crate) fn detach() -> Result<(), String> {

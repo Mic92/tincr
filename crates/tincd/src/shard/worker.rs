@@ -69,10 +69,25 @@ pub(crate) struct WorkerHandle {
     pub punt_efd: Arc<OwnedFd>,
     pub mailbox: Arc<SnapMailbox>,
     stop: Arc<AtomicBool>,
+    idx: usize,
+    body: Option<Box<dyn FnOnce() + Send>>,
     join: Option<JoinHandle<()>>,
 }
 
 impl WorkerHandle {
+    /// # Panics
+    /// Thread spawn failure.
+    #[expect(clippy::expect_used, reason = "documented panic")]
+    pub(crate) fn start(&mut self) {
+        if let Some(body) = self.body.take() {
+            let h = Builder::new()
+                .name(format!("tinc-shard{}", self.idx))
+                .spawn(body)
+                .expect("spawn shard worker");
+            self.join = Some(h);
+        }
+    }
+
     pub(crate) fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(j) = self.join.take() {
@@ -87,12 +102,13 @@ impl Drop for WorkerHandle {
     }
 }
 
-/// Spawn worker `idx` (1-based; shard 0 is the control thread).
+/// Worker `idx` (1-based; shard 0 is the control thread), not yet
+/// running until [`WorkerHandle::start`].
 ///
 /// # Panics
-/// Thread spawn or eventfd failure.
+/// eventfd failure.
 #[expect(clippy::expect_used, reason = "documented panic")]
-pub(crate) fn spawn(
+pub(crate) fn prepare(
     idx: usize,
     udp: Vec<OwnedFd>,
     egress: Vec<Box<dyn UdpEgress + Send>>,
@@ -107,22 +123,21 @@ pub(crate) fn spawn(
     let mailbox = Arc::new(SnapMailbox::new());
     let stop = Arc::new(AtomicBool::new(false));
 
-    let h = {
+    let body: Box<dyn FnOnce() + Send> = {
         let punt = Arc::clone(&punt);
         let punt_efd = Arc::clone(&punt_efd);
         let mailbox = Arc::clone(&mailbox);
         let stop = Arc::clone(&stop);
-        Builder::new()
-            .name(format!("tinc-shard{idx}"))
-            .spawn(move || run(&udp, egress, tun, &punt, &punt_efd, &mailbox, &stop))
-            .expect("spawn shard worker")
+        Box::new(move || run(&udp, egress, tun, &punt, &punt_efd, &mailbox, &stop))
     };
     WorkerHandle {
         punt,
         punt_efd,
         mailbox,
         stop,
-        join: Some(h),
+        idx,
+        body: Some(body),
+        join: None,
     }
 }
 

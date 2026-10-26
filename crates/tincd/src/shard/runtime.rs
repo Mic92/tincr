@@ -15,15 +15,15 @@ use crate::daemon::{DaemonSettings, RoutingMode};
 use super::{bpf, worker};
 #[cfg(target_os = "linux")]
 use crate::daemon::{IoWhat, ListenerSlot};
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(target_os = "linux")]
 use crate::egress::UdpEgress;
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(target_os = "linux")]
 use crate::egress::linux::Fast;
 #[cfg(target_os = "linux")]
 use crate::event::{EventLoop, Io};
 #[cfg(target_os = "linux")]
 use crate::listen::{SockOpts, open_udp_siblings};
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(target_os = "linux")]
 use std::io;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
@@ -61,7 +61,7 @@ pub(crate) fn resolve(settings: &DaemonSettings, config: &Config) -> usize {
     n
 }
 
-/// The spawned workers, or nothing. Dropping stops the threads.
+/// The workers, or nothing. Dropping stops the threads.
 #[derive(Default)]
 pub(crate) struct ShardRuntime {
     #[cfg(target_os = "linux")]
@@ -72,6 +72,14 @@ impl ShardRuntime {
     #[cfg(target_os = "linux")]
     pub(crate) fn new(workers: Vec<worker::WorkerHandle>) -> Self {
         Self { workers }
+    }
+
+    #[cfg_attr(not(target_os = "linux"), expect(clippy::unused_self))]
+    pub(crate) fn start(&mut self) {
+        #[cfg(target_os = "linux")]
+        for w in &mut self.workers {
+            w.start();
+        }
     }
 
     /// Publish a routing snapshot to every worker.
@@ -105,10 +113,10 @@ impl ShardRuntime {
     }
 }
 
-/// Open reuseport siblings, attach the cBPF steer, spawn workers,
-/// register their punt eventfds.
+/// Open reuseport siblings, attach the cBPF steer, prepare workers,
+/// register their punt eventfds. [`ShardRuntime::start`] runs them.
 #[cfg(target_os = "linux")]
-pub(crate) fn spawn_all(
+pub(crate) fn prepare_all(
     n: usize,
     tuns: Vec<Box<dyn Device + Send>>,
     listeners: &[ListenerSlot],
@@ -140,7 +148,7 @@ pub(crate) fn spawn_all(
                 Ok(Box::new(e) as Box<dyn UdpEgress + Send>)
             })
             .collect::<io::Result<Vec<_>>>()?;
-        workers.push(worker::spawn(k + 1, udp, egress, tun));
+        workers.push(worker::prepare(k + 1, udp, egress, tun));
     }
     for (i, w) in workers.iter().enumerate() {
         #[expect(clippy::cast_possible_truncation)] // n <= 64

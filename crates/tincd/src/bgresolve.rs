@@ -22,7 +22,6 @@ use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
 use std::thread::Builder;
-use std::thread::JoinHandle;
 
 /// What a resolve is *for*. The worker doesn't care — it just runs
 /// `getaddrinfo` over `hosts` — but the daemon needs to route the
@@ -53,9 +52,9 @@ pub(crate) struct DnsRes {
 }
 
 /// See module doc. Dropping `req_tx` makes the worker's `recv()` return
-/// `Disconnected` → thread exits → `_join` is collected at process exit
-/// (we don't `.join()` on `Drop`; a hung `getaddrinfo` would wedge
-/// shutdown).
+/// `Disconnected` → thread exits → the join handle is collected at
+/// process exit (we don't `.join()` on `Drop`; a hung `getaddrinfo`
+/// would wedge shutdown).
 pub(crate) struct DnsWorker {
     req_tx: Sender<DnsReq>,
     res_rx: Receiver<DnsRes>,
@@ -64,22 +63,35 @@ pub(crate) struct DnsWorker {
     /// (the very case this thread exists for) would otherwise let
     /// requests stack unboundedly.
     inflight: HashSet<DnsTag>,
-    _join: JoinHandle<()>,
+    /// Until [`Self::start`]: requests queue in the channel.
+    pending: Option<(Receiver<DnsReq>, Sender<DnsRes>)>,
 }
 
 impl DnsWorker {
-    /// Spawn the resolver thread. Panics only if the OS refuses to
-    /// create a thread (OOM / `RLIMIT_NPROC`), which is unrecoverable
-    /// at daemon setup anyway.
     #[must_use]
-    pub(crate) fn spawn() -> Self {
+    pub(crate) fn new() -> Self {
         let (req_tx, req_rx) = mpsc::channel::<DnsReq>();
         let (res_tx, res_rx) = mpsc::channel::<DnsRes>();
+        Self {
+            req_tx,
+            res_rx,
+            inflight: HashSet::new(),
+            pending: Some((req_rx, res_tx)),
+        }
+    }
+
+    /// Spawn the resolver thread. Panics only if the OS refuses to
+    /// create a thread (OOM / `RLIMIT_NPROC`), which is unrecoverable
+    /// at daemon start anyway.
+    pub(crate) fn start(&mut self) {
+        let Some((req_rx, res_tx)) = self.pending.take() else {
+            return;
+        };
         #[expect(
             clippy::expect_used,
             reason = "thread spawn at startup; failure is fatal"
         )]
-        let join = Builder::new()
+        Builder::new()
             .name("tinc-dns".into())
             .spawn(move || {
                 while let Ok(DnsReq { tag, hosts }) = req_rx.recv() {
@@ -99,12 +111,6 @@ impl DnsWorker {
                 }
             })
             .expect("dns worker thread spawn");
-        Self {
-            req_tx,
-            res_rx,
-            inflight: HashSet::new(),
-            _join: join,
-        }
     }
 
     /// Non-blocking enqueue. Dedup'd: a request for a tag that
@@ -151,7 +157,8 @@ mod tests {
     /// actual `getaddrinfo` path without touching the network.
     #[test]
     fn worker_roundtrip_localhost() {
-        let mut w = DnsWorker::spawn();
+        let mut w = DnsWorker::new();
+        w.start();
         w.request(
             DnsTag::Outgoing("bob".into()),
             vec![("localhost".into(), 655)],
@@ -175,7 +182,8 @@ mod tests {
     /// after drain it's accepted again.
     #[test]
     fn inflight_dedup() {
-        let mut w = DnsWorker::spawn();
+        let mut w = DnsWorker::new();
+        w.start();
         let tag = DnsTag::Outgoing("bob".into());
         let hosts = vec![("127.0.0.1".into(), 655)];
         w.request(tag.clone(), hosts.clone());

@@ -28,7 +28,7 @@ use args::{Args, debug_level_to_filter, parse_args, resolve_debug_level};
 use nix::sys::mman::{MlockAllFlags, mlockall};
 use procsetup::{
     apply_process_priority, check_socket_activation, cut_umbilical, detach, drop_privs,
-    harden_process, resolve_sandbox_level,
+    harden_process, resolve_sandbox_level, take_umbilical,
 };
 use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
@@ -90,6 +90,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    let umbilical = take_umbilical();
 
     // Disable coredumps before any key load (Daemon::setup below).
     harden_process(args.allow_coredump);
@@ -173,7 +175,7 @@ fn main() -> ExitCode {
 
     // setup_network opens TUN, binds sockets, runs tinc-up. All
     // need root; drop_privs is after.
-    let daemon = match Daemon::setup(
+    let mut bound = match Daemon::setup(
         &args.confbase,
         &args.pidfile,
         &args.socket,
@@ -187,6 +189,15 @@ fn main() -> ExitCode {
         }
     };
 
+    // Before the chroot, which hides tinc.conf.
+    let sandbox_level = match resolve_sandbox_level(&args.confbase, &args.cmdline_conf) {
+        Ok(l) => l,
+        Err(e) => {
+            log::error!(target: "tincd", "{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     // tinc-down (Daemon::Drop) inherits the post-drop_privs uid:
     // it can't `ip link set down`. Known C limitation we share.
     if let Err(e) = drop_privs(args.switchuser.as_deref(), args.do_chroot, &args.confbase) {
@@ -195,17 +206,13 @@ fn main() -> ExitCode {
         // unknown state.
         process::exit(1);
     }
+    if args.do_chroot {
+        bound.chrooted(&args.confbase);
+    }
 
-    // sandbox after drop_privs. The Linux device path is hard-coded
-    // /dev/net/tun (re-open mid-run is theoretical; upstream unveils
-    // it, we match); dummy/fd device types pass None.
-    let sandbox_level = match resolve_sandbox_level(&args.confbase, &args.cmdline_conf) {
-        Ok(l) => l,
-        Err(e) => {
-            log::error!(target: "tincd", "{e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    // The Linux device path is hard-coded /dev/net/tun (re-open mid-run
+    // is theoretical; upstream unveils it, we match); dummy/fd device
+    // types pass None.
     let sandbox_paths = sandbox::Paths {
         confbase: args.confbase.clone(),
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -215,20 +222,23 @@ fn main() -> ExitCode {
         logfile: args.logfile.clone(),
         pidfile: args.pidfile.clone(),
         unixsocket: args.socket.clone(),
-        hosts_overlay: daemon.hosts_overlay().map(Path::to_path_buf),
+        hosts_overlay: bound.hosts_overlay().map(Path::to_path_buf),
     };
     if let Err(e) = sandbox::enter(sandbox_level, &sandbox_paths, args.do_chroot) {
         log::error!(target: "tincd", "{e}");
         return ExitCode::FAILURE;
     }
 
+    // Threads inherit the sandbox only if created after it.
+    let daemon = bound.start();
+
     // READY=1 gates dependent systemd units on a packet-forwarding
     // daemon, not just a started process.
     sd_notify::notify_ready();
 
-    // `tinc start` blocks reading the umbilical fd; nul byte +
-    // close lets it exit 0. No-op outside the `tinc start` path.
-    cut_umbilical();
+    if let Some(fd) = umbilical {
+        cut_umbilical(fd);
+    }
 
     // WATCHDOG pings come from `TimerWhat::Watchdog` inside the
     // event loop, so a wedged loop stops pinging and systemd

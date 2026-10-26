@@ -590,7 +590,7 @@ fn open_one(
 ///
 /// # Errors
 /// Any bind/setsockopt failure. Caller falls back to `Shards = 1`.
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(target_os = "linux")]
 pub(crate) fn open_udp_siblings(
     l: &Listener,
     opts: &SockOpts,

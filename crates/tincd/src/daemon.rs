@@ -48,6 +48,7 @@ mod udp_info;
 
 pub(crate) use dp::DataPlane;
 pub use settings::{DaemonSettings, ForwardingMode, RoutingMode};
+use tinc_conf::hostdirs::rebase_path;
 
 // `UPnP` config knob. With the feature off the type still exists
 // (settings.rs stores it unconditionally) but only `No` is reachable
@@ -664,13 +665,42 @@ impl Daemon {
     }
 }
 
-impl Daemon {
-    /// For the sandbox allow-list, which is built after setup.
+/// A daemon whose fds are open and scripts have run, but which has no
+/// threads yet. `main` drops privileges and enters the sandbox in this
+/// state, because both only apply to threads created afterwards.
+pub struct Bound(Daemon);
+
+impl Bound {
+    /// For the sandbox allow-list.
     #[must_use]
     pub fn hosts_overlay(&self) -> Option<&Path> {
-        self.hosts.overlay()
+        self.0.hosts.overlay()
     }
 
+    /// Rebase stored paths after `chroot(root)`.
+    pub fn chrooted(&mut self, root: &Path) {
+        let d = &mut self.0;
+        d.confbase = rebase_path(&d.confbase, root);
+        d.hosts = d.hosts.rebased(root);
+        for o in d.outgoings.values_mut() {
+            o.addr_cache.rebase(root);
+        }
+    }
+
+    /// Spawn the worker threads.
+    #[must_use]
+    pub fn start(self) -> Daemon {
+        let mut d = self.0;
+        d.shards.start();
+        d.dns_worker.start();
+        d.script_worker.start();
+        #[cfg(feature = "upnp")]
+        d.spawn_portmapper();
+        d
+    }
+}
+
+impl Daemon {
     /// Node name for logging. tincd never calls `Graph::del_node`
     /// (only `del_edge`; nodes accumulate monotonically), so any
     /// `NodeId` obtained from `node_ids`, `id6_table`, `last_routes`,
