@@ -18,7 +18,7 @@ use crate::invitation_serve::InvitePhase;
 use crate::keys;
 use crate::outgoing::ProxyConfig;
 use crate::script::ScriptEnv;
-use crate::tunnel::MTU;
+use crate::tunnel::{MTU, Via};
 use crate::{invitation_serve, socks};
 
 use crate::addrcache::AddressCache;
@@ -895,7 +895,7 @@ impl Daemon {
             }
         };
         nw |= self
-            .dispatch_tunnel_outputs(from_nid, &from_name, outs)
+            .dispatch_tunnel_outputs(from_nid, &from_name, outs, Via::Tcp)
             .needs_write;
         // Tell upstream relays our MTU floor.
         nw |= self.send_mtu_info(from_nid, &from_name, i32::from(MTU), true);

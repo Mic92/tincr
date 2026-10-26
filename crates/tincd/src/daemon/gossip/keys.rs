@@ -5,7 +5,7 @@ use crate::daemon::{ConnId, Daemon, ForwardingMode};
 
 use crate::dispatch::DispatchError;
 use crate::local_addr;
-use crate::tunnel::{MTU, make_udp_label};
+use crate::tunnel::{MTU, Via, make_udp_label};
 
 use crate::dispatch;
 use crate::graph::NodeId;
@@ -320,7 +320,7 @@ impl Daemon {
             };
             // `to.via == myself` trivially holds for `to == myself`.
             let mut nw = self
-                .dispatch_tunnel_outputs(from_nid, &msg.from, outs)
+                .dispatch_tunnel_outputs(from_nid, &msg.from, outs, Via::Tcp)
                 .needs_write;
             nw |= self.send_mtu_info(from_nid, &msg.from, i32::from(MTU), true);
             nw |= self.send_udp_info(from_nid, &msg.from, true);
@@ -448,12 +448,12 @@ impl Daemon {
         // KEX) just stashes - recv_outs is empty here.
         let mut nw = hint_nw;
         nw |= self
-            .dispatch_tunnel_outputs(from_nid, &msg.from, init_outs)
+            .dispatch_tunnel_outputs(from_nid, &msg.from, init_outs, Via::Tcp)
             .needs_write;
         match recv_result {
             Ok((_consumed, recv_outs)) => {
                 nw |= self
-                    .dispatch_tunnel_outputs(from_nid, &msg.from, recv_outs)
+                    .dispatch_tunnel_outputs(from_nid, &msg.from, recv_outs, Via::Tcp)
                     .needs_write;
             }
             Err(e) => {
@@ -602,7 +602,7 @@ impl Daemon {
         };
 
         let mut nw = self
-            .dispatch_tunnel_outputs(from_nid, &msg.from, outs)
+            .dispatch_tunnel_outputs(from_nid, &msg.from, outs, Via::Tcp)
             .needs_write;
 
         // Two gates - validkey (set above on HandshakeDone; without

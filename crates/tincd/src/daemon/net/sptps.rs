@@ -10,7 +10,7 @@ use std::os::fd::AsFd;
 use crate::compress;
 use crate::node_id::NodeId6;
 use crate::packet::len_u16;
-use crate::tunnel::{MTU, TunnelState};
+use crate::tunnel::{MTU, TunnelState, Via};
 
 use super::helpers;
 use crate::daemon::ListenerSlot;
@@ -173,6 +173,7 @@ impl Daemon {
         peer: NodeId,
         peer_name: &str,
         outs: Vec<tinc_sptps::Output>,
+        via: Via,
     ) -> TunnelSendOutcome {
         let mut outcome = TunnelSendOutcome::default();
         for o in outs {
@@ -233,11 +234,18 @@ impl Daemon {
                     self.dp.rx_scratch.clear();
                     self.dp.rx_scratch.resize(14, 0);
                     self.dp.rx_scratch.extend_from_slice(&bytes);
-                    outcome.needs_write |= self.receive_sptps_record(peer, peer_name, record_type);
+                    outcome.needs_write |=
+                        self.receive_sptps_record(peer, peer_name, record_type, via);
                 }
             }
         }
         outcome
+    }
+
+    fn note_recent_len(&mut self, peer: NodeId, len: u16) {
+        if let Some(p) = self.dp.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut()) {
+            p.maxrecentlen = p.maxrecentlen.max(len);
+        }
     }
 
     /// Decode, decompress (if needed) and route one SPTPS record.
@@ -252,6 +260,7 @@ impl Daemon {
         peer: NodeId,
         peer_name: &str,
         record_type: u8,
+        via: Via,
     ) -> bool {
         let body_len = self.dp.rx_scratch.len() - 14;
 
@@ -265,25 +274,17 @@ impl Daemon {
         // PMTU probe. Probes only make sense over UDP (they are the
         // PMTU discovery mechanism); TCP-tunneled probe = peer bug.
         if record_type == PKT_PROBE {
-            let udppacket = self
-                .dp
-                .tunnels
-                .get(&peer)
-                .is_some_and(|t| t.status.udppacket);
-            if !udppacket {
+            if via == Via::Tcp {
                 log::error!(target: "tincd::net",
                             "Got SPTPS PROBE from {peer_name} via TCP");
                 return false;
             }
-            let body_len_u16 = len_u16(body_len);
-            if let Some(p) = self.dp.tunnels.get_mut(&peer).and_then(|t| t.pmtu.as_mut())
-                && body_len_u16 > p.maxrecentlen
-            {
-                p.maxrecentlen = body_len_u16;
+            if matches!(via, Via::Udp(_)) {
+                self.note_recent_len(peer, len_u16(body_len));
             }
             // mem::take dance: udp_probe_h is &mut self.
             let scratch = mem::take(&mut self.dp.rx_scratch);
-            let nw = self.udp_probe_h(peer, peer_name, &scratch[14..]);
+            let nw = self.udp_probe_h(peer, peer_name, &scratch[14..], via);
             self.dp.rx_scratch = scratch;
             return nw;
         }
@@ -386,15 +387,8 @@ impl Daemon {
             &mut scratch
         };
 
-        // maxrecentlen for try_udp's gratuitous probe-reply size.
-        // Gated on udppacket: TCP-tunneled frames don't inform PMTU.
-        let frame_len = len_u16(frame.len());
-        if let Some(t) = self.dp.tunnels.get_mut(&peer)
-            && t.status.udppacket
-            && let Some(p) = t.pmtu.as_mut()
-            && frame_len > p.maxrecentlen
-        {
-            p.maxrecentlen = frame_len;
+        if matches!(via, Via::Udp(_)) {
+            self.note_recent_len(peer, len_u16(frame.len()));
         }
 
         let len = frame.len() as u64;

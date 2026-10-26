@@ -253,10 +253,14 @@ pub(crate) struct TunnelStatus {
     /// `send_udp_probe_packet`. Side-channel from `try_udp` to
     /// `send_sptps_data` (4 layers down).
     pub send_locally: bool,
+}
 
-    /// Bit 9. Ephemeral, per-packet: routing reads it for "reply the
-    /// same way".
-    pub udppacket: bool,
+/// How a tunnel record reached us.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Via {
+    Tcp,
+    Udp(SocketAddr),
+    UdpRelayed,
 }
 
 impl TunnelState {
@@ -281,9 +285,9 @@ impl TunnelStatus {
     /// Reconstruct `node_status_t.value` for `dump_nodes`.
     /// GCC-LSB-first: bit 0 `unused_active`, 1 validkey,
     /// 2 waitingforkey, 3 visited†, 4 reachable(param), 5 indirect†,
-    /// 6 sptps, 7 `udp_confirmed`, 8 `send_locally`‡, 9 udppacket,
+    /// 6 sptps, 7 `udp_confirmed`, 8 `send_locally`‡, 9 udppacket‡,
     /// 10-12 omitted†. († always 0: graph scratch / unported.
-    /// ‡ transient — 0 in practice between event-loop turns.)
+    /// ‡ transient. 0 between event-loop turns.)
     /// `reachable` is a param (owned by graph, not `TunnelStatus`).
     #[must_use]
     pub(crate) const fn as_u32(self, reachable: bool) -> u32 {
@@ -305,9 +309,6 @@ impl TunnelStatus {
         }
         if self.send_locally {
             v |= 1 << 8;
-        }
-        if self.udppacket {
-            v |= 1 << 9;
         }
         v
     }
@@ -347,7 +348,6 @@ mod tests {
                 sptps: true,
                 udp_confirmed: true,
                 send_locally: true,
-                udppacket: true,
             },
             last_req_key: Some(Instant::now()),
             pmtu: Some({
@@ -457,28 +457,19 @@ mod tests {
             }),
             1 << 7
         );
-        assert_eq!(
-            bit(TunnelStatus {
-                udppacket: true,
-                ..z
-            }),
-            1 << 9
-        );
 
-        // All set: 0b11_1101_0110 = 0x3d6.
+        // All set.
         let all = TunnelStatus {
             validkey: true,
             waitingforkey: true,
             sptps: true,
             udp_confirmed: true,
             send_locally: true,
-            udppacket: true,
         };
         assert_eq!(
             all.as_u32(true),
-            (1 << 1) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 9)
+            (1 << 1) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 8)
         );
-        assert_eq!(all.as_u32(true), 0x3d6);
 
         // Post-handshake steady state: 0xd2.
         let steady = TunnelStatus {
@@ -487,7 +478,6 @@ mod tests {
             sptps: true,
             udp_confirmed: true,
             send_locally: false,
-            udppacket: false,
         };
         assert_eq!(steady.as_u32(true), 0xd2);
     }
