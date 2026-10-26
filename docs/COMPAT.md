@@ -135,6 +135,13 @@ Things that work in both daemons but not identically.
   such byte
   in a key or value is replaced with U+FFFD rather than passed
   through verbatim.
+- **Learned UDP addresses don't displace a working one.** An address
+  from ANS_KEY, REQ_KEY, UDP_INFO or the graph is ignored while the
+  current one is confirmed or was seen in authenticated traffic. C
+  switches to it and restarts PMTU discovery.
+- **`PMTUDiscovery` is honoured, also per host.** With `= no`, a
+  confirmed path carries frames up to `PMTU` (or the link MTU) without
+  probing. C still sends data over TCP until probing succeeds.
 - **`ClampMSS` finds the MSS option anywhere.** C only clamps it when
   it is the first TCP option or follows another 4-byte option.
 - **Meta requests are capped at 2176 bytes on receive.** C bounds what
