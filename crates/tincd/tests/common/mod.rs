@@ -628,19 +628,31 @@ impl ChildWithLog {
     }
 
     pub fn kill_and_log(mut self) -> String {
+        self.reap();
+        self.log_snapshot()
+    }
+
+    fn reap(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        if let Some(drain) = self.drain.take() {
-            let _ = drain.join();
-        }
-        self.log_snapshot()
+        let Some(drain) = self.drain.take() else {
+            return;
+        };
+        let _ = drain.join();
+        // Every test that runs a daemon doubles as a "no panic on any
+        // input it saw" check. A caught panic otherwise only shows up
+        // as a vague exit or a timeout.
+        let log = self.log_snapshot();
+        assert!(
+            !log.contains("panicked at") || thread::panicking(),
+            "daemon panicked:\n{log}"
+        );
     }
 }
 
 impl Drop for ChildWithLog {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.reap();
     }
 }
 
