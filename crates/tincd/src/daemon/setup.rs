@@ -859,8 +859,9 @@ impl Daemon {
         // failures are logged + skipped (the bad subnet just isn't
         // routable).
         let mut subnets = SubnetTree::new();
-        for s in parse_subnets_from_config(&config, &name) {
-            subnets.add(s, name.clone());
+        let config_subnets = parse_subnets_from_config(&config, &name);
+        for s in &config_subnets {
+            subnets.add(*s, name.clone());
         }
 
         // DNS stub (Rust-only)
@@ -947,6 +948,7 @@ impl Daemon {
             last_mst: Vec::new(),
             mac_table: HashMap::new(),
             mac_leases: mac_lease::MacLeases::default(),
+            config_subnets,
             mac_cap_warned: false,
             age_subnets_timer: None,
             dns,

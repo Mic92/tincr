@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tinc_proto::Subnet;
 
 use crate::inthash::IntHashMap;
 use std::net::SocketAddr;
@@ -472,6 +473,8 @@ pub struct Daemon {
     /// `mac_table` (via gossip `ADD_SUBNET`) but not here. Lifecycles
     /// kept separate (see `mac_lease.rs` doc).
     pub(crate) mac_leases: mac_lease::MacLeases,
+    /// Our `Subnet =` lines as of the last (re)load. Reload diffs these.
+    pub(crate) config_subnets: HashSet<Subnet>,
 
     /// Log-once latch for the `MAX_MAC_LEASES` cap in `learn_mac`.
     pub(crate) mac_cap_warned: bool,
