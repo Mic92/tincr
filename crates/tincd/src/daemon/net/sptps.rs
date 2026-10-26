@@ -216,13 +216,7 @@ impl Daemon {
                             outcompression: tunnel.outcompression,
                             stats: Arc::clone(&tunnel.stats),
                         });
-                        // Mirror first so on_probe_reply's minmtu
-                        // store finds it.
-                        self.tunnel_handles.insert(peer, Arc::clone(&handles));
-                        if let Some(s) = self.tx_snap.as_mut() {
-                            s.tunnels.insert(peer, handles);
-                        }
-                        self.publish_shard_snap();
+                        self.tunnel_handles.insert(peer, handles);
                     }
                 }
                 Output::Record { record_type, bytes } => {

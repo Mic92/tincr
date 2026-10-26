@@ -112,7 +112,7 @@ impl Daemon {
                     if let Some(tunnel) = self.dp.tunnels.get_mut(&node) {
                         tunnel.reset_unreachable();
                     }
-                    self.drop_tunnel_handles(node);
+                    self.tunnel_handles.remove(&node);
                 }
             }
         }

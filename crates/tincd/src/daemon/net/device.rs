@@ -203,19 +203,12 @@ impl Daemon {
                             // because `tx_probe` borrows the snapshot while seal+ship needs `&mut
                             // self.dp`.
                             let snap = self.tx_snap.take();
-                            // any_pcap is the only slowpath_all input
-                            // that flips at runtime (`tinc pcap` arms
-                            // it via the control conn). The fold was
-                            // computed at setup; check the live bit
-                            // here. One bool load per super.
-                            if self.any_pcap
-                                || !self.tx_fast_super(
-                                    snap.as_ref(),
-                                    count,
-                                    &scratch,
-                                    tso_lens.get(..count).unwrap_or_default(),
-                                )
-                            {
+                            if !self.tx_fast_super(
+                                snap.as_ref(),
+                                count,
+                                &scratch,
+                                tso_lens.get(..count).unwrap_or_default(),
+                            ) {
                                 for (i, &n) in tso_lens.iter().take(count).enumerate() {
                                     let off = i * tinc_device::DeviceArena::STRIDE;
                                     if let Some(frame) = scratch.get_mut(off..off + n) {
