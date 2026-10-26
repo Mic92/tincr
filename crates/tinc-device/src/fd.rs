@@ -28,7 +28,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use crate::ether::{ETH_HLEN, from_ip_nibble, set_etherheader};
-use crate::{Device, MTU, Mac, Mode, assert_read_buf, read_fd, write_fd};
+use crate::{Device, MTU, Mac, Mode, assert_read_buf, read_fd, tun_payload, write_fd};
 use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
 #[cfg(target_os = "android")]
 use std::os::android::net::SocketAddrExt;
@@ -236,17 +236,9 @@ impl Device for FdTun {
         Ok(n + ETH_HLEN)
     }
 
-    /// +14 write — skip the synthetic eth header. Doesn't actually
-    /// mutate `buf`; the `&mut` is the `dyn Device` shared signature
-    /// (linux TUN write does mutate).
-    fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        debug_assert!(
-            buf.len() > ETH_HLEN,
-            "fd write buf too short: {} <= {ETH_HLEN}",
-            buf.len()
-        );
-        // Strip 14, write the rest.
-        write_fd(self.fd.as_fd(), &buf[ETH_HLEN..])
+    /// Skip the synthetic eth header.
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        write_fd(self.fd.as_fd(), tun_payload(buf)?)
     }
 
     /// TUN-only. The contract.
@@ -375,7 +367,7 @@ mod tests {
         buf[14] = 0x45; // IPv4 marker, will be written
         buf[33] = 0x99; // last byte, arbitrary
 
-        let n = tun.write(&mut buf).unwrap();
+        let n = tun.write(&buf).unwrap();
         // Wrote 20 (the IP part). Not 34.
         assert_eq!(n, 20);
 
@@ -387,6 +379,11 @@ mod tests {
         assert_eq!(recv[19], 0x99); // last byte survived
         // The ether garbage is not here.
         assert_ne!(recv[0], 0xEE);
+
+        for short in [&buf[..1], &buf[..14]] {
+            let e = tun.write(short).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+        }
     }
 
     /// `SCM_RIGHTS` round-trip via the production `recv_one_fd`

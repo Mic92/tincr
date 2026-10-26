@@ -286,7 +286,7 @@ impl Daemon {
                 // the batch ships in one `sendmsg_x`; elsewhere that is plain `write`.
                 if gro.is_some() {
                     Self::rx_fast_sink(&mut self.device, &mut gro, &mut rx_fast_scratch[..len]);
-                } else if let Err(e) = self.device.write_stage(&mut rx_fast_scratch[..len]) {
+                } else if let Err(e) = self.device.write_stage(&rx_fast_scratch[..len]) {
                     log::debug!(target: "tincd::net", "Error writing to device: {e}");
                 }
                 continue;

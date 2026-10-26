@@ -160,8 +160,8 @@ fn utun_sendmsg_x_inject() {
 
     let n = 6usize;
     for i in 0..n {
-        let mut f = ip4_udp_frame([10, 98, 2, 2], [10, 98, 2, 1], 50000, port, 24 + i);
-        dev.write_stage(&mut f).expect("stage");
+        let f = ip4_udp_frame([10, 98, 2, 2], [10, 98, 2, 1], 50000, port, 24 + i);
+        dev.write_stage(&f).expect("stage");
     }
     dev.write_flush().expect("flush");
 

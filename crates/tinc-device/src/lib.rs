@@ -20,6 +20,8 @@
 use std::io;
 use std::os::fd::BorrowedFd;
 
+use crate::ether::ETH_HLEN;
+
 // Types
 
 /// 1500 payload + 14 ethernet header + 4 VLAN
@@ -110,14 +112,12 @@ pub trait Device: Send {
     /// `read(2)`: `EAGAIN` when empty, `EBADFD` if the TUN device went away.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
 
-    /// Write one packet from `buf` (`data[offset..offset+len]`). Linux TUN zeroes
-    /// `buf[12..14]` and writes `buf[4..]` as `[vnet_hdr=0][IP]`; BSD `Utun` zeroes
-    /// `buf[10..12]` and writes `buf[10..]`; TAP writes `buf` as is — hence `&mut`.
+    /// Write one ethernet frame. TUN backends replace the eth header.
     ///
     /// # Errors
-    /// `write(2)` errors, e.g. `ENOBUFS` on a full TAP TX queue; the daemon drops
-    /// the packet.
-    fn write(&mut self, buf: &mut [u8]) -> io::Result<usize>;
+    /// `write(2)` errors, or `InvalidInput` for a TUN frame with no IP
+    /// payload. The daemon drops the packet.
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize>;
 
     /// GRO super write: pass `[vnet_hdr(10)][IP super]` straight to the TUN fd, no
     /// eth-header munging. Only Linux `Tun` (the one `IFF_VNET_HDR` backend)
@@ -164,7 +164,7 @@ pub trait Device: Send {
     ///
     /// # Errors
     /// As [`write`]; batching backends may defer errors to [`write_flush`].
-    fn write_stage(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    fn write_stage(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.write(buf)
     }
 
@@ -221,7 +221,7 @@ impl Device for Dummy {
     }
 
     /// Silent drop; return `len` so the daemon's stats counters tick.
-    fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         Ok(buf.len())
     }
 
@@ -274,6 +274,28 @@ pub(crate) fn read_fd(fd: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<usize> {
 #[cfg(unix)]
 pub(crate) fn write_fd(fd: BorrowedFd<'_>, buf: &[u8]) -> io::Result<usize> {
     nix::unistd::write(fd, buf).map_err(Into::into)
+}
+
+/// `writev(2)` of `prefix` + `body` as one packet.
+#[inline]
+#[cfg(unix)]
+pub(crate) fn writev_fd(fd: BorrowedFd<'_>, prefix: &[u8], body: &[u8]) -> io::Result<usize> {
+    nix::sys::uio::writev(fd, &[io::IoSlice::new(prefix), io::IoSlice::new(body)])
+        .map_err(Into::into)
+}
+
+/// The IP payload of an ethernet frame for TUN backends.
+///
+/// # Errors
+/// `InvalidInput` if nothing follows the eth header.
+pub(crate) fn tun_payload(buf: &[u8]) -> io::Result<&[u8]> {
+    match buf.get(ETH_HLEN..) {
+        Some(ip) if !ip.is_empty() => Ok(ip),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("TUN write of {}-byte frame", buf.len()),
+        )),
+    }
 }
 
 // Linux TUN/TAP — `linux/device.c` (225 LOC)
@@ -341,7 +363,7 @@ mod tests {
                 None => Err(io::ErrorKind::WouldBlock.into()),
             }
         }
-        fn write(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
             unreachable!("read-path test double")
         }
         fn mode(&self) -> Mode {

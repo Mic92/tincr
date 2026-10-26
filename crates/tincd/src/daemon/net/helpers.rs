@@ -143,7 +143,7 @@ pub(super) fn handle_udp_emsgsize(
 pub(crate) fn gro_offer_or_write(
     device: &mut dyn Device,
     gro: &mut Option<GroBucket>,
-    data: &mut [u8],
+    data: &[u8],
 ) {
     const ETH_HLEN: usize = 14;
     let flush = |device: &mut dyn Device, b: &mut GroBucket| {

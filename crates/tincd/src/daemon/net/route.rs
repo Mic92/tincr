@@ -218,11 +218,16 @@ impl Daemon {
     }
 
     fn broadcast_packet(&mut self, data: &mut [u8], from: Option<NodeId>) -> bool {
-        // Echo a forwarded broadcast to local kernel.
+        let nw = self.broadcast_to_peers(data, from);
+        // Echo a forwarded broadcast to the local kernel last: the
+        // `overwrite_mac` stamp must not reach the peers.
         if from.is_some() {
             self.send_packet_myself(data);
         }
+        nw
+    }
 
+    fn broadcast_to_peers(&mut self, data: &[u8], from: Option<NodeId>) -> bool {
         // Tunnelserver: MST might be invalid (filtered ADD_EDGE →
         // loops). BMODE_NONE: opted out.
         if self.settings.tunnelserver
@@ -565,7 +570,7 @@ impl Daemon {
     /// magic IP and a reply was written, so the caller skips `route()`; `false`
     /// after ~5 byte compares otherwise. The caller has checked
     /// `self.dns.is_some()`; the take/put-back avoids the borrow conflict with
-    /// `device.write(&mut self)` and moves only two `Option<IpAddr>` and a
+    /// `device.write(&self)` and moves only two `Option<IpAddr>` and a
     /// `String`.
     fn try_dns_intercept(&mut self, data: &[u8]) -> bool {
         let Some(cfg) = self.dns.take() else {
@@ -585,10 +590,10 @@ impl Daemon {
                 self.dns = Some(cfg);
                 return true;
             };
-            let mut frame = dns::wrap_v4(data, &reply, dns_ip, src, sport);
+            let frame = dns::wrap_v4(data, &reply, dns_ip, src, sport);
             log::debug!(target: "tincd::dns",
                         "reply {} bytes to {src}:{sport}", reply.len());
-            if let Err(e) = self.device.write(&mut frame) {
+            if let Err(e) = self.device.write(&frame) {
                 log::debug!(target: "tincd::dns",
                             "device write failed: {e}");
             }
@@ -603,10 +608,10 @@ impl Daemon {
                 self.dns = Some(cfg);
                 return true;
             };
-            let mut frame = dns::wrap_v6(data, &reply, &dns_ip, &src, sport);
+            let frame = dns::wrap_v6(data, &reply, &dns_ip, &src, sport);
             log::debug!(target: "tincd::dns",
                         "reply {} bytes to [{src}]:{sport}", reply.len());
-            if let Err(e) = self.device.write(&mut frame) {
+            if let Err(e) = self.device.write(&frame) {
                 log::debug!(target: "tincd::dns",
                             "device write failed: {e}");
             }

@@ -44,7 +44,7 @@ use std::io;
 use std::os::unix::io::{AsFd, BorrowedFd, OwnedFd};
 
 use crate::ether::{ETH_HLEN, ETH_P_IP, ETH_P_IPV6, from_ip_nibble, set_etherheader};
-use crate::{Device, MTU, Mac, Mode, assert_read_buf, read_fd, write_fd};
+use crate::{Device, MTU, Mac, Mode, assert_read_buf, read_fd, tun_payload, write_fd, writev_fd};
 #[cfg(target_os = "macos")]
 use crate::{DeviceArena, DrainResult, drain_via_read};
 
@@ -190,42 +190,21 @@ impl Device for BsdTun {
         }
     }
 
-    /// Write a packet. Three arms.
-    fn write(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // Tun/Utun index into the 14-byte ether header; reject short
-        // frames so a malformed peer packet can't panic on a slice op.
-        if self.variant != BsdVariant::Tap && buf.len() < ETH_HLEN {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "{}: write of {}-byte frame (< ETH_HLEN={ETH_HLEN})",
-                    self.iface,
-                    buf.len()
-                ),
-            ));
-        }
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self.variant {
-            // TUN +14: route.c wrote a full ether header; strip it.
-            BsdVariant::Tun => write_fd(self.fd.as_fd(), &buf[ETH_HLEN..]),
-
-            // UTUN +10: map ethertype → AF prefix at `[10..14]`
-            // (clobbers the ethertype slot; kernel reconstructs).
+            BsdVariant::Tun => write_fd(self.fd.as_fd(), tun_payload(buf)?),
+            // utun wants an AF prefix instead of the eth header.
             BsdVariant::Utun => {
+                let ip = tun_payload(buf)?;
                 let ethertype = u16::from_be_bytes([buf[12], buf[13]]);
                 let Some(prefix) = to_af_prefix(ethertype) else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!(
-                            "{}: unknown ethertype {ethertype:#06x} (route.c emitted non-IPv4/IPv6 in TUN mode?)",
-                            self.iface
-                        ),
+                        format!("{}: unknown ethertype {ethertype:#06x}", self.iface),
                     ));
                 };
-                let offset = ETH_HLEN - AF_PREFIX_LEN; // = 10
-                buf[offset..ETH_HLEN].copy_from_slice(&prefix);
-                write_fd(self.fd.as_fd(), &buf[offset..])
+                writev_fd(self.fd.as_fd(), &prefix, ip)
             }
-
             BsdVariant::Tap => write_fd(self.fd.as_fd(), buf),
         }
     }
@@ -263,7 +242,7 @@ impl Device for BsdTun {
     }
 
     #[cfg(target_os = "macos")]
-    fn write_stage(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    fn write_stage(&mut self, buf: &[u8]) -> io::Result<usize> {
         if let Some(b) = self.batch.as_mut()
             && b.stage(buf)
         {
