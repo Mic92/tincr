@@ -8,7 +8,7 @@ use super::{
     parse_subnets_from_config,
 };
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant, SystemTime};
@@ -627,10 +627,10 @@ impl Daemon {
         }
 
         // subnet diff.
-        let current_subnets: HashSet<Subnet> =
-            self.subnets.owned_by(&self.name).into_iter().collect();
+        // Only configured subnets: learned MACs are ours too, but not config's.
         let new_subnets = parse_subnets_from_config(&config, &self.name);
-        let diff = reload::diff_subnets(&current_subnets, &new_subnets);
+        let diff = reload::diff_subnets(&self.config_subnets, &new_subnets);
+        self.config_subnets.clone_from(&new_subnets);
 
         // removed → send DEL, subnet-down, del
         let myname = self.name.clone();
@@ -668,10 +668,12 @@ impl Daemon {
         self.tx_snap_refresh_subnets();
 
         // ConnectTo diff.
+        // Autoconnect dials are not config's to remove.
         let current_ct: BTreeSet<String> = self
             .outgoings
-            .iter()
-            .map(|(_, o)| o.node_name.clone())
+            .values()
+            .filter(|o| o.origin == OutOrigin::ConfigConnectTo)
+            .map(|o| o.node_name.clone())
             .collect();
         let new_ct: BTreeSet<String> = parse_connect_to_from_config(&config, &myname)
             .into_iter()
@@ -683,7 +685,7 @@ impl Daemon {
             let oid = self
                 .outgoings
                 .iter()
-                .find(|(_, o)| o.node_name == name)
+                .find(|(_, o)| o.node_name == name && o.origin == OutOrigin::ConfigConnectTo)
                 .map(|(id, _)| id);
             if let Some(oid) = oid {
                 let to_terminate: Vec<ConnId> = self
@@ -709,6 +711,11 @@ impl Daemon {
         }
         // Add: same path as setup()
         for peer in to_add {
+            // An autoconnect dial to it becomes the configured one.
+            if let Some(o) = self.outgoings.values_mut().find(|o| o.node_name == peer) {
+                o.origin = OutOrigin::ConfigConnectTo;
+                continue;
+            }
             self.lookup_or_add_node(&peer);
             let addr_cache = AddressCache::open(&self.confbase, &peer);
             let oid = self.outgoings.insert(Outgoing {
