@@ -17,11 +17,10 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::PoisonError;
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::SystemTime;
 
 use crate::daemon::read_sptps_kex;
 use std::env;
@@ -36,33 +35,58 @@ use tinc_crypto::b64;
 use tinc_crypto::hybrid::SptpsKex;
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 
-type Stamp = (Option<SystemTime>, u64);
+/// Device, inode, size, mtime and ctime. Deployments that pin mtime
+/// (Nix store) still replace the inode, and an in-place edit moves ctime.
+type Stamp = (u64, u64, u64, i64, i64, i64, i64);
 type HostCache = Mutex<HashMap<PathBuf, (Stamp, Arc<Config>)>>;
 static HOST_CACHE: LazyLock<HostCache> = LazyLock::new(HostCache::default);
+/// The next read of every host file goes to disk.
+pub(crate) fn clear_host_cache() {
+    HOST_CACHE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+}
 
-/// Read `hosts/{name}` into a [`Config`], empty on ENOENT/parse-fail.
-/// Cached per path, revalidated by mtime+size so on-disk updates are seen.
+/// Read `hosts/{name}` into a [`Config`] with its `-o NAME.KEY` overrides,
+/// empty on ENOENT/parse-fail. Cached per path, revalidated by [`Stamp`].
 #[must_use]
 pub(crate) fn read_host_config(hosts: &HostDirs, name: &str) -> Arc<Config> {
     let path = hosts.file(name);
     let mut cache = HOST_CACHE.lock().unwrap_or_else(PoisonError::into_inner);
-    let Ok(meta) = fs::metadata(&path) else {
+    let Ok(m) = fs::metadata(&path) else {
         cache.remove(&path);
         return Arc::default();
     };
-    let stamp = (meta.modified().ok(), meta.len());
-    if let Some((cached, cfg)) = cache.get(&path)
-        && *cached == stamp
-    {
-        return Arc::clone(cfg);
+    let stamp = (
+        m.dev(),
+        m.ino(),
+        m.len(),
+        m.mtime(),
+        m.mtime_nsec(),
+        m.ctime(),
+        m.ctime_nsec(),
+    );
+    let file = match cache.get(&path) {
+        Some((cached, cfg)) if *cached == stamp => Arc::clone(cfg),
+        _ => {
+            let mut cfg = Config::default();
+            if let Ok(entries) = tinc_conf::parse_file(&path) {
+                cfg.merge(entries);
+            }
+            let cfg = Arc::new(cfg);
+            cache.insert(path, (stamp, Arc::clone(&cfg)));
+            cfg
+        }
+    };
+    drop(cache);
+    let mut overrides = hosts.overrides(name).cloned().peekable();
+    if overrides.peek().is_none() {
+        return file;
     }
-    let mut cfg = Config::default();
-    if let Ok(entries) = tinc_conf::parse_file(&path) {
-        cfg.merge(entries);
-    }
-    let cfg = Arc::new(cfg);
-    cache.insert(path, (stamp, Arc::clone(&cfg)));
-    cfg
+    let mut cfg = Config::clone(&file);
+    cfg.merge(overrides);
+    Arc::new(cfg)
 }
 
 /// `SPTPSCipher` from a host config; `None` if absent (global default applies).
@@ -329,6 +353,7 @@ mod tests {
     use std::iter;
     use std::os::unix::fs::OpenOptionsExt;
     use std::str;
+    use std::time::SystemTime;
 
     /// Generate a deterministic keypair for tests. Seeded from a tag.
     fn det_key(tag: u8) -> SigningKey {
@@ -357,6 +382,39 @@ mod tests {
         let peer = read_host_config(&hosts, "peer");
         let default = (default_kex, SptpsAead::default());
         link_sptps_modes(&hosts, "me", &peer, "peer", default)
+    }
+
+    /// A replaced file is re-read even with the same size and mtime (Nix
+    /// store), and `-o NAME.KEY` beats the file.
+    #[test]
+    fn host_config_cache_and_overrides() {
+        let tmp = TmpDir::new("host-cache");
+        fs::create_dir(tmp.path().join("hosts")).unwrap();
+        let mut cmdline = Config::new();
+        cmdline.merge(parse_line("peer.Weight = 7", Source::Cmdline { line: 1 }).unwrap());
+        cmdline.merge(parse_line("other.Weight = 8", Source::Cmdline { line: 2 }).unwrap());
+        let plain = HostDirs::new(tmp.path(), None);
+        let hosts = HostDirs::new(tmp.path(), None).with_overrides(&cmdline);
+        let path = tmp.path().join("hosts/peer");
+        let write = |body: &str| {
+            let t = tmp.path().join("t");
+            fs::write(&t, body).unwrap();
+            let f = fs::File::options().write(true).open(&t).unwrap();
+            f.set_modified(SystemTime::UNIX_EPOCH).unwrap();
+            fs::rename(&t, &path).unwrap();
+        };
+        let get = |hosts: &HostDirs, k: &str| {
+            read_host_config(hosts, "peer")
+                .lookup(k)
+                .next()
+                .map(|e| e.get_str().to_owned())
+        };
+        write("Port = 1\nWeight = 5\n");
+        assert_eq!(get(&plain, "Port").as_deref(), Some("1"));
+        write("Port = 2\nWeight = 5\n");
+        assert_eq!(get(&plain, "Port").as_deref(), Some("2"));
+        assert_eq!(get(&plain, "Weight").as_deref(), Some("5"));
+        assert_eq!(get(&hosts, "Weight").as_deref(), Some("7"));
     }
 
     const PQ: &str = "SPTPSKex = x25519-mlkem768\nSPTPSCipher = aes-256-gcm\n";

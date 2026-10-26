@@ -403,14 +403,21 @@ pub(super) fn read_daemon_config(
 ) -> Result<(tinc_conf::Config, String, HostDirs), SetupError> {
     let mut config =
         tinc_conf::read_server_config(confbase).map_err(|e| SetupError::Config(format!("{e}")))?;
-    config.merge(cmdline_conf.entries().iter().cloned());
+    // `NAME.KEY` entries belong to host configs.
+    config.merge(
+        cmdline_conf
+            .entries()
+            .iter()
+            .filter(|e| !e.variable.contains('.'))
+            .cloned(),
+    );
     let name = config
         .lookup("Name")
         .next()
         .map(tinc_conf::Entry::get_str)
         .ok_or_else(|| SetupError::Config("Name for tinc daemon required!".into()))?;
     let name = expand_name(name).map_err(SetupError::Config)?;
-    let hosts = HostDirs::from_config(confbase, &config);
+    let hosts = HostDirs::from_config(confbase, &config).with_overrides(cmdline_conf);
     let overridden = hosts.overridden();
     if let Some(o) = hosts.overlay()
         && !overridden.is_empty()

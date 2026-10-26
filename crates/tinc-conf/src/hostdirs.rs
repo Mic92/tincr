@@ -10,9 +10,10 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use crate::Config;
 use crate::name::check_id;
+use crate::{Config, Entry, parse_line};
 
 /// `p` as seen after `chroot(root)`. Paths outside `root` are
 /// unreachable there and stay as they are.
@@ -26,6 +27,8 @@ pub fn rebase_path(p: &Path, root: &Path) -> PathBuf {
 pub struct HostDirs {
     primary: PathBuf,
     overlay: Option<PathBuf>,
+    /// `-o NAME.KEY=VALUE` entries, as `(NAME, KEY = VALUE)`.
+    overrides: Arc<[(String, Entry)]>,
 }
 
 impl HostDirs {
@@ -34,7 +37,36 @@ impl HostDirs {
         let primary = confbase.join("hosts");
         // An overlay that is `hosts/` itself would list every node twice.
         let overlay = overlay.filter(|o| !o.components().eq(primary.components()));
-        Self { primary, overlay }
+        Self {
+            primary,
+            overlay,
+            overrides: Arc::new([]),
+        }
+    }
+
+    /// Take the `NAME.KEY` entries of a command-line config as host
+    /// overrides.
+    #[must_use]
+    pub fn with_overrides(mut self, cmdline: &Config) -> Self {
+        self.overrides = cmdline
+            .entries()
+            .iter()
+            .filter_map(|e| {
+                let (host, key) = e.variable.split_once('.')?;
+                let line = format!("{key} = {}", e.get_str());
+                let entry = parse_line(&line, e.source.clone())?.ok()?;
+                Some((host.to_owned(), entry))
+            })
+            .collect();
+        self
+    }
+
+    /// The command-line overrides for host `name`.
+    pub fn overrides(&self, name: &str) -> impl Iterator<Item = &Entry> {
+        self.overrides
+            .iter()
+            .filter(move |(host, _)| host == name)
+            .map(|(_, e)| e)
     }
 
     /// Reads `HostsOverlayDirectory` from the merged config. A relative
@@ -91,6 +123,7 @@ impl HostDirs {
         Self {
             primary: rebase_path(&self.primary, root),
             overlay: self.overlay.as_deref().map(|o| rebase_path(o, root)),
+            overrides: Arc::clone(&self.overrides),
         }
     }
 
