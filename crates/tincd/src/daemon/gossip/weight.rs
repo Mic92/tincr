@@ -12,9 +12,14 @@ impl Daemon {
     /// raising the weight. Returns `needs_write`.
     pub(in crate::daemon) fn on_pong_rtt(&mut self, id: ConnId, now: Instant) -> bool {
         let pinginterval = u64::from(self.settings.pinginterval);
+        let global_weight = self.settings.global_weight;
         let Some(conn) = self.conns.get_mut(id) else {
             return false;
         };
+        // An operator-set `Weight` is not overridden by measurement.
+        if conn.host_weight.or(global_weight).is_some() {
+            return false;
+        }
         let rtt = conn.ping_rtt_ms;
         if rtt == 0 {
             // Unmeasured (PONG without a recorded PING send-time).
