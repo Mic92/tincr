@@ -491,6 +491,16 @@ pub enum GroVerdict {
     NotCandidate,
 }
 
+/// IP header fields a coalesced run must share. v6 has no DF.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FlowMeta {
+    /// TOS or traffic class, ECN bits included.
+    tos: u8,
+    df: bool,
+    /// TTL or hop limit.
+    ttl: u8,
+}
+
 /// Single-slot, append-only TCP GRO accumulator, the inverse of [`tso_split`]:
 /// coalesce same-flow packets into `[vnet_hdr(10)][IP super]` and hand
 /// [`flush`]'s slice to `Device::write_super`. A flow mismatch flushes and
@@ -518,10 +528,8 @@ pub struct GroBucket {
     /// flushes on ack mismatch too). Under heavy unidirectional flow,
     /// data-direction segments share the same ack.
     ack: u32,
-    /// `tos`/`ttl` (v4) or `tclass`/`hlim` (v6). Kernel GRO flushes
-    /// on these too. Stored together: low byte = ttl/hlim, high =
-    /// tos/tclass.
-    ip_meta: u16,
+    /// Kernel GRO flushes on these too.
+    meta: FlowMeta,
 
     // coalesce state
     /// Expected seq of the NEXT packet to append. `first_seq +
@@ -556,7 +564,7 @@ impl GroBucket {
             sport: 0,
             dport: 0,
             ack: 0,
-            ip_meta: 0,
+            meta: FlowMeta::default(),
             next_seq: 0,
             gso_size: 0,
             psh_set: false,
@@ -639,14 +647,18 @@ impl GroBucket {
         let sport = be16(ip, iphlen);
         let dport = be16(ip, iphlen + 2);
         let (addr_off, addr_len) = ip_addr_span(is_v6);
-        // v4: tos at [1], ttl at [8], DF at [6]>>5. v6: tclass split
-        // across [0..2] (we store the [0] high nibble + [1] high
-        // nibble), hlim at [7]. Packed into one u16 so the compare
-        // below stays a single branch.
-        let ip_meta = if is_v6 {
-            u16::from(ip[0] & 0x0F) << 12 | u16::from(ip[1] & 0xF0) << 4 | u16::from(ip[7])
+        let meta = if is_v6 {
+            FlowMeta {
+                tos: (ip[0] << 4) | (ip[1] >> 4),
+                df: false,
+                ttl: ip[7],
+            }
         } else {
-            u16::from(ip[1]) << 8 | u16::from(ip[6] >> 5) << 7 | u16::from(ip[8])
+            FlowMeta {
+                tos: ip[1],
+                df: ip[6] & 0x40 != 0,
+                ttl: ip[8],
+            }
         };
 
         let gso_size = len_u16(payload_len);
@@ -666,7 +678,7 @@ impl GroBucket {
             self.sport = sport;
             self.dport = dport;
             self.ack = ack;
-            self.ip_meta = ip_meta;
+            self.meta = meta;
             self.next_seq = seq.wrapping_add(u32::from(gso_size));
             self.gso_size = gso_size;
             self.psh_set = psh_set;
@@ -682,7 +694,7 @@ impl GroBucket {
             || sport != self.sport
             || dport != self.dport
             || ack != self.ack
-            || ip_meta != self.ip_meta
+            || meta != self.meta
             || ip[addr_off..addr_off + addr_len] != self.addrs[..addr_len]
         {
             return GroVerdict::FlushFirst;
