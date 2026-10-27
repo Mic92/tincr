@@ -145,7 +145,7 @@ fn tinc_up_gets_interface_and_name() {
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\necho \"iface=$INTERFACE name=$NAME\" > '{}'\n",
+            "#!/bin/sh\necho \"iface=$INTERFACE name=$NAME\" > '{0}.tmp'\nmv '{0}.tmp' '{0}'\n",
             marker.display()
         ),
     )
