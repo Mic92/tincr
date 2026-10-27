@@ -23,6 +23,8 @@ pub(super) const UDP_RX_BATCH: usize = 64;
 /// over-draining starves the TUN reader of TX time — iperf3
 /// saturating the device must not block UDP recv/meta-conn flush).
 pub(super) const DEVICE_DRAIN_CAP: usize = 64;
+/// Punted packets handled per wake, for the same reason.
+pub(super) const PUNT_DRAIN_CAP: usize = 64;
 /// Wire packets cap ~1700; 2KB oversize truncates and the SPTPS
 /// decrypt fails (same outcome as the old stack buf).
 pub(super) const UDP_RX_BUFSZ: usize = 2048;

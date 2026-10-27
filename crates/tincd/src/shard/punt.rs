@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Mutex;
 use std::sync::PoisonError;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Max punted frame: MTU-sized UDP payload. Supers are never punted whole.
 pub(crate) const PUNT_SLOT: usize = 2048;
@@ -26,6 +27,8 @@ pub(crate) struct PuntPkt {
 
 pub(crate) struct PuntQueue {
     q: Mutex<Inner>,
+    /// Set by a worker that gave up on its TUN queue.
+    device_failed: AtomicBool,
 }
 
 struct Inner {
@@ -43,7 +46,17 @@ impl PuntQueue {
                 free: Vec::new(),
                 dropped: 0,
             }),
+            device_failed: AtomicBool::new(false),
         }
+    }
+
+    #[cfg_attr(not(target_os = "linux"), expect(dead_code))]
+    pub(crate) fn set_device_failed(&self) {
+        self.device_failed.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn device_failed(&self) -> bool {
+        self.device_failed.load(Ordering::Relaxed)
     }
 
     /// `false` = ring full, packet dropped.
