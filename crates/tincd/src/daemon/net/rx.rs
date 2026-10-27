@@ -1,9 +1,3 @@
-#![expect(
-    clippy::indexing_slicing,
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 use super::super::Daemon;
 use super::{UDP_RX_BATCH, UDP_RX_BUFSZ, UdpRxBatch, ss_to_std};
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -46,7 +40,10 @@ pub const MAX_PENDING_META: usize = 64;
 impl Daemon {
     /// accept → tarpit-check → `configure_tcp` → allocate → register.
     pub(in crate::daemon) fn on_tcp_accept(&mut self, i: u8) {
-        let listener = &self.listeners[usize::from(i)].listener;
+        let Some(slot) = self.listeners.get(usize::from(i)) else {
+            return;
+        };
+        let listener = &slot.listener;
 
         // socket2 accept4(SOCK_CLOEXEC) avoids fd leaks into script
         // children for free.
@@ -126,7 +123,9 @@ impl Daemon {
         let conn = Connection::new_meta(fd, hostname, peer, self.timers.now());
 
         if let Some(id) = self.register_conn(conn, Io::Read) {
-            self.conns[id].counted_pending = true;
+            if let Some(c) = self.conns.get_mut(id) {
+                c.counted_pending = true;
+            }
             self.pending_meta += 1;
             log::info!(target: "tincd::conn", "Connection from {peer}");
         }
@@ -146,16 +145,10 @@ impl Daemon {
     /// timers had their slice (`deef1268`), which TCP-over-tunnel needs to keep its
     /// send window moving.
     pub(in crate::daemon) fn on_udp_recv(&mut self, i: u8) {
-        // Take the batch out so we can borrow bufs immutably while
-        // calling `&mut self.handle_incoming_vpn_packet`. Same
-        // pattern as `rx_scratch` (`e49b5af6`). `expect` is fine —
-        // this is the only `take` site, no re-entrancy (epoll is
-        // single-threaded), and we always put it back below.
-        let mut batch = self
-            .dp
-            .udp_rx_batch
-            .take()
-            .expect("udp_rx_batch is Some between on_udp_recv calls");
+        // Taken out so bufs can be read under `&mut self`. Always put back.
+        let Some(mut batch) = self.dp.udp_rx_batch.take() else {
+            return;
+        };
 
         self.recvmmsg_batch(i, &mut batch);
 
@@ -189,7 +182,9 @@ impl Daemon {
                     k = idx + 1;
                     let n = len_u16(msg.bytes.min(UDP_RX_BUFSZ));
                     let peer = msg.address.as_ref().and_then(ss_to_std).map(unmap);
-                    meta[idx] = (n, peer);
+                    if let Some(m) = meta.get_mut(idx) {
+                        *m = (n, peer);
+                    }
                 }
                 k
             }
@@ -215,12 +210,12 @@ impl Daemon {
             return n;
         }
         let mut count = 0;
-        while count < UDP_RX_BATCH {
-            match recvfrom::<NixSS>(fd, &mut batch.bufs[count]) {
+        while let (Some(buf), Some(m)) = (batch.bufs.get_mut(count), meta.get_mut(count)) {
+            match recvfrom::<NixSS>(fd, buf) {
                 Ok((n, addr)) => {
                     let n = len_u16(n.min(UDP_RX_BUFSZ));
                     let peer = addr.as_ref().and_then(ss_to_std).map(unmap);
-                    meta[count] = (n, peer);
+                    *m = (n, peer);
                     count += 1;
                 }
                 Err(Errno::EAGAIN) => break,
@@ -234,7 +229,10 @@ impl Daemon {
     }
 
     fn recvmmsg_batch(&mut self, i: u8, batch: &mut UdpRxBatch) -> usize {
-        let fd = self.listeners[usize::from(i)].listener.udp.as_raw_fd();
+        let Some(slot) = self.listeners.get(usize::from(i)) else {
+            return 0;
+        };
+        let fd = slot.listener.udp.as_raw_fd();
 
         // Phase 1: syscall + extract (len, peer) per message.
         let mut meta: [(u16, Option<SocketAddr>); UDP_RX_BATCH] = [(0u16, None); UDP_RX_BATCH];
@@ -263,7 +261,9 @@ impl Daemon {
             if n == 0 {
                 continue;
             }
-            let pkt = &batch.bufs[idx][..n];
+            let Some(pkt) = batch.bufs.get(idx).and_then(|b| b.get(..n)) else {
+                continue;
+            };
 
             // RX fast-path attempt: `rx_probe` walks the gate chain, `rx_open` decrypts,
             // post-gates and commits replay, leaving `[eth:14][IP]` in `rx_fast_scratch`.
@@ -274,14 +274,15 @@ impl Daemon {
                 && let Some(src) = peer
                 && let Some(target) = shard::rx_probe(snap, pkt, src)
                 && let Ok(len) = shard::rx_open(&target, snap, &mut rx_fast_scratch, &mut dst_memo)
+                && let Some(frame) = rx_fast_scratch.get_mut(..len)
             {
                 target.handles.stats.add_in(1, len as u64);
                 // Consumed; the replay window advanced so the slow path won't see it. GRO
                 // offer or TUN write inline. Without GRO (Darwin utun) use `write_stage` so
                 // the batch ships in one `sendmsg_x`; elsewhere that is plain `write`.
                 if gro.is_some() {
-                    Self::rx_fast_sink(&mut self.device, &mut gro, &mut rx_fast_scratch[..len]);
-                } else if let Err(e) = self.device.write_stage(&rx_fast_scratch[..len]) {
+                    Self::rx_fast_sink(&mut self.device, &mut gro, frame);
+                } else if let Err(e) = self.device.write_stage(frame) {
                     log::debug!(target: "tincd::net", "Error writing to device: {e}");
                 }
                 continue;
@@ -328,10 +329,11 @@ impl Daemon {
         let _ = nix::unistd::read(&*efd, &mut buf);
         let mut nw = false;
         while let Some(mut p) = punt.pop() {
-            let len = usize::from(p.len);
-            match p.src {
-                Some(src) => self.handle_incoming_vpn_packet(&p.buf[..len], Some(src)),
-                None => nw |= self.forward_packet(&mut p.buf[..len], None),
+            if let Some(buf) = p.buf.get_mut(..usize::from(p.len)) {
+                match p.src {
+                    Some(src) => self.handle_incoming_vpn_packet(buf, Some(src)),
+                    None => nw |= self.forward_packet(buf, None),
+                }
             }
             punt.recycle(p.buf);
         }
@@ -341,15 +343,17 @@ impl Daemon {
     }
 
     fn handle_incoming_vpn_packet(&mut self, pkt: &[u8], peer: Option<SocketAddr>) {
-        if pkt.len() < 12 {
+        let ids = pkt.split_first_chunk::<6>().and_then(|(dst, rest)| {
+            let (src, ct) = rest.split_first_chunk::<6>()?;
+            Some((dst, src, ct))
+        });
+        let Some((dst, src, ct)) = ids else {
             log::debug!(target: "tincd::net",
                         "Dropping {}-byte UDP packet (too short for ID prefix)",
                         pkt.len());
             return;
-        }
-        let dst_id = NodeId6::from_bytes(pkt[0..6].try_into().unwrap());
-        let src_id = NodeId6::from_bytes(pkt[6..12].try_into().unwrap());
-        let ct = &pkt[12..];
+        };
+        let (dst_id, src_id) = (NodeId6::from_bytes(*dst), NodeId6::from_bytes(*src));
 
         // No decrypt-by-trial for legacy packets (no NodeId6 prefix)
         // or the ~never NodeId6 collision case (sha512(name)[:6],
