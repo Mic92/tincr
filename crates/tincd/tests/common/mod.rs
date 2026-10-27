@@ -502,6 +502,19 @@ impl PeerFixture {
         fixture
     }
 
+    /// All records in one `write(2)`, so the daemon decodes them in one batch.
+    pub fn send_batch(&mut self, bodies: &[&[u8]]) {
+        let mut wire = Vec::new();
+        for body in bodies {
+            for output in self.sptps.send_record(0, body).expect("send_record") {
+                if let Output::Wire { bytes, .. } = output {
+                    wire.extend_from_slice(&bytes);
+                }
+            }
+        }
+        (&self.stream).write_all(&wire).expect("send batch");
+    }
+
     pub fn send_record(&mut self, body: &[u8]) {
         for output in self.sptps.send_record(0, body).expect("send_record") {
             if let Output::Wire { bytes, .. } = output {

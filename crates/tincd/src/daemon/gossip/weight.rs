@@ -87,7 +87,7 @@ impl Daemon {
             ns.edge_weight = new_w;
         }
         // Weight changed → SSSP tie-break may flip.
-        self.graph_dirty = true;
+        self.graph_dirty.mark();
 
         // Same wire shape as `on_ack`'s initial broadcast: one nonce,
         // all active conns. Tunnelserver hubs don't propagate edges,

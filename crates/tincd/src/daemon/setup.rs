@@ -18,6 +18,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+use super::gossip::GraphDirty;
 use crate::event::{EventLoop, Io, SelfPipe, TimerHandle, Timers};
 use crate::graph::Graph;
 use slotmap::SlotMap;
@@ -914,7 +915,7 @@ impl Daemon {
             id6_table,
             contradicting_add_edge: 0,
             contradicting_del_edge: 0,
-            graph_dirty: false,
+            graph_dirty: GraphDirty::default(),
             sleeptime: 10,
             started_at: timers.now(),
             icmp_ratelimit: icmp::IcmpRateLimit::new(),

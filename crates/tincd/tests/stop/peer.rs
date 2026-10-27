@@ -116,9 +116,13 @@ fn transitive_edge_makes_node_reachable() {
     let _ = peer.drain_records(500);
 
     // SSSP only follows edges whose reverse exists, so announce both
-    // directions like the two real nodes would.
-    peer.send_record(b"12 11111111 testpeer faraway 10.99.0.2 655 0 50\n");
-    peer.send_record(b"12 22222222 faraway testpeer 10.99.0.1 655 0 50\n");
+    // directions like the two real nodes would. The REQ_KEY in the same
+    // batch must already see faraway reachable.
+    peer.send_batch(&[
+        b"12 11111111 testpeer faraway 10.99.0.2 655 0 50\n",
+        b"12 22222222 faraway testpeer 10.99.0.1 655 0 50\n",
+        b"15 faraway testnode\n",
+    ]);
     assert_no_reply(&mut peer, "ADD_EDGE");
 
     let mut ctl = peer.node.ctl();
@@ -212,6 +216,7 @@ fn transitive_edge_makes_node_reachable() {
     let log = peer.kill_and_stderr();
     assert!(log.contains("Node testpeer became reachable"), "{log}");
     assert!(log.contains("Node faraway became reachable"), "{log}");
+    assert!(log.contains("Got legacy REQ_KEY from faraway"), "{log}");
 }
 
 /// The daemon has a different public key on file for `testpeer` than

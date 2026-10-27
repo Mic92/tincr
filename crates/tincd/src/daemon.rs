@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::event::{EventLoop, Ready, SelfPipe, TimerHandle, Timers};
 use crate::graph::{EdgeId, Graph, NodeId, Route};
+use gossip::GraphDirty;
 use slotmap::SlotMap;
 use tinc_conf::HostDirs;
 use tinc_crypto::sign::SigningKey;
@@ -352,12 +353,9 @@ pub struct Daemon {
     /// Same, for `DEL_EDGE`: peer says we DON'T have an edge we DO have.
     pub(crate) contradicting_del_edge: u32,
 
-    /// Set by `on_add_edge`; `flush_graph_dirty` runs the BFS once
-    /// at the end of each dispatch batch instead of per edge.
-    /// `on_del_edge`/`on_ack`/`terminate` still call
-    /// `run_graph_and_log` directly (they read the result
-    /// immediately) and that clears this too.
-    pub(crate) graph_dirty: bool,
+    /// Set by `on_add_edge` so a `send_everything` burst costs one BFS.
+    /// Any record that may read reachability flushes it first.
+    pub(crate) graph_dirty: GraphDirty,
 
     /// Seconds the periodic handler blocks for when contradicting-
     /// edge counters exceed 100. The "two daemons fighting over the
