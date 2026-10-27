@@ -10,31 +10,28 @@
 //! Entries TTL out after `pinginterval` seconds; the age timer
 //! re-arms every 10s, so real lifetime is `pinginterval`..`+10s`.
 //!
-//! Diverges from C: the nonce token is stripped before hashing. C's
-//! full-line key lets a peer rotate the nonce to bypass dedup and
-//! drive an O(n²) re-flood. Stricter-than-C is intentional; first-
-//! sight acceptance is unchanged.
+//! At the cap the oldest entry is evicted, so an unseen line is always
+//! applied. A rotated nonce is a new line, as in C: handlers forward only
+//! state-changing lines and `FloodLimiter` bounds distinct-content floods.
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-/// Hard cap on cache entries. At the cap, [`SeenRequests::check`]
-/// reports unseen lines as duplicates: drop, don't forward — refuse
-/// to amplify the flood that filled the cache. 4096 × ~2KB ≈ 8MB.
+/// Hard cap on cache entries. 4096 × ~2KB ≈ 8MB.
 pub(crate) const SEEN_CAP: usize = 4096;
 
 /// [`FloodLimiter`] refill: forwarded gossip msgs/s per connection.
-/// 1k-node initial sync ≈ 3k msgs → ~15s, well under `pinginterval`.
 pub(crate) const FLOOD_RATE_PER_SEC: u32 = 200;
-/// [`FloodLimiter`] burst cap. Sized for `send_everything` in one read.
+/// [`FloodLimiter`] burst cap.
 pub(crate) const FLOOD_BURST: u32 = 1000;
 
-/// Dedup cache. Key = wire line with the nonce token (field 2)
-/// stripped — see [`normalize_key`].
+/// Dedup cache keyed on the full wire line.
 pub(crate) struct SeenRequests {
     cache: HashMap<String, Instant>,
+    /// Insertion order. Entries share one TTL, so this is also age order.
+    order: VecDeque<(Instant, String)>,
 }
 
 impl SeenRequests {
@@ -42,34 +39,43 @@ impl SeenRequests {
     pub(crate) fn new() -> Self {
         Self {
             cache: HashMap::new(),
+            order: VecDeque::new(),
         }
     }
 
-    /// `true` = already seen (drop). Nonce token stripped before
-    /// lookup so nonce-only variations dedup; one alloc per call.
+    /// `true` = already seen (drop).
     pub(crate) fn check(&mut self, line: &str, now: Instant) -> bool {
-        let key = normalize_key(line);
-        if self.cache.contains_key(key.as_str()) {
+        if self.cache.contains_key(line) {
             return true;
         }
-        if self.cache.len() >= SEEN_CAP {
-            // Refuse insert, report as seen. Next `age()` frees room.
-            return true;
+        while self.cache.len() >= SEEN_CAP {
+            self.pop_oldest();
         }
-        self.cache.insert(key, now);
+        self.cache.insert(line.to_owned(), now);
+        self.order.push_back((now, line.to_owned()));
         false
     }
 
+    fn pop_oldest(&mut self) -> Option<Instant> {
+        let (at, key) = self.order.pop_front()?;
+        // Skip stale order entries left by `purge_mentions`.
+        if self.cache.get(&key) == Some(&at) {
+            self.cache.remove(&key);
+        }
+        Some(at)
+    }
+
     /// Evict entries at least `max_age` old (C's `<=` boundary) and return
-    /// `(deleted, left)` for the debug log. `saturating_duration_since` so an entry
-    /// stamped later than `now` simply doesn't expire instead of panicking.
+    /// `(deleted, left)` for the debug log.
     pub(crate) fn age(&mut self, now: Instant, max_age: Duration) -> (usize, usize) {
         let before = self.cache.len();
-        self.cache.retain(|_, firstseen| {
-            // Keep if not expired. C: `firstseen + pinginterval <=
-            // now` deletes; so keep when `now - firstseen < max_age`.
-            now.saturating_duration_since(*firstseen) < max_age
-        });
+        while self
+            .order
+            .front()
+            .is_some_and(|(at, _)| now.saturating_duration_since(*at) >= max_age)
+        {
+            self.pop_oldest();
+        }
         let left = self.cache.len();
         (before - left, left)
     }
@@ -82,25 +88,6 @@ impl SeenRequests {
         self.cache
             .retain(|k, _| !k.split(' ').any(|tok| tok == name));
     }
-}
-
-/// Drop token 2 (nonce) from `"<REQ> <nonce> <rest...>"`. The nonce
-/// has no semantic weight; <2 tokens is degenerate → pass through.
-fn normalize_key(line: &str) -> String {
-    let mut it = line.split_ascii_whitespace();
-    let Some(req) = it.next() else {
-        return String::new();
-    };
-    if it.next().is_none() {
-        return req.to_owned();
-    }
-    let mut key = String::with_capacity(line.len());
-    key.push_str(req);
-    for tok in it {
-        key.push(' ');
-        key.push_str(tok);
-    }
-    key
 }
 
 /// Per-connection token bucket on *re-forwarded* gossip. Dedup can't
@@ -257,32 +244,29 @@ mod tests {
         assert!(!s.check(ADD_EDGE, t1));
     }
 
+    /// A repeated `DEL_EDGE` within the TTL carries a fresh nonce and must apply.
     #[test]
-    fn check_dedups_across_nonce() {
+    fn check_keys_full_line() {
         let mut s = SeenRequests::new();
         let now = Instant::now();
-        let a = "12 a3f alice bob 10.0.0.1 655 0 50 192.168.1.1 655";
-        let b = "12 ffffffff alice bob 10.0.0.1 655 0 50 192.168.1.1 655";
-        assert!(!s.check(a, now));
-        assert!(s.check(b, now), "nonce-only difference must dedup");
-        // Real content change still distinct.
-        let c = "12 a3f alice bob 10.0.0.1 655 0 51 192.168.1.1 655";
-        assert!(!s.check(c, now));
+        assert!(!s.check("13 a3f alice bob", now));
+        assert!(!s.check("13 ffffffff alice bob", now));
+        assert!(s.check("13 ffffffff alice bob", now));
     }
 
     #[test]
-    fn check_refuses_past_cap() {
+    fn check_evicts_oldest_at_cap() {
         let mut s = SeenRequests::new();
-        let now = Instant::now();
+        let t0 = Instant::now();
         for i in 0..SEEN_CAP {
-            assert!(!s.check(&format!("12 0 n{i} b"), now));
+            assert!(!s.check(&format!("12 0 n{i} b"), t0));
         }
-        assert!(s.check("12 0 brand new", now));
-        assert!(s.check("12 0 n0 b", now));
-        let (_, left) = s.age(now, Duration::from_hours(1));
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(!s.check("12 0 brand new", t1));
+        assert!(!s.check("12 0 n0 b", t1), "oldest evicted");
+        assert!(s.check(&format!("12 0 n{} b", SEEN_CAP - 1), t1));
+        let (_, left) = s.age(t1, Duration::from_hours(1));
         assert_eq!(left, SEEN_CAP);
-        s.age(now + Duration::from_secs(3601), Duration::from_mins(1));
-        assert!(!s.check("12 0 brand new", now));
     }
 
     #[test]
