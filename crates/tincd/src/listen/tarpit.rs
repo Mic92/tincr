@@ -6,11 +6,19 @@
 
 use std::net::SocketAddr;
 use std::os::fd::OwnedFd;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Default leaky-bucket capacity; the runtime value comes from
 /// `MaxConnectionBurst` config via `Tarpit::new`. Tests use this to
 /// seed the default behaviour.
+/// Drain one token per whole elapsed second. The clock advances by whole
+/// seconds only, so the fractional remainder counts towards the next leak.
+fn leak(burst: u32, since: &mut Instant, now: Instant) -> u32 {
+    let elapsed = now.saturating_duration_since(*since).as_secs();
+    *since += Duration::from_secs(elapsed);
+    burst.saturating_sub(u32::try_from(elapsed).unwrap_or(u32::MAX))
+}
+
 #[cfg(test)]
 const MAX_BURST: u32 = 10;
 
@@ -75,16 +83,7 @@ impl Tarpit {
         let same_host = self.prev_addr.is_some_and(|p| p.ip() == addr.ip());
 
         if same_host {
-            // Leak: subtract elapsed seconds, floor at zero. A clock
-            // going backwards is clamped to zero elapsed (never
-            // increases the bucket).
-            let elapsed = now.saturating_duration_since(self.samehost_time).as_secs();
-            // elapsed: u32 overflows after 136yr uptime; would only under-drain anyway
-            #[expect(clippy::cast_possible_truncation)]
-            {
-                self.samehost_burst = self.samehost_burst.saturating_sub(elapsed as u32);
-            }
-            self.samehost_time = now;
+            self.samehost_burst = leak(self.samehost_burst, &mut self.samehost_time, now);
             self.samehost_burst += 1;
 
             // Strictly greater: triggers at 11.
@@ -98,13 +97,7 @@ impl Tarpit {
         // "different from prev"); the SECOND connection does.
         self.prev_addr = Some(addr);
 
-        // All-host bucket: same arithmetic.
-        let elapsed = now.saturating_duration_since(self.allhost_time).as_secs();
-        #[expect(clippy::cast_possible_truncation)] // see same-host bucket above
-        {
-            self.allhost_burst = self.allhost_burst.saturating_sub(elapsed as u32);
-        }
-        self.allhost_time = now;
+        self.allhost_burst = leak(self.allhost_burst, &mut self.allhost_time, now);
         self.allhost_burst += 1;
 
         // Greater-or-equal: triggers at 10, then clamps, so the
@@ -293,6 +286,13 @@ mod tests {
         // Wait MORE than the bucket holds. saturating_sub clamps to 0.
         assert!(!tp.check(host_a, after(t0, 100)));
         assert_eq!(tp.buckets().1, 1, "drained to 0, refilled to 1");
+
+        // Sub-second gaps add up: 0.6 s + 0.6 s leaks one token.
+        let t1 = after(t0, 100);
+        tp.check(host_a, t1 + Duration::from_millis(600));
+        assert_eq!(tp.buckets().1, 2);
+        tp.check(host_a, t1 + Duration::from_millis(1200));
+        assert_eq!(tp.buckets().1, 2, "one second leaked across two gaps");
     }
 
     /// `prev_addr` updates regardless of whether check returned true
