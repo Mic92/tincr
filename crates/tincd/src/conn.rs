@@ -13,7 +13,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::ops::Range;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
 use nix::sys::socket::send;
@@ -65,11 +65,9 @@ enum Expect {
     Blob(u16, Vec<u8>),
 }
 
-/// Hard cap on queued outbuf bytes. The periodic sweep also checks
-/// `settings.maxoutbufsize` but only on stale conns, leaving a full
-/// sweep-interval window in which an authenticated peer that stops
-/// reading can balloon outbuf. 1 MiB is well above any legitimate
-/// burst (initial graph dump on large meshes stays <<100 KiB).
+/// Hard cap on queued outbuf bytes, checked at append. The periodic
+/// sweep only catches a peer that stopped reading after `PingTimeout`.
+/// 1 MiB is well above any legitimate burst.
 pub(crate) const OUTBUF_HARD_CAP: usize = 1 << 20;
 
 // LineBuf
@@ -81,6 +79,8 @@ pub(crate) struct LineBuf {
     data: Vec<u8>,
     /// Index of first unconsumed byte.
     offset: usize,
+    /// Bytes consumed over the buffer's lifetime.
+    drained: u64,
 }
 
 impl LineBuf {
@@ -130,8 +130,14 @@ impl LineBuf {
     }
 
     /// Advance the cursor (after partial `send()`).
+    #[must_use]
+    pub(crate) const fn drained(&self) -> u64 {
+        self.drained
+    }
+
     pub(crate) fn consume(&mut self, n: usize) {
         self.offset += n;
+        self.drained += n as u64;
         if self.offset >= self.data.len() {
             self.data.clear();
             self.offset = 0;
@@ -190,6 +196,9 @@ pub(crate) struct Connection {
     /// Activity stamp for the idle sweep. Control conns get +1h,
     /// refreshed on stream writes.
     pub last_ping_time: Instant,
+    /// `outbuf`'s drained count at the last check, and when the queue
+    /// was last empty or moved.
+    flush_progress: (u64, Instant),
     /// `>= 2` means SPTPS; `< 2` is rejected.
     pub protocol_minor: u8,
     /// Peer's public key, loaded by `id_h`.
@@ -316,6 +325,7 @@ impl Connection {
             name,
             hostname,
             last_ping_time: now,
+            flush_progress: (0, now),
             protocol_minor: 0,
             ecdsa: None,
             sptps: None,
@@ -706,6 +716,16 @@ impl Connection {
         }
         self.outbuf.data.extend_from_slice(&line);
         was_empty
+    }
+
+    /// How long the outbuf has been non-empty without draining a byte.
+    /// Sampled by the 1 Hz sweep.
+    pub(crate) fn flush_stalled(&mut self, now: Instant) -> Duration {
+        let drained = self.outbuf.drained();
+        if drained != self.flush_progress.0 || self.outbuf.is_empty() {
+            self.flush_progress = (drained, now);
+        }
+        now.saturating_duration_since(self.flush_progress.1)
     }
 
     /// `handle_meta_write`.
