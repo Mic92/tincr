@@ -221,7 +221,10 @@ fn tinc_up_runs_in_confbase() {
     let tinc_up = node.confbase.join("tinc-up");
     fs::write(
         &tinc_up,
-        format!("#!/bin/sh\npwd > '{}'\n", cwd_file.display()),
+        format!(
+            "#!/bin/sh\npwd > '{0}.tmp'\nmv '{0}.tmp' '{0}'\n",
+            cwd_file.display()
+        ),
     )
     .unwrap();
     fs::set_permissions(&tinc_up, Permissions::from_mode(0o755)).unwrap();

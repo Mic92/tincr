@@ -159,7 +159,7 @@ fn join_with_overlay_writes_there_and_peer_connects() {
         &hook,
         format!(
             // A slow hook must not delay the joiner's ACK.
-            "#!/bin/sh\nsleep 3\necho \"$NODE $HOST_FILE\" > '{}'\n",
+            "#!/bin/sh\nsleep 3\necho \"$NODE $HOST_FILE\" > '{0}.tmp'\nmv '{0}.tmp' '{0}'\n",
             hook_out.display()
         ),
     )
@@ -255,7 +255,7 @@ fn replace_invite_rekeys_node_and_drops_old_device() {
     fs::write(
         &hook,
         format!(
-            "#!/bin/sh\necho \"$REPLACE $KARTEI_NS\" > '{}'\n",
+            "#!/bin/sh\necho \"$REPLACE $KARTEI_NS\" > '{0}.tmp'\nmv '{0}.tmp' '{0}'\n",
             hook_out.display()
         ),
     )
