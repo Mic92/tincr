@@ -69,7 +69,9 @@ known v1 limitation.
 - A relayed meta path to the peer exists.
 - Not behind a `Proxy =` (proxies own the socket).
 
-No new config knob. `AutoConnect = no` disables.
+No new config knob. `AutoConnect = no` disables both starting a punch
+and answering one. At most 8 rounds run at once, and peer-supplied
+addresses that are unfit to dial (loopback, link-local) are skipped.
 
 ## Lifecycle
 
@@ -94,7 +96,10 @@ range.
 ## Test coverage
 
 - `punch.rs::tests`: state machine transitions, dial-delay clamping,
-  expiry, payload round-trip.
+  payload round-trip.
+- `daemon/punch.rs::tests`: target filtering.
+- `dispatch/tests.rs::punch_roles_complete_handshake`: the B/A roles
+  complete the ID and SPTPS handshake.
 - `tinc-proto/src/msg/key.rs::req_key_punch_roundtrip`: wire format.
 - `tinc-proto/src/msg/key.rs::req_key_unknown_reqno`: legacy peer
   graceful-ignore.

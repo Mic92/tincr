@@ -6,16 +6,17 @@ use std::net::{IpAddr, SocketAddr};
 use std::os::fd::OwnedFd;
 use std::time::Duration;
 
+use crate::addr;
 use crate::conn::Connection;
 use crate::daemon::{ConnId, Daemon, TimerWhat};
 use crate::event::Io;
+use crate::event::TimerHandle;
 use crate::graph::NodeId;
 use crate::listen::fmt_addr;
 use crate::outgoing::{self, PunchSock};
-use crate::punch::{self, PunchAction, PunchState};
+use crate::punch::{self, AWAIT_CONNECT_TIMEOUT, AWAIT_SYNC_TIMEOUT, PunchAction, PunchState};
 use rand_core::Rng;
 use socket2::Domain;
-use std::time::Instant;
 use tinc_crypto::os_rng;
 use tinc_proto::Request;
 use tinc_proto::msg::ReqKeyExt;
@@ -26,12 +27,19 @@ use tinc_sptps::Role;
 const REDIAL_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_REDIALS: u8 = 3;
 
+/// Cap on concurrent punch rounds. Each holds up to two bound sockets,
+/// and the `from` of a relayed PUNCH is not authenticated.
+const MAX_PUNCHES: usize = 8;
+
 /// One inflight punch round.
-#[derive(Debug)]
 pub(crate) struct PunchEntry {
     /// Round id; echoed by the peer in reply and SYNC.
-    pub(crate) nonce: u64,
-    pub(crate) state: PunchState,
+    nonce: u64,
+    state: PunchState,
+    /// Bound before `PUNCH` so the port is known, consumed at dial.
+    socks: Vec<PunchSock>,
+    /// Expiry while waiting for the peer, the dial while `Delaying`.
+    timer: TimerHandle,
 }
 
 /// A punch dial we may have to replay after an RST.
@@ -63,14 +71,11 @@ impl Daemon {
         let Some((my_addrs, socks)) = self.punch_prepare() else {
             return false;
         };
-        self.punch_socks.insert(nid, socks);
-        let now = self.timers.now();
         let nonce = os_rng().next_u64();
-        let (state, actions) = punch::start(now, my_addrs);
+        let (state, actions) = punch::start(self.timers.now(), my_addrs);
         log::info!(target: "tincd::punch", "Starting sim-open punch toward {name}");
-        self.punches.insert(nid, PunchEntry { nonce, state });
-        self.run_punch_actions(nid, name, nonce, actions);
-        true
+        self.insert_punch(nid, nonce, state, socks);
+        self.run_punch_actions(nid, name, nonce, actions)
     }
 
     /// Dispatch `REQ_KEY ... 64/65` (already routed to us). Returns
@@ -81,12 +86,15 @@ impl Daemon {
         from_name: &str,
         ext: &ReqKeyExt,
     ) -> bool {
+        if !self.settings.autoconnect {
+            return false;
+        }
         if self.nodes.get(&from_nid).and_then(|ns| ns.conn).is_some() {
             self.clear_punch(from_nid);
             return false; // already directly connected
         }
         let now = self.timers.now();
-        let (nonce, transition) = match ext.reqno {
+        let (nonce, state, actions) = match ext.reqno {
             REQ_KEY_PUNCH => {
                 let Some((nonce, peer_addrs)) =
                     ext.payload.as_deref().and_then(punch::parse_punch_payload)
@@ -96,10 +104,8 @@ impl Daemon {
                 if peer_addrs.is_empty() {
                     return false;
                 }
-                match self.punches.get(&from_nid) {
-                    Some(e) if e.nonce == nonce => {
-                        (nonce, punch::on_punch_reply(&e.state, now, peer_addrs))
-                    }
+                let next = match self.punches.get(&from_nid) {
+                    Some(e) if e.nonce == nonce => punch::on_punch_reply(&e.state, now, peer_addrs),
                     Some(e) if matches!(e.state, PunchState::AwaitConnect { .. }) => {
                         // Simultaneous start: both sides sent PUNCH.
                         // Lower name keeps the B role; the higher one
@@ -108,33 +114,36 @@ impl Daemon {
                             return false;
                         }
                         self.clear_punch(from_nid);
-                        (
-                            nonce,
-                            self.punch_as_responder(from_nid, from_name, now, peer_addrs),
-                        )
+                        return self.punch_as_responder(from_nid, from_name, nonce, peer_addrs);
                     }
                     Some(_) => return false, // stale round
-                    None => (
-                        nonce,
-                        self.punch_as_responder(from_nid, from_name, now, peer_addrs),
-                    ),
-                }
+                    None => {
+                        return self.punch_as_responder(from_nid, from_name, nonce, peer_addrs);
+                    }
+                };
+                let Some((state, actions)) = next else {
+                    return false; // replay/race
+                };
+                (nonce, state, actions)
             }
             REQ_KEY_PUNCH_SYNC => {
                 let Some(nonce) = ext.payload.as_deref().and_then(punch::parse_sync_payload) else {
                     return false;
                 };
-                match self.punches.get(&from_nid) {
-                    Some(e) if e.nonce == nonce => (nonce, punch::on_sync(&e.state, now)),
+                let next = match self.punches.get(&from_nid) {
+                    Some(e) if e.nonce == nonce => punch::on_sync(&e.state, now),
                     _ => return false, // lost state or stale round
-                }
+                };
+                let Some((state, actions)) = next else {
+                    return false;
+                };
+                (nonce, state, actions)
             }
             _ => unreachable!("caller dispatches only on 64/65"),
         };
-        let Some((state, actions)) = transition else {
-            return false; // replay/race
-        };
-        self.punches.insert(from_nid, PunchEntry { nonce, state });
+        if let Some(e) = self.punches.get_mut(&from_nid) {
+            e.state = state;
+        }
         self.run_punch_actions(from_nid, from_name, nonce, actions)
     }
 
@@ -143,26 +152,45 @@ impl Daemon {
         &mut self,
         from_nid: NodeId,
         from_name: &str,
-        now: Instant,
+        nonce: u64,
         peer_addrs: Vec<SocketAddr>,
-    ) -> Option<(PunchState, Vec<PunchAction>)> {
-        let (my_addrs, socks) = self.punch_prepare()?;
-        self.punch_socks.insert(from_nid, socks);
+    ) -> bool {
+        if self.punches.len() >= MAX_PUNCHES {
+            log::debug!(target: "tincd::punch", "Too many punches, ignoring {from_name}");
+            return false;
+        }
+        let Some((my_addrs, socks)) = self.punch_prepare() else {
+            return false;
+        };
         log::info!(target: "tincd::punch",
                    "PUNCH from {from_name}, replying with {} addrs",
                    my_addrs.len());
-        Some(punch::on_punch_fresh(now, peer_addrs, my_addrs))
+        let (state, actions) = punch::on_punch_fresh(self.timers.now(), peer_addrs, my_addrs);
+        self.insert_punch(from_nid, nonce, state, socks);
+        self.run_punch_actions(from_nid, from_name, nonce, actions)
     }
 
-    /// `TimerWhat::Punch(nid)` fired: pop state, dial.
+    fn insert_punch(&mut self, nid: NodeId, nonce: u64, state: PunchState, socks: Vec<PunchSock>) {
+        let timer = self.timers.add(TimerWhat::Punch(nid));
+        let entry = PunchEntry {
+            nonce,
+            state,
+            socks,
+            timer,
+        };
+        self.punches.insert(nid, entry);
+    }
+
+    /// `TimerWhat::Punch(nid)` fired: dial a `Delaying` round, expire
+    /// any other.
     pub(super) fn on_punch_timer(&mut self, nid: NodeId) {
-        self.punch_timers.remove(&nid);
-        let Some(PunchEntry {
-            state: PunchState::Delaying { addrs, role, .. },
-            ..
-        }) = self.punches.remove(&nid)
-        else {
-            return; // cleared elsewhere
+        let Some(e) = self.punches.remove(&nid) else {
+            return;
+        };
+        let PunchState::Delaying { addrs, role, .. } = e.state else {
+            log::debug!(target: "tincd::punch", "Punch round expired");
+            self.clear_punch(nid);
+            return;
         };
         if self.nodes.get(&nid).and_then(|ns| ns.conn).is_some() {
             return; // a normal connect landed during the delay
@@ -172,31 +200,18 @@ impl Daemon {
             .node(nid)
             .map(|n| n.name.clone())
             .unwrap_or_default();
-        self.dial_punch(nid, &name, &addrs, role);
-    }
-
-    /// Periodic sweep: drop expired states.
-    pub(super) fn sweep_punches(&mut self) {
-        let now = self.timers.now();
-        let expired: Vec<NodeId> = self
-            .punches
-            .extract_if(|_, e| punch::is_expired(&e.state, now))
-            .map(|(nid, _)| nid)
-            .collect();
-        for nid in expired {
-            self.clear_punch(nid);
-        }
+        self.dial_punch(nid, &name, e.socks, &addrs, role);
     }
 
     /// Cancel a punch. Drops unconsumed sockets and pending redials.
     pub(super) fn clear_punch(&mut self, nid: NodeId) {
         self.punches.remove(&nid);
-        self.punch_socks.remove(&nid);
         self.punch_redials.remove(&nid);
-        self.punch_timers.remove(&nid);
         self.punch_dials.retain(|_, d| d.nid != nid);
     }
 
+    /// Send what the state machine asked for, then arm the round's
+    /// timer for its new state.
     fn run_punch_actions(
         &mut self,
         nid: NodeId,
@@ -215,22 +230,24 @@ impl Daemon {
                     let payload = punch::format_sync_payload(nonce);
                     nw |= self.send_punch_line(nid, name, REQ_KEY_PUNCH_SYNC, &payload);
                 }
-                PunchAction::DialAt { at, addrs, role } => {
-                    let now = self.timers.now();
-                    let delay = at.saturating_duration_since(now);
-                    if delay.is_zero() {
-                        self.punches.remove(&nid);
-                        self.dial_punch(nid, name, &addrs, role);
-                    } else {
-                        let tid = self.timers.add_after(TimerWhat::Punch(nid), delay);
-                        self.punch_timers.insert(nid, tid);
-                    }
-                }
+                PunchAction::DialAt { .. } => {}
+            }
+        }
+        let now = self.timers.now();
+        if let Some(e) = self.punches.get(&nid) {
+            let after = match &e.state {
+                PunchState::AwaitConnect { .. } => AWAIT_CONNECT_TIMEOUT,
+                PunchState::AwaitSync { .. } => AWAIT_SYNC_TIMEOUT,
+                PunchState::Delaying { fire_at, .. } => fire_at.saturating_duration_since(now),
+            };
+            if after.is_zero() {
+                self.on_punch_timer(nid);
+            } else {
+                self.timers.set(&e.timer, after);
             }
         }
         nw
     }
-
     fn send_punch_line(
         &mut self,
         to_nid: NodeId,
@@ -287,15 +304,17 @@ impl Daemon {
         (!addrs.is_empty()).then_some((addrs, socks))
     }
 
-    /// Connect each pre-bound socket to the first matching-family
-    /// peer addr. One connect per socket. Failures silent.
-    fn dial_punch(&mut self, nid: NodeId, name: &str, peer_addrs: &[SocketAddr], role: Role) {
-        for ps in self.punch_socks.remove(&nid).unwrap_or_default() {
-            let want_v4 = matches!(ps.local, SocketAddr::V4(_));
-            let Some(&target) = peer_addrs
-                .iter()
-                .find(|a| matches!(a, SocketAddr::V4(_)) == want_v4)
-            else {
+    /// Connect each pre-bound socket to a peer addr. Failures silent.
+    fn dial_punch(
+        &mut self,
+        nid: NodeId,
+        name: &str,
+        socks: Vec<PunchSock>,
+        peer_addrs: &[SocketAddr],
+        role: Role,
+    ) {
+        for ps in socks {
+            let Some(target) = punch_target(ps.local, peer_addrs) else {
                 continue;
             };
             let dial = PunchDial {
@@ -375,5 +394,35 @@ impl Daemon {
     /// Conn is gone for any reason: drop its redial bookkeeping.
     pub(super) fn forget_punch_dial(&mut self, id: ConnId) {
         self.punch_dials.remove(&id);
+    }
+}
+
+/// The first peer-supplied address of the socket's family that is fit to
+/// dial. The list comes from the peer, so loopback and the like are out.
+fn punch_target(local: SocketAddr, peer_addrs: &[SocketAddr]) -> Option<SocketAddr> {
+    peer_addrs
+        .iter()
+        .copied()
+        .find(|a| a.is_ipv4() == local.is_ipv4() && !addr::is_unwanted_dial_addr(a))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::punch_target;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn punch_target_filters() {
+        let sa = |s: &str| s.parse::<SocketAddr>().unwrap();
+        let v4 = sa("0.0.0.0:1");
+        let v6 = sa("[::]:1");
+        let peer = [
+            sa("127.0.0.1:655"),
+            sa("[2001:db8::1]:655"),
+            sa("192.0.2.1:655"),
+        ];
+        assert_eq!(punch_target(v4, &peer), Some(sa("192.0.2.1:655")));
+        assert_eq!(punch_target(v6, &peer), Some(sa("[2001:db8::1]:655")));
+        assert_eq!(punch_target(v4, &peer[..2]), None);
     }
 }
