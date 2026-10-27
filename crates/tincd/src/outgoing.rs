@@ -368,10 +368,7 @@ pub enum ProxyConfig {
         user: Option<String>,
         pass: Option<String>,
     },
-    /// `CONNECT host:port HTTP/1.1\r\n\r\n`. Response is line-based
-    /// (not `tcplen`-exact like SOCKS); `on_conn_readable` intercepts
-    /// the `HTTP/1.1 ` prefix while `allow_request == Id`, which closes
-    /// naturally once `id_h` runs.
+    /// `CONNECT host:port HTTP/1.1\r\n\r\n`.
     Http { host: String, port: u16 },
 }
 
@@ -388,7 +385,7 @@ impl ProxyConfig {
         }
     }
 
-    /// Map to `socks::ProxyType` for `build_request`/`check_response`.
+    /// Map to `socks::ProxyType` for `build_request`.
     /// `None` for non-SOCKS variants (Exec has no handshake; HTTP is
     /// line-based).
     #[must_use]

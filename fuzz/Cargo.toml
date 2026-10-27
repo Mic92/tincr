@@ -46,3 +46,10 @@ path = "fuzz_targets/gro.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "meta_feed"
+path = "fuzz_targets/meta_feed.rs"
+test = false
+doc = false
+bench = false

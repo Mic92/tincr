@@ -97,6 +97,7 @@ fn connects_through_socks5_proxy() {
 /// so the fake sends none either.
 #[test]
 fn connects_through_http_proxy() {
-    let proxy = spawn_proxy(http_connect_handshake, b"HTTP/1.1 200 OK\r\n\r\n");
+    let reply = b"HTTP/1.0 200 Connection established\r\nProxy-agent: tinyproxy\r\n\r\n";
+    let proxy = spawn_proxy(http_connect_handshake, reply);
     connect_through("httpproxy", "http", proxy);
 }

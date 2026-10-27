@@ -20,6 +20,7 @@ use tinc_crypto::os_rng;
 use tinc_proto::Request;
 use tinc_proto::msg::ReqKeyExt;
 use tinc_proto::request::{REQ_KEY_PUNCH, REQ_KEY_PUNCH_SYNC};
+use tinc_sptps::Role;
 
 /// Re-dial backoff after an inbound RST killed a punch dial.
 const REDIAL_BACKOFF: Duration = Duration::from_millis(50);
@@ -39,6 +40,7 @@ pub(crate) struct PunchDial {
     pub(crate) nid: NodeId,
     pub(crate) local: SocketAddr,
     pub(crate) target: SocketAddr,
+    pub(crate) role: Role,
     pub(crate) tries: u8,
 }
 
@@ -156,7 +158,7 @@ impl Daemon {
     pub(super) fn on_punch_timer(&mut self, nid: NodeId) {
         self.punch_timers.remove(&nid);
         let Some(PunchEntry {
-            state: PunchState::Delaying { addrs, .. },
+            state: PunchState::Delaying { addrs, role, .. },
             ..
         }) = self.punches.remove(&nid)
         else {
@@ -170,7 +172,7 @@ impl Daemon {
             .node(nid)
             .map(|n| n.name.clone())
             .unwrap_or_default();
-        self.dial_punch(nid, &name, &addrs);
+        self.dial_punch(nid, &name, &addrs, role);
     }
 
     /// Periodic sweep: drop expired states.
@@ -213,12 +215,12 @@ impl Daemon {
                     let payload = punch::format_sync_payload(nonce);
                     nw |= self.send_punch_line(nid, name, REQ_KEY_PUNCH_SYNC, &payload);
                 }
-                PunchAction::DialAt { at, addrs } => {
+                PunchAction::DialAt { at, addrs, role } => {
                     let now = self.timers.now();
                     let delay = at.saturating_duration_since(now);
                     if delay.is_zero() {
                         self.punches.remove(&nid);
-                        self.dial_punch(nid, name, &addrs);
+                        self.dial_punch(nid, name, &addrs, role);
                     } else {
                         let tid = self.timers.add_after(TimerWhat::Punch(nid), delay);
                         self.punch_timers.insert(nid, tid);
@@ -287,7 +289,7 @@ impl Daemon {
 
     /// Connect each pre-bound socket to the first matching-family
     /// peer addr. One connect per socket. Failures silent.
-    fn dial_punch(&mut self, nid: NodeId, name: &str, peer_addrs: &[SocketAddr]) {
+    fn dial_punch(&mut self, nid: NodeId, name: &str, peer_addrs: &[SocketAddr], role: Role) {
         for ps in self.punch_socks.remove(&nid).unwrap_or_default() {
             let want_v4 = matches!(ps.local, SocketAddr::V4(_));
             let Some(&target) = peer_addrs
@@ -296,40 +298,32 @@ impl Daemon {
             else {
                 continue;
             };
-            self.dial_punch_sock(nid, name, ps, target, 0);
+            let dial = PunchDial {
+                nid,
+                local: ps.local,
+                target,
+                role,
+                tries: 0,
+            };
+            self.dial_punch_sock(name, ps, dial);
         }
     }
 
-    fn dial_punch_sock(
-        &mut self,
-        nid: NodeId,
-        name: &str,
-        ps: PunchSock,
-        target: SocketAddr,
-        tries: u8,
-    ) {
-        let local = ps.local;
-        let Some(sock) = outgoing::punch_connect(ps, target) else {
+    fn dial_punch_sock(&mut self, name: &str, ps: PunchSock, dial: PunchDial) {
+        let Some(sock) = outgoing::punch_connect(ps, dial.target) else {
             return;
         };
-        // Same path as a normal outgoing dial. Pre-set name so
-        // id_h's mismatch check fires.
+        // Pre-set name so id_h's mismatch check fires.
         let fd = OwnedFd::from(sock);
-        let mut conn = Connection::new_meta(fd, fmt_addr(&target), target, self.timers.now());
+        let addr = dial.target;
+        let mut conn = Connection::new_meta(fd, fmt_addr(&addr), addr, self.timers.now());
         conn.connecting = true;
+        conn.role = dial.role;
         name.clone_into(&mut conn.name);
         log::info!(target: "tincd::punch",
-                   "Sim-open dialing {name}: {local} → {target}");
+                   "Sim-open dialing {name}: {} → {addr}", dial.local);
         if let Some(id) = self.register_conn(conn, Io::ReadWrite) {
-            self.punch_dials.insert(
-                id,
-                PunchDial {
-                    nid,
-                    local,
-                    target,
-                    tries,
-                },
-            );
+            self.punch_dials.insert(id, dial);
         }
     }
 
@@ -367,7 +361,14 @@ impl Daemon {
             let Some(ps) = outgoing::punch_rebind(d.local, &self.settings.sockopts) else {
                 continue;
             };
-            self.dial_punch_sock(nid, &name, ps, d.target, d.tries + 1);
+            self.dial_punch_sock(
+                &name,
+                ps,
+                PunchDial {
+                    tries: d.tries + 1,
+                    ..d
+                },
+            );
         }
     }
 
