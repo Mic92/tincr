@@ -713,23 +713,15 @@ impl Daemon {
             nw |= self.send_udp_info(from_nid, &from_name, true);
         }
 
-        // Relay. validkey gate skips unkeyed tunnels (would buffer
-        // and stall). try_tx always.
+        // The payload is from↔to ciphertext, so our own key with `to` is
+        // not needed. A TCPOnly neighbour never gets one.
         if to_nid != self.myself {
-            let validkey = self
-                .dp
-                .tunnels
-                .get(&to_nid)
-                .is_some_and(|t| t.status.validkey);
-            if validkey {
-                log::debug!(target: "tincd::net",
-                            "Relaying SPTPS_PACKET {from_name} → {} \
-                             ({} bytes)",
-                            self.node_log_name(to_nid), ct.len());
-                nw |= self
-                    .send_sptps_data_relay(to_nid, from_nid, 0, Some(ct))
-                    .needs_write;
-            }
+            log::debug!(target: "tincd::net",
+                        "Relaying SPTPS_PACKET {from_name} → {} ({} bytes)",
+                        self.node_log_name(to_nid), ct.len());
+            nw |= self
+                .send_sptps_data_relay(to_nid, from_nid, 0, Some(ct))
+                .needs_write;
             nw |= self.try_tx(to_nid, true);
             return nw;
         }
