@@ -26,6 +26,7 @@ use tinc_crypto::sign::SigningKey;
 use tinc_device::{Device, DeviceArena, GroBucket};
 use tinc_proto::Subnet;
 
+use crate::clock;
 use crate::compress;
 use crate::control::{ControlSocket, generate_cookie, write_pidfile};
 use crate::dispatch::myself_options_from_config;
@@ -920,7 +921,7 @@ impl Daemon {
             // Seed with now: the first `on_ping_tick` (after
             // `pingtimeout` seconds) sees a delta of `pingtimeout`,
             // well under the `2*30` suspend-detect threshold.
-            last_periodic_run_time: timers.now(),
+            last_periodic_run_time: clock::boottime(),
             iface,
             script_worker: ScriptWorker::new(),
             overwrite_mac,
