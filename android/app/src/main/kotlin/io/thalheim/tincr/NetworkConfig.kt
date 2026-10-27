@@ -14,6 +14,7 @@ data class NetworkConfig(
     val dnsServers: List<String>,
     val searchDomains: List<String>,
     val mtu: Int,
+    val logLevel: Int = 2,
 ) {
     val name: String?
         get() = File(dir, "tinc.conf").takeIf { it.isFile }?.useLines { lines ->
@@ -31,6 +32,7 @@ data class NetworkConfig(
             val dns = mutableListOf<String>()
             val domains = mutableListOf<String>()
             var mtu = 1400
+            var logLevel = 2
             var network: String? = null
             var inviter: String? = null
 
@@ -49,10 +51,11 @@ data class NetworkConfig(
                         "dns" -> dns.add(value)
                         "domain" -> domains.add(value)
                         "mtu" -> value.toIntOrNull()?.let { mtu = it }
+                        "loglevel" -> value.toIntOrNull()?.let { logLevel = it }
                     }
                 }
             }
-            return NetworkConfig(dir, network, inviter, addresses, routes, dns, domains, mtu)
+            return NetworkConfig(dir, network, inviter, addresses, routes, dns, domains, mtu, logLevel)
         }
 
         private fun cidr(s: String): CidrAddr? {

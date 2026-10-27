@@ -29,6 +29,7 @@ class TincrVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
     private var daemon: TincdRunner? = null
     private var netCallback: ConnectivityManager.NetworkCallback? = null
+    private var fdServer: TunFdServer? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -51,10 +52,18 @@ class TincrVpnService : VpnService() {
         }
         this.tun = tun
 
-        val fdServer = TunFdServer(TUN_SOCKET, tun.fileDescriptor)
-        daemon = TincdRunner(this, config).also { it.start() }
+        val server = TunFdServer(TUN_SOCKET, tun.fileDescriptor).also { fdServer = it }
+        val runner = TincdRunner(this, config).also { daemon = it }
+        runner.start()
         // tincd connects to @tincr-tun and receives the tun fd.
-        fdServer.serveOnce()
+        val served = server.serveOnce(30_000) { runner.alive }
+        fdServer = null
+        if (!served) {
+            Log.e(TAG, "tincd never picked up the tun fd")
+            stopVpn()
+            stopSelf()
+            return
+        }
         watchNetwork(config)
         running = true
     }
@@ -65,6 +74,8 @@ class TincrVpnService : VpnService() {
             Builder()
                 .setSession("tincr")
                 .setMtu(config.mtu)
+                // tincd runs under our UID. Its own sockets must not loop into the tun.
+                .addDisallowedApplication(packageName)
                 .apply {
                     config.addresses.forEach { addAddress(it.address, it.prefix) }
                     config.routes.forEach { addRoute(it.address, it.prefix) }
@@ -100,6 +111,8 @@ class TincrVpnService : VpnService() {
 
     private fun stopVpn() {
         running = false
+        fdServer?.close()
+        fdServer = null
         netCallback?.let {
             getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it)
         }

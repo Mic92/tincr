@@ -76,9 +76,8 @@ class MainActivity : ComponentActivity() {
             while (true) {
                 val running = TincrVpnService.running
                 val (nodes, tail) = withContext(Dispatchers.IO) {
-                    val f = File(netDir, "tincd.log")
                     (if (running) TincCtl(netDir).nodes() else emptyMap()) to
-                        (if (f.isFile) f.readLines().takeLast(200).joinToString("\n") else "(no log)")
+                        DaemonLog(netDir).tail(200)
                 }
                 state = homeState(nodes, running)
                 log = tail
