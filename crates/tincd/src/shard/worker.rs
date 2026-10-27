@@ -202,9 +202,9 @@ fn run(
 
         let mut punted = false;
         let mut gro = Some(mem::take(&mut gro_spare));
-        for fd in udp {
+        for (sock, fd) in (0u8..).zip(udp) {
             punted |= rx_batch(
-                fd,
+                (fd, sock),
                 &mut tun,
                 &mut gro,
                 snap.as_deref(),
@@ -356,7 +356,7 @@ fn tx_super(snap: Option<&TxSnapshot>, punt: &PuntQueue, tx: &mut TxState, count
 
 /// One `recvmmsg` + fast-path dispatch. Returns whether anything was punted.
 fn rx_batch(
-    udp: &OwnedFd,
+    (udp, sock): (&OwnedFd, u8),
     tun: &mut Box<dyn Device + Send>,
     gro: &mut Option<GroBucket>,
     snap: Option<&TxSnapshot>,
@@ -406,7 +406,7 @@ fn rx_batch(
             continue;
         }
         let Some(src) = src else { continue };
-        punted |= punt.push(pkt, Some(unmap(src)));
+        punted |= punt.push(pkt, Some((unmap(src), sock)));
     }
     punted
 }

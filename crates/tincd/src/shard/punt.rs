@@ -21,8 +21,9 @@ const PUNT_CAP: usize = 256;
 pub(crate) struct PuntPkt {
     pub buf: Box<[u8; PUNT_SLOT]>,
     pub len: u16,
-    /// `Some` = UDP datagram from this source; `None` = TUN frame.
-    pub src: Option<SocketAddr>,
+    /// `Some` = UDP datagram from this source on this listener;
+    /// `None` = TUN frame.
+    pub src: Option<(SocketAddr, u8)>,
 }
 
 pub(crate) struct PuntQueue {
@@ -60,7 +61,7 @@ impl PuntQueue {
     }
 
     /// `false` = ring full, packet dropped.
-    pub(crate) fn push(&self, pkt: &[u8], src: Option<SocketAddr>) -> bool {
+    pub(crate) fn push(&self, pkt: &[u8], src: Option<(SocketAddr, u8)>) -> bool {
         debug_assert!(pkt.len() <= PUNT_SLOT);
         let mut q = self.q.lock().unwrap_or_else(PoisonError::into_inner);
         if q.full.len() >= PUNT_CAP || pkt.len() > PUNT_SLOT {
@@ -116,10 +117,10 @@ mod tests {
     #[test]
     fn push_pop_roundtrip() {
         let q = PuntQueue::new();
-        assert!(q.push(b"hello", Some(addr())));
+        assert!(q.push(b"hello", Some((addr(), 0))));
         let p = q.pop().unwrap();
         assert_eq!(&p.buf[..usize::from(p.len)], b"hello");
-        assert_eq!(p.src, Some(addr()));
+        assert_eq!(p.src, Some((addr(), 0)));
         q.recycle(p.buf);
         assert!(q.pop().is_none());
     }
@@ -137,11 +138,11 @@ mod tests {
     #[test]
     fn freelist_reuses_buffers() {
         let q = PuntQueue::new();
-        assert!(q.push(b"a", Some(addr())));
+        assert!(q.push(b"a", Some((addr(), 0))));
         let p = q.pop().unwrap();
         let ptr = ptr::from_ref(&*p.buf) as usize;
         q.recycle(p.buf);
-        assert!(q.push(b"b", Some(addr())));
+        assert!(q.push(b"b", Some((addr(), 0))));
         let p2 = q.pop().unwrap();
         assert_eq!(std::ptr::from_ref(&*p2.buf) as usize, ptr);
     }

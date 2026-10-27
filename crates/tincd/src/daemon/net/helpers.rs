@@ -20,11 +20,16 @@ use std::sync::atomic;
 /// Re-warn cadence for [`handle_udp_unreachable`].
 const UDP_UNREACHABLE_WARN_INTERVAL: Duration = Duration::from_mins(1);
 
-/// Listener index for sending to `addr`: the first of its family.
-pub(super) fn listener_for(listeners: &[ListenerSlot], addr: &SocketAddr) -> u8 {
+/// Listener index for sending to `addr`: `hint` (where the peer reached
+/// us) if its family fits, else the first of the family.
+pub(super) fn listener_for(listeners: &[ListenerSlot], addr: &SocketAddr, hint: u8) -> u8 {
+    let fits = |s: &ListenerSlot| s.listener.local.is_ipv4() == addr.is_ipv4();
+    if listeners.get(usize::from(hint)).is_some_and(fits) {
+        return hint;
+    }
     listeners
         .iter()
-        .position(|s| s.listener.local.is_ipv4() == addr.is_ipv4())
+        .position(fits)
         .and_then(|i| u8::try_from(i).ok())
         .unwrap_or(0)
 }
@@ -39,7 +44,7 @@ pub(super) fn publish_path(
     let Some(t) = tunnels.get_mut(&nid) else {
         return;
     };
-    let moved = t.path.refresh_target(|a| listener_for(listeners, a));
+    let moved = t.path.refresh_target(|a, h| listener_for(listeners, a, h));
     if let Some(h) = tunnel_handles.get(&nid) {
         if moved {
             *h.udp_addr.lock().unwrap_or_else(PoisonError::into_inner) = t.path.target().cloned();
@@ -54,7 +59,9 @@ impl Daemon {
             return;
         }
         for (nid, t) in &self.dp.tunnels {
-            let derived = t.path.derive_target(|a| listener_for(&self.listeners, a));
+            let derived = t
+                .path
+                .derive_target(|a, h| listener_for(&self.listeners, a, h));
             debug_assert!(t.path.target() == derived.as_ref(), "{nid:?}: stale target");
             if let Some(h) = self.tunnel_handles.get(nid) {
                 debug_assert!(t.status.validkey, "{nid:?}: fast path outlived its session");
@@ -224,9 +231,10 @@ mod tests {
         let nid = NodeId(42);
         let now = Instant::now();
         let mut t = TunnelState::default();
-        t.path.on_authenticated_rx("10.0.0.1:655".parse().unwrap());
+        t.path
+            .on_authenticated_rx("10.0.0.1:655".parse().unwrap(), 0);
         let _ = t.path.on_probe_reply(1400, now);
-        assert!(t.path.refresh_target(|_| 0));
+        assert!(t.path.refresh_target(|_, _| 0));
         tunnels.insert(nid, t);
 
         let err = io::Error::from_raw_os_error(101);

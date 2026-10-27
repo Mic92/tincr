@@ -301,7 +301,7 @@ impl Daemon {
             // Taken back below before the next iteration so the
             // local `gro` owns it across the loop.
             self.dp.gro_bucket = gro.take();
-            self.handle_incoming_vpn_packet(pkt, peer);
+            self.handle_incoming_vpn_packet(pkt, peer, i);
             gro = self.dp.gro_bucket.take();
         }
         // Restore before gro_flush takes &mut self.
@@ -345,7 +345,7 @@ impl Daemon {
             };
             if let Some(buf) = p.buf.get_mut(..usize::from(p.len)) {
                 match p.src {
-                    Some(src) => self.handle_incoming_vpn_packet(buf, Some(src)),
+                    Some((src, sock)) => self.handle_incoming_vpn_packet(buf, Some(src), sock),
                     None => nw |= self.forward_packet(buf, None),
                 }
             }
@@ -356,7 +356,7 @@ impl Daemon {
         }
     }
 
-    fn handle_incoming_vpn_packet(&mut self, pkt: &[u8], peer: Option<SocketAddr>) {
+    fn handle_incoming_vpn_packet(&mut self, pkt: &[u8], peer: Option<SocketAddr>, sock: u8) {
         let ids = pkt.split_first_chunk::<6>().and_then(|(dst, rest)| {
             let (src, ct) = rest.split_first_chunk::<6>()?;
             Some((dst, src, ct))
@@ -448,7 +448,7 @@ impl Daemon {
                 .entry(from_nid)
                 .or_default()
                 .path
-                .on_authenticated_rx(src)
+                .on_authenticated_rx(src, sock)
         {
             log::debug!(target: "tincd::net", "UDP address of {from_name} is {src}");
             self.publish_path(from_nid);
