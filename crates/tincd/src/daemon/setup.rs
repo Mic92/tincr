@@ -191,6 +191,26 @@ fn expand_name(name: &str) -> Result<String, String> {
 /// `shards > 1` on a Linux multi-queue TUN).
 type ShardTuns = Vec<Box<dyn Device + Send>>;
 
+/// The clone device a kernel TUN/TAP is opened through (`Device`, else
+/// `/dev/net/tun`). `None` for device types that open nothing by path at
+/// runtime.
+pub(super) fn device_node(config: &tinc_conf::Config) -> Option<PathBuf> {
+    if !cfg!(any(target_os = "linux", target_os = "android")) {
+        return None;
+    }
+    let ty = config
+        .lookup("DeviceType")
+        .next()?
+        .get_str()
+        .to_ascii_lowercase();
+    matches!(ty.as_str(), "tun" | "tap").then(|| {
+        config.lookup("Device").next().map_or_else(
+            || PathBuf::from("/dev/net/tun"),
+            |e| PathBuf::from(e.get_str()),
+        )
+    })
+}
+
 #[cfg_attr(
     not(any(target_os = "linux", target_os = "android")),
     expect(unused_variables)
@@ -251,11 +271,13 @@ fn open_device(
         }
         #[cfg(any(target_os = "linux", target_os = "android"))]
         Some("tun") => {
+            let node = device_node(config).unwrap_or_default();
             // Real kernel TUN via `/dev/net/tun` + TUNSETIFF; needs `CAP_NET_ADMIN` (the
             // netns harness grants it in a userns via bwrap). `Interface = NAME` attaches
             // to a precreated persistent device, which the netns test then moves into a
             // child netns (the fd binding survives); unset lets the kernel pick.
             let cfg = tinc_device::DeviceConfig {
+                device: Some(node.display().to_string()),
                 iface: config
                     .lookup("Interface")
                     .next()
@@ -284,7 +306,7 @@ fn open_device(
                 }
             }
             let tun = tinc_device::Tun::open(&cfg)
-                .map_err(|e| SetupError::io("open TUN device /dev/net/tun", e))?;
+                .map_err(|e| SetupError::io(format!("open TUN device {}", node.display()), e))?;
             Box::new(tun)
         }
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -292,16 +314,17 @@ fn open_device(
             // TODO: auto-derive tap when Mode != router and
             // DeviceType is unset. We only handle the explicit
             // form here; the cross-impl test sets it explicitly.
+            let node = device_node(config).unwrap_or_default();
             let cfg = tinc_device::DeviceConfig {
+                device: Some(node.display().to_string()),
                 iface: config
                     .lookup("Interface")
                     .next()
                     .map(|e| e.get_str().to_owned()),
                 mode: tinc_device::Mode::Tap,
-                ..Default::default()
             };
             let tun = tinc_device::Tun::open(&cfg)
-                .map_err(|e| SetupError::io("open TAP device /dev/net/tun", e))?;
+                .map_err(|e| SetupError::io(format!("open TAP device {}", node.display()), e))?;
             Box::new(tun)
         }
         #[cfg(target_os = "macos")]
@@ -762,6 +785,7 @@ impl Daemon {
         settings.sockopts.shard_group = n_shards > 1;
 
         // device
+        let clone_node = device_node(&config);
         let (device, shard_tuns) = open_device(&config, n_shards, settings.shards.is_some())?;
         // open_device may have fallen back to a single queue.
         #[cfg_attr(not(target_os = "linux"), expect(unused_variables))]
@@ -956,6 +980,7 @@ impl Daemon {
             mac_table: HashMap::new(),
             mac_leases: mac_lease::MacLeases::default(),
             config_subnets,
+            device_node: clone_node,
             mac_cap_warned: false,
             age_subnets_timer: None,
             dns,
@@ -1121,6 +1146,24 @@ mod tests {
             .collect();
         c.merge(entries);
         c
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn device_node_honours_device() {
+        let tun = Some(PathBuf::from("/dev/net/tun"));
+        for (lines, want) in [
+            (&["DeviceType = tun"][..], tun.clone()),
+            (&["DeviceType = TAP"], tun),
+            (
+                &["DeviceType = tun", "Device = /dev/tun"],
+                Some("/dev/tun".into()),
+            ),
+            (&["DeviceType = fd", "Device = 3"], None),
+            (&[], None),
+        ] {
+            assert_eq!(device_node(&cfg_from(lines)), want, "{lines:?}");
+        }
     }
 
     /// Own host file SPTPS modes must not become defaults for other peers.

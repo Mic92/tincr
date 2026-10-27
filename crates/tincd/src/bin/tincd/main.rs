@@ -210,15 +210,9 @@ fn main() -> ExitCode {
         bound.chrooted(&args.confbase);
     }
 
-    // The Linux device path is hard-coded /dev/net/tun (re-open mid-run
-    // is theoretical; upstream unveils it, we match); dummy/fd device
-    // types pass None.
     let sandbox_paths = sandbox::Paths {
         confbase: args.confbase.clone(),
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        device: Some("/dev/net/tun".into()),
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        device: None,
+        device: bound.device_node().map(Path::to_path_buf),
         logfile: args.logfile.clone(),
         pidfile: args.pidfile.clone(),
         unixsocket: args.socket.clone(),
