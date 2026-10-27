@@ -290,10 +290,6 @@ pub(crate) struct Portable {
     sock: Socket,
 }
 
-#[cfg_attr(
-    all(not(test), any(target_os = "linux", target_os = "android")),
-    expect(dead_code)
-)]
 impl Portable {
     /// Build from a dup of the listener's UDP socket.
     ///
@@ -306,10 +302,7 @@ impl Portable {
         })
     }
 
-    /// Borrow the dup'd socket. `macos::Fast` calls `as_raw_fd()` on
-    /// it for the `sendmsg_x` syscall; otherwise the field stays
-    /// encapsulated for `Portable`'s own send loop.
-    #[cfg(target_os = "macos")]
+    /// Borrow the dup'd socket for the batching syscalls of `Fast`.
     pub(crate) const fn sock(&self) -> &Socket {
         &self.sock
     }

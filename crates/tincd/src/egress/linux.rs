@@ -12,28 +12,28 @@
 //! the encode, so we trade the micro-optimization for zero `unsafe`.
 //! Re-check `rust_vs_c_throughput` if this is ever suspect.
 //!
-//! No fallback: kernel ≥4.18 floor. `ENOPROTOOPT` panics rather than
-//! silently degrading to per-frame sendto.
+//! The kernel rejects GSO with `EIO` on xfrm routes and, before 6.11, on
+//! devices without TX checksum offload, and with `ENOPROTOOPT` before
+//! 4.18. Either latches this egress to per-frame sendto.
 
 #![forbid(unsafe_code)]
 
 use std::io;
 use std::io::IoSlice;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 
 use nix::errno::Errno;
 use nix::sys::socket::{ControlMessage, MsgFlags, SockaddrStorage, sendmsg};
 use socket2::Socket;
 
-use super::{EgressBatch, UdpEgress};
+use super::{EgressBatch, Portable, UdpEgress};
 
 /// `UDP_SEGMENT` egress. Linux ≥4.18 (`bec1f6f69736`).
 pub(crate) struct Fast {
-    /// `dup(2)` of the listener's UDP socket. Same file description
-    /// as the `recvmmsg` side — same bound addr, same `SO_BINDTODEVICE`,
-    /// same `IP_TOS` (the daemon's `set_udp_tos` sets it on the
-    /// listener fd, which is the same FILE DESCRIPTION).
-    sock: Socket,
+    /// Per-frame sender over a dup of the listener's UDP socket, which
+    /// shares its bound addr, `SO_BINDTODEVICE` and `IP_TOS`.
+    fallback: Portable,
+    gso_off: bool,
 }
 
 impl Fast {
@@ -43,64 +43,55 @@ impl Fast {
     /// `io::Error` from `dup(2)` (fd exhaustion).
     pub(crate) fn new(udp: &Socket) -> io::Result<Self> {
         Ok(Self {
-            sock: udp.try_clone()?,
+            fallback: Portable::new(udp)?,
+            gso_off: false,
         })
     }
 }
 
 impl UdpEgress for Fast {
     fn send_batch(&mut self, b: &EgressBatch<'_>) -> io::Result<()> {
-        // count=1: skip the cmsg. The kernel's GSO branch only fires for `datalen >
-        // gso_size` anyway, and this is the common case (single ICMP/ARP/control
-        // frame; the batch is only armed for drains >1). `frames[..last_len]` makes
-        // the `frames.len() == last_len` invariant local.
-        if b.count == 1 {
-            let frame = b
-                .frames
-                .get(..usize::from(b.last_len))
-                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-            return self.sock.send_to(frame, b.dst).map(|_| ());
+        self.send_batch_with(b, |fd, iov, cmsg, dst| {
+            sendmsg(fd, iov, cmsg, MsgFlags::empty(), Some(dst)).map(|_| ())
+        })
+    }
+}
+
+impl Fast {
+    fn send_batch_with<F>(&mut self, b: &EgressBatch<'_>, submit: F) -> io::Result<()>
+    where
+        F: FnOnce(
+            RawFd,
+            &[IoSlice<'_>],
+            &[ControlMessage<'_>],
+            &SockaddrStorage,
+        ) -> nix::Result<()>,
+    {
+        // count=1: the kernel's GSO branch only fires for `datalen > gso_size`
+        // anyway, and this is the common case.
+        if b.count == 1 || self.gso_off {
+            return self.fallback.send_batch(b);
         }
 
-        // GSO path: one iovec over the dense run, split by the kernel at `b.stride`;
-        // the last segment may be shorter. `b.frames` is exactly `(count-1)*stride +
-        // last_len` with no gaps, which the split depends on. The daemon already keeps
-        // `stride` within PMTU (EMSGSIZE here means it shrank mid-flight and
-        // `on_emsgsize` handles it), `count ≤ DEVICE_DRAIN_CAP < UDP_MAX_SEGMENTS`,
-        // and never sets `SO_NO_CHECK`. `dst` is a cached `socket2::SockAddr`,
-        // converted via `std::net::SocketAddr` for nix on the stack.
+        // One iovec over the dense run, split by the kernel at `b.stride`.
+        // `b.frames` is exactly `(count-1)*stride + last_len` with no gaps.
+        // EMSGSIZE means the PMTU shrank mid-flight and `on_emsgsize` handles it.
         let dst = SockaddrStorage::from(
             b.dst
                 .as_socket()
                 .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?,
         );
-
         let iov = [IoSlice::new(b.frames)];
         let cmsg = [ControlMessage::UdpGsoSegments(&b.stride)];
-
-        // `flags=0`: the socket is already non-blocking; EWOULDBLOCK
-        // surfaces as `Errno::EAGAIN`.
-        if let Err(e) = sendmsg(
-            self.sock.as_raw_fd(),
-            &iov,
-            &cmsg,
-            MsgFlags::empty(),
-            Some(&dst),
-        ) {
-            // ENOPROTOOPT: kernel <4.18, doesn't recognize
-            // UDP_SEGMENT. Deployment policy excludes this; panic
-            // with a clear message rather than silently dropping.
-            // The throughput gate would eventually flag it but the
-            // failure is loud enough to halt on.
-            assert_ne!(
-                e,
-                Errno::ENOPROTOOPT,
-                "kernel rejects UDP_SEGMENT cmsg (requires Linux ≥4.18; \
-                 no Linux fallback ladder)"
-            );
-            return Err(e.into());
+        match submit(self.fallback.sock().as_raw_fd(), &iov, &cmsg, &dst) {
+            Ok(()) => Ok(()),
+            Err(Errno::EIO | Errno::ENOPROTOOPT) => {
+                log::info!(target: "tincd::net", "UDP GSO unsupported here, sending per frame");
+                self.gso_off = true;
+                self.fallback.send_batch(b)
+            }
+            Err(e) => Err(e.into()),
         }
-        Ok(())
     }
 }
 
@@ -110,6 +101,32 @@ mod tests {
     use super::*;
     use socket2::SockAddr;
     use std::net::UdpSocket;
+    use std::time::Duration;
+
+    /// GSO `EIO` resends the run per frame and latches GSO off.
+    #[test]
+    fn gso_eio_latches_per_frame() {
+        let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        rx.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let tx: Socket = UdpSocket::bind("127.0.0.1:0").unwrap().into();
+        let mut f = Fast::new(&tx).unwrap();
+        let dst = SockAddr::from(rx.local_addr().unwrap());
+        let b = EgressBatch {
+            dst: &dst,
+            frames: b"aaaabb",
+            stride: 4,
+            count: 2,
+            last_len: 2,
+        };
+        f.send_batch_with(&b, |_, _, _, _| Err(Errno::EIO)).unwrap();
+        f.send_batch_with(&b, |_, _, _, _| panic!("GSO retried"))
+            .unwrap();
+        let mut buf = [0u8; 64];
+        for want in [&b"aaaa"[..], b"bb", b"aaaa", b"bb"] {
+            let (n, _) = rx.recv_from(&mut buf).unwrap();
+            assert_eq!(&buf[..n], want);
+        }
+    }
 
     /// `Fast::send_batch` with `count=1` is one plain `sendto` (no
     /// cmsg). Same wire bytes as `Portable`. The seam is transparent
