@@ -4,6 +4,7 @@ use super::*;
 use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
 use nix::unistd::write;
 use std::fs::File;
+use std::sync::atomic::Ordering;
 use tinc_crypto::os_rng;
 use tinc_crypto::sign::SigningKey;
 use tinc_sptps::{Framing, Output, Role};
@@ -558,6 +559,21 @@ fn oversize_request_is_dead() {
     let line = "x".repeat(usize::from(u16::MAX));
     assert!(!conn.send(format_args!("{line}")));
     assert!(conn.dead);
+}
+
+/// Sending past the rekey threshold starts an in-band KEX.
+#[test]
+fn send_rekeys_meta_sptps() {
+    let (mut conn, _alice, _wr) = sptps_conn_pair();
+    let sptps = conn.sptps.as_deref_mut().unwrap();
+    let due = sptps.out_key_base() + tinc_sptps::SEAL_REKEY_THRESHOLD;
+    sptps.outseqno_handle().store(due, Ordering::Relaxed);
+    assert!(conn.send(format_args!("8")));
+    let sptps = conn.sptps.as_deref_mut().unwrap();
+    assert!(
+        sptps.force_kex(&mut os_rng()).is_err(),
+        "KEX already in flight"
+    );
 }
 
 /// No `\n` appended; 0x0a mid-body left alone.
