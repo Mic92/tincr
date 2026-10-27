@@ -9,6 +9,7 @@ use crate::tunnel::TunnelState;
 
 use super::ListenerSlot;
 use super::helpers;
+use super::sptps::inherit_tos;
 use crate::egress::TxBatch;
 use crate::graph::Graph;
 use crate::graph::NodeId;
@@ -286,18 +287,16 @@ impl Daemon {
         tunnel_handles: &IntHashMap<NodeId, Arc<TunnelHandles>>,
         now: Instant,
     ) {
-        let Some((b, sock, relay_nid, origlen)) = batch.take() else {
+        let Some(run) = batch.take() else {
             return;
         };
-        // Ship, then let `b` (which borrows `batch.buf`/`batch.dst`)
-        // fall out of scope before `reset` mutates `batch`.
-        let result = {
-            let r = listeners
-                .get_mut(usize::from(sock))
-                .map(|slot| slot.egress.send_batch(&b));
-            let _ = b;
-            r
-        };
+        let (relay_nid, origlen) = (run.relay, run.origlen);
+        if let Some(tos) = run.tos {
+            inherit_tos(listeners, run.sock, run.batch.dst, tos);
+        }
+        let result = listeners
+            .get_mut(usize::from(run.sock))
+            .map(|slot| slot.egress.send_batch(&run.batch));
         batch.reset();
 
         let Some(result) = result else {
@@ -428,6 +427,9 @@ impl Daemon {
         // Listener-gone (reload mid-super) ⇒ slow path; rare.
         // Seqnos already burned by tx_probe — fine, gaps are valid
         // (replay window is a sliding bitmap).
+        if self.dp.tx_batch.sock().is_some_and(|s| s != target.sock) {
+            self.flush_tx_batch();
+        }
         let Some(slot) = self.listeners.get_mut(usize::from(target.sock)) else {
             return false;
         };

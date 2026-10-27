@@ -117,6 +117,8 @@ pub(crate) struct TxBatch {
     /// destination on a different listener (different bound addr)
     /// is a different run.
     sock: u8,
+    /// Outer TOS to set at ship time, `None` to leave the socket's as is.
+    tos: Option<u8>,
     /// The relay node whose `pmtu` shrinks on `EMSGSIZE`. Stored
     /// per-run so `flush` can call `on_emsgsize` without re-
     /// resolving the route. `crate::graph::NodeId` is `Copy`.
@@ -141,6 +143,7 @@ impl Default for TxBatch {
             count: 0,
             dst: None,
             sock: 0,
+            tos: None,
             relay: NodeId(0),
             origlen: 0,
         }
@@ -160,18 +163,25 @@ impl TxBatch {
             count: 0,
             dst: None,
             sock: 0,
+            tos: None,
             relay: NodeId(0),
             origlen: 0,
         }
     }
 
     /// True if `frame` (encrypted, with the 12-byte ID prefix) can
-    /// extend the current run. Same dst, same sock, same stride,
+    /// extend the current run. Same dst, sock and TOS, same stride,
     /// previous frame was full-stride (a short tail ends the run —
     /// the kernel's split-at-stride math expects only the LAST
     /// segment short), and under the kernel cap.
     #[must_use]
-    pub(crate) fn can_coalesce(&self, dst: &SockAddr, sock: u8, frame_len: usize) -> bool {
+    pub(crate) fn can_coalesce(
+        &self,
+        dst: &SockAddr,
+        sock: u8,
+        tos: Option<u8>,
+        frame_len: usize,
+    ) -> bool {
         // Empty run coalesces with anything (it BECOMES the run).
         if self.count == 0 {
             return true;
@@ -181,6 +191,7 @@ impl TxBatch {
             return false; // > 64KB can't be a single UDP datagram
         };
         self.sock == sock
+            && self.tos == tos
             && self.count < UDP_MAX_SEGMENTS
             // Total bytes after this stage must stay under the UDP datagram cap;
             // `udp_sendmsg` rejects `len > 0xFFFF` before the GSO cmsg parse. At
@@ -212,11 +223,12 @@ impl TxBatch {
         &mut self,
         dst: &SockAddr,
         sock: u8,
+        tos: Option<u8>,
         relay: NodeId,
         origlen: u16,
         frame: &[u8],
     ) {
-        debug_assert!(self.can_coalesce(dst, sock, frame.len()));
+        debug_assert!(self.can_coalesce(dst, sock, tos, frame.len()));
         #[expect(clippy::cast_possible_truncation)] // ≤ MTU+33
         let frame_len = frame.len() as u16;
         if self.count == 0 {
@@ -225,6 +237,7 @@ impl TxBatch {
             self.stride = frame_len;
             self.dst = Some(dst.clone());
             self.sock = sock;
+            self.tos = tos;
             self.relay = relay;
             self.origlen = origlen;
         }
@@ -233,32 +246,37 @@ impl TxBatch {
         self.count += 1;
     }
 
-    /// Consume the run as an `EgressBatch`. `None` if empty.
-    /// Resets to empty (next `stage` starts a fresh run).
-    ///
-    /// Returns `(batch, sock, relay, origlen)` — the egress sends
-    /// `batch`; the daemon's error handler needs the rest for
-    /// `EMSGSIZE` → `pmtu.on_emsgsize(origlen)`.
+    /// Consume the run. `None` if empty. Call `reset` once the borrow
+    /// of the returned batch is dropped.
     #[must_use]
-    pub(crate) fn take(&mut self) -> Option<(EgressBatch<'_>, u8, NodeId, u16)> {
+    pub(crate) fn take(&mut self) -> Option<Run<'_>> {
         if self.count == 0 {
             return None;
         }
-        let dst = self.dst.as_ref()?; // Some by construction
-        let batch = EgressBatch {
-            dst,
-            frames: &self.buf,
-            stride: self.stride,
-            count: self.count,
-            last_len: self.last_len,
-        };
-        let sock = self.sock;
-        let relay = self.relay;
-        let origlen = self.origlen;
-        // Reset before returning the borrow would conflict; but the
-        // batch borrows `self.buf` and `self.dst`. So: caller drops
-        // the batch, then calls `reset`. Two-step.
-        Some((batch, sock, relay, origlen))
+        let dst = self.dst.as_ref()?;
+        Some(Run {
+            batch: EgressBatch {
+                dst,
+                frames: &self.buf,
+                stride: self.stride,
+                count: self.count,
+                last_len: self.last_len,
+            },
+            sock: self.sock,
+            tos: self.tos,
+            relay: self.relay,
+            origlen: self.origlen,
+        })
+    }
+
+    /// Listener of the staged run, `None` if empty.
+    #[must_use]
+    pub(crate) const fn sock(&self) -> Option<u8> {
+        if self.count == 0 {
+            None
+        } else {
+            Some(self.sock)
+        }
     }
 
     /// Reset to empty. Call after `take()`'s borrow is dropped.
@@ -275,6 +293,16 @@ impl TxBatch {
     pub(crate) const fn count(&self) -> u16 {
         self.count
     }
+}
+
+/// A staged run handed to the egress. `relay` and `origlen` feed
+/// `EMSGSIZE` → `pmtu.on_emsgsize(origlen)`.
+pub(crate) struct Run<'a> {
+    pub batch: EgressBatch<'a>,
+    pub sock: u8,
+    pub tos: Option<u8>,
+    pub relay: NodeId,
+    pub origlen: u16,
 }
 
 /// The floor. `count` × `sendto`. Works on macOS, BSD, anything
@@ -448,32 +476,34 @@ mod tests {
         let mut b = TxBatch::new(4096);
 
         // Empty: accepts anything.
-        assert!(b.can_coalesce(&dst1, 0, 100));
-        assert!(b.can_coalesce(&dst2, 7, 9999));
+        assert!(b.can_coalesce(&dst1, 0, None, 100));
+        assert!(b.can_coalesce(&dst2, 7, None, 9999));
 
         // Stage one frame at stride=100.
-        b.stage(&dst1, 0, NodeId(1), 67, &[0xAA; 100]);
+        b.stage(&dst1, 0, None, NodeId(1), 67, &[0xAA; 100]);
         assert_eq!(b.count(), 1);
 
         // Same dst, same sock, same size: extends.
-        assert!(b.can_coalesce(&dst1, 0, 100));
+        assert!(b.can_coalesce(&dst1, 0, None, 100));
         // Different dst: closes.
-        assert!(!b.can_coalesce(&dst2, 0, 100));
+        assert!(!b.can_coalesce(&dst2, 0, None, 100));
         // Different sock: closes.
-        assert!(!b.can_coalesce(&dst1, 1, 100));
+        assert!(!b.can_coalesce(&dst1, 1, None, 100));
+        // Different TOS: closes.
+        assert!(!b.can_coalesce(&dst1, 0, Some(0x20), 100));
         // Larger frame: closes (would span two stride slots).
-        assert!(!b.can_coalesce(&dst1, 0, 101));
+        assert!(!b.can_coalesce(&dst1, 0, None, 101));
         // Smaller frame: extends as the short tail.
-        assert!(b.can_coalesce(&dst1, 0, 50));
+        assert!(b.can_coalesce(&dst1, 0, None, 50));
 
         // Stage the short tail.
-        b.stage(&dst1, 0, NodeId(1), 17, &[0xBB; 50]);
+        b.stage(&dst1, 0, None, NodeId(1), 17, &[0xBB; 50]);
         assert_eq!(b.count(), 2);
         // After a short tail, NOTHING coalesces — even same-stride.
         // The kernel's split-at-stride math expects only the LAST
         // segment short.
-        assert!(!b.can_coalesce(&dst1, 0, 100));
-        assert!(!b.can_coalesce(&dst1, 0, 50));
+        assert!(!b.can_coalesce(&dst1, 0, None, 100));
+        assert!(!b.can_coalesce(&dst1, 0, None, 50));
     }
 
     /// `TxBatch::take` produces a dense-packed `EgressBatch`. The
@@ -491,11 +521,13 @@ mod tests {
         let mut b = TxBatch::new(4096);
         // 3 frames: two at stride=12, one short at 5. Distinct
         // bytes per-frame so we can match them on the rx side.
-        b.stage(&dst, 0, NodeId(1), 0, b"frame_one_12");
-        b.stage(&dst, 0, NodeId(1), 0, b"frame_two_12");
-        b.stage(&dst, 0, NodeId(1), 0, b"short");
+        b.stage(&dst, 0, None, NodeId(1), 0, b"frame_one_12");
+        b.stage(&dst, 0, None, NodeId(1), 0, b"frame_two_12");
+        b.stage(&dst, 0, None, NodeId(1), 0, b"short");
 
-        let (batch, sock, relay, _origlen) = b.take().unwrap();
+        let Run {
+            batch, sock, relay, ..
+        } = b.take().unwrap();
         assert_eq!(sock, 0);
         assert_eq!(relay, NodeId(1));
         assert_eq!(batch.count, 3);
@@ -531,15 +563,15 @@ mod tests {
 
         // 43 fit (65317 ≤ 65487).
         for _ in 0..43 {
-            assert!(b.can_coalesce(&dst, 0, frame.len()));
-            b.stage(&dst, 0, NodeId(1), 1486, &frame);
+            assert!(b.can_coalesce(&dst, 0, None, frame.len()));
+            b.stage(&dst, 0, None, NodeId(1), 1486, &frame);
         }
         assert_eq!(b.count(), 43);
         // 44th doesn't (66836 > 65487).
-        assert!(!b.can_coalesce(&dst, 0, frame.len()));
+        assert!(!b.can_coalesce(&dst, 0, None, frame.len()));
 
         // The batch as built fits the cap.
-        let (batch, ..) = b.take().unwrap();
+        let Run { batch, .. } = b.take().unwrap();
         assert!(batch.frames.len() <= BATCH_MAX_BYTES);
     }
 
