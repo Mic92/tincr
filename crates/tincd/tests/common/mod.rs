@@ -8,7 +8,8 @@
 #![allow(dead_code)] // not every test binary uses every helper
 
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::net::TcpStream;
+use std::mem;
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -459,22 +460,69 @@ impl PeerFixture {
             .with_conf("PingTimeout = 60");
         node.write_config(&peer, false);
         node.start();
-
         let stream = TcpStream::connect(node.tcp_addr()).expect("TCP connect");
+        Self::handshake(tmp, node, stream, Role::Initiator)
+    }
+
+    /// As [`Self::spawn_with_conf`], but the daemon has `ConnectTo =
+    /// testpeer` and dials us.
+    pub fn spawn_dialled(tag: &str, extra_conf: &str) -> (Self, TcpListener) {
+        let tmp = TmpGuard::new("peer", tag);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let mut peer = Node::new(tmp.path(), "testpeer", PEER_SEED);
+        peer.port = listener.local_addr().unwrap().port();
+        let mut node = Node::new(tmp.path(), "testnode", 0x42).with_conf(extra_conf);
+        node.write_config(&peer, true);
+        node.start();
+        let (stream, _) = listener.accept().expect("accept");
+        (
+            Self::handshake(tmp, node, stream, Role::Responder),
+            listener,
+        )
+    }
+
+    fn handshake(tmp: TmpGuard, node: Node, stream: TcpStream, role: Role) -> Self {
+        let (sptps, _) = Sptps::start(
+            role,
+            Framing::Stream,
+            SigningKey::from_seed(&[PEER_SEED; 32]),
+            node.pubkey(),
+            Vec::new(),
+            0,
+            &mut tinc_crypto::os_rng(),
+        );
+        let mut fixture = Self {
+            tmp,
+            node,
+            stream,
+            sptps,
+            daemon_ack: Vec::new(),
+        };
+        fixture.connect(fixture.stream.try_clone().unwrap(), role);
+        fixture
+    }
+
+    /// Replace the meta connection with `stream`: our ID line, SPTPS as
+    /// `role`, until the daemon's ACK arrives. Returns the old stream.
+    pub fn connect(&mut self, stream: TcpStream, role: Role) -> TcpStream {
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         writeln!(&stream, "0 testpeer 17.7").unwrap();
         assert_eq!(read_line_unbuffered(&stream), b"0 testnode 17.7\n");
 
-        // We dialled, so we are the SPTPS initiator; the label names
-        // initiator first and is NUL-terminated like `proto::tcp_label`.
+        // The label names the initiator first and is NUL-terminated
+        // like `proto::tcp_label`.
+        let label: &[u8] = match role {
+            Role::Initiator => b"tinc TCP key expansion testpeer testnode\0",
+            Role::Responder => b"tinc TCP key expansion testnode testpeer\0",
+        };
         let (sptps, init_output) = Sptps::start(
-            Role::Initiator,
+            role,
             Framing::Stream,
             SigningKey::from_seed(&[PEER_SEED; 32]),
-            node.pubkey(),
-            b"tinc TCP key expansion testpeer testnode\0".to_vec(),
+            self.node.pubkey(),
+            label.to_vec(),
             0,
             &mut tinc_crypto::os_rng(),
         );
@@ -483,23 +531,16 @@ impl PeerFixture {
                 (&stream).write_all(&bytes).expect("send KEX");
             }
         }
+        self.sptps = sptps;
+        let old = mem::replace(&mut self.stream, stream);
 
-        let mut fixture = Self {
-            tmp,
-            node,
-            stream,
-            sptps,
-            daemon_ack: Vec::new(),
-        };
-        // The daemon sends SIG and its ACK back to back; the first
-        // record after HandshakeDone is that ACK.
-        let mut records = fixture.pump(Duration::from_secs(5), |records| !records.is_empty());
-        fixture.daemon_ack = records.swap_remove(0);
-        fixture
-            .stream
+        // The first record after HandshakeDone is the daemon's ACK.
+        let mut records = self.pump(Duration::from_secs(5), |records| !records.is_empty());
+        self.daemon_ack = records.swap_remove(0);
+        self.stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        fixture
+        old
     }
 
     /// All records in one `write(2)`, so the daemon decodes them in one batch.

@@ -6,10 +6,12 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
+use std::thread;
 use std::time::Duration;
 
 use super::common::{
     Node, PeerFixture, is_timeout, node_reachable, node_status, read_cookie, read_line_unbuffered,
+    read_to_eof,
 };
 use std::str;
 use tinc_crypto::sign::SigningKey;
@@ -217,6 +219,26 @@ fn transitive_edge_makes_node_reachable() {
     assert!(log.contains("Node testpeer became reachable"), "{log}");
     assert!(log.contains("Node faraway became reachable"), "{log}");
     assert!(log.contains("Got legacy REQ_KEY from faraway"), "{log}");
+}
+
+/// A peer whose old stream died silently redials: the fresh conn must
+/// win over a stale one, even where the name tie-break would keep it.
+#[test]
+fn stale_conn_loses_to_redial() {
+    let (mut peer, _listener) = PeerFixture::spawn_dialled("stale-redial", "");
+    activate(&mut peer);
+    let _ = peer.drain_records(200);
+    // Past PingTimeout (1 s), so the old conn is no longer a simultaneous dial.
+    thread::sleep(Duration::from_millis(1500));
+
+    let fresh = TcpStream::connect(peer.node.tcp_addr()).expect("TCP connect");
+    let old = peer.connect(fresh, Role::Initiator);
+    activate(&mut peer);
+    old.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    assert!(read_to_eof(&old).is_ok(), "old conn closed");
+    let _ = peer.drain_records(200);
+    let connections = peer.node.ctl().dump(6);
+    assert_eq!(connections.len(), 2, "peer + control: {connections:?}");
 }
 
 /// The daemon has a different public key on file for `testpeer` than
