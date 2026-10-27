@@ -200,6 +200,19 @@ impl Conf {
     }
 
     /// Every connection, for `tinc-auth`. Detached.
+    /// A daemon answering `REQ_LOOKUP_ADDR` from `table` (address →
+    /// `SUBNET OWNER`), the way it routes.
+    pub fn serve_lookup(&self, table: &'static [(&'static str, &'static str)]) {
+        self.serve_forever(move |ctl| {
+            let line = ctl.recv().unwrap();
+            let addr = line.strip_prefix("18 16 ").expect("REQ_LOOKUP_ADDR");
+            if let Some((_, row)) = table.iter().find(|(a, _)| *a == addr) {
+                ctl.send(&format!("18 16 {row}"));
+            }
+            ctl.send("18 16");
+        });
+    }
+
     pub fn serve_forever(&self, script: impl Fn(&mut CtlConn) + Send + Sync + 'static) {
         let (listener, cookie) = self.listen();
         let script = Arc::new(script);

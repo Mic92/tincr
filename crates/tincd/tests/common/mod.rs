@@ -366,7 +366,18 @@ impl Ctl {
 
     /// `REQ_DUMP_*`: rows up to the bare `18 SUBTYPE` terminator.
     pub fn dump(&mut self, subtype: u8) -> Vec<String> {
-        writeln!(self.writer, "18 {subtype}").unwrap();
+        self.dump_with(subtype, "")
+    }
+
+    /// `REQ_LOOKUP_ADDR`: the `SUBNET OWNER` the daemon routes `addr` to.
+    pub fn lookup_addr(&mut self, addr: &str) -> Option<String> {
+        let rows = self.dump_with(16, &format!(" {addr}"));
+        rows.first()
+            .map(|r| r.strip_prefix("18 16 ").unwrap().to_owned())
+    }
+
+    fn dump_with(&mut self, subtype: u8, args: &str) -> Vec<String> {
+        writeln!(self.writer, "18 {subtype}{args}").unwrap();
         let terminator = format!("18 {subtype}");
         let mut rows = Vec::new();
         loop {

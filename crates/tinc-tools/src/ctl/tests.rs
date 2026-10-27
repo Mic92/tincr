@@ -8,12 +8,12 @@ use std::thread;
 /// Round-trip through `from_i32`. Unknown → None.
 #[test]
 fn request_from_i32() {
-    for i in 0..16 {
+    for i in 0..17 {
         let r = CtlRequest::from_i32(i).unwrap();
         assert_eq!(r as i32, i);
     }
     assert_eq!(CtlRequest::from_i32(-1), None);
-    assert_eq!(CtlRequest::from_i32(16), None);
+    assert_eq!(CtlRequest::from_i32(17), None);
     assert_eq!(CtlRequest::from_i32(999), None);
 }
 

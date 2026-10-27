@@ -96,6 +96,11 @@ fn ack_activates_connection_and_subnet_gossip_applies() {
     peer.send_record(add_subnet);
     assert_no_reply(&mut peer, "ADD_SUBNET");
     assert_eq!(ctl.dump(5), ["18 5 192.168.99.0/24 testpeer"]);
+    assert_eq!(
+        ctl.lookup_addr("192.168.99.7").as_deref(),
+        Some("192.168.99.0/24 testpeer")
+    );
+    assert_eq!(ctl.lookup_addr("10.9.9.9"), None);
 
     // Same line incl. nonce → dropped by the seen-request cache.
     peer.send_record(add_subnet);

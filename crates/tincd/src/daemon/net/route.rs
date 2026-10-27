@@ -1,5 +1,6 @@
 use super::super::{ConnId, Daemon, ForwardingMode, RoutingMode, TimerWhat};
 
+use std::net::IpAddr;
 use std::time::Duration;
 
 use crate::route_decide::{self, RouteResult, TtlResult, route};
@@ -83,6 +84,21 @@ impl Daemon {
         });
 
         nw | self.dispatch_route_result(result, data, from)
+    }
+
+    /// The reachable owner `route()` would pick for `addr`, and its subnet.
+    pub(crate) fn route_owner(&self, addr: IpAddr) -> Option<(Subnet, String)> {
+        let reachable = |name: &str| {
+            self.node_ids
+                .get(name)
+                .and_then(|&nid| self.graph.node(nid))
+                .is_some_and(|n| n.reachable)
+        };
+        let (subnet, owner) = match addr {
+            IpAddr::V4(a) => self.subnets.lookup_ipv4(a, reachable)?,
+            IpAddr::V6(a) => self.subnets.lookup_ipv6(&a, reachable)?,
+        };
+        Some((*subnet, owner?.to_owned()))
     }
 
     /// Emit `18 14 LEN\n` plus the full eth frame to each pcap subscriber

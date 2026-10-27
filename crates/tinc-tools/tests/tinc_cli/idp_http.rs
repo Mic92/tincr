@@ -1,5 +1,5 @@
-//! The OIDC provider half of `tinc-auth`, over real HTTP. The subnet
-//! dump assigns 127.0.0.1 to alice so both the bind check and the
+//! The OIDC provider half of `tinc-auth`, over real HTTP. The daemon
+//! routes 127.0.0.1 to alice so both the bind check and the
 //! `/authorize` whois succeed on loopback.
 
 use super::{AuthDaemon, Conf, HttpResponse};
@@ -7,14 +7,11 @@ use base64::Engine;
 use std::fs;
 use std::io::Write;
 use std::net::TcpStream;
+use std::thread;
+use std::time::Duration;
 
 fn serve_subnets(conf: &Conf) {
-    conf.serve_forever(|ctl| {
-        ctl.expect("18 5");
-        ctl.send("18 5 127.0.0.1/32 alice");
-        ctl.send("18 5 10.0.0.0/24 bob");
-        ctl.send("18 5");
-    });
+    conf.serve_lookup(&[("127.0.0.1", "127.0.0.1/32 alice")]);
 }
 
 fn start_idp(conf: &Conf) -> (AuthDaemon, u16) {
@@ -85,6 +82,15 @@ fn idp_full_flow_over_http() {
     assert_eq!(disco.status, 200);
     let d = disco.json();
     assert_eq!(d["issuer"], "http://idp.mesh");
+
+    // A client that declares a body and never sends it holds one worker,
+    // not the IdP.
+    let mut stalled = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stalled
+        .write_all(b"POST /token HTTP/1.1\r\nHost: idp\r\nContent-Length: 2000\r\n\r\n")
+        .unwrap();
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(get(port, "/.well-known/openid-configuration").status, 200);
 
     let jwks = get(port, "/.well-known/jwks.json").json();
     assert_eq!(jwks["keys"][0]["alg"], "RS256");
