@@ -11,11 +11,11 @@
 //! | `Tinc-Subnet` | `10.20.0.2` | the matching subnet entry |
 //!
 //! nginx sets `Remote-Addr: $remote_addr` on a subrequest over a
-//! unix socket. We longest-prefix match it against a fresh
-//! `REQ_DUMP_SUBNETS` dump, same algorithm as `tinc info <addr>`.
-//! Hit → 204 + headers, miss → 401, dead daemon → 503 (fail
-//! closed). One control connection per request. The `auth_request`
-//! rate is "page loads", not per-asset.
+//! unix socket. tincd answers which reachable node it routes that
+//! address to (`REQ_LOOKUP_ADDR`), and only a host-length subnet
+//! counts unless `--min-prefix4/6` says otherwise. Hit → 204 +
+//! headers, miss → 401, dead daemon → 503 (fail closed). One control
+//! connection per request.
 
 // `deny` not `forbid`: `from_raw_fd` for socket activation is the
 // one unsafe call.
@@ -38,8 +38,7 @@ use std::fs;
 use std::process;
 use std::thread;
 use tinc_proto::Subnet;
-use tinc_proto::subnet::DEFAULT_WEIGHT;
-use tinc_tools::ctl::rows::{SubnetRow, strip_weight};
+use tinc_tools::ctl::rows::strip_weight;
 use tinc_tools::ctl::{CtlError, CtlRequest, CtlSocket, DumpRow};
 use tinc_tools::idp::{self, Idp};
 use tinc_tools::names::{Paths, PathsInput};
@@ -50,63 +49,44 @@ const SD_LISTEN_FDS_START: RawFd = 3;
 struct Match {
     owner: String,
     subnet: String,
-    prefix: u8,
 }
 
-/// Dump subnets, longest-prefix match, return the owner. Filters
-/// `(broadcast)`: it has no owner node and must not authenticate.
-fn lookup(paths: &Paths, addr: IpAddr) -> Result<Option<Match>, CtlError> {
-    let find = match addr {
-        IpAddr::V4(a) => Subnet::V4 {
-            addr: a,
-            prefix: 32,
-            weight: DEFAULT_WEIGHT,
-        },
-        IpAddr::V6(a) => Subnet::V6 {
-            addr: a,
-            prefix: 128,
-            weight: DEFAULT_WEIGHT,
-        },
-    };
+/// Shortest prefix that names a node. A wider subnet is a LAN or an exit
+/// node, not an identity.
+#[derive(Clone, Copy)]
+struct MinPrefix {
+    v4: u8,
+    v6: u8,
+}
 
+/// Ask tincd which reachable node it routes `addr` to, so we agree with
+/// the data plane.
+fn lookup(paths: &Paths, addr: IpAddr, min: MinPrefix) -> Result<Option<Match>, CtlError> {
     let mut ctl = CtlSocket::connect(paths)?;
-    ctl.send(CtlRequest::DumpSubnets)?;
-
-    let mut best: Option<Match> = None;
+    ctl.send_str(CtlRequest::LookupAddr, &addr.to_string())?;
+    let mut hit = None;
     loop {
         match ctl.recv_row()? {
             DumpRow::End(_) => break,
             DumpRow::Row(_, body) => {
-                // Malformed rows are skipped, not fatal: on the auth
-                // path failing closed (401) beats a 500.
-                let Ok(row) = SubnetRow::parse(&body) else {
+                let Some((subnet_s, owner)) = body.split_once(' ') else {
                     continue;
                 };
-                let Ok(subnet) = row.subnet.parse::<Subnet>() else {
-                    continue;
+                let ok = match subnet_s.parse::<Subnet>() {
+                    Ok(Subnet::V4 { prefix, .. }) => prefix >= min.v4,
+                    Ok(Subnet::V6 { prefix, .. }) => prefix >= min.v6,
+                    _ => false,
                 };
-                if !subnet.matches(&find, true) {
-                    continue;
-                }
-                if row.owner == "(broadcast)" {
-                    continue;
-                }
-                let prefix = match subnet {
-                    Subnet::V4 { prefix, .. } | Subnet::V6 { prefix, .. } => prefix,
-                    Subnet::Mac { .. } => continue,
-                };
-                if best.as_ref().is_none_or(|b| prefix > b.prefix) {
-                    best = Some(Match {
-                        owner: row.owner,
-                        subnet: strip_weight(&row.subnet).to_owned(),
-                        prefix,
+                if ok {
+                    hit = Some(Match {
+                        owner: owner.to_owned(),
+                        subnet: strip_weight(subnet_s).to_owned(),
                     });
                 }
             }
         }
     }
-
-    Ok(best)
+    Ok(hit)
 }
 
 fn header(name: &str, value: &str) -> Header {
@@ -121,7 +101,7 @@ fn map_user<'a>(map: &'a UserMap, node: &'a str) -> &'a str {
     map.get(node).map_or(node, String::as_str)
 }
 
-fn handle(req: tiny_http::Request, paths: &Paths, netname: &str, map: &UserMap) {
+fn handle(req: tiny_http::Request, paths: &Paths, netname: &str, map: &UserMap, min: MinPrefix) {
     let remote_addr = req
         .headers()
         .iter()
@@ -141,7 +121,7 @@ fn handle(req: tiny_http::Request, paths: &Paths, netname: &str, map: &UserMap) 
         return;
     };
 
-    let resp = match lookup(paths, addr) {
+    let resp = match lookup(paths, addr, min) {
         Ok(Some(m)) => Response::empty(204)
             .with_header(header("Tinc-Node", &m.owner))
             .with_header(header("Tinc-User", map_user(map, &m.owner)))
@@ -183,6 +163,7 @@ struct Args {
     email_domain: Option<String>,
     id_token_ttl: Duration,
     access_token_ttl: Duration,
+    min_prefix: MinPrefix,
 }
 
 fn parse_ttl(s: &str) -> Result<Duration, String> {
@@ -208,6 +189,7 @@ fn parse_args() -> Result<Args, String> {
     let mut email_domain = None;
     let mut id_token_ttl = idp::DEFAULT_ID_TOKEN_TTL;
     let mut access_token_ttl = idp::DEFAULT_ACCESS_TOKEN_TTL;
+    let mut min_prefix = MinPrefix { v4: 32, v6: 128 };
     let mut args = env::args().skip(1);
 
     let next_val = |args: &mut dyn Iterator<Item = String>, flag: &str, glued: Option<&str>| {
@@ -268,6 +250,20 @@ fn parse_args() -> Result<Args, String> {
                     parse_ttl(&next_val(&mut args, "--id-token-ttl", glued.as_deref())?)?;
                 continue;
             }
+            "--min-prefix4" | "--min-prefix6" => {
+                let v = next_val(&mut args, &flag, glued.as_deref())?;
+                let (max, slot) = if flag == "--min-prefix4" {
+                    (32, &mut min_prefix.v4)
+                } else {
+                    (128, &mut min_prefix.v6)
+                };
+                *slot = v
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|n| (1..=max).contains(n))
+                    .ok_or(format!("{flag} must be 1..={max}"))?;
+                continue;
+            }
             "--access-token-ttl" => {
                 access_token_ttl = parse_ttl(&next_val(
                     &mut args,
@@ -319,11 +315,13 @@ fn parse_args() -> Result<Args, String> {
                      \x20               [--idp-listen ADDR --issuer URL --clients FILE]\n\
                      \x20               [--groups FILE] [--map FILE] [--email-domain DOMAIN]\n\
                      \x20               [--id-token-ttl 5m] [--access-token-ttl 1h]\n\
+                     \x20               [--min-prefix4 32] [--min-prefix6 128]\n\
                      \n\
                      nginx auth_request backend. Listens on a unix socket (via\n\
                      systemd socket activation, or --listen-socket). Replies 204 with\n\
-                     Tinc-Node/Tinc-Net/Tinc-Subnet headers when Remote-Addr is\n\
-                     routed by a known tinc subnet, 401 otherwise.\n\
+                     Tinc-Node/Tinc-Net/Tinc-Subnet headers when tincd routes\n\
+                     Remote-Addr to a reachable node through a subnet at least\n\
+                     --min-prefix4/6 long (host routes by default), 401 otherwise.\n\
                      \n\
                      --listen-socket is the socket nginx connects to. tincd's control\n\
                      socket is located via --pidfile (or -n/-c), same as `tinc`.\n\
@@ -357,6 +355,7 @@ fn parse_args() -> Result<Args, String> {
         email_domain,
         id_token_ttl,
         access_token_ttl,
+        min_prefix,
     })
 }
 
@@ -369,8 +368,8 @@ fn load_map(path: Option<&PathBuf>) -> Result<UserMap, String> {
     }
 }
 
-fn whois(paths: &Paths, addr: IpAddr, map: &UserMap) -> idp::Whois {
-    match lookup(paths, addr) {
+fn whois(paths: &Paths, addr: IpAddr, map: &UserMap, min: MinPrefix) -> idp::Whois {
+    match lookup(paths, addr, min) {
         Ok(Some(m)) => Ok(Some(idp::Node {
             user: map_user(map, &m.owner).to_owned(),
             name: m.owner,
@@ -418,7 +417,7 @@ fn build_idp(args: &Args, paths: &Paths, netname: &str) -> Result<Idp, String> {
     ))
 }
 
-fn handle_idp(req: tiny_http::Request, idp: &Idp, paths: &Paths, map: &UserMap) {
+fn handle_idp(req: tiny_http::Request, idp: &Idp, paths: &Paths, map: &UserMap, min: MinPrefix) {
     let now = idp::now_unix();
     let url = req.url().to_owned();
     let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
@@ -433,7 +432,7 @@ fn handle_idp(req: tiny_http::Request, idp: &Idp, paths: &Paths, map: &UserMap) 
         (Method::Get, "/.well-known/jwks.json") => idp.jwks(),
         (Method::Get | Method::Post, "/authorize") => {
             let peer = req.remote_addr().map(SocketAddr::ip);
-            let who = peer.map_or(Err(()), |ip| whois(paths, ip, map));
+            let who = peer.map_or(Err(()), |ip| whois(paths, ip, map, min));
             let query = query.to_owned();
             idp.authorize(&query, who, now)
         }
@@ -464,19 +463,44 @@ fn respond_idp(req: tiny_http::Request, resp: idp::HttpResponse) {
     let _ = req.respond(r);
 }
 
-fn check_idp_bind(paths: &Paths, addr: SocketAddr) -> Result<(), String> {
+fn check_idp_bind(paths: &Paths, addr: SocketAddr, min: MinPrefix) -> Result<(), String> {
     let name = tinc_tools::cmd::exchange::get_my_name(paths)
         .map_err(|e| format!("reading Name from tinc.conf: {e}"))?;
-    match lookup(paths, addr.ip()) {
+    if addr.ip().is_unspecified() {
+        return Err("the IdP must bind a mesh address, not a wildcard".to_owned());
+    }
+    match lookup(paths, addr.ip(), min) {
         Ok(Some(m)) if m.owner == name => Ok(()),
         Ok(Some(m)) => Err(format!(
             "{} belongs to node {}, not to this node ({name})",
             addr.ip(),
             m.owner
         )),
-        Ok(None) => Err(format!("{} is not inside a mesh subnet", addr.ip())),
+        Ok(None) => Err(format!("{} is not a mesh address of this node", addr.ip())),
         Err(e) => Err(format!("cannot verify {} against tincd: {e}", addr.ip())),
     }
+}
+
+/// A request that stalls (a declared body never sent) ties up one
+/// worker, not the whole listener.
+const WORKERS: usize = 8;
+
+fn serve_pool(
+    server: Server,
+    handler: impl Fn(tiny_http::Request) + Send + Sync + 'static,
+) -> Vec<thread::JoinHandle<()>> {
+    let server = Arc::new(server);
+    let handler = Arc::new(handler);
+    (0..WORKERS)
+        .map(|_| {
+            let (server, handler) = (Arc::clone(&server), Arc::clone(&handler));
+            thread::spawn(move || {
+                while let Ok(req) = server.recv() {
+                    handler(req);
+                }
+            })
+        })
+        .collect()
 }
 
 fn main() -> ExitCode {
@@ -529,8 +553,8 @@ fn main() -> ExitCode {
         }
     };
 
-    let idp_thread = match &args.idp_listen {
-        None => None,
+    let idp_workers = match &args.idp_listen {
+        None => Vec::new(),
         Some(addr) => {
             let idp = match build_idp(&args, &paths, &netname) {
                 Ok(i) => i,
@@ -539,7 +563,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            if let Err(e) = check_idp_bind(&paths, *addr) {
+            if let Err(e) = check_idp_bind(&paths, *addr, args.min_prefix) {
                 eprintln!("tinc-auth: refusing to serve the IdP: {e}");
                 return ExitCode::FAILURE;
             }
@@ -553,14 +577,9 @@ fn main() -> ExitCode {
             if let Some(bound) = server.server_addr().to_ip() {
                 eprintln!("tinc-auth: IdP listening on {bound}");
             }
-            let paths = paths.clone();
             let idp = Arc::new(idp);
-            let map = Arc::clone(&map);
-            Some(thread::spawn(move || {
-                for req in server.incoming_requests() {
-                    handle_idp(req, &idp, &paths, &map);
-                }
-            }))
+            let (paths, map, min) = (paths.clone(), Arc::clone(&map), args.min_prefix);
+            serve_pool(server, move |req| handle_idp(req, &idp, &paths, &map, min))
         }
     };
 
@@ -577,14 +596,13 @@ fn main() -> ExitCode {
 
     eprintln!("tinc-auth: listening (net={netname})");
 
-    // Sequential: the work per request is one ctl roundtrip (~1 ms).
     // No graceful shutdown. systemd holds the activated socket open
     // across restarts.
-    if let Some(server) = server {
-        for req in server.incoming_requests() {
-            handle(req, &paths, &netname, &map);
-        }
-    } else if let Some(t) = idp_thread {
+    let min = args.min_prefix;
+    let auth_workers = server.map_or_else(Vec::new, |server| {
+        serve_pool(server, move |req| handle(req, &paths, &netname, &map, min))
+    });
+    for t in auth_workers.into_iter().chain(idp_workers) {
         let _ = t.join();
     }
 

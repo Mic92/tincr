@@ -76,8 +76,11 @@ name if the app cares which device it was.
 
 A request from a mesh address gets a 204 with `Tinc-Node`,
 `Tinc-User` (also served as `Remote-User` for consumers that
-expect the generic name), `Tinc-Net` and `Tinc-Subnet` headers. Anything else
-gets a 401. If
+expect the generic name), `Tinc-Net` and `Tinc-Subnet` headers. tincd
+decides the owner the way it routes, so an offline node's address
+never counts, and only host subnets (`/32`, `/128`) identify a node.
+A node whose identity is a wider range needs `--min-prefix4 N` or
+`--min-prefix6 N`. `/0` never counts. Anything else gets a 401. If
 tincd is down, tinc-auth answers 503 and nginx denies the request,
 so a dead daemon never turns into an open door.
 
@@ -287,8 +290,8 @@ role_attribute_path = contains(groups[*], 'admin') && 'Admin' || 'Viewer'
 
 ## When it doesn't work
 
-**The IdP refuses to start.** The `--idp-listen` address is not in
-a subnet this node owns, or tincd isn't up yet. Compare against
+**The IdP refuses to start.** The `--idp-listen` address is a
+wildcard, is not a host subnet this node owns, or tincd isn't up yet. Compare against
 `tinc -n NET dump subnets`, and order the unit after the tinc
 service.
 

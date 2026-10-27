@@ -16,6 +16,7 @@ use crate::conn::Connection;
 use crate::keys;
 use crate::keys::read_ecdsa_public_key;
 use std::fmt;
+use std::net::IpAddr;
 use std::str;
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -139,6 +140,8 @@ pub(crate) enum CtlReq {
     DumpTraffic = 13,
     Pcap = 14,
     Log = 15,
+    /// tincr only: which node the daemon would route an address to.
+    LookupAddr = 16,
 }
 
 impl CtlReq {
@@ -160,6 +163,7 @@ impl CtlReq {
             13 => Self::DumpTraffic,
             14 => Self::Pcap,
             15 => Self::Log,
+            16 => Self::LookupAddr,
             _ => return None,
         })
     }
@@ -188,6 +192,7 @@ pub(crate) const REQ_DISCONNECT: CtlReq = CtlReq::Disconnect;
 pub(crate) const REQ_DUMP_TRAFFIC: CtlReq = CtlReq::DumpTraffic;
 pub(crate) const REQ_LOG: CtlReq = CtlReq::Log;
 pub(crate) const REQ_PCAP: CtlReq = CtlReq::Pcap;
+pub(crate) const REQ_LOOKUP_ADDR: CtlReq = CtlReq::LookupAddr;
 /// Reply-only sentinel, never a request — stays a bare `i32`, not a
 /// `CtlReq` variant.
 const REQ_INVALID: i32 = -1;
@@ -239,6 +244,8 @@ pub(crate) enum DispatchResult {
     /// PREVIOUS level then updates (if level >= 0; negative is
     /// query-only).
     SetDebug(Option<i32>),
+    /// Reply is a one-row dump `SUBNET OWNER`, empty on a miss.
+    LookupAddr(Option<IpAddr>),
     /// Handler failed; caller drops the connection.
     Drop,
 }
@@ -930,6 +937,10 @@ pub(crate) fn handle_control(conn: &mut Connection, line: &[u8]) -> (DispatchRes
             (DispatchResult::Disconnect(name), false)
         }
         Some(REQ_DUMP_TRAFFIC) => (DispatchResult::DumpTraffic, false),
+        Some(REQ_LOOKUP_ADDR) => {
+            let addr = nth_token(line, 2).and_then(|s| s.parse().ok());
+            (DispatchResult::LookupAddr(addr), false)
+        }
         Some(REQ_LOG) => {
             // Level is the 3rd token, default 0 if missing. Colorize
             // (4th) ignored: we send bare `args()` from log_tap, no

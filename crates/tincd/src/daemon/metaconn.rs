@@ -27,6 +27,7 @@ use crate::dispatch::REQ_DUMP_EDGES;
 use crate::dispatch::REQ_DUMP_NODES;
 use crate::dispatch::REQ_DUMP_SUBNETS;
 use crate::dispatch::REQ_DUMP_TRAFFIC;
+use crate::dispatch::REQ_LOOKUP_ADDR;
 use crate::dispatch::REQ_PURGE;
 use crate::dispatch::REQ_RELOAD;
 use crate::dispatch::REQ_RETRY;
@@ -182,6 +183,7 @@ impl Daemon {
                 | DispatchResult::DumpTraffic
                 | DispatchResult::Log(_)
                 | DispatchResult::Pcap(_)
+                | DispatchResult::LookupAddr(_)
                 | DispatchResult::SetDebug(_) => {
                     unreachable!("Dump/Reload variants rewritten inline above")
                 }
@@ -399,6 +401,16 @@ impl Daemon {
                 // `terminate()` only touches the matched conn;
                 // the ctl conn `id` is still here.
                 self.ctl_ack(id, REQ_DISCONNECT, result)
+            }
+            DispatchResult::LookupAddr(addr) => {
+                let rows = addr
+                    .and_then(|a| self.route_owner(a))
+                    .map(|(subnet, owner)| {
+                        format!("{} {REQ_LOOKUP_ADDR} {subnet} {owner}", Request::Control)
+                    })
+                    .into_iter()
+                    .collect();
+                self.ctl_send_dump(id, rows, REQ_LOOKUP_ADDR)
             }
             DispatchResult::DumpTraffic => {
                 let rows = self.dump_traffic_rows();

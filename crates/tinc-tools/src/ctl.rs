@@ -76,6 +76,8 @@ pub enum CtlRequest {
     DumpTraffic = 13,
     Pcap = 14,
     Log = 15,
+    /// tincr only: the reachable owner the daemon routes an address to.
+    LookupAddr = 16,
 }
 
 impl CtlRequest {
@@ -101,6 +103,7 @@ impl CtlRequest {
             13 => Self::DumpTraffic,
             14 => Self::Pcap,
             15 => Self::Log,
+            16 => Self::LookupAddr,
             _ => return None,
         })
     }
