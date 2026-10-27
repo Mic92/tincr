@@ -152,7 +152,18 @@ fn prepare(
         }
         None => Command::new(&scriptname),
     };
-    // Inherit daemon env (matches upstream C `system()`); add tinc vars on top.
+    // Inherit the daemon env as C's `system()` does, minus what systemd
+    // meant for tincd alone.
+    for key in [
+        "NOTIFY_SOCKET",
+        "LISTEN_FDS",
+        "LISTEN_PID",
+        "LISTEN_FDNAMES",
+        "WATCHDOG_USEC",
+        "WATCHDOG_PID",
+    ] {
+        cmd.env_remove(key);
+    }
     cmd.envs(env.vars.iter().map(|(k, v)| (k, v)));
     cmd.current_dir(confbase);
     Ok(cmd)

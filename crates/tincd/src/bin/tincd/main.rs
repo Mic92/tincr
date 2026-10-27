@@ -180,6 +180,7 @@ fn main() -> ExitCode {
     // setup_network opens TUN, binds sockets, runs tinc-up. All
     // need root; drop_privs is after.
     let mut bound = match Daemon::setup(
+        args.netname.as_deref(),
         &args.confbase,
         &args.pidfile,
         &args.socket,

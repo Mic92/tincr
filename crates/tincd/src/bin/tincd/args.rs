@@ -32,6 +32,8 @@ pub(crate) const fn debug_level_to_filter(d: u32) -> log::LevelFilter {
 
 #[expect(clippy::struct_excessive_bools)] // independent CLI switches
 pub(crate) struct Args {
+    /// `-n` / `NETNAME`, exported to hook scripts.
+    pub netname: Option<String>,
     pub confbase: PathBuf,
     pub pidfile: PathBuf,
     pub socket: PathBuf,
@@ -379,6 +381,7 @@ where
     }
 
     Ok(Args {
+        netname,
         confbase,
         pidfile,
         socket,

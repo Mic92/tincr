@@ -463,6 +463,7 @@ pub struct Daemon {
     pub(crate) mac_leases: mac_lease::MacLeases,
     /// What the sandbox must leave openable for the device.
     pub(crate) device_node: Option<PathBuf>,
+    pub(crate) netname: Option<String>,
     /// Our `Subnet =` lines as of the last (re)load. Reload diffs these.
     pub(crate) config_subnets: HashSet<Subnet>,
 
@@ -888,18 +889,21 @@ impl Drop for Daemon {
     /// Unlink pidfile + socket. `ControlSocket::drop` already
     /// unlinks the socket; we do the pidfile.
     fn drop(&mut self) {
-        // Subnet-down first (may `ip route del`), then tinc-down
-        // (brings the iface down). Mirror of the setup-time
-        // subnet-up loop.
+        // As C: peers' down-hooks, then our subnet-down, then tinc-down,
+        // each only after everything queued before it has run.
+        let peers: Vec<NodeId> = self
+            .graph
+            .node_ids()
+            .filter(|&n| n != self.myself && self.graph.node(n).is_some_and(|n| n.reachable))
+            .collect();
+        for node in peers {
+            self.run_node_down_scripts(node);
+        }
+        self.script_worker.flush();
         for s in &self.subnets.owned_by(&self.name) {
             self.run_subnet_script_sync(false, &self.name, s);
         }
 
-        // tinc-down before device close (the device's own `Drop`
-        // runs after). Gate on whether tinc-up actually fired -
-        // more correct than checking `!device_standby`: if standby
-        // and a peer was reachable at shutdown, we don't run graph
-        // in Drop, so check the actual state.
         if self.device_enabled {
             self.run_script("tinc-down");
         }

@@ -733,6 +733,7 @@ impl Daemon {
     /// # Panics
     /// If a `SelfPipe` already exists; setup runs once per process.
     pub fn setup(
+        netname: Option<&str>,
         confbase: &Path,
         pidfile: &Path,
         socket: &Path,
@@ -941,6 +942,7 @@ impl Daemon {
             mac_leases: mac_lease::MacLeases::default(),
             config_subnets,
             device_node: clone_node,
+            netname: netname.map(str::to_owned),
             mac_cap_warned: false,
             age_subnets_timer: None,
             dns,

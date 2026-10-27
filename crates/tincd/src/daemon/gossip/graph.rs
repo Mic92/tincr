@@ -3,7 +3,7 @@
 
 use crate::daemon::Daemon;
 
-use crate::graph::{Transition, run_graph};
+use crate::graph::{NodeId, Transition, run_graph};
 use crate::local_addr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -109,21 +109,8 @@ impl Daemon {
                     log::info!(target: "tincd::graph",
                                "Node {name} became unreachable");
 
-                    let name_owned = name.to_owned();
-                    // Read addr before reset clears it.
-                    let addr = self
-                        .dp
-                        .tunnels
-                        .get(&node)
-                        .and_then(|t| t.path.addr())
-                        .or_else(|| self.nodes.get(&node).and_then(|ns| ns.edge_addr));
-
-                    self.run_host_script(false, &name_owned, addr);
-
-                    // subnet-down for every owned subnet.
-                    for s in &self.subnets.owned_by(&name_owned) {
-                        self.run_subnet_script(false, &name_owned, s);
-                    }
+                    // Before reset clears the address.
+                    self.run_node_down_scripts(node);
 
                     // reset_unreachable: sptps_stop + mtu reset +
                     // clear UDP addr.
@@ -150,6 +137,23 @@ impl Daemon {
         // mutation that triggered this call (both call sites do the
         // mutation first, then `run_graph_and_log`).
         self.tx_snap_refresh_graph();
+    }
+
+    /// Queue `host-down`, `hosts/NAME-down` and `subnet-down` for `node`.
+    pub(in crate::daemon) fn run_node_down_scripts(&self, node: NodeId) {
+        let Some(name) = self.graph.node(node).map(|n| n.name.clone()) else {
+            return;
+        };
+        let addr = self
+            .dp
+            .tunnels
+            .get(&node)
+            .and_then(|t| t.path.addr())
+            .or_else(|| self.nodes.get(&node).and_then(|ns| ns.edge_addr));
+        self.run_host_script(false, &name, addr);
+        for s in &self.subnets.owned_by(&name) {
+            self.run_subnet_script(false, &name, s);
+        }
     }
 
     /// One BFS per dispatch batch. See [`Daemon::graph_dirty`].

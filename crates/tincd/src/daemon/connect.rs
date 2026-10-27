@@ -599,7 +599,13 @@ impl Daemon {
                 };
                 log::info!(target: "tincd::conn",
                             "Trying to connect to {name} ({addr}) via proxy exec");
-                let fd = match outgoing::do_outgoing_pipe(cmd, addr, &name, &self.name) {
+                let fd = match outgoing::do_outgoing_pipe(
+                    cmd,
+                    addr,
+                    &name,
+                    &self.name,
+                    self.netname.as_deref(),
+                ) {
                     Ok(fd) => fd,
                     Err(e) => {
                         log::error!(target: "tincd::conn",

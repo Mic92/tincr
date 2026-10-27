@@ -533,6 +533,7 @@ pub(crate) fn do_outgoing_pipe(
     addr: SocketAddr,
     node_name: &str,
     my_name: &str,
+    netname: Option<&str>,
 ) -> io::Result<OwnedFd> {
     // Pre-allocate all strings the child needs before fork. The
     // child only does libc:: pointer ops. CString panics on interior
@@ -554,7 +555,13 @@ pub(crate) fn do_outgoing_pipe(
         .map_err(|_| nul_err("address has interior NUL"))?;
     let port_env = CString::new(format!("REMOTEPORT={}", addr.port()))
         .map_err(|_| nul_err("port has interior NUL"))?;
-    let ours = [addr_env, port_env, name_env, node_env];
+    let mut ours = vec![addr_env, port_env, name_env, node_env];
+    if let Some(net) = netname {
+        ours.push(
+            CString::new(format!("NETNAME={net}"))
+                .map_err(|_| nul_err("netname has interior NUL"))?,
+        );
+    }
     let override_key = |kv: &[u8]| {
         ours.iter().any(|o| {
             let o = o.as_bytes();
@@ -624,7 +631,6 @@ pub(crate) fn do_outgoing_pipe(
                 libc::setsid();
 
                 // execve with pre-built envp; no setenv in the child.
-                // NETNAME omitted (not threaded through yet; same as run_script).
                 libc::execve(sh.as_ptr(), argv.as_ptr(), envp.as_ptr());
 
                 // execve returned → failed. _exit (not exit — exit()
@@ -969,8 +975,14 @@ mod tests {
     /// sees both directions on sock[0].
     #[test]
     fn proxy_exec_roundtrip() {
-        let fd = do_outgoing_pipe("cat", "127.0.0.1:655".parse().unwrap(), "bob", "alice")
-            .expect("do_outgoing_pipe");
+        let fd = do_outgoing_pipe(
+            "cat",
+            "127.0.0.1:655".parse().unwrap(),
+            "bob",
+            "alice",
+            None,
+        )
+        .expect("do_outgoing_pipe");
 
         // Wrap in a UnixStream for ergonomic read/write. fd is a
         // valid AF_UNIX SOCK_STREAM; `From<OwnedFd>` consumes it
@@ -1002,10 +1014,11 @@ mod tests {
     #[test]
     fn proxy_exec_env() {
         let fd = do_outgoing_pipe(
-            "echo \"$NAME $NODE $REMOTEADDRESS $REMOTEPORT\"",
+            "echo \"$NAME $NODE $REMOTEADDRESS $REMOTEPORT $NETNAME\"",
             "10.0.0.1:12345".parse().unwrap(),
             "bob",
             "alice",
+            Some("vpn"),
         )
         .expect("do_outgoing_pipe");
 
@@ -1013,7 +1026,7 @@ mod tests {
         let mut r = BufReader::new(stream);
         let mut line = String::new();
         r.read_line(&mut line).expect("read env line");
-        assert_eq!(line.trim_end(), "alice bob 10.0.0.1 12345");
+        assert_eq!(line.trim_end(), "alice bob 10.0.0.1 12345 vpn");
     }
 
     /// `probe_connecting` on a refused connection returns `Err`. The
