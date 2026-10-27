@@ -21,6 +21,7 @@ use crate::graph::NodeId;
 use crate::keys as hostkeys;
 use rand_core::Rng;
 use std::str;
+use std::time::Duration;
 use tinc_crypto::os_rng;
 
 mod edges;
@@ -157,10 +158,8 @@ impl Daemon {
             .collect()
     }
 
-    /// Re-send to every active conn except `from`. Receivers'
-    /// `seen.check` + the `from` skip = loop break. Rate-limited per
-    /// origin (`FloodLimiter`): over-budget drops the forward only,
-    /// caller's local graph update already happened.
+    /// Re-send to every active conn except `from`. Rate-limited per origin,
+    /// except for the `send_everything` burst right after its ACK.
     pub(super) fn forward_request(&mut self, from: ConnId, body: &[u8]) -> bool {
         // Post-parse; from_utf8 already succeeded.
         let Ok(s) = str::from_utf8(body) else {
@@ -168,8 +167,15 @@ impl Daemon {
                        "forward_request: non-UTF-8 body, dropping");
             return false;
         };
+        let targets = self.broadcast_targets(Some(from));
+        if targets.is_empty() {
+            return false;
+        }
         let now = self.timers.now();
+        let grace = Duration::from_secs(u64::from(self.settings.pingtimeout));
         if let Some(c) = self.conns.get_mut(from)
+            && c.activated_at
+                .is_none_or(|t| now.saturating_duration_since(t) > grace)
             && !c.flood.allow(now)
         {
             if c.flood.should_warn() {
@@ -180,10 +186,6 @@ impl Daemon {
                            crate::seen::FLOOD_RATE_PER_SEC,
                            crate::seen::FLOOD_BURST);
             }
-            return false;
-        }
-        let targets = self.broadcast_targets(Some(from));
-        if targets.is_empty() {
             return false;
         }
         log::debug!(target: "tincd::proto",
