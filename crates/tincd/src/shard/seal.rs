@@ -35,9 +35,8 @@ pub(crate) struct SealOk {
 pub(crate) type SealErr = (NodeId, u16);
 
 /// Seal each chunk at `scratch_in[i*stride..][..lens[i]]` (eth header
-/// included, stripped here; Router offset is always 14), stage into
-/// `batch`, ship when full and at the end. One `ChaPoly` per super;
-/// `tx_scratch` is the slow path's buffer. `prefix` must be 12 bytes.
+/// stripped here), stage into `batch`, ship when full and at the end.
+/// `batch` must be empty or staged for `egress`'s listener.
 ///
 /// # Errors
 /// `EMSGSIZE` from `send_batch` (PMTU shrank mid-super; TCP retransmits).
@@ -51,6 +50,7 @@ pub(crate) fn seal_super(
     batch: &mut TxBatch,
     egress: &mut dyn UdpEgress,
 ) -> Result<SealOk, SealErr> {
+    debug_assert!(batch.sock().is_none_or(|s| s == target.sock));
     let cipher = &target.handles.outcipher;
     let mut bytes = 0u64;
 
@@ -73,12 +73,8 @@ pub(crate) fn seal_super(
         cipher.seal_into(u64::from(seqno), PKT_NORMAL, body, tx_scratch, 16);
         // tx_scratch.len() == 16 + 1 + body_len + 16 == body_len + 33
 
-        // Ship-on-full before stage. `can_coalesce` returns true for
-        // empty, so first iteration always falls through to stage.
-        // `target.sock`: daemon picks the listener's egress; the
-        // sock recorded in `batch` must match the egress passed to
-        // `ship`.
-        if !batch.can_coalesce(&target.dst, target.sock, tx_scratch.len()) {
+        // Ship-on-full before stage. `can_coalesce` returns true for empty.
+        if !batch.can_coalesce(&target.dst, target.sock, None, tx_scratch.len()) {
             ship(batch, egress)?;
         }
         // `origlen` is PRE-encrypt body — what PMTU is measured at.
@@ -88,6 +84,7 @@ pub(crate) fn seal_super(
         batch.stage(
             &target.dst,
             target.sock,
+            None,
             target.to_nid,
             body_len as u16,
             tx_scratch,
@@ -108,16 +105,11 @@ pub(crate) fn seal_super(
 /// `EMSGSIZE` propagates because only it needs caller-side state
 /// (PMTU). UDP is unreliable; dropped frames retransmit at TCP layer.
 fn ship(batch: &mut TxBatch, egress: &mut dyn UdpEgress) -> Result<(), SealErr> {
-    let Some((b, _sock, relay, origlen)) = batch.take() else {
+    let Some(run) = batch.take() else {
         return Ok(());
     };
-    // `b` borrows `batch.buf`; let it fall out of scope before `reset`
-    // mutates. Same scoping as `ship_tx_batch` (device.rs).
-    let r = {
-        let r = egress.send_batch(&b);
-        let _ = b;
-        r
-    };
+    let (relay, origlen) = (run.relay, run.origlen);
+    let r = egress.send_batch(&run.batch);
     batch.reset();
     match r {
         Err(e) if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) => Err((relay, origlen)),

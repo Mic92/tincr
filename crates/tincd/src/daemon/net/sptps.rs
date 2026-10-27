@@ -645,16 +645,17 @@ impl Daemon {
             (&cold_sockaddr, sock)
         };
 
-        if self.settings.priorityinheritance {
-            inherit_tos(&mut self.listeners, sock, sockaddr, self.dp.tx_priority);
-        }
+        let tos = self
+            .settings
+            .priorityinheritance
+            .then_some(self.dp.tx_priority);
 
         // TX batching: stage into `tx_batch` instead of sending when
         // all gates pass; the drain loop ships the run in one sendmsg.
         //   - tx_batch_live: only inside on_device_read's drain loop
         //   - cached.is_some(): cold-path sockaddr is stack-local
         //   - ct.is_none(): hot path only (relay/handshake are rare)
-        // dst/size mismatch → flush + restart. Never worse than per-frame.
+        // dst/size/TOS mismatch → flush + restart. TOS is set at ship time.
         if self.dp.tx_batch_live && ct.is_none() && cached.is_some() {
             let dp = &mut self.dp;
             // origlen for EMSGSIZE → pmtu.on_emsgsize. Same value
@@ -662,7 +663,7 @@ impl Daemon {
             let at_len = len_u16(origlen);
             if !dp
                 .tx_batch
-                .can_coalesce(sockaddr, sock, dp.tx_scratch.len())
+                .can_coalesce(sockaddr, sock, tos, dp.tx_scratch.len())
             {
                 // Disjoint dp fields; ship directly (flush_tx_batch
                 // would reborrow &mut self).
@@ -676,13 +677,16 @@ impl Daemon {
                 );
             }
             dp.tx_batch
-                .stage(sockaddr, sock, relay_nid, at_len, &dp.tx_scratch);
+                .stage(sockaddr, sock, tos, relay_nid, at_len, &dp.tx_scratch);
             return TunnelSendOutcome::default(); // staged; no meta write or immediate UDP send
         }
 
         // Immediate-send path. Hit when: outside the drain loop,
         // or cold path (no cached addr), or relay/
         // handshake (`ct.is_some()`).
+        if let Some(tos) = tos {
+            inherit_tos(&mut self.listeners, sock, sockaddr, tos);
+        }
         match self.send_sptps_udp_immediate(sockaddr, sock, relay_nid, origlen) {
             UdpSubmit::Sent => TunnelSendOutcome {
                 udp_sent: true,
@@ -760,7 +764,12 @@ impl Daemon {
 
 /// Copy inner TOS to outer socket. Without it, all encrypted
 /// traffic gets default DSCP regardless of inner QoS marking.
-fn inherit_tos(listeners: &mut [ListenerSlot], sock: u8, sockaddr: &socket2::SockAddr, prio: u8) {
+pub(super) fn inherit_tos(
+    listeners: &mut [ListenerSlot],
+    sock: u8,
+    sockaddr: &socket2::SockAddr,
+    prio: u8,
+) {
     if let Some(slot) = listeners.get_mut(usize::from(sock))
         && slot.last_tos != prio
     {
