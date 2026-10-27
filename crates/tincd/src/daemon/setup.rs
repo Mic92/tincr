@@ -696,9 +696,7 @@ fn init_control(
 }
 
 impl DataPlane {
-    fn new(device_mode: tinc_device::Mode) -> Self {
-        #[cfg(not(target_os = "linux"))]
-        let _ = device_mode;
+    fn new(supports_super: bool) -> Self {
         Self {
             tunnels: IntHashMap::default(),
             choose_udp_x: 0,
@@ -710,15 +708,7 @@ impl DataPlane {
             udp_rx_batch: Some(net::UdpRxBatch::new()),
             gro_bucket: None,
             gro_bucket_spare: Some(GroBucket::new()),
-            // Linux TUN: vnet_hdr is unconditional since `5cf9b12d`.
-            // TAP/FdTun/BSD/Dummy: trait default returns Unsupported.
-            // Gate here so we never `offer()` into a bucket whose
-            // flush will fail at write — that would silently drop
-            // every coalesced burst.
-            #[cfg(target_os = "linux")]
-            gro_enabled: device_mode == tinc_device::Mode::Tun,
-            #[cfg(not(target_os = "linux"))]
-            gro_enabled: false,
+            gro_enabled: supports_super,
             device_arena: Some(DeviceArena::new(net::DEVICE_DRAIN_CAP)),
             // Lazy: only allocated on first `DrainResult::Super`.
             // TAP and non-Linux backends never produce Super,
@@ -772,6 +762,7 @@ impl Daemon {
         // awkward.
         let iface = device.iface().to_owned();
         let device_mode = device.mode();
+        let supports_super = device.supports_super();
         log::info!(target: "tincd",
                    "Device mode: {device_mode:?}, interface: {iface}");
 
@@ -918,7 +909,7 @@ impl Daemon {
             seen: SeenRequests::new(),
             nodes: IntHashMap::default(),
             edge_addrs: HashMap::new(),
-            dp: DataPlane::new(device_mode),
+            dp: DataPlane::new(supports_super),
             id6_table,
             contradicting_add_edge: 0,
             contradicting_del_edge: 0,

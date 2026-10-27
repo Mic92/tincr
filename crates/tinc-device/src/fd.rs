@@ -29,6 +29,7 @@ use std::path::Path;
 
 use crate::ether::{ETH_HLEN, from_ip_nibble, set_etherheader};
 use crate::{Device, MTU, Mac, Mode, assert_read_buf, read_fd, tun_payload, write_fd};
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
 #[cfg(target_os = "android")]
 use std::os::android::net::SocketAddrExt;
@@ -86,6 +87,9 @@ impl FdTun {
                 (File::from(fd), format!("fd:{}", path.display()))
             }
         };
+        // The daemon drains until EAGAIN, a blocking fd would park it.
+        let flags = OFlag::from_bits_retain(fcntl(&fd, FcntlArg::F_GETFL)?);
+        fcntl(&fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
         Ok(FdTun { fd, device_label })
     }
 }
@@ -281,6 +285,15 @@ mod tests {
     /// Write IP bytes to a pipe, `FdTun` reads at +14, synthesizes
     /// the ethertype at +12, returns len+14. Only byte 0 of the
     /// packet matters (the version nibble); the rest is opaque payload.
+    #[test]
+    fn open_sets_nonblocking() {
+        let (r, _w) = pipe();
+        let mut dev = FdTun::open(FdSource::Inherited(r)).unwrap();
+        let mut buf = [0u8; 2048];
+        let e = dev.read(&mut buf).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
+    }
+
     #[test]
     fn read_ip_via_pipe() {
         // Minimal IPv4-ish packet (`0x45` = version 4, IHL 5;
