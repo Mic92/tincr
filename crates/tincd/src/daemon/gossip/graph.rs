@@ -7,12 +7,23 @@ use crate::graph::{Transition, run_graph};
 use crate::local_addr;
 use std::sync::Arc;
 
+/// A BFS owed after deferred topology changes. Only this module reads
+/// or clears it, so a stale read must go through `flush_graph_dirty`.
+#[derive(Default)]
+pub(crate) struct GraphDirty(bool);
+
+impl GraphDirty {
+    pub(crate) fn mark(&mut self) {
+        self.0 = true;
+    }
+}
+
 impl Daemon {
     /// sssp + diff + mst.
     pub(in crate::daemon) fn run_graph_and_log(&mut self) {
         // Covers any pending `on_add_edge` deferrals from the same
         // batch when called directly (on_del_edge/on_ack/terminate).
-        self.graph_dirty = false;
+        self.graph_dirty = GraphDirty::default();
         let (transitions, mst, routes) = run_graph(&mut self.graph, self.myself, &self.last_routes);
         // Side-table for dump_nodes. Swap-whole: sssp built a fresh Vec.
         // Old Arc drops here (refcount 1, single-thread).
@@ -136,7 +147,7 @@ impl Daemon {
 
     /// One BFS per dispatch batch. See [`Daemon::graph_dirty`].
     pub(in crate::daemon) fn flush_graph_dirty(&mut self) {
-        if self.graph_dirty {
+        if self.graph_dirty.0 {
             self.run_graph_and_log();
         }
     }

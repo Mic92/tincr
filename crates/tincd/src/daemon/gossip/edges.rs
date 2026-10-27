@@ -133,7 +133,7 @@ impl Daemon {
         };
 
         // Defer BFS to end of dispatch batch; see `graph_dirty`.
-        self.graph_dirty = true;
+        self.graph_dirty.mark();
 
         Ok(nw)
     }

@@ -471,11 +471,8 @@ impl Daemon {
 
     /// `FeedResult::Sptps` body: drain SPTPS events in order.
     fn on_feed_sptps(&mut self, id: ConnId, events: Vec<SptpsEvent>) -> FeedDrain {
-        // Order matters: an ADD_EDGE record before a blob can
-        // change reachability that the blob's route reads — so
-        // flush the deferred BFS before each blob. The bulk
-        // send_everything batch (pure ADD_EDGE/ADD_SUBNET, no
-        // blobs) still coalesces to one BFS at the tail.
+        // An ADD_EDGE can change reachability that the next event reads,
+        // so everything but ADD_EDGE/ADD_SUBNET flushes the deferred BFS.
         let mut needs_write = false;
         for ev in events {
             match ev {
@@ -580,6 +577,9 @@ impl Daemon {
                         }
                     };
 
+                    if !matches!(req, Request::AddEdge | Request::AddSubnet) {
+                        self.flush_graph_dirty();
+                    }
                     let result = match req {
                         Request::Ack => self.on_ack(id, body),
                         Request::AddSubnet => self.on_add_subnet(id, body),

@@ -13,8 +13,7 @@
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(unreachable_pub)]
-// Nothing reachable from a socket, TUN fd or meta record may panic
-// (PLAN.md C2). Files that still do carry a `#![expect]` allow-list.
+// Nothing reachable from a socket, TUN fd or meta record may panic.
 #![deny(
     clippy::indexing_slicing,
     clippy::unwrap_used,

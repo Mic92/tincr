@@ -25,6 +25,7 @@ use tinc_crypto::os_rng;
 
 mod edges;
 mod graph;
+pub(crate) use graph::GraphDirty;
 mod keys;
 mod send;
 mod subnets;

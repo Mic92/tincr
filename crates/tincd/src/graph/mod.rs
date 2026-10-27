@@ -12,12 +12,6 @@
 //! direct whenever a direct path appears, even at a worse distance, so
 //! the `via` hint used for UDP hole-punching always points at the last
 //! real relay.
-#![expect(
-    clippy::indexing_slicing,
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use crate::dispatch::ConnOptions;
 use std::collections::{BTreeMap, VecDeque};
@@ -60,7 +54,7 @@ fn sticky_post_pass(
         if old.nexthop == new.nexthop {
             continue;
         }
-        let Some(sticky_w) = sticky_wdist[slot] else {
+        let Some(sticky_w) = sticky_wdist.get(slot).copied().flatten() else {
             // BFS never saw an equal-hop path via old.nexthop → it no
             // longer reaches `n` at this distance. Real reroute.
             continue;
@@ -176,32 +170,35 @@ pub struct Graph {
     weight_order: BTreeMap<(i32, String, String), EdgeId>,
 }
 
-/// Index into the slabs. Slot may be `None` (freed) — hence the
-/// `Option` indirection. Macro because we'd otherwise repeat
-/// `self.edges[e.0 as usize].as_ref().unwrap()` two dozen times, and
-/// half the time it's `as_mut`, and `.expect("live")` everywhere is
-/// noise. Live-slot expectation is documented at each call site by
-/// the surrounding logic (e.g. "just got this ID off the BFS queue").
-macro_rules! slot {
-    ($slab:expr_2021, $id:expr_2021) => {
-        $slab[$id.0 as usize].as_ref().expect("live slot")
-    };
-    (mut $slab:expr_2021, $id:expr_2021) => {
-        $slab[$id.0 as usize].as_mut().expect("live slot")
-    };
+/// Store `v` in a recycled slot (LIFO) or a new one, return its index.
+fn alloc_slot<T>(slab: &mut Vec<Option<T>>, free: &mut Vec<u32>, v: T) -> u32 {
+    while let Some(idx) = free.pop() {
+        if let Some(s) = slab.get_mut(idx as usize)
+            && s.is_none()
+        {
+            *s = Some(v);
+            return idx;
+        }
+    }
+    slab.push(Some(v));
+    #[expect(clippy::cast_possible_truncation)] // a mesh never nears u32::MAX slots
+    let idx = (slab.len() - 1) as u32;
+    idx
 }
 
-/// Reserve a slot in a slab: recycle from `free` (LIFO) or push a new
-/// `None`. Returns the index; caller writes the value.
-fn alloc_slot<T>(slab: &mut Vec<Option<T>>, free: &mut Vec<u32>) -> u32 {
-    if let Some(idx) = free.pop() {
-        debug_assert!(slab[idx as usize].is_none());
-        idx
-    } else {
-        let idx = u32::try_from(slab.len()).expect("u32 slots");
-        slab.push(None);
-        idx
-    }
+/// `to_name` of a slab edge, `""` for a freed slot.
+fn edge_to_name(edges: &[Option<Edge>], e: EdgeId) -> &str {
+    edges
+        .get(e.0 as usize)
+        .and_then(Option::as_ref)
+        .map_or("", |e| e.to_name.as_str())
+}
+
+/// Slot indices zipped with live payloads.
+fn live<T>(slab: &[Option<T>]) -> impl Iterator<Item = (u32, &T)> {
+    (0u32..)
+        .zip(slab)
+        .filter_map(|(i, s)| s.as_ref().map(|v| (i, v)))
 }
 
 impl Graph {
@@ -210,116 +207,102 @@ impl Graph {
         Self::default()
     }
 
+    fn node_mut(&mut self, n: NodeId) -> Option<&mut Node> {
+        self.nodes.get_mut(n.0 as usize)?.as_mut()
+    }
+
+    fn edge_mut(&mut self, e: EdgeId) -> Option<&mut Edge> {
+        self.edges.get_mut(e.0 as usize)?.as_mut()
+    }
+
+    fn name(&self, n: NodeId) -> String {
+        self.node(n).map(|n| n.name.clone()).unwrap_or_default()
+    }
+
     /// `node_tree.insert`. `reachable` defaults true (steady state).
     /// Recycles a freed slot if one exists (LIFO).
-    ///
-    /// # Panics
-    /// On more than `u32::MAX` nodes — not a realistic limit; tinc
-    /// meshes are tens to hundreds.
     pub fn add_node(&mut self, name: impl Into<String>) -> NodeId {
-        let idx = alloc_slot(&mut self.nodes, &mut self.node_free);
-        self.nodes[idx as usize] = Some(Node {
+        let node = Node {
             name: name.into(),
             edges: Vec::new(),
             reachable: true,
-        });
-        NodeId(idx)
+        };
+        NodeId(alloc_slot(&mut self.nodes, &mut self.node_free, node))
     }
 
     /// `edge_add`: insert into `from.edge_tree` and `edge_weight_tree`,
-    /// link `reverse` if the twin already exists.
-    ///
-    /// # Panics
-    /// On more than `u32::MAX` edges. Not a realistic concern; tinc
-    /// meshes are tens to hundreds of nodes.
+    /// link `reverse` if the twin already exists. Both nodes must be live.
     pub fn add_edge(&mut self, from: NodeId, to: NodeId, weight: i32, options: u32) -> EdgeId {
-        // We don't dedup; per-node list would get two
-        // entries with same `to_name` (binary_search_by → unspecified
-        // match), and weight_order would silently drop the old EdgeId.
         // Daemon discipline holds (on_add_edge does lookup_edge first,
         // on_ack does terminate→del_edge first); this is a tripwire.
         debug_assert!(
             self.lookup_edge(from, to).is_none(),
             "duplicate edge {from:?}→{to:?}"
         );
-        let id = EdgeId(alloc_slot(&mut self.edges, &mut self.edge_free));
-
-        // Find reverse: an edge from `to` whose destination is `from`.
-        let reverse = slot!(self.nodes, to)
-            .edges
+        let reverse = self
+            .node_edges(to)
             .iter()
             .copied()
-            .find(|&eid| slot!(self.edges, eid).to == from);
-        if let Some(r) = reverse {
-            slot!(mut self.edges, r).reverse = Some(id);
-        }
-
-        let to_name = slot!(self.nodes, to).name.clone();
-        let from_name = slot!(self.nodes, from).name.clone();
-
-        self.edges[id.0 as usize] = Some(Edge {
+            .find(|&eid| self.edge(eid).is_some_and(|e| e.to == from));
+        let to_name = self.name(to);
+        let from_name = self.name(from);
+        let edge = Edge {
             from,
             to,
             weight,
             options,
             reverse,
             to_name: to_name.clone(),
-        });
+        };
+        let id = EdgeId(alloc_slot(&mut self.edges, &mut self.edge_free, edge));
+        if let Some(r) = reverse.and_then(|r| self.edge_mut(r)) {
+            r.reverse = Some(id);
+        }
 
         // Per-node edge list, sorted by `to_name`. The cache in `Edge`
         // is what makes this comparator work without borrowing `nodes`.
         let edges = &self.edges;
-        let from_edges = &mut slot!(mut self.nodes, from).edges;
-        let pos = from_edges.partition_point(|&eid| slot!(edges, eid).to_name < to_name);
-        from_edges.insert(pos, id);
+        if let Some(from_node) = self.nodes.get_mut(from.0 as usize).and_then(Option::as_mut) {
+            let pos = from_node
+                .edges
+                .partition_point(|&eid| edge_to_name(edges, eid) < to_name.as_str());
+            from_node.edges.insert(pos, id);
+        }
 
-        // Global weight-ordered index.
         self.weight_order.insert((weight, from_name, to_name), id);
-
         id
     }
 
     /// Delete an edge: unlink the twin's `reverse`, remove from the per-node list
     /// and `weight_order`, free the slot. `None` if already freed, since conn close
     /// and `DEL_EDGE` can race during teardown and a no-op is the safe answer.
-    ///
-    /// # Panics
-    /// If the edge is live but its `from` node or index entries are missing — arena
-    /// invariants, a bug here rather than in the caller.
     pub fn del_edge(&mut self, e: EdgeId) -> Option<()> {
-        // Read what we need *before* mutating the slab. The per-node
-        // edge list still contains `e` itself; the binary-search
-        // comparator below will deref `e`'s slot, so it must stay live
-        // until after the list-remove. `take()` comes last.
+        // The per-node list comparator reads `e`'s slot, so `take()` comes last.
         let (from, to_name, weight, reverse) = {
-            let edge = self.edges[e.0 as usize].as_ref()?;
+            let edge = self.edge(e)?;
             (edge.from, edge.to_name.clone(), edge.weight, edge.reverse)
         };
 
-        // Unlink twin's back-pointer.
-        if let Some(r) = reverse {
-            slot!(mut self.edges, r).reverse = None;
+        if let Some(r) = reverse.and_then(|r| self.edge_mut(r)) {
+            r.reverse = None;
         }
 
-        // Per-node list is sorted by `to_name`; binary-search the slot
-        // out. The `from` node must be live — deleting an edge whose
-        // origin is gone is a caller bug.
         let edges = &self.edges;
-        let from_edges = &mut slot!(mut self.nodes, from).edges;
-        let pos = from_edges
-            .binary_search_by(|&eid| slot!(edges, eid).to_name.as_str().cmp(&to_name))
-            .expect("edge in from's list");
-        from_edges.remove(pos);
+        if let Some(from_node) = self.nodes.get_mut(from.0 as usize).and_then(Option::as_mut)
+            && let Ok(pos) = from_node
+                .edges
+                .binary_search_by(|&eid| edge_to_name(edges, eid).cmp(&to_name))
+        {
+            from_node.edges.remove(pos);
+        }
 
-        // Recompute the weight-order key. `from_name` we don't cache
-        // (only `to_name`
-        // is needed for the sort comparator); look it up. Cheaper than
-        // a third name clone on every edge.
-        let from_name = slot!(self.nodes, from).name.clone();
+        let from_name = self.name(from);
         self.weight_order.remove(&(weight, from_name, to_name));
 
-        self.edges[e.0 as usize] = None;
-        self.edge_free.push(e.0);
+        if let Some(s) = self.edges.get_mut(e.0 as usize) {
+            *s = None;
+            self.edge_free.push(e.0);
+        }
         Some(())
     }
 
@@ -329,17 +312,15 @@ impl Graph {
     /// node. `None` if already freed, as [`Self::del_edge`]. Subnets are
     /// daemon-side.
     pub fn del_node(&mut self, n: NodeId) -> Option<()> {
-        // Can't `take` yet — `del_edge` needs the node live to look
-        // up `from_name` and edit `from_edges`. Check liveness, drain
-        // edges, *then* take. Drain a snapshot to avoid iterator
-        // invalidation during `del_edge`.
-        let outgoing: Vec<EdgeId> = self.nodes[n.0 as usize].as_ref()?.edges.clone();
+        // `del_edge` needs the node live, so drain a snapshot before the take.
+        let outgoing: Vec<EdgeId> = self.node(n)?.edges.clone();
         for e in outgoing {
             self.del_edge(e);
         }
-
-        self.nodes[n.0 as usize] = None;
-        self.node_free.push(n.0);
+        if let Some(s) = self.nodes.get_mut(n.0 as usize) {
+            *s = None;
+            self.node_free.push(n.0);
+        }
         Some(())
     }
 
@@ -347,23 +328,19 @@ impl Graph {
     /// the weight changed, leave the per-node index alone. Exists alongside
     /// del+add for `EdgeId` stability, so side tables keyed on the id see one
     /// write. `None` for a stale id.
-    ///
-    /// # Panics
-    /// If a live edge's `from` node or `weight_order` entry is missing.
     pub fn update_edge(&mut self, e: EdgeId, weight: i32, options: u32) -> Option<()> {
-        let edge = self.edges[e.0 as usize].as_mut()?;
+        let edge = self.edge_mut(e)?;
         edge.options = options;
         if edge.weight == weight {
             return Some(());
         }
-        // Weight changed: re-key `weight_order` (unlink, reinsert).
         let old_weight = edge.weight;
         edge.weight = weight;
         let to_name = edge.to_name.clone();
-        let from_name = slot!(self.nodes, edge.from).name.clone();
+        let from = edge.from;
+        let from_name = self.name(from);
         self.weight_order
-            .remove(&(old_weight, from_name.clone(), to_name.clone()))
-            .expect("edge in weight_order");
+            .remove(&(old_weight, from_name.clone(), to_name.clone()));
         self.weight_order.insert((weight, from_name, to_name), e);
         Some(())
     }
@@ -372,22 +349,19 @@ impl Graph {
     /// list keyed on `to_name`.
     #[must_use]
     pub fn lookup_edge(&self, from: NodeId, to: NodeId) -> Option<EdgeId> {
-        let to_name = self.nodes[to.0 as usize].as_ref()?.name.as_str();
-        let from_edges = &self.nodes[from.0 as usize].as_ref()?.edges;
-        let edges = &self.edges;
-        from_edges
-            .binary_search_by(|&eid| slot!(edges, eid).to_name.as_str().cmp(to_name))
-            .ok()
-            .map(|i| from_edges[i])
+        let to_name = self.node(to)?.name.as_str();
+        let from_edges = &self.node(from)?.edges;
+        let i = from_edges
+            .binary_search_by(|&eid| edge_to_name(&self.edges, eid).cmp(to_name))
+            .ok()?;
+        from_edges.get(i).copied()
     }
 
-    /// Daemon calls after diffing SSSP results.
-    ///
-    /// # Panics
-    /// If `n` is a freed slot. The daemon walks `sssp` results indexed
-    /// by live `NodeId`; a freed ID here is a bug.
+    /// Daemon calls after diffing SSSP results. No-op on a freed slot.
     pub fn set_reachable(&mut self, n: NodeId, r: bool) {
-        slot!(mut self.nodes, n).reachable = r;
+        if let Some(n) = self.node_mut(n) {
+            n.reachable = r;
+        }
     }
 
     /// `None` if the slot was freed (stale `NodeId`).
@@ -416,36 +390,22 @@ impl Graph {
     }
 
     /// Live node IDs, slot order. **Not** `ExactSizeIterator`: with a
-    /// free-list, `nodes.len()` counts holes too. The daemon's `sssp`
-    /// result vector is still `nodes.len()` long (indexed by raw slot,
-    /// dead slots get `None` routes); use `.len()` on that if you need
-    /// a count.
-    #[expect(clippy::missing_panics_doc)] // u32::try_from on a u32-bounded len
+    /// free-list, `nodes.len()` counts holes too.
     pub fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
-        (0..u32::try_from(self.nodes.len()).unwrap())
-            .filter(|&i| self.nodes[i as usize].is_some())
-            .map(NodeId)
+        live(&self.nodes).map(|(i, _)| NodeId(i))
     }
 
-    /// All edges in slab order, one pass over `Vec<Option<Edge>>`. C walks per node
-    /// alphabetically; order doesn't matter since the dump is one edge per line and
-    /// the CLI sorts. A bidi link is two `Edge`s and yields two items, matching the
-    /// dump's per-direction rows.
+    /// All edges in slab order. A bidi link is two `Edge`s and yields two
+    /// items, matching the dump's per-direction rows.
     pub fn edge_iter(&self) -> impl Iterator<Item = (EdgeId, &Edge)> + '_ {
-        self.edges.iter().enumerate().filter_map(|(i, slot)| {
-            #[expect(clippy::cast_possible_truncation)] // slab is u32-bounded
-            slot.as_ref().map(|e| (EdgeId(i as u32), e))
-        })
+        live(&self.edges).map(|(i, e)| (EdgeId(i), e))
     }
 
     /// Outgoing edges of `n`, sorted by destination name. Empty slice
     /// for freed slots.
     #[must_use]
     pub fn node_edges(&self, n: NodeId) -> &[EdgeId] {
-        self.nodes
-            .get(n.0 as usize)
-            .and_then(Option::as_ref)
-            .map_or(&[], |node| node.edges.as_slice())
+        self.node(n).map_or(&[], |node| node.edges.as_slice())
     }
 
     /// BFS from `myself`; one `Option<Route>` per node indexed by `NodeId.0`,
@@ -462,130 +422,104 @@ impl Graph {
     /// `indirect`) and within [`STICKY_THRESHOLD_PCT`] % of the new best weight,
     /// keep it. Local damping of weight jitter, no re-gossip; topology changes
     /// still win. `prev` is the last result; uncovered slots get the plain BFS
-    /// answer. Analogue: Tailscale's DERP home stays unless a new region wins by
-    /// ≥33 %.
+    /// answer.
     #[must_use]
-    #[expect(clippy::missing_panics_doc)] // unwraps are on enqueued (⇒ visited) IDs
     pub fn sssp_sticky(&self, myself: NodeId, prev: &[Option<Route>]) -> Vec<Option<Route>> {
-        // Helper: previous nexthop for slot `n`, if any.
         let prev_nh = |n: NodeId| {
             prev.get(n.0 as usize)
                 .and_then(Option::as_ref)
                 .map(|r| r.nexthop)
         };
-        // Result is indexed by raw slot number, including freed slots
-        // (they stay `None`). The daemon zips this against `node_ids()`
-        // and never reads dead slots.
+        // Indexed by raw slot number, freed slots stay `None`.
         let n_nodes = self.nodes.len();
         let mut route: Vec<Option<Route>> = vec![None; n_nodes];
         // Per-node: cheapest equal-hop wdist via the previous nexthop,
         // if the BFS encounters one. Consumed by `sticky_post_pass`.
         let mut sticky_wdist: Vec<Option<i32>> = vec![None; n_nodes];
 
-        // `myself`'s entry.
-        route[myself.0 as usize] = Some(Route {
-            indirect: false,
-            distance: 0,
-            weighted_distance: 0,
-            nexthop: myself,
-            via: myself,
-            prevedge: None,
-            options: 0, // never meaningful for myself
-        });
+        if let Some(r) = route.get_mut(myself.0 as usize) {
+            *r = Some(Route {
+                indirect: false,
+                distance: 0,
+                weighted_distance: 0,
+                nexthop: myself,
+                via: myself,
+                prevedge: None,
+                options: 0, // never meaningful for myself
+            });
+        }
 
         let mut todo = VecDeque::new();
         todo.push_back(myself);
 
         while let Some(n) = todo.pop_front() {
-            // The body needs `route[n]` immutable while writing
-            // `route[e.to]` mutable. Snapshot the bits we read.
-            let (n_distance, n_wdist, n_indirect, n_nexthop, n_via) = {
-                let r = route[n.0 as usize].as_ref().unwrap();
-                (
-                    r.distance,
-                    r.weighted_distance,
-                    r.indirect,
-                    r.nexthop,
-                    r.via,
-                )
+            let Some(Some(r)) = route.get(n.0 as usize).copied() else {
+                continue;
             };
 
-            for &eid in &slot!(self.nodes, n).edges {
-                let e = slot!(self.edges, eid);
+            for &eid in self.node_edges(n) {
+                let Some(e) = self.edge(eid) else { continue };
 
                 // Skip half-edges and edges back to ourselves.
                 if e.reverse.is_none() || e.to == myself {
                     continue;
                 }
+                let to = e.to.0 as usize;
+                let Some(&old) = route.get(to) else { continue };
 
                 // Indirect propagates; OPTION_INDIRECT adds.
-                let indirect = n_indirect || (e.options & OPTION_INDIRECT) != 0;
+                let indirect = r.indirect || (e.options & OPTION_INDIRECT) != 0;
 
-                let cand_hops = n_distance + 1;
+                let cand_hops = r.distance + 1;
                 // Peer-supplied weight: saturate so a chain of i32::MAX
                 // hops can't wrap negative and win the tie-break.
-                let cand_wdist = n_wdist.saturating_add(e.weight);
-                let cand_nexthop = if n_nexthop == myself { e.to } else { n_nexthop };
+                let cand_wdist = r.weighted_distance.saturating_add(e.weight);
+                let cand_nexthop = if r.nexthop == myself { e.to } else { r.nexthop };
 
                 // Stickiness bookkeeping: record the cheapest wdist of any candidate arriving
-                // via this node's previous nexthop at the hop count the BFS will settle on
-                // (only on first visit or same-hop revisit; BFS never lowers `distance` later,
-                // and the indirect→direct upgrade keeps nexthop). Recorded before the skip so
-                // the heavier equal-hop alternative isn't lost.
-                if Some(cand_nexthop) == prev_nh(e.to) {
-                    let same_hop = route[e.to.0 as usize]
-                        .as_ref()
-                        .is_none_or(|p| p.distance == cand_hops);
-                    if same_hop {
-                        let slot = &mut sticky_wdist[e.to.0 as usize];
-                        *slot = Some(slot.map_or(cand_wdist, |w| w.min(cand_wdist)));
-                    }
-                }
-
-                if let Some(prev) = &route[e.to.0 as usize] {
-                    // Visited. Skip if (already direct or new indirect)
-                    // and (different hop or not lighter).
-                    let directness_unchanged = !prev.indirect || indirect;
-                    let not_lighter =
-                        prev.distance != cand_hops || prev.weighted_distance <= cand_wdist;
-                    if directness_unchanged && not_lighter {
-                        continue;
-                    }
+                // via this node's previous nexthop at the hop count the BFS will settle on.
+                // Recorded before the skip so the heavier equal-hop alternative isn't lost.
+                if Some(cand_nexthop) == prev_nh(e.to)
+                    && old.is_none_or(|p| p.distance == cand_hops)
+                    && let Some(slot) = sticky_wdist.get_mut(to)
+                {
+                    *slot = Some(slot.map_or(cand_wdist, |w| w.min(cand_wdist)));
                 }
 
                 // nexthop and weighted_distance update only on first visit or same-hop lighter
                 // weight. The indirect→direct upgrade keeps nexthop but updates
                 // distance/prevedge/via/options, so distance can rise while nexthop stays;
                 // matching C exactly keeps routing consistent mesh-wide (KAT-pinned).
-                let prev = route[e.to.0 as usize].as_ref();
-                let update_nexthop = prev.is_none()
-                    || (prev.unwrap().distance == cand_hops
-                        && prev.unwrap().weighted_distance > cand_wdist);
-
-                let (nexthop, weighted_distance) = if update_nexthop {
-                    (cand_nexthop, cand_wdist)
-                } else {
-                    let p = prev.unwrap();
-                    (p.nexthop, p.weighted_distance)
+                let (nexthop, weighted_distance) = match old {
+                    None => (cand_nexthop, cand_wdist),
+                    Some(p) => {
+                        let directness_unchanged = !p.indirect || indirect;
+                        let lighter = p.distance == cand_hops && p.weighted_distance > cand_wdist;
+                        if directness_unchanged && !lighter {
+                            continue;
+                        }
+                        if lighter {
+                            (cand_nexthop, cand_wdist)
+                        } else {
+                            (p.nexthop, p.weighted_distance)
+                        }
+                    }
                 };
 
-                // Unconditional: `distance` is *always* set to the
-                // candidate hop count, even if the old one was smaller.
-                // `via` is propagated or fresh depending on `indirect`.
-                route[e.to.0 as usize] = Some(Route {
-                    indirect,
-                    distance: cand_hops,
-                    weighted_distance,
-                    nexthop,
-                    via: if indirect { n_via } else { e.to },
-                    prevedge: Some(eid),
-                    options: e.options,
-                });
+                if let Some(slot) = route.get_mut(to) {
+                    *slot = Some(Route {
+                        indirect,
+                        distance: cand_hops,
+                        weighted_distance,
+                        nexthop,
+                        via: if indirect { r.via } else { e.to },
+                        prevedge: Some(eid),
+                        options: e.options,
+                    });
+                }
 
-                // Re-enqueue. This *can* enqueue a node multiple times
-                // (e.g. on indirect→direct upgrade, after it's already
-                // been dequeued once); the second visit's edge loop
-                // will mostly hit the skip branch.
+                // Can enqueue a node twice (indirect→direct upgrade); the
+                // second visit mostly hits the skip branch.
                 todo.push_back(e.to);
             }
         }
@@ -601,56 +535,43 @@ impl Graph {
     /// joining an unvisited node to a visited one, and rewind to the start after
     /// progress following a skip (so a light edge between two unvisited nodes is
     /// picked up once one end is connected). Starts from the first reachable `from`
-    /// in weight order. Returns both directions' `EdgeId`s — the edges whose
-    /// connection gets `mst` set.
+    /// in weight order. Returns both directions' `EdgeId`s.
     #[must_use]
-    #[expect(clippy::missing_panics_doc)] // reverse.unwrap() guarded two lines up
     pub fn mst(&self) -> Vec<EdgeId> {
         let mut visited = vec![false; self.nodes.len()];
+        let is_visited = |v: &[bool], n: NodeId| v.get(n.0 as usize).copied().unwrap_or(false);
+        let visit = |v: &mut [bool], n: NodeId| {
+            if let Some(b) = v.get_mut(n.0 as usize) {
+                *b = true;
+            }
+        };
         let mut mst_edges = Vec::new();
 
-        // Walk weight order, find first reachable `from`, mark.
-        // `weight_order` only holds live edges (`del_edge` removes),
-        // so `slot!` is safe here.
-        for &eid in self.weight_order.values() {
-            let from = slot!(self.edges, eid).from;
-            if slot!(self.nodes, from).reachable {
-                visited[from.0 as usize] = true;
-                break;
-            }
+        let order: Vec<(EdgeId, &Edge)> = self
+            .weight_order
+            .values()
+            .filter_map(|&eid| Some((eid, self.edge(eid)?)))
+            .collect();
+        if let Some((_, e)) = order
+            .iter()
+            .find(|(_, e)| self.node(e.from).is_some_and(|n| n.reachable))
+        {
+            visit(&mut visited, e.from);
         }
 
-        // Linear walk with rewind-to-head on skipped→progress. We use
-        // an index and reset it.
-        //
-        // The rewind assigns the index back to 0, so the next iteration
-        // starts from the head. We collect the order once (it doesn't
-        // change mid-walk) and index.
-        let order: Vec<EdgeId> = self.weight_order.values().copied().collect();
         let mut i = 0;
         let mut skipped = false;
-
-        while i < order.len() {
-            let eid = order[i];
-            let e = slot!(self.edges, eid);
-
-            let v_from = visited[e.from.0 as usize];
-            let v_to = visited[e.to.0 as usize];
-
-            // Skip if no reverse twin, or both endpoints have the same
-            // visited state (already in tree, or both unreachable).
-            if e.reverse.is_none() || v_from == v_to {
+        while let Some(&(eid, e)) = order.get(i) {
+            let joins = is_visited(&visited, e.from) != is_visited(&visited, e.to);
+            let Some(rev) = e.reverse.filter(|_| joins) else {
                 skipped = true;
                 i += 1;
                 continue;
-            }
-
-            visited[e.from.0 as usize] = true;
-            visited[e.to.0 as usize] = true;
-
-            // Both directions get the mst bit. Reverse exists (checked above).
+            };
+            visit(&mut visited, e.from);
+            visit(&mut visited, e.to);
             mst_edges.push(eid);
-            mst_edges.push(e.reverse.unwrap());
+            mst_edges.push(rev);
 
             if skipped {
                 skipped = false;
@@ -1132,10 +1053,9 @@ pub(crate) fn diff_reachability(
             continue;
         }
 
-        // `visited` ⇔ `new_routes[n].is_some()`.
-        let visited = new_routes[n.0 as usize].is_some();
-        // `node()` is `Some` — `n` came from `node_ids()`.
-        let was_reachable = graph.node(n).expect("live").reachable;
+        let route = new_routes.get(n.0 as usize).copied().flatten();
+        let visited = route.is_some();
+        let was_reachable = graph.node(n).is_some_and(|n| n.reachable);
 
         if visited == was_reachable {
             continue;
@@ -1145,10 +1065,11 @@ pub(crate) fn diff_reachability(
         // this.
         graph.set_reachable(n, visited);
 
-        if visited {
-            // Route is `Some` (just checked).
-            let via = new_routes[n.0 as usize].as_ref().expect("visited").via;
-            out.push(Transition::BecameReachable { node: n, via });
+        if let Some(r) = route {
+            out.push(Transition::BecameReachable {
+                node: n,
+                via: r.via,
+            });
         } else {
             out.push(Transition::BecameUnreachable { node: n });
         }
