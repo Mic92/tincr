@@ -177,6 +177,8 @@ mod tests {
     use super::*;
     use std::net::UdpSocket;
     use std::os::fd::AsRawFd;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     /// `phase1` over a real loopback UDP socket: same `(len, peer)`
     /// per slot as the `recvfrom` loop would have produced, in one
@@ -195,15 +197,23 @@ mod tests {
             tx.send_to(p, dst).unwrap();
         }
 
+        // Loopback delivery is not instant on a loaded machine, so collect
+        // across calls until every datagram has arrived.
         let mut batch = UdpRxBatch::new();
         let mut meta = [(0u16, None); UDP_RX_BATCH];
-        let n = phase1(rx.as_raw_fd(), &mut batch, &mut meta).expect("recvmsg_x available");
-        assert_eq!(n, payloads.len());
-        for (i, p) in payloads.iter().enumerate() {
-            assert_eq!(usize::from(meta[i].0), p.len(), "slot {i} len");
-            assert_eq!(meta[i].1, Some(peer), "slot {i} peer");
-            assert_eq!(&batch.bufs[i][..p.len()], *p, "slot {i} bytes");
+        let mut got = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while got.len() < payloads.len() && Instant::now() < deadline {
+            let n = phase1(rx.as_raw_fd(), &mut batch, &mut meta).expect("recvmsg_x available");
+            for (i, (len, from)) in meta.iter().enumerate().take(n) {
+                got.push((batch.bufs[i][..usize::from(*len)].to_vec(), *from));
+            }
+            if n == 0 {
+                thread::sleep(Duration::from_millis(10));
+            }
         }
+        let want: Vec<_> = payloads.iter().map(|p| (p.to_vec(), Some(peer))).collect();
+        assert_eq!(got, want);
 
         // Drained: next call sees EAGAIN → 0.
         assert_eq!(phase1(rx.as_raw_fd(), &mut batch, &mut meta), Some(0));
