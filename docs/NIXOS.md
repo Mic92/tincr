@@ -20,6 +20,7 @@ can hook the in-mesh DNS stub into systemd-resolved.
         tincr.nixosModules.tincr
         {
           services.tincr.networks.mesh = {
+            nodeName = "alpha";
             ed25519PrivateKeyFile = "/var/lib/tincr/mesh/ed25519_key.priv";
             addresses = [ "10.21.0.1/16" ];
             connectTo = [ "beta" ];
@@ -113,7 +114,7 @@ deploy. `/etc/tinc/<net>/invitations` is a symlink into the same
 state directory, so invitations are issued as the service user:
 
 ```console
-$ sudo -u tincr tinc -n mesh --pidfile /run/tincr/mesh.pid invite phone
+$ sudo -u tincr tinc -n mesh invite phone
 ```
 
 Set `socketActivation = false` to start the daemon at boot

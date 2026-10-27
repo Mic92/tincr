@@ -12,7 +12,7 @@ let
   cfg = config.services.tincr;
 
   netOpts =
-    { name, ... }:
+    { ... }:
     {
       options = {
         enable = lib.mkOption {
@@ -26,7 +26,12 @@ let
         };
         nodeName = lib.mkOption {
           type = lib.types.strMatching "[a-zA-Z0-9_]+";
-          default = name;
+          description = "Tinc node name. Must match a host file in `hosts`.";
+        };
+        utunUnit = lib.mkOption {
+          type = lib.types.nullOr lib.types.ints.unsigned;
+          default = null;
+          description = "utun unit number. Defaults to 10 plus the network's index.";
         };
         listenPort = lib.mkOption {
           type = lib.types.port;
@@ -63,6 +68,13 @@ let
 
   enabledNets = lib.filterAttrs (_: n: n.enable) cfg.networks;
 
+  utunUnit =
+    name: net:
+    if net.utunUnit != null then
+      net.utunUnit
+    else
+      10 + lib.lists.findFirstIndex (n: n == name) 0 (lib.attrNames enabledNets);
+
   mkTincConf =
     name: net:
     lib.concatStringsSep "\n" (
@@ -71,7 +83,7 @@ let
         # Fixed unit number keeps the interface name stable across
         # restarts so routes added by tinc-up survive.
         "DeviceType = utun"
-        "Device = utun10"
+        "Device = utun${toString (utunUnit name net)}"
         "Port = ${toString net.listenPort}"
         "AutoConnect = ${if net.autoConnect then "yes" else "no"}"
         "Ed25519PrivateKeyFile = ${toString net.ed25519PrivateKeyFile}"
@@ -144,6 +156,11 @@ in
   };
 
   config = lib.mkIf (enabledNets != { }) {
+    assertions = lib.mapAttrsToList (n: net: {
+      assertion = net.hosts ? ${net.nodeName};
+      message = "services.tincr.networks.${n}: hosts.${net.nodeName} (nodeName) is missing.";
+    }) enabledNets;
+
     environment.etc = lib.mkMerge (lib.mapAttrsToList etcForNet enabledNets);
 
     launchd.daemons = lib.mapAttrs' (

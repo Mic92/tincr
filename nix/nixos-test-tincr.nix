@@ -70,6 +70,17 @@ testers.runNixOSTest {
   nodes = {
     alpha = {
       imports = [ (mkNode "alpha" "10.21.0.1" { connectTo = [ "beta" ]; }) ];
+      # A second network that shares /run/tincr and runs a tap device.
+      services.tincr.networks.lab = {
+        nodeName = "alpha";
+        listenPort = 656;
+        deviceType = "tap";
+        socketActivation = false;
+        ed25519PrivateKeyFile = "/etc/tinc/mesh/ed25519_key.priv";
+        hosts = {
+          inherit (hosts) alpha;
+        };
+      };
       # Only the service unit changes, the socket stays identical.
       specialisation.svcchange.configuration = {
         services.tincr.networks.mesh.extraConfig = "PingInterval = 59";
@@ -123,7 +134,7 @@ testers.runNixOSTest {
 
             def udp_confirmed(_: bool, m=m, peer=peer) -> bool:
                 row = m.succeed(
-                    "tinc --pidfile=/run/tincr/mesh.pid -n mesh dump nodes "
+                    "tinc -n mesh dump nodes "
                     f"| grep '^{peer} ' || true"
                 )
                 match = re.search(r"status ([0-9a-f]+)", row)
@@ -152,6 +163,16 @@ testers.runNixOSTest {
         # PTR not asserted. resolved's mDNS responder answers first.
         # PTR is unit-tested in crates/tincd/src/dns.rs.
 
+    with subtest("networks keep separate runtime dirs, reload works"):
+        alpha.wait_for_unit("tincr-lab.service")
+        alpha.succeed("ip -d link show tinc-lab | grep -q tap")
+        alpha.systemctl("restart tincr-lab.service")
+        alpha.wait_for_unit("tincr-lab.service")
+        alpha.succeed("test -S /run/tincr/mesh/tinc.socket")
+        alpha.succeed("tinc -n mesh dump nodes | grep -q '^beta '")
+        alpha.succeed("systemctl reload tincr-mesh.service")
+        alpha.succeed("systemctl is-active tincr-mesh.service")
+
     with subtest("switch-to-configuration restarts the service itself"):
         # Peers may reconnect and socket-activate alpha, so assert on what
         # s-t-c decided rather than on is-active.
@@ -165,7 +186,7 @@ testers.runNixOSTest {
 
     with subtest("tinc invite works as the service user"):
         url = alpha.succeed(
-            "runuser -u tincr -- tinc -n mesh --pidfile /run/tincr/mesh.pid invite gamma"
+            "runuser -u tincr -- tinc -n mesh invite gamma"
         ).strip()
         assert len(url.rsplit("/", 1)[1]) == 48, url
         alpha.succeed("runuser -u tincr -- test -O /var/lib/tincr/mesh/invitations/ed25519_key.priv")

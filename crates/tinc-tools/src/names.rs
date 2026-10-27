@@ -144,7 +144,7 @@ impl Paths {
     }
 
     /// Resolve `pidfilename` (and implicitly the socket name); idempotent.
-    /// `/var/run/tinc[.NET].pid` if it exists; else `/run/tincr/NET.pid`; else
+    /// `/var/run/tinc[.NET].pid` if it exists; else `/run/tincr/NET/tinc.pid`; else
     /// `confbase/pid` if *that* exists; else the `/var/run` path anyway, so a
     /// no-daemon error names the place a daemon should have written. `&mut self`
     /// rather than a constructor keeps `for_cli()` probe-free for tests and
@@ -180,7 +180,7 @@ impl Paths {
         let tincr_path = input
             .netname
             .as_ref()
-            .map(|net| Path::new(TINCR_RUNDIR).join(format!("{net}.pid")));
+            .map(|net| Path::new(TINCR_RUNDIR).join(net).join("tinc.pid"));
 
         self.pidfile = Some(
             [Some(system_path.clone()), tincr_path, Some(confbase_path)]
