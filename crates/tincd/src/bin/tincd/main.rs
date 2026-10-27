@@ -45,13 +45,17 @@ fn init_logging(args: &Args) {
     // Global `info`, not `tincd=info`: dependent crates' warn/error
     // (tinc-sptps decrypt failures, tinc-device ioctl errors) must
     // surface at default verbosity.
-    let mut builder =
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
-
-    // RUST_LOG (target-scoped) wins over filter_level (global floor).
-    if let Some(d) = args.debug_level {
-        builder.filter_level(debug_level_to_filter(d));
-    }
+    // Without RUST_LOG the inner filter is Trace and the sink level in
+    // log_tap applies, so `tinc debug` can raise it at runtime.
+    let rust_log = env::var_os("RUST_LOG").is_some();
+    let mut builder = env_logger::Builder::from_env(env_logger::Env::default());
+    let sink = if rust_log {
+        log::LevelFilter::Trace
+    } else {
+        builder.filter_level(log::LevelFilter::Trace);
+        args.debug_level
+            .map_or(log::LevelFilter::Info, debug_level_to_filter)
+    };
 
     if let Some(path) = &args.logfile {
         match OpenOptions::new()
@@ -72,7 +76,7 @@ fn init_logging(args: &Args) {
 
     // log_tap wraps env_logger so REQ_LOG control conns can tee.
     let inner = builder.build();
-    tincd::log_tap::init(inner);
+    tincd::log_tap::init(inner, sink);
 
     // Seed log_tap's debug-level atomic for REQ_SET_DEBUG replies.
     // `init_*`, not `set_*`: the latter would clobber the level

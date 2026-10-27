@@ -1,58 +1,58 @@
-//! `REQ_LOG` log tap. In the log write hook, walk conns with
-//! `status.log`, send each log line over the ctl socket.
+//! `REQ_LOG` log tap and the runtime debug level.
 //!
-//! ## The interception problem
+//! The `log::Log` impl runs on whatever thread logs (event loop, shard
+//! workers, script/DNS/portmap threads), so tapped records go into one
+//! global bounded queue the event loop drains each turn. Overflow drops
+//! records and reports how many were lost.
 //!
-//! C hooks into its own `logger()` macro. We use `log::info!` etc.
-//! The `log::Log` impl runs at the call site (any module's `info!`);
-//! the conns are in `Daemon`'s `&mut self`. The `'static` logger
-//! can't reach in directly.
-//!
-//! What makes this cheap: **the daemon is single-threaded**. Every `log::info!` happens INSIDE `daemon.run()`'s
-//! event loop, on the same thread, in the middle of some handler.
-//!
-//! So the tap doesn't need synchronization. The `log::Log` impl
-//! pushes to a thread-local buffer; the daemon drains it once per
-//! event-loop turn. The buffer is shared-static but never contended.
-//!
-//! ## Perf
-//!
-//! - **No log conns** (steady state): one Relaxed atomic load per
-//!   `log::*!` call, before format. The `log::log!` macro calls
-//!   `enabled()` first and only evaluates `format_args!` if that
-//!   returns true — the format is the expensive part.
-//! - **Log conn exists**: per log line, one `to_string()` format
-//!   (unavoidable — C does `vsnprintf` into a buffer too) + Vec
-//!   push. Drained once per event-loop turn. `mem::take` leaves
-//!   capacity.
-//! - **No mutex**: `thread_local!` + `RefCell`. Never contended
-//!   because single-threaded.
-//!
-//! ## Re-entrancy
-//!
-//! An `info!` whose args trigger another `info!` would double-borrow
-//! the `RefCell` and panic. Doesn't happen — our log formatting is
-//! plain values, no method calls that log. If it ever does, the
-//! panic is loud and points here.
+//! `tinc debug N` must take effect at runtime, so unless `RUST_LOG` names
+//! its own filter the inner `env_logger` is built at Trace and [`SINK`]
+//! gates what reaches stderr or the logfile.
 
 #![forbid(unsafe_code)]
 
-use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::mem;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 
 /// Gate. `enabled()` checks this before formatting.
 static LOG_TAP_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// The tinc-style debug level (0..=5+). Separate from
-/// `log::max_level()` because the tinc↔Rust mapping is
-/// lossy (1 and 2 both → Debug). Stored so `REQ_SET_DEBUG` can
-/// reply with the exact previous value.
+/// The tinc-style debug level (0..=5+). Separate from the filter because
+/// the mapping is lossy (1 and 2 both → Debug). `REQ_SET_DEBUG` replies
+/// with the exact previous value.
 static DEBUG_LEVEL: AtomicI32 = AtomicI32::new(0);
 
+/// `LevelFilter as usize` for the stderr/logfile sink.
+static SINK: AtomicUsize = AtomicUsize::new(log::LevelFilter::Trace as usize);
+
+/// Records waiting for the event loop, and how many overflowed.
+static TAP: Mutex<VecDeque<(log::Level, String)>> = Mutex::new(VecDeque::new());
+static DROPPED: AtomicU64 = AtomicU64::new(0);
+const TAP_CAP: usize = 4096;
+
+/// The CLI (Rust and C) ends the session on a record over this.
+pub const MAX_RECORD: usize = 1024;
+
+const FILTERS: [log::LevelFilter; 6] = [
+    log::LevelFilter::Off,
+    log::LevelFilter::Error,
+    log::LevelFilter::Warn,
+    log::LevelFilter::Info,
+    log::LevelFilter::Debug,
+    log::LevelFilter::Trace,
+];
+
+fn sink() -> log::LevelFilter {
+    FILTERS
+        .get(SINK.load(Ordering::Relaxed))
+        .copied()
+        .unwrap_or(log::LevelFilter::Trace)
+}
+
 /// tinc `debug_level` → `log::LevelFilter`. Same mapping as
-/// `main.rs::debug_level_to_filter` (5-line dup — the binary
-/// doesn't dep on this module's internals).
+/// `main.rs::debug_level_to_filter`.
 const fn level_to_filter(d: i32) -> log::LevelFilter {
     match d {
         ..=0 => log::LevelFilter::Info,
@@ -61,82 +61,56 @@ const fn level_to_filter(d: i32) -> log::LevelFilter {
     }
 }
 
-/// Seed the C-style debug level. main.rs calls this once after
-/// `init()`. Does not touch `log::max_level()`: `init()` already
-/// set it from `inner.filter()`, which reflects `RUST_LOG`. Calling
-/// `set_debug_level` here would clobber that (`RUST_LOG=debug` + no
-/// `-d` flag → we'd reset `max_level` back to Info).
+fn refresh_max_level() {
+    let tap = if LOG_TAP_ACTIVE.load(Ordering::Relaxed) {
+        log::LevelFilter::Trace
+    } else {
+        log::LevelFilter::Off
+    };
+    log::set_max_level(sink().max(tap));
+}
+
+/// Seed the C-style debug level for `REQ_SET_DEBUG` readback.
 pub fn init_debug_level(level: i32) {
     DEBUG_LEVEL.store(level, Ordering::Relaxed);
 }
 
-/// Read the current tinc-style debug level. For `REQ_SET_DEBUG`'s
-/// "reply with previous level".
 #[must_use]
 pub fn debug_level() -> i32 {
     DEBUG_LEVEL.load(Ordering::Relaxed)
 }
 
-/// Set the debug level: store the i32 for readback and update
-/// `log::max_level()`; negative only queries. Returns the previous level. Never
-/// lowers below Trace while `LOG_TAP_ACTIVE`, or `tinc debug 0` would mute a
-/// running `tinc log`.
+/// Set the debug level and sink filter, return the previous level.
+/// Negative only queries.
 pub fn set_debug_level(new_level: i32) -> i32 {
     let prev = DEBUG_LEVEL.load(Ordering::Relaxed);
     if new_level >= 0 {
         DEBUG_LEVEL.store(new_level, Ordering::Relaxed);
-        let filter = level_to_filter(new_level);
-        // Don't drop below Trace if a REQ_LOG conn is tapping.
-        // log_tap::set_active(true) sets Trace and expects it to
-        // stay. REQ_SET_DEBUG to a lower level would otherwise
-        // silence the tap mid-stream.
-        if !LOG_TAP_ACTIVE.load(Ordering::Relaxed) || filter >= log::LevelFilter::Trace {
-            log::set_max_level(filter);
-        }
+        SINK.store(level_to_filter(new_level) as usize, Ordering::Relaxed);
+        refresh_max_level();
     }
     prev
 }
 
-thread_local! {
-    /// Tap buffer. `RefCell` because single-threaded; the `log::Log`
-    /// impl is `Sync` per the trait bound, but we only ever call it
-    /// from the daemon thread. `thread_local!` makes the type system
-    /// see this without a mutex.
-    static TAP: RefCell<Vec<(log::Level, String)>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Wraps `env_logger::Logger`. Forwards everything to the inner
-/// logger; ADDITIONALLY pushes to `TAP` when the gate is open.
+/// Wraps `env_logger::Logger`, gated by [`SINK`], and tees to the tap.
 struct TapLogger {
     inner: env_logger::Logger,
 }
 
 impl log::Log for TapLogger {
     fn enabled(&self, m: &log::Metadata<'_>) -> bool {
-        // Short-circuit: if neither stderr nor the tap wants it,
-        // skip the format entirely. The format is the expensive part.
-        // The `log::log!` macro calls this before evaluating
-        // `format_args!`; returning `false` here means the args
-        // (which may include `Display` impls) never execute.
-        self.inner.enabled(m) || LOG_TAP_ACTIVE.load(Ordering::Relaxed)
+        (m.level() <= sink() && self.inner.enabled(m)) || LOG_TAP_ACTIVE.load(Ordering::Relaxed)
     }
 
     fn log(&self, r: &log::Record<'_>) {
-        // env_logger does its own `matches()` check inside (filter
-        // by target etc), so unconditional forward is correct.
-        self.inner.log(r);
-
+        if r.level() <= sink() {
+            self.inner.log(r);
+        }
         if LOG_TAP_ACTIVE.load(Ordering::Relaxed) {
-            // Format once, push; the daemon drains per turn. Prefixed with level and
-            // target so `tinc log 5` on a busy mesh is grep-able. No timestamp: per-turn
-            // draining would make it misleadingly precise and the reader's terminal or
-            // journal stamps arrival.
-            TAP.with_borrow_mut(|v| {
-                v.push((
-                    r.level(),
-                    format!("{:5} {}: {}", r.level(), r.target(), r.args()),
-                ));
-            });
+            push(
+                r.level(),
+                format!("{:5} {}: {}", r.level(), r.target(), r.args()),
+            );
         }
     }
 
@@ -145,65 +119,91 @@ impl log::Log for TapLogger {
     }
 }
 
-/// Install the tap logger as the global logger (from `init_logging`, instead of
-/// `builder.init()`). `max_level` starts at the inner filter's, so with no log
-/// conns a `trace!` under an Info stderr short-circuits in the macro;
-/// `set_active(true)` raises it to Trace while a log conn exists.
+fn push(level: log::Level, mut msg: String) {
+    if msg.len() > MAX_RECORD {
+        let mut cut = MAX_RECORD;
+        while !msg.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        msg.truncate(cut);
+    }
+    let Ok(mut q) = TAP.lock() else { return };
+    if q.len() >= TAP_CAP {
+        DROPPED.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    q.push_back((level, msg));
+}
+
+/// Install the tap logger. `sink` is the initial stderr/logfile level.
 ///
 /// # Panics
 /// As `env_logger::Builder::init`: called twice or another logger installed.
 #[expect(clippy::expect_used, reason = "documented panic, same as env_logger")]
-pub fn init(inner: env_logger::Logger) {
-    let max_level = inner.filter();
+pub fn init(inner: env_logger::Logger, sink: log::LevelFilter) {
+    SINK.store(sink as usize, Ordering::Relaxed);
     log::set_boxed_logger(Box::new(TapLogger { inner }))
         .expect("log_tap::init called after logger already set");
-    log::set_max_level(max_level);
+    refresh_max_level();
 }
 
-/// Drain the tap buffer. Called once per event-loop turn from
-/// `daemon.rs::run`. `mem::take` leaves the Vec's capacity so the
-/// next turn doesn't re-allocate.
+/// Take the queued records, plus a note if any were dropped.
 #[must_use]
 pub fn drain() -> Vec<(log::Level, String)> {
-    TAP.with_borrow_mut(mem::take)
+    let mut out: Vec<_> = TAP
+        .lock()
+        .map(|mut q| mem::take(&mut *q).into())
+        .unwrap_or_default();
+    let dropped = DROPPED.swap(0, Ordering::Relaxed);
+    if dropped > 0 {
+        out.push((
+            log::Level::Warn,
+            format!("WARN  tincd: log tap dropped {dropped} records"),
+        ));
+    }
+    out
 }
 
-/// Gate control: `true` when the first `REQ_LOG` arrives (also raising
-/// `max_level` to Trace so `enabled()` is consulted), `false` when the last log
-/// conn leaves. `false` doesn't lower `max_level` back — the inner level isn't
-/// cached, and the cost is one atomic check per log macro.
+/// Open the gate on the first `REQ_LOG`, close it with the last.
 pub fn set_active(on: bool) {
     LOG_TAP_ACTIVE.store(on, Ordering::Relaxed);
-    if on {
-        log::set_max_level(log::LevelFilter::Trace);
+    if !on && let Ok(mut q) = TAP.lock() {
+        q.clear();
     }
-}
-
-/// Test-only: push a record directly to `TAP` without going through
-/// the global logger (which is a process singleton; tests would
-/// stomp each other). Same code path as `TapLogger::log`'s push.
-#[cfg(test)]
-fn push_for_test(level: log::Level, msg: &str) {
-    TAP.with_borrow_mut(|v| v.push((level, msg.to_string())));
+    refresh_max_level();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
 
-    /// Push then drain. Order preserved (Vec). `mem::take` clears.
+    /// One test owns the global queue: order, truncation, overflow and
+    /// records from another thread.
     #[test]
     fn push_and_drain() {
-        push_for_test(log::Level::Info, "hello");
-        push_for_test(log::Level::Debug, "world");
-
+        push(log::Level::Info, "hello".into());
+        thread::spawn(|| push(log::Level::Debug, "world".into()))
+            .join()
+            .unwrap();
+        push(log::Level::Info, "é".repeat(MAX_RECORD));
         let d = drain();
-        assert_eq!(d.len(), 2);
+        assert_eq!(d.len(), 3);
         assert_eq!(d[0], (log::Level::Info, "hello".to_string()));
         assert_eq!(d[1], (log::Level::Debug, "world".to_string()));
-
-        // Drained: next drain is empty.
+        assert_eq!(d[2].1.len(), MAX_RECORD);
         assert!(drain().is_empty());
+
+        for _ in 0..TAP_CAP + 3 {
+            push(log::Level::Info, String::new());
+        }
+        let d = drain();
+        assert_eq!(d.len(), TAP_CAP + 1);
+        assert!(
+            d[TAP_CAP].1.contains("dropped 3 records"),
+            "{:?}",
+            d[TAP_CAP]
+        );
     }
 
     /// `set_active` flips the atomic. The integration test (stop.rs)

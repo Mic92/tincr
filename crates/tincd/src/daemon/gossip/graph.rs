@@ -6,6 +6,7 @@ use crate::daemon::Daemon;
 use crate::graph::{Transition, run_graph};
 use crate::local_addr;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A BFS owed after deferred topology changes. Only this module reads
 /// or clears it, so a stale read must go through `flush_graph_dirty`.
@@ -36,7 +37,13 @@ impl Daemon {
         // same as far as routes/ns are concerned.
         // Keep edge IDs and map at broadcast time.
         self.last_mst = mst;
+        let unix_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
         for t in transitions {
+            let (Transition::BecameReachable { node, .. } | Transition::BecameUnreachable { node }) =
+                t;
+            self.state_changed.insert(node, unix_now);
             match t {
                 Transition::BecameReachable { node, via: via_nid } => {
                     // `device_enable` is idempotent so we just call

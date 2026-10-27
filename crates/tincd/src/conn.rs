@@ -272,8 +272,6 @@ pub(crate) struct Connection {
     /// or above the level (the wire's debug-level int is mapped at the
     /// `REQ_LOG` arm). No colour: we send the bare message.
     pub log_level: Option<log::Level>,
-    /// Debug level before this conn's `REQ_SET_DEBUG`; restored on close.
-    pub prev_debug_level: Option<i32>,
     /// Gossip re-forward rate limit; checked in `forward_request`.
     pub flood: FloodLimiter,
 }
@@ -355,7 +353,6 @@ impl Connection {
             pmtu_cap: None,
             sptps_kex: tinc_sptps::SptpsKex::default(),
             log_level: None,
-            prev_debug_level: None,
             flood: FloodLimiter::new(),
         }
     }
