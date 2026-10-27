@@ -28,16 +28,12 @@
 //! - `overwrite_mac` stamp (device.rs:410) — Router+TAP only;
 //!   `slowpath_all` already gates `!= Router`, and TAP is irrelevant
 //!   to TUN (kernel doesn't read the eth header on a TUN write).
-#![expect(
-    clippy::indexing_slicing,
-    clippy::unwrap_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use super::{TunnelHandles, TxSnapshot};
 use crate::graph::NodeId;
 use crate::node_id::NodeId6;
 use crate::tunnel::MTU;
+use crate::wire;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
@@ -173,7 +169,9 @@ pub(crate) fn rx_probe<'a>(
     // path checks `< 12` at rx.rs:249 and `< 21` at state.rs:838;
     // we fuse them. A 20-byte ct can't possibly decrypt — no point
     // building the target just to fail in rx_open.
-    if pkt.len() < 12 + SPTPS_DGRAM_MIN {
+    let (dst, rest) = pkt.split_first_chunk::<6>()?;
+    let (src_id, ct) = rest.split_first_chunk::<6>()?;
+    if ct.len() < SPTPS_DGRAM_MIN {
         return None;
     }
 
@@ -181,14 +179,14 @@ pub(crate) fn rx_probe<'a>(
     // decrypt, or for-us-via-relay), which has `&mut Daemon` side effects; punt
     // all of it. The 6-byte zero check is written as u32+u16 compares explicitly
     // on this hot path.
-    if pkt[..6] != [0u8; 6] {
+    if *dst != [0u8; 6] {
         return None;
     }
 
     // src_id6 → NodeId. Unknown ⇒ legacy packet or NodeId6 collision
     // (rx.rs:262 logs + drops). One IntHashMap probe — same as the
     // slow path's `id6_table.lookup`.
-    let src_id = NodeId6::from_bytes(pkt[6..12].try_into().ok()?);
+    let src_id = NodeId6::from_bytes(*src_id);
     let from_nid = snap.id6.lookup(src_id)?;
 
     // Tunnel handles. None ⇒ pre-handshake (rx.rs:278 runs
@@ -205,7 +203,7 @@ pub(crate) fn rx_probe<'a>(
     Some(RxTarget {
         from_nid,
         handles,
-        ct: &pkt[12..],
+        ct,
     })
 }
 
@@ -227,7 +225,8 @@ pub(crate) fn rx_open(
     // invariant for the slice math below.
     debug_assert!(ct.len() >= SPTPS_DGRAM_MIN);
 
-    let seqno = u32::from_be_bytes([ct[0], ct[1], ct[2], ct[3]]);
+    let (seqno, sealed) = ct.split_first_chunk::<4>().ok_or(())?;
+    let seqno = u32::from_be_bytes(*seqno);
 
     // Step 1: decrypt with the prebuilt session cipher.
     //
@@ -241,11 +240,11 @@ pub(crate) fn rx_open(
     target
         .handles
         .incipher
-        .open_into(u64::from(seqno), &ct[4..], scratch, ETH_HLEN)
+        .open_into(u64::from(seqno), sealed, scratch, ETH_HLEN)
         .map_err(|_| ())?;
     // scratch = [0;14][type:1][body]
 
-    let ty = scratch[ETH_HLEN];
+    let ty = wire::u8_at(scratch, ETH_HLEN).ok_or(())?;
 
     // Step 2: type gate. `PKT_NORMAL` is 0; COMPRESSED/MAC/PROBE are bits 0-2 and
     // `REC_HANDSHAKE` (≥128) marks an in-band rekey record. Anything nonzero
@@ -274,7 +273,7 @@ pub(crate) fn rx_open(
         return Err(());
     }
     let body_off = ETH_HLEN + 1;
-    let (ethertype, mine) = match scratch[body_off] >> 4 {
+    let (ethertype, mine) = match wire::u8_at(scratch, body_off).ok_or(())? >> 4 {
         4 => {
             // dst at IP+16, need at least IP_HLEN bytes of header.
             // `route_ipv4` checks `len < ETHER+IP` (route.rs:98);
@@ -282,18 +281,14 @@ pub(crate) fn rx_open(
             if body_len < IP4_HLEN {
                 return Err(());
             }
-            let dst: [u8; 4] = scratch[body_off + IP4_DST..body_off + IP4_DST + 4]
-                .try_into()
-                .map_err(|_| ())?; // unreachable: len-checked above
+            let dst = *wire::array::<4>(scratch, body_off + IP4_DST).ok_or(())?;
             (ETH_P_IP, dst_memo.probe_v4(dst, snap))
         }
         6 => {
             if body_len < IP6_HLEN {
                 return Err(());
             }
-            let dst: [u8; 16] = scratch[body_off + IP6_DST..body_off + IP6_DST + 16]
-                .try_into()
-                .map_err(|_| ())?; // unreachable
+            let dst = *wire::array::<16>(scratch, body_off + IP6_DST).ok_or(())?;
             (ETH_P_IPV6, dst_memo.probe_v6(dst, snap))
         }
         _ => return Err(()), // unknown IP version; slow path logs
@@ -317,7 +312,7 @@ pub(crate) fn rx_open(
         .handles
         .replay
         .lock()
-        .unwrap()
+        .map_err(|_| ())?
         .check_public(seqno)
         .map_err(|_| ())?;
 
@@ -325,7 +320,7 @@ pub(crate) fn rx_open(
     // scratch is `[0;14][ty:1][body]`. We want `[0;12][et:2][body]`.
     // Stamp the ethertype at [12..14] (the headroom is already zero,
     // so the eth dst/src MACs are zero — TUN ignores them).
-    scratch[12..14].copy_from_slice(&ethertype.to_be_bytes());
+    wire::put_be16(scratch, 12, ethertype).ok_or(())?;
     // Strip the type byte: shift [15..] down to [14..]. Same
     // memmove `open_data_into` does (state.rs:791). body_len bytes
     // moved by 1; small, in-L1.

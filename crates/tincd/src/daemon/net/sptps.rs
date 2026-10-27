@@ -1,9 +1,5 @@
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 use super::super::{Daemon, PKT_COMPRESSED, PKT_MAC, PKT_NORMAL, PKT_PROBE, RoutingMode};
+use crate::wire;
 use std::io;
 use std::os::fd::AsFd;
 
@@ -114,14 +110,13 @@ impl Daemon {
 
         // PKT_PROBE goes via try_tx, not here. The offset check only
         // matters for Router (Switch offset=0).
-        if data.len() < offset {
+        let Some(payload) = data.get(offset..) else {
             return false;
-        }
+        };
 
         // Only set PKT_COMPRESSED if compression actually helped.
         // Peer asked for this level in ANS_KEY. PERF(chunk-10): one
         // alloc per packet when peer asked for compression.
-        let payload = &data[offset..];
         let level = compress::Level::from_wire(tunnel.outcompression);
         let mut record_type = base_type;
         let compressed;
@@ -198,19 +193,16 @@ impl Daemon {
                     // keys exist; `outseqno_handle`/`replay_handle` clone the Arcs inside the
                     // Sptps so fast path and control side share one counter and window. On rekey
                     // this arm runs again and the old handles drop.
-                    if let Some(sptps) = tunnel.sptps.as_deref() {
+                    if let Some(sptps) = tunnel.sptps.as_deref()
+                        && let (Some(outkey), Some(inkey)) =
+                            (sptps.outcipher_key(), sptps.incipher_key())
+                    {
                         let handles = Arc::new(TunnelHandles {
                             outseqno: sptps.outseqno_handle(),
                             out_key_base: sptps.out_key_base(),
                             replay: sptps.replay_handle(),
-                            outcipher: tinc_crypto::aead::SptpsCipher::new(
-                                sptps.aead(),
-                                &sptps.outcipher_key().expect("post-HandshakeDone"),
-                            ),
-                            incipher: tinc_crypto::aead::SptpsCipher::new(
-                                sptps.aead(),
-                                &sptps.incipher_key().expect("post-HandshakeDone"),
-                            ),
+                            outcipher: tinc_crypto::aead::SptpsCipher::new(sptps.aead(), &outkey),
+                            incipher: tinc_crypto::aead::SptpsCipher::new(sptps.aead(), &inkey),
                             udp_addr: Mutex::new(tunnel.path.target().cloned()),
                             minmtu: AtomicU16::new(tunnel.minmtu()),
                             outcompression: tunnel.outcompression,
@@ -276,7 +268,8 @@ impl Daemon {
             }
             // mem::take dance: udp_probe_h is &mut self.
             let scratch = mem::take(&mut self.dp.rx_scratch);
-            let nw = self.udp_probe_h(peer, peer_name, &scratch[14..], via);
+            let body = scratch.get(14..).unwrap_or_default();
+            let nw = self.udp_probe_h(peer, peer_name, body, via);
             self.dp.rx_scratch = scratch;
             return nw;
         }
@@ -310,10 +303,11 @@ impl Daemon {
             let incomp = self.dp.tunnels.get(&peer).map_or(0, |t| t.incompression);
             let level = compress::Level::from_wire(incomp);
             let scratch = mem::take(&mut self.dp.rx_scratch);
-            let d = self
-                .dp
-                .compressor
-                .decompress(&scratch[14..], level, MTU as usize);
+            let d = self.dp.compressor.decompress(
+                scratch.get(14..).unwrap_or_default(),
+                level,
+                MTU as usize,
+            );
             self.dp.rx_scratch = scratch;
             if let Some(d) = d {
                 decompressed = Some(d);
@@ -340,7 +334,7 @@ impl Daemon {
                     self.dp.rx_scratch = scratch;
                     return false;
                 }
-                let ethertype: u16 = match body[0] >> 4 {
+                let ethertype: u16 = match body.first().map_or(0, |b| b >> 4) {
                     4 => ETH_P_IP,
                     6 => 0x86DD,
                     v => {
@@ -350,21 +344,22 @@ impl Daemon {
                         return false;
                     }
                 };
-                frame_vec = vec![0u8; offset + body.len()];
-                frame_vec[12..14].copy_from_slice(&ethertype.to_be_bytes());
-                frame_vec[offset..].copy_from_slice(body);
+                frame_vec = Vec::with_capacity(offset + body.len());
+                frame_vec.extend_from_slice(&[0; 12]);
+                frame_vec.extend_from_slice(&ethertype.to_be_bytes());
+                frame_vec.extend_from_slice(body);
             }
             &mut frame_vec
         } else if offset == 0 {
             // Switch mode: body at scratch[14..] is the frame.
-            &mut scratch[14..]
+            scratch.get_mut(14..).unwrap_or_default()
         } else {
             // Router mode (THE HOT PATH).
             if body_len == 0 {
                 self.dp.rx_scratch = scratch;
                 return false;
             }
-            let ethertype: u16 = match scratch[14] >> 4 {
+            let ethertype: u16 = match scratch.get(14).map_or(0, |b| b >> 4) {
                 4 => ETH_P_IP,
                 6 => 0x86DD,
                 v => {
@@ -375,7 +370,10 @@ impl Daemon {
                 }
             };
             // Headroom [0..14] is already zero; stamp ethertype.
-            scratch[12..14].copy_from_slice(&ethertype.to_be_bytes());
+            if wire::put_be16(&mut scratch, 12, ethertype).is_none() {
+                self.dp.rx_scratch = scratch;
+                return false;
+            }
             &mut scratch
         };
 
@@ -419,11 +417,9 @@ impl Daemon {
         ct: Option<&[u8]>,
         from_is_myself: bool,
     ) -> bool {
-        // `match` not `unwrap_or`: latter is eager, would
-        // slice-panic on empty scratch even when ct=Some.
         let ct = match ct {
             Some(s) => s,
-            None => &self.dp.tx_scratch[12..],
+            None => self.dp.tx_scratch.get(12..).unwrap_or_default(),
         };
 
         let Some(conn_id) = self.conn_for_nexthop(to_nid) else {
@@ -617,9 +613,11 @@ impl Daemon {
             self.dp.tx_scratch.extend_from_slice(dst_id.as_bytes());
             self.dp.tx_scratch.extend_from_slice(src_id.as_bytes());
             self.dp.tx_scratch.extend_from_slice(ct);
-        } else {
-            self.dp.tx_scratch[0..6].copy_from_slice(dst_id.as_bytes());
-            self.dp.tx_scratch[6..12].copy_from_slice(src_id.as_bytes());
+        } else if let Some((dst, rest)) = self.dp.tx_scratch.split_first_chunk_mut::<6>()
+            && let Some(src) = rest.first_chunk_mut::<6>()
+        {
+            *dst = *dst_id.as_bytes();
+            *src = *src_id.as_bytes();
         }
 
         // Send to RELAY, not `to`. Fast path: `path.target()` set
