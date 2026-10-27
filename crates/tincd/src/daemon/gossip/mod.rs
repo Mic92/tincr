@@ -65,13 +65,7 @@ impl Daemon {
     pub(super) fn load_peer_tunnel_cfg(&self, name: &str) -> Option<PeerTunnelCfg> {
         let cfg = hostkeys::read_host_config(&self.hosts, name);
         let key = hostkeys::read_ecdsa_public_key(&cfg, &self.hosts, name)?;
-        let (kex, aead) = hostkeys::link_sptps_modes(
-            &self.hosts,
-            &self.name,
-            &cfg,
-            name,
-            (self.settings.sptps_kex, self.settings.sptps_cipher),
-        );
+        let (kex, aead) = hostkeys::link_sptps_modes(&self.hosts, &self.name, &cfg, name);
         Some((key, kex, aead))
     }
 

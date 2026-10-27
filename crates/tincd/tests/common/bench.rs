@@ -7,7 +7,6 @@
 #![allow(dead_code)] // each bench uses a subset
 
 use std::env;
-use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -70,11 +69,14 @@ impl Impl {
 /// A sampling profiler can stall a ping cycle, hence the looser timeout.
 pub fn bench_conf(ping_timeout: u32) -> String {
     let ping_timeout = if perf_enabled() { 5 } else { ping_timeout };
-    let mut conf = format!("PingTimeout = {ping_timeout}\n");
-    if let Ok(cipher) = env::var("TINCD_BENCH_SPTPS_CIPHER") {
-        writeln!(conf, "SPTPSCipher = {cipher}").unwrap();
-    }
-    conf
+    format!("PingTimeout = {ping_timeout}\n")
+}
+
+/// Host-file lines. The cipher applies only if both host files ask.
+pub fn bench_host_conf() -> String {
+    env::var("TINCD_BENCH_SPTPS_CIPHER")
+        .map(|c| format!("SPTPSCipher = {c}\n"))
+        .unwrap_or_default()
 }
 
 /// alice dials bob.

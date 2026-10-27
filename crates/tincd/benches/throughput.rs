@@ -28,8 +28,8 @@ mod bench {
     use std::time::Duration;
 
     use super::common::bench::{
-        Impl, PingStats, Tunnel, bench_conf, c_tincd_bin, iperf3_available, iperf3_client,
-        node_minmtu, parse_iperf, perf_enabled, ping_once,
+        Impl, PingStats, Tunnel, bench_conf, bench_host_conf, c_tincd_bin, iperf3_available,
+        iperf3_client, node_minmtu, parse_iperf, perf_enabled, ping_once,
     };
     use super::common::linux::{
         ChildNetNs, bwrap_inner_init, bwrap_reexec, bwrap_usable, run_ip, run_ip_in,
@@ -134,6 +134,7 @@ mod bench {
             .iface(iface)
             .subnet(subnet)
             .with_conf(&bench_conf(1))
+            .with_host_conf(&bench_host_conf())
     }
 
     /// Field order: daemons drop before their devices.
@@ -397,12 +398,14 @@ mod bench {
                     .iface(&format!("tincT{k}"))
                     .subnet(&format!("10.44.{k}.0/24"))
                     .with_conf(&bench_conf(5))
+                    .with_host_conf(&bench_host_conf())
             })
             .collect();
         let mut alice = Node::new(tmp.path(), "alice", 0xA1)
             .iface("tincT0")
             .subnet("10.44.0.0/24")
             .with_conf(&bench_conf(5))
+            .with_host_conf(&bench_host_conf())
             .with_conf(if single_shard { "Shards = 1" } else { "" });
         for bob in &mut bobs {
             bob.write_config(&alice, false);
