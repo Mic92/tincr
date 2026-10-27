@@ -2,15 +2,13 @@
 //! reads, execute the resulting action, and load `hosts/` so nodes we
 //! have no edge to are still candidates.
 
-use super::{Daemon, TimerWhat, parse_subnets_from_config};
+use super::{Daemon, parse_subnets_from_config};
 
-use std::collections::HashSet;
 use std::time::Duration;
 
-use crate::addrcache::AddressCache;
 use crate::autoconnect::{self, AutoAction, NodeSnapshot, OutgoingSnapshot, ShortcutKnobs};
 use crate::keys;
-use crate::outgoing::{OutOrigin, Outgoing, OutgoingId};
+use crate::outgoing::OutOrigin;
 use tinc_crypto::os_rng;
 
 impl Daemon {
@@ -150,14 +148,12 @@ impl Daemon {
             })
             .collect();
 
-        // pending = Outgoing slots with no live conn. Pre-ACK conns
-        // count as serving.
-        let served: HashSet<OutgoingId> = self.conns.values().filter_map(|c| c.outgoing).collect();
+        // Slots waiting to redial. A dial in flight isn't pending.
         let pending_outgoings: Vec<OutgoingSnapshot> = self
             .outgoings
-            .iter()
-            .filter(|(oid, _)| !served.contains(oid))
-            .map(|(_, o)| OutgoingSnapshot {
+            .values()
+            .filter(|o| o.state.conn().is_none())
+            .map(|o| OutgoingSnapshot {
                 name: o.node_name.clone(),
                 origin: o.origin,
                 age: Duration::MAX,
@@ -193,17 +189,7 @@ impl Daemon {
                     log::info!(target: "tincd",
                                "Autoconnecting to {name}");
                 }
-                self.lookup_or_add_node(&name);
-                let addr_cache = AddressCache::open(&self.confbase, &name);
-                let oid = self.outgoings.insert(Outgoing {
-                    node_name: name,
-                    origin,
-                    timeout: 0,
-                    addr_cache,
-                });
-                let tid = self.timers.add(TimerWhat::RetryOutgoing(oid));
-                self.outgoing_timers.insert(oid, tid);
-                self.setup_outgoing_connection(oid);
+                self.add_outgoing(name, origin);
             }
             AutoAction::Disconnect { name, origin } => {
                 if origin == OutOrigin::AutoShortcut {
@@ -222,7 +208,6 @@ impl Daemon {
                 if let Some(cid) = cid {
                     let oid = self.conns.get_mut(cid).and_then(|c| c.outgoing.take());
                     if let Some(oid) = oid {
-                        self.outgoing_timers.remove(oid);
                         self.outgoings.remove(oid);
                     }
                     self.terminate(cid);
@@ -251,7 +236,6 @@ impl Daemon {
                     .find(|(_, o)| o.node_name == name)
                     .map(|(id, _)| id);
                 if let Some(oid) = oid {
-                    self.outgoing_timers.remove(oid);
                     self.outgoings.remove(oid);
                 }
             }

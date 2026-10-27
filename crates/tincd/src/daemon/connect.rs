@@ -1,14 +1,15 @@
-use super::{ConnId, Daemon, IoWhat, NodeState};
+use super::{ConnId, Daemon, IoWhat, NodeState, TimerWhat};
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, OwnedFd};
 use std::time::Duration;
 
+use crate::addrcache::AddressCache;
 use crate::conn::Connection;
 use crate::dispatch::parse_ack;
 use crate::listen::fmt_addr;
 use crate::outgoing::{
-    ConnectAttempt, OutOrigin, OutgoingId, ProxyConfig, probe_connecting, try_connect,
-    try_connect_via_proxy,
+    ConnectAttempt, OutOrigin, OutState, Outgoing, OutgoingId, ProxyConfig, probe_connecting,
+    try_connect, try_connect_via_proxy,
 };
 use crate::{local_addr, socks};
 use tinc_sptps::Role;
@@ -80,6 +81,11 @@ impl Daemon {
 
         // ACK reached — address worked. Pinned by tests/addrcache.rs.
         if let Some(oid) = conn_outgoing {
+            if let Some(o) = self.outgoings.get_mut(oid)
+                && o.state.conn() == Some(id)
+            {
+                o.state = OutState::Connected(id);
+            }
             self.confirm_outgoing_address(oid, conn_addr);
             if let Some(a) = conn_addr {
                 self.addr_owners.insert(a, name.clone());
@@ -120,7 +126,12 @@ impl Daemon {
                 .and_then(|dc| dc.outgoing.take())
             {
                 match self.conns.get_mut(keep) {
-                    Some(kc) if kc.outgoing.is_none() => kc.outgoing = Some(dropped_oid),
+                    Some(kc) if kc.outgoing.is_none() => {
+                        kc.outgoing = Some(dropped_oid);
+                        if let Some(o) = self.outgoings.get_mut(dropped_oid) {
+                            o.state = OutState::Connected(keep);
+                        }
+                    }
                     _ => {
                         // Both conns own an Outgoing (cold-start
                         // duplicate `ConnectTo`). The slot was
@@ -129,7 +140,6 @@ impl Daemon {
                         // or it leaks for the daemon lifetime.
                         log::warn!(target: "tincd::conn",
                             "Two outgoing connections to the same node {name}!");
-                        self.outgoing_timers.remove(dropped_oid);
                         self.outgoings.remove(dropped_oid);
                     }
                 }
@@ -384,10 +394,14 @@ impl Daemon {
         // `was_active` wedged a pre-ACK ping-sweep timeout forever: `on_ping_tick`
         // terminates directly, nothing re-drove the outgoing, and `stress_link_flap`
         // never reconnected after lo-up.
-        if let Some(oid) = conn_outgoing.filter(|oid| self.outgoings.contains_key(*oid)) {
+        if let Some(oid) = conn_outgoing
+            && let Some(o) = self.outgoings.get_mut(oid)
+            && o.state.conn() == Some(id)
+        {
+            o.state = OutState::Idle;
             // Reset backoff only if the conn got to ACK (proven-good
             // addr). Pre-ACK → keep the bumped backoff.
-            if was_active && let Some(o) = self.outgoings.get_mut(oid) {
+            if was_active {
                 o.timeout = 0;
             }
             self.do_outgoing_connection(oid);
@@ -439,26 +453,57 @@ impl Daemon {
         }
     }
 
+    /// New slot, dialled right away. The node goes into the graph first so
+    /// an `ADD_EDGE` arriving via another path can find it.
+    pub(super) fn add_outgoing(&mut self, name: String, origin: OutOrigin) {
+        self.lookup_or_add_node(&name);
+        let addr_cache = AddressCache::open(&self.confbase, &name);
+        let oid = self
+            .outgoings
+            .insert(Outgoing::new(name, origin, addr_cache));
+        self.setup_outgoing_connection(oid);
+    }
+
+    /// Backoff over, or `tinc retry`: dial now if the slot is waiting.
+    pub(super) fn wake_outgoing(&mut self, oid: OutgoingId) {
+        if let Some(o) = self.outgoings.get_mut(oid)
+            && matches!(o.state, OutState::Backoff(_))
+        {
+            o.state = OutState::Idle;
+            self.setup_outgoing_connection(oid);
+        }
+    }
+
     pub(super) fn setup_outgoing_connection(&mut self, oid: OutgoingId) {
-        // No timer del: it can't fire mid-connect and the next `retry_outgoing`
-        // overwrites it. Drain DNS results first so worker results are visible to this
+        // Drain DNS results first so worker results are visible to this
         // retry rather than the next; near-free when empty.
         self.drain_dns_worker();
 
         let Some(outgoing) = self.outgoings.get(oid) else {
-            return; // gone (chunk 8's mark-sweep)
+            return;
         };
+        if !matches!(outgoing.state, OutState::Idle) {
+            return;
+        }
         let name = outgoing.node_name.clone();
 
         // No node_ids entry = never ACK'd.
         let nid = self.node_ids.get(&name).copied();
-        if nid
+        if let Some(cid) = nid
             .and_then(|nid| self.nodes.get(&nid))
             .and_then(|ns| ns.conn)
-            .is_some()
         {
             log::info!(target: "tincd::conn",
                        "Already connected to {name}");
+            // The slot follows that conn, so its death redials.
+            if let Some(c) = self.conns.get_mut(cid)
+                && c.outgoing.is_none()
+            {
+                c.outgoing = Some(oid);
+                if let Some(o) = self.outgoings.get_mut(oid) {
+                    o.state = OutState::Connected(cid);
+                }
+            }
             return;
         }
 
@@ -573,6 +618,9 @@ impl Daemon {
                 let Some(id) = self.register_conn(conn, Io::Read) else {
                     continue;
                 };
+                if let Some(o) = self.outgoings.get_mut(oid) {
+                    o.state = OutState::Dialing(id);
+                }
                 // Proxy is transport; peer expects ID.
                 if let Some(conn) = self.conns.get_mut(id) {
                     log::info!(target: "tincd::conn",
@@ -645,8 +693,11 @@ impl Daemon {
                     // IO_READ|IO_WRITE. EPOLLOUT fires on connect
                     // complete or fail. READ too (loopback connect+
                     // immediate-data is possible).
-                    if self.register_conn(conn, Io::ReadWrite).is_none() {
+                    let Some(id) = self.register_conn(conn, Io::ReadWrite) else {
                         continue;
+                    };
+                    if let Some(o) = self.outgoings.get_mut(oid) {
+                        o.state = OutState::Dialing(id);
                     }
                     return;
                 }
@@ -671,10 +722,9 @@ impl Daemon {
         let name = outgoing.node_name.clone();
         log::info!(target: "tincd::conn",
                    "Trying to re-establish outgoing connection in {timeout} seconds");
-        if let Some(tid) = self.outgoing_timers.get(oid) {
-            self.timers
-                .set(tid, Duration::from_secs(u64::from(timeout)));
-        }
+        let after = Duration::from_secs(u64::from(timeout));
+        outgoing.state =
+            OutState::Backoff(self.timers.add_after(TimerWhat::RetryOutgoing(oid), after));
 
         // Clear the DNS hint map so the next `setup_outgoing_
         // connection` chains *fresh* DNS, not the addrs that just

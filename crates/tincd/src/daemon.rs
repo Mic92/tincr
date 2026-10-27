@@ -414,11 +414,6 @@ pub struct Daemon {
     /// fires on SIGHUP-reload.
     pub(crate) outgoings: SlotMap<OutgoingId, Outgoing>,
 
-    /// Per-outgoing retry timer. Parallel map: `Outgoing` stays
-    /// independent of the timer wheel. `setup_outgoing_connection`
-    /// disarms it first thing.
-    pub(crate) outgoing_timers: slotmap::SecondaryMap<OutgoingId, TimerHandle>,
-
     /// Names whose `hosts/NAME` has an `Address =` line; populated by
     /// `load_all_nodes`, read by `autoconnect::decide` as the eligible-to-dial
     /// gate. A set rather than a `NodeState` field because `NodeState` is
@@ -762,9 +757,7 @@ impl Daemon {
                 match t {
                     TimerWhat::Ping => self.on_ping_tick(),
                     TimerWhat::AgePastRequests => self.on_age_past_requests(),
-                    TimerWhat::RetryOutgoing(oid) => {
-                        self.setup_outgoing_connection(oid);
-                    }
+                    TimerWhat::RetryOutgoing(oid) => self.wake_outgoing(oid),
                     TimerWhat::Periodic => {
                         // Return is the would-sleep duration; only
                         // the unit test reads it.
