@@ -13,7 +13,7 @@ use crate::dns;
 use crate::fragment;
 use crate::graph::{EdgeId, NodeId};
 use crate::packet::ETH_P_ARP;
-use crate::packet::{ETH_P_IP, ethertype};
+use crate::packet::{ETH_P_IP, L3, ethertype};
 use tinc_proto::{Request, Subnet};
 
 /// Cap on locally-learned MAC subnets (switch mode).
@@ -432,16 +432,18 @@ impl Daemon {
         // PMTU runs: 1518 ceiling.
         let via_mtu = self.dp.tunnels.get(&via_nid).map_or(MTU, |t| t.path.mtu());
 
-        // directonly — operator opts out of relay.
+        let l3 = L3::of(data);
+        // directonly — operator opts out of relay. Switch mode drops silently.
         if self.settings.directonly && to_nid != via_nid {
-            let is_v4 = ethertype(data) == Some(ETH_P_IP);
-            let (t, c) = if is_v4 {
-                (route_decide::ICMP_DEST_UNREACH, route_decide::ICMP_NET_ANO)
-            } else {
-                (
+            let (t, c) = match (self.settings.routing_mode, l3) {
+                (RoutingMode::Router, L3::V4) => {
+                    (route_decide::ICMP_DEST_UNREACH, route_decide::ICMP_NET_ANO)
+                }
+                (RoutingMode::Router, L3::V6) => (
                     route_decide::ICMP6_DST_UNREACH,
                     route_decide::ICMP6_DST_UNREACH_ADMIN,
-                )
+                ),
+                _ => return false,
             };
             return self.emit_icmp(
                 data,
@@ -458,8 +460,8 @@ impl Daemon {
         // while `via_mtu == 0`: before discovery finishes `mtu` is 0, we'd claim 576,
         // and the kernel caches that per destination for 10 minutes, pinning every TCP
         // flow in that window to MSS 536.
-        if via_nid != self.myself && via_mtu != 0 {
-            let is_v4 = ethertype(data) == Some(ETH_P_IP);
+        if via_nid != self.myself && via_mtu != 0 && l3 != L3::Other {
+            let is_v4 = l3 == L3::V4;
             let floor: u16 = if is_v4 { 590 } else { 1294 };
             let limit = via_mtu.max(floor);
             if data.len() > usize::from(limit) {

@@ -303,6 +303,26 @@ pub(crate) const ARPHRD_ETHER: u16 = 1;
 // with a pointer back. RFC constants; can't drift.
 /// `ETH_P_IP` — see `tinc-device/src/ether.rs:32`.
 pub(crate) const ETH_P_IP: u16 = 0x0800;
+pub(crate) const ETH_P_IPV6: u16 = 0x86DD;
+
+/// Network layer of an untagged frame. Only these shapes get ICMP replies
+/// or fragmentation, everything else (`802.1Q`, `PPPoE`, `MPLS`) is sent as is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum L3 {
+    V4,
+    V6,
+    Other,
+}
+
+impl L3 {
+    pub(crate) fn of(frame: &[u8]) -> Self {
+        match ethertype(frame) {
+            Some(ETH_P_IP) => Self::V4,
+            Some(ETH_P_IPV6) => Self::V6,
+            _ => Self::Other,
+        }
+    }
+}
 /// Not exported by `tinc-device`.
 pub(crate) const ETH_P_ARP: u16 = 0x0806;
 
@@ -397,6 +417,21 @@ impl Ipv4Pseudo {
 mod tests {
     use super::*;
     use zerocopy::IntoBytes;
+
+    #[test]
+    fn l3_of_untagged_only() {
+        let frame = |t: u16| {
+            let mut f = [0u8; 60];
+            f[12..14].copy_from_slice(&t.to_be_bytes());
+            f
+        };
+        assert_eq!(L3::of(&frame(0x0800)), L3::V4);
+        assert_eq!(L3::of(&frame(0x86DD)), L3::V6);
+        for t in [0x8100, 0x8864, 0x8847] {
+            assert_eq!(L3::of(&frame(t)), L3::Other, "{t:#x}");
+        }
+        assert_eq!(L3::of(&[0; 12]), L3::Other);
+    }
 
     // Struct sizes — pin layout.
 
