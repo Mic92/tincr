@@ -105,6 +105,9 @@ Things that work in both daemons but not identically.
   currently the next hop for active traffic is never reaped by the
   "more than 3 connections" rule, and connections opened as a
   shortcut to a hot relay target are held for a grace period.
+- **Binary `SPTPS_PACKET` is relayed without a relay key.** C only
+  relays when it holds a key with the destination, which a TCPOnly
+  neighbour never gets, so spokes of an all-TCP hub could not talk.
 - **`StrictSubnets` reload is incomplete.** Authorised subnets are
   loaded at startup, but SIGHUP does not yet re-diff `hosts/*` and
   broadcast the deltas the way C does. Restart the daemon after

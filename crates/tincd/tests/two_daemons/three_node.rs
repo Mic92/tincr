@@ -72,18 +72,28 @@ fn probe() -> Vec<u8> {
 
 /// alice and bob never connect directly; mid relays both the key
 /// exchange and the data, and alice learns bob's UDP address anyway.
+/// Under `TCPOnly` mid holds no key with either spoke and relays anyway.
 #[test]
 fn relays_via_mid() {
-    let tmp = tmp!("relay3");
+    relay_via_mid("relay3", "");
+    relay_via_mid("relay3-tcponly", "TCPOnly = yes\n");
+}
+
+fn relay_via_mid(tag: &str, conf: &str) {
+    let tmp = tmp!(tag);
     let (alice_dev, alice_daemon_end) = sockpair_datagram();
     let (bob_dev, bob_daemon_end) = sockpair_datagram();
     let mut alice = Node::new(tmp.path(), "alice", 0xA3)
         .fd(alice_daemon_end.as_raw_fd())
-        .subnet("10.0.0.1/32");
-    let mut mid = Node::new(tmp.path(), "mid", 0xC3).log_level("tincd=debug");
+        .subnet("10.0.0.1/32")
+        .with_conf(conf);
+    let mut mid = Node::new(tmp.path(), "mid", 0xC3)
+        .log_level("tincd=debug")
+        .with_conf(conf);
     let mut bob = Node::new(tmp.path(), "bob", 0xB3)
         .fd(bob_daemon_end.as_raw_fd())
-        .subnet("10.0.0.2/32");
+        .subnet("10.0.0.2/32")
+        .with_conf(conf);
     start_hub(
         &mut mid,
         &mut alice,
@@ -122,7 +132,7 @@ fn relays_via_mid() {
     let nodes = alice_ctl.dump(3);
     let bob_row = nodes.iter().find(|r| r.starts_with("18 3 bob ")).unwrap();
     assert!(
-        bob_row.contains(" 127.0.0.1 port "),
+        !conf.is_empty() || bob_row.contains(" 127.0.0.1 port "),
         "udp addr not learned: {bob_row}"
     );
     assert!(mid.stop().contains("Relaying"));
