@@ -605,7 +605,9 @@ pub(crate) fn open_udp_siblings(
     let addr = SockAddr::from(l.udp.local_addr()?.as_socket().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "udp listener has no inet addr")
     })?);
-    (0..extra).map(|_| setup_udp(&addr, opts, true)).collect()
+    // Match the primary, which may be an adopted dual-stack socket.
+    let v6only = addr.is_ipv4() || l.udp.only_v6().unwrap_or(true);
+    (0..extra).map(|_| setup_udp(&addr, opts, v6only)).collect()
 }
 
 /// Configure an accepted fd: NONBLOCK (not inherited from the listener) and

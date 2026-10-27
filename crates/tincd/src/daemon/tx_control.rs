@@ -588,7 +588,7 @@ impl Daemon {
             && let Some(addr) = t.path.addr()
         {
             if t.path.confirmed() || t.path.addr_seen() {
-                let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
+                let sock = local_addr::adapt_socket(&addr, t.path.rx_sock(), &listener_addrs);
                 return Some((addr, sock));
             }
             // 1-of-3 returns early with stashed addr; other 2 fall
@@ -596,7 +596,7 @@ impl Daemon {
             self.dp.choose_udp_x = self.dp.choose_udp_x.wrapping_add(1);
             if self.dp.choose_udp_x >= 3 {
                 self.dp.choose_udp_x = 0;
-                let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
+                let sock = local_addr::adapt_socket(&addr, t.path.rx_sock(), &listener_addrs);
                 return Some((addr, sock));
             }
         }
@@ -629,7 +629,10 @@ impl Daemon {
                 let i = (os_rng().next_u32() as usize) % cands.len();
                 Some(cands.swap_remove(i))
             })?;
-        let sock = local_addr::adapt_socket(&addr, 0, &listener_addrs);
+        // Exploring: any listener may be the one the peer can reach.
+        #[expect(clippy::cast_possible_truncation)] // ≤ MAXSOCKETS
+        let any = (os_rng().next_u32() as usize % listener_addrs.len().max(1)) as u8;
+        let sock = local_addr::adapt_socket(&addr, any, &listener_addrs);
         Some((addr, sock))
     }
 }

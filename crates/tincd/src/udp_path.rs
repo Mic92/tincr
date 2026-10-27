@@ -14,6 +14,8 @@ pub(crate) struct UdpPath {
     addr: Option<SocketAddr>,
     /// `addr` is where an authenticated datagram came from, not a hint.
     addr_seen: bool,
+    /// Listener the peer last reached us on; replies leave from it.
+    rx_sock: u8,
     pmtu: Option<PmtuState>,
     send_failed_at: Option<Instant>,
     /// Derived by [`Self::refresh_target`], cached for the hot path.
@@ -24,6 +26,11 @@ impl UdpPath {
     #[must_use]
     pub(crate) const fn addr(&self) -> Option<SocketAddr> {
         self.addr
+    }
+
+    #[must_use]
+    pub(crate) const fn rx_sock(&self) -> u8 {
+        self.rx_sock
     }
 
     #[must_use]
@@ -68,12 +75,16 @@ impl UdpPath {
     }
 
     #[must_use]
-    pub(crate) fn derive_target(&self, sock: impl Fn(&SocketAddr) -> u8) -> Option<(SockAddr, u8)> {
+    /// `sock(addr, rx_sock)` picks the listener to send from.
+    pub(crate) fn derive_target(
+        &self,
+        sock: impl Fn(&SocketAddr, u8) -> u8,
+    ) -> Option<(SockAddr, u8)> {
         let addr = self.addr.filter(|_| self.confirmed())?;
-        Some((SockAddr::from(addr), sock(&addr)))
+        Some((SockAddr::from(addr), sock(&addr, self.rx_sock)))
     }
 
-    pub(crate) fn refresh_target(&mut self, sock: impl Fn(&SocketAddr) -> u8) -> bool {
+    pub(crate) fn refresh_target(&mut self, sock: impl Fn(&SocketAddr, u8) -> u8) -> bool {
         let t = self.derive_target(sock);
         if t == self.target {
             return false;
@@ -89,9 +100,11 @@ impl UdpPath {
 
     /// Proves only the peer→us leg, so it moves the address without
     /// confirming the path.
-    pub(crate) fn on_authenticated_rx(&mut self, src: SocketAddr) -> bool {
+    pub(crate) fn on_authenticated_rx(&mut self, src: SocketAddr, sock: u8) -> bool {
         self.addr_seen = true;
-        self.addr.replace(src) != Some(src)
+        let moved = self.addr.replace(src) != Some(src) || self.rx_sock != sock;
+        self.rx_sock = sock;
+        moved
     }
 
     pub(crate) fn on_probe_reply(&mut self, len: u16, now: Instant) -> Vec<PmtuAction> {
@@ -188,10 +201,10 @@ mod tests {
     fn invalidation_is_atomic() {
         type Kill = fn(&mut UdpPath, Instant);
         let now = Instant::now();
-        let listeners = |_: &SocketAddr| 0;
+        let listeners = |_: &SocketAddr, _| 0;
         let confirmed = || {
             let mut p = UdpPath::default();
-            p.on_authenticated_rx(addr("192.0.2.1:655"));
+            p.on_authenticated_rx(addr("192.0.2.1:655"), 0);
             let pm = p.pmtu_mut(now);
             pm.ping_sent = true;
             let _ = pm.on_probe_reply(1400, now);
@@ -224,7 +237,7 @@ mod tests {
         let mut p = UdpPath::default();
         assert!(p.on_addr_hint(addr("192.0.2.1:655")));
         assert!(p.on_addr_hint(addr("192.0.2.2:655")));
-        p.on_authenticated_rx(addr("192.0.2.1:655"));
+        p.on_authenticated_rx(addr("192.0.2.1:655"), 0);
         assert!(!p.on_addr_hint(addr("198.51.100.7:655")));
         assert_eq!(p.addr(), Some(addr("192.0.2.1:655")));
 
@@ -236,20 +249,23 @@ mod tests {
     #[test]
     fn rebinding_moves_the_target() {
         let now = Instant::now();
-        let listeners = |_: &SocketAddr| 0;
+        let listeners = |_: &SocketAddr, _| 0;
         let mut p = UdpPath::default();
-        assert!(p.on_authenticated_rx(addr("192.0.2.1:655")));
-        assert!(!p.on_authenticated_rx(addr("192.0.2.1:655")));
+        assert!(p.on_authenticated_rx(addr("192.0.2.1:655"), 0));
+        assert!(!p.on_authenticated_rx(addr("192.0.2.1:655"), 0));
         let pm = p.pmtu_mut(now);
         pm.ping_sent = true;
         let _ = pm.on_probe_reply(18, now);
         assert!(p.refresh_target(listeners));
-        assert!(p.on_authenticated_rx(addr("192.0.2.1:40000")));
+        assert!(p.on_authenticated_rx(addr("192.0.2.1:40000"), 0));
         assert!(p.refresh_target(listeners));
         assert_eq!(
             p.target().and_then(|(sa, _)| sa.as_socket()),
             Some(addr("192.0.2.1:40000"))
         );
+        assert!(p.on_authenticated_rx(addr("192.0.2.1:40000"), 1));
+        assert!(p.refresh_target(|_, hint| hint));
+        assert_eq!(p.target().map(|(_, s)| *s), Some(1));
     }
 
     #[test]
