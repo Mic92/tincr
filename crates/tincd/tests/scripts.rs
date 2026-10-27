@@ -10,14 +10,17 @@ use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::time::Duration;
 
 #[macro_use]
 mod common;
 use common::node::Node;
-use common::poll_until;
+use common::{poll_until, tincd_at};
 
-const ENV_KEYS: [&str; 7] = [
+const ENV_KEYS: [&str; 9] = [
+    "NETNAME",
+    "DEBUG",
     "NAME",
     "NODE",
     "SUBNET",
@@ -198,23 +201,41 @@ fn host_down_order_on_disconnect() {
     assert_eq!(events[subnet_down].env["SUBNET"], "10.0.2.0/24");
 }
 
+/// As C: reachable peers' down-hooks, then our own subnet-down, then
+/// tinc-down. Every hook gets `NETNAME` and `DEBUG`.
 #[test]
-fn own_subnet_down_then_tinc_down_on_shutdown() {
+fn down_hooks_then_tinc_down_on_shutdown() {
     let tmp = tmp!("shutdown");
     let mut alice = node(tmp.path(), "alice", 0xA4).subnet("10.0.1.0/24");
-    alice.write_config_multi(&[], &[]);
-    let log = ScriptLog::install(tmp.path(), &alice, None);
-    alice.start();
-    let started = log.wait_len(2).len();
+    let mut bob = node(tmp.path(), "bob", 0xB4).subnet("10.0.2.0/24");
+    bob.write_config(&alice, false);
+    bob.start();
+    alice.write_config(&bob, true);
+    let log = ScriptLog::install(tmp.path(), &alice, Some("bob"));
+    let mut cmd = tincd_at(&alice.confbase, &alice.pidfile, &alice.socket);
+    cmd.env("NETNAME", "testnet").stderr(Stdio::piped());
+    alice.start_command(cmd);
+    let started = log.wait_for("subnet-up", "bob").len();
 
     // SIGKILL would skip the shutdown scripts.
     alice.signal(nix::sys::signal::Signal::SIGTERM);
     assert!(alice.wait_exit().success());
     let events = log.events();
     let events = &events[started..];
+    let peer_down = position(events, "host-down", "bob");
+    let peer_subnet_down = position(events, "subnet-down", "bob");
     let subnet_down = position(events, "subnet-down", "alice");
     let tinc_down = position(events, "tinc-down", "");
-    assert!(subnet_down < tinc_down, "{events:#?}");
+    assert!(
+        peer_down < peer_subnet_down && peer_subnet_down < subnet_down && subnet_down < tinc_down,
+        "{events:#?}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| e.env["NETNAME"] == "testnet" && !e.env["DEBUG"].is_empty()),
+        "{events:#?}"
+    );
     assert_eq!(events[subnet_down].env["SUBNET"], "10.0.1.0/24");
     assert_eq!(events[subnet_down].env["REMOTEADDRESS"], "");
     assert_eq!(events[tinc_down].env["NAME"], "alice");

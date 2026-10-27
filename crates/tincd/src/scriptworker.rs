@@ -30,6 +30,8 @@ pub(crate) enum Job {
     /// Atomic write-then-rename; keeps addrcache fsync+rename tail
     /// latency off the event loop.
     WriteFile { path: PathBuf, bytes: Vec<u8> },
+    /// Signalled once every earlier job has run.
+    Barrier(SyncSender<()>),
 }
 
 /// FIFO worker. Jobs queue until [`Self::start`], which runs after
@@ -86,6 +88,20 @@ impl ScriptWorker {
     }
 }
 
+impl ScriptWorker {
+    /// Block until every job queued so far has run, so a synchronous
+    /// `tinc-down` cannot overtake a queued `host-down`.
+    pub(crate) fn flush(&self) {
+        let (Some(tx), Some(_)) = (&self.tx, &self.join) else {
+            return;
+        };
+        let (done_tx, done_rx) = sync_channel(1);
+        if tx.send(Job::Barrier(done_tx)).is_ok() {
+            let _ = done_rx.recv();
+        }
+    }
+}
+
 impl Drop for ScriptWorker {
     fn drop(&mut self) {
         // Hang up the sender so `rx.recv()` returns Err and the
@@ -110,6 +126,9 @@ fn run(rx: &Receiver<Job>) {
                     &name,
                     script::execute(&confbase, &name, &env, interpreter.as_deref()),
                 );
+            }
+            Job::Barrier(done) => {
+                let _ = done.send(());
             }
             Job::WriteFile { path, bytes } => {
                 if let Err(e) = addrcache::write_atomic(&path, &bytes) {

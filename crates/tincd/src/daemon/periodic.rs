@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::outgoing::OutState;
 use crate::script::{ScriptEnv, ScriptResult};
-use crate::{invitation_serve, reload, script};
+use crate::{invitation_serve, log_tap, reload, script};
 
 use super::setup;
 use crate::graph::NodeId;
@@ -310,10 +310,21 @@ impl Daemon {
         slept
     }
 
-    /// A failing script never aborts the daemon. `DEVICE`/`NETNAME`/
-    /// `DEBUG`: not threaded through yet (None).
+    /// The variables every hook gets, as C's `environment_init`.
+    pub(super) fn script_env(&self) -> ScriptEnv {
+        let device = self.device_node.as_ref().map(|p| p.to_string_lossy());
+        ScriptEnv::base(
+            self.netname.as_deref(),
+            &self.name,
+            device.as_deref(),
+            Some(&self.iface),
+            Some(log_tap::debug_level()),
+        )
+    }
+
+    /// A failing script never aborts the daemon.
     pub(super) fn run_script(&self, name: &str) {
-        let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
+        let mut env = self.script_env();
         // Rust-only: thread DNS config through to tinc-up so the
         // script can `resolvectl dns "$INTERFACE" "$DNS_ADDR"`
         // without hardcoding the magic IP. Only set when the stub
@@ -351,6 +362,7 @@ impl Daemon {
             return;
         }
         self.device_enabled = false;
+        self.script_worker.flush();
         self.run_script("tinc-down");
     }
 
@@ -376,7 +388,7 @@ impl Daemon {
         owner: &str,
         subnet: &Subnet,
     ) -> (&'static str, ScriptEnv) {
-        let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
+        let mut env = self.script_env();
         env.add("NODE", owner.to_owned());
         // REMOTEADDRESS/REMOTEPORT only if owner != myself
         if owner != self.name
@@ -400,7 +412,7 @@ impl Daemon {
     /// Enqueue host-up/down and hosts/NAME-up/down. `addr` None →
     /// REMOTEADDRESS omitted.
     pub(super) fn run_host_script(&self, up: bool, node: &str, addr: Option<SocketAddr>) {
-        let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
+        let mut env = self.script_env();
         env.add("NODE", node.to_owned());
         if let Some(a) = addr {
             env.add("REMOTEADDRESS", a.ip().to_string());

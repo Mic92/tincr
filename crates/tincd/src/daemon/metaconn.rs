@@ -16,7 +16,6 @@ use crate::dispatch::{
 };
 use crate::invitation_serve::InvitePhase;
 use crate::keys;
-use crate::script::ScriptEnv;
 use crate::socks::Reply;
 use crate::tunnel::{MTU, Via};
 use crate::{invitation_serve, socks};
@@ -962,7 +961,7 @@ impl Daemon {
         extra: Vec<(String, String)>,
         addr: Option<SocketAddr>,
     ) {
-        let mut env = ScriptEnv::base(None, &self.name, None, Some(&self.iface), None);
+        let mut env = self.script_env();
         env.add("NODE", node.to_owned());
         // With HostsOverlayDirectory the file is not at hosts/$NODE.
         env.add("HOST_FILE", host_file.display().to_string());

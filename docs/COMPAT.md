@@ -115,11 +115,10 @@ Things that work in both daemons but not identically.
 - **Unknown or restart-only config keys are warned about.** C
   ignores them silently. tincr logs a warning at startup, and on
   SIGHUP logs which changed keys need a restart to take effect.
-- **Hook script environment is clean.** `tinc-up`, `host-up`, etc.
-  receive only the documented `NETNAME`/`NAME`/`DEVICE`/… variables,
-  not the daemon's full inherited environment. Scripts that relied
-  on ambient `PATH` entries or leaked variables may need adjusting.
-  Per-event hooks (`host-up`, `subnet-up`, …) are spawned without
+- **Hook scripts don't see systemd's per-process variables.** As in C
+  they inherit the daemon's environment plus `NETNAME`/`NAME`/`DEVICE`/
+  `INTERFACE`/`DEBUG`, but `NOTIFY_SOCKET`, `LISTEN_*` and `WATCHDOG_*`
+  are removed. Per-event hooks (`host-up`, `subnet-up`, …) are spawned without
   waiting. Only `tinc-up`/`tinc-down` block.
 - **A failing `invitation-created` hook aborts `tinc invite`.** C
   ignores the exit status. tincr removes the invitation file and
