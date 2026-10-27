@@ -136,40 +136,23 @@ fn parse_watchdog_usec(raw: Option<&str>) -> Option<Duration> {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+    #[cfg(target_os = "linux")]
     use std::ffi::OsString;
-    use std::fs;
     #[cfg(target_os = "linux")]
     use std::os::unix::ffi::OsStringExt;
 
-    /// Bind a datagram socket at a unique filesystem path and return both
-    /// ends of the conversation. We don't use a tempdir crate (per the
-    /// project rule against NamedTempFile-style helpers); a pid+nanos
-    /// suffix is plenty for a test that cleans up after itself.
-    struct Unlink(OsString);
-    impl Drop for Unlink {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
-    }
-
-    fn bound_socket() -> (UnixDatagram, Unlink) {
-        let path = format!(
-            "/tmp/tincd-sdnotify-test.{}.{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let sock = UnixDatagram::bind(&path).expect("bind test socket");
-        (sock, Unlink(OsString::from(path)))
+    fn bound_socket() -> (UnixDatagram, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = UnixDatagram::bind(dir.path().join("notify")).expect("bind test socket");
+        (sock, dir)
     }
 
     #[test]
     fn datagram_body_is_exact_state_string() {
-        let (rx, path) = bound_socket();
+        let (rx, dir) = bound_socket();
+        let path = dir.path().join("notify");
 
-        notify_to(&path.0, "READY=1").expect("send READY=1");
+        notify_to(path.as_os_str(), "READY=1").expect("send READY=1");
 
         let mut buf = [0u8; 64];
         let n = rx.recv(&mut buf).expect("recv");
@@ -178,12 +161,13 @@ mod tests {
 
     #[test]
     fn multiple_states_arrive_as_separate_datagrams() {
-        let (rx, path) = bound_socket();
+        let (rx, dir) = bound_socket();
+        let path = dir.path().join("notify");
 
         // The C code sends READY then immediately a first WATCHDOG ping;
         // make sure we don't accidentally coalesce.
-        notify_to(&path.0, "READY=1").unwrap();
-        notify_to(&path.0, "WATCHDOG=1").unwrap();
+        notify_to(path.as_os_str(), "READY=1").unwrap();
+        notify_to(path.as_os_str(), "WATCHDOG=1").unwrap();
 
         let mut buf = [0u8; 64];
         let n = rx.recv(&mut buf).unwrap();
