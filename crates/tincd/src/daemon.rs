@@ -52,16 +52,11 @@ pub(crate) use dp::DataPlane;
 pub use settings::{DaemonSettings, ForwardingMode, RoutingMode};
 use tinc_conf::hostdirs::rebase_path;
 
-// `UPnP` config knob. With the feature off the type still exists
-// (settings.rs stores it unconditionally) but only `No` is reachable
-// — `load_settings` warns and ignores the config line, like a C tinc
-// built with `--disable-miniupnpc`.
 use crate::bgresolve::DnsWorker;
 use crate::dispatch::ConnOptions;
 use crate::dns::DnsConfig;
 use crate::event::MAX_EVENTS_PER_TURN;
 use crate::portmap::Portmapper;
-#[cfg(feature = "upnp")]
 pub use crate::portmap::UpnpMode;
 use crate::scriptworker::ScriptWorker;
 use crate::sd_notify;
@@ -69,28 +64,11 @@ use crate::shard::NodeView;
 use crate::shard::TunnelHandles;
 use crate::shard::TxSnapshot;
 use crate::shard::runtime::ShardRuntime;
-use std::fs;
-use std::io;
-#[cfg(not(feature = "upnp"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum UpnpMode {
-    #[default]
-    No,
-}
-#[cfg(not(feature = "upnp"))]
-impl UpnpMode {
-    // Signature matches the feature-on variant so settings.rs is
-    // cfg-free; clippy's unnecessary-wraps doesn't see across cfgs.
-    #[expect(clippy::unnecessary_wraps)]
-    pub(crate) fn from_config(_: &str) -> Option<Self> {
-        log::warn!(target: "tincd",
-            "UPnP was requested, but tincd was built without the `upnp` feature");
-        Some(Self::No)
-    }
-}
 pub(crate) use settings::{
     load_settings, parse_connect_to_from_config, parse_subnets_from_config, read_sptps_kex,
 };
+use std::fs;
+use std::io;
 
 // SPTPS record-type bits for the per-tunnel data channel.
 // Type 0 = plain IP packet (router mode, no compression). Bits are OR-combined.
@@ -556,7 +534,6 @@ pub struct Daemon {
     /// UPnP-IGD/NAT-PMP refresh thread.
     /// `Some` iff `UPnP != no` and the feature is compiled in. Polled
     /// from `on_periodic_tick`.
-    #[cfg(feature = "upnp")]
     pub(crate) portmapper: Option<Portmapper>,
 
     /// TX fast-path snapshot. The Super arm `mem::take`s this,
@@ -696,7 +673,6 @@ impl Bound {
         d.shards.start();
         d.dns_worker.start();
         d.script_worker.start();
-        #[cfg(feature = "upnp")]
         d.spawn_portmapper();
         d
     }

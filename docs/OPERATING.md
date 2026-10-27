@@ -259,7 +259,7 @@ Tuning / disabling:
 | `UPnPRefreshPeriod` | 60 | seconds; lease is `max(2×this, 120)` |
 | `UPnPDiscoverWait` | 5 | SSDP M-SEARCH wait |
 
-Set `UPnP = no` (or build without the `upnp` feature) to disable.
+Set `UPnP = no` to disable.
 Not reload-safe; restart to apply.
 
 ## Hot redeploy under systemd

@@ -57,7 +57,6 @@ mod outgoing;
 mod packet;
 mod platform;
 mod pmtu;
-#[cfg(feature = "upnp")]
 mod portmap;
 mod punch;
 mod reload;

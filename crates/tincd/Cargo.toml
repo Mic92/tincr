@@ -97,9 +97,9 @@ lz4_flex = "0.14"
 # hyper/netwatch); igd-next was tried and dropped (~50 deps via
 # attohttpc → url → idna → ICU). netdev provides cross-platform
 # default-gateway lookup (v4 *and* v6 — 0.42 fixed the Linux v6
-# parser); PCP needs the gateway addr to send to. Feature-gated,
-# default-ON to mirror C tinc's --enable-miniupnpc autoconf default.
-netdev = { version = "0.46", optional = true }
+# parser); PCP needs the gateway addr to send to. Always built: the
+# runtime `UPnP` setting is what turns it on.
+netdev = "0.46"
 shake = { version = "0.1", default-features = false }
 
 # LZO levels 10–11: vendored minilzo.c (GPL-2.0+, same as tinc) via
@@ -140,8 +140,6 @@ rand_chacha = "0.10"
 
 
 [features]
-default = ["upnp"]
-upnp = ["dep:netdev"]
 # Exposes `tincd::fuzz` for the cargo-fuzz targets in /fuzz.
 fuzzing = []
 

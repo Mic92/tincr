@@ -276,7 +276,6 @@ impl Daemon {
 
         // PCP/UPnP portmapper drain. Non-blocking; the refresh thread
         // already did the protocol work.
-        #[cfg(feature = "upnp")]
         if let Some(pm) = self.portmapper.as_ref() {
             for ev in pm.tick() {
                 match ev {
