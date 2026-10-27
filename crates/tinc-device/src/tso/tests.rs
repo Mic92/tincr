@@ -603,6 +603,14 @@ fn gro_flush_on_mismatch() {
     let mut gap = segs[1].clone();
     gap[24..28].copy_from_slice(&1200u32.to_be_bytes());
     assert_eq!(b.offer(&gap), GroVerdict::FlushFirst);
+
+    // CE after ECT(0) on DF segments: merging would lose the mark.
+    let _ = b.flush();
+    let (mut ect, mut ce) = (segs[0].clone(), segs[1].clone());
+    ect[1] = 0x02;
+    ce[1] = 0x03;
+    assert_eq!(b.offer(&ect), GroVerdict::Coalesced);
+    assert_eq!(b.offer(&ce), GroVerdict::FlushFirst);
 }
 
 /// PSH terminates the run: nothing appends after.
