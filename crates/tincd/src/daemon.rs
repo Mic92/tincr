@@ -379,7 +379,8 @@ pub struct Daemon {
     /// every connection (the peers gave up on us; sending into stale
     /// SPTPS contexts produces "failed signature" noise on the other
     /// side). Updated each `on_ping_tick`.
-    pub(crate) last_periodic_run_time: Instant,
+    /// `clock::boottime()` at the last sweep, for suspend detection.
+    pub(crate) last_periodic_run_time: Duration,
 
     /// Kernel-chosen interface name (`tun0`, `tinc0`). Captured at
     /// setup from `device.iface()` because the trait borrow blocks

@@ -8,6 +8,7 @@ use super::{
     parse_subnets_from_config,
 };
 
+use crate::clock;
 use crate::keys;
 use std::collections::BTreeSet;
 use std::io;
@@ -49,9 +50,9 @@ impl Daemon {
     /// minute the host was asleep and peers dropped us, so close everything rather
     /// than talk into stale SPTPS contexts.
     fn on_conn_sweep_tick(&mut self, now: Instant) {
-        // Laptop-suspend detection. Saturating sub: clock-goes-
-        // backwards (NTP) reads as zero (safe).
-        let sleep_time = now.saturating_duration_since(self.last_periodic_run_time);
+        // Suspend detection. Saturating: a wall clock stepping back reads as zero.
+        let boot = clock::boottime();
+        let sleep_time = boot.saturating_sub(self.last_periodic_run_time);
         let threshold = Duration::from_secs(u64::from(self.settings.udp_discovery_timeout) * 2);
         let close_all_connections = sleep_time > threshold;
         if close_all_connections {
@@ -59,7 +60,7 @@ impl Daemon {
                         "Awaking from dead after {} seconds of sleep",
                         sleep_time.as_secs());
         }
-        self.last_periodic_run_time = now;
+        self.last_periodic_run_time = boot;
 
         let pingtimeout = Duration::from_secs(u64::from(self.settings.pingtimeout));
         let pinginterval = Duration::from_secs(u64::from(self.settings.pinginterval));

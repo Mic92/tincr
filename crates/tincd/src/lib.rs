@@ -27,6 +27,7 @@ mod addrcache;
 mod autoconnect;
 mod bgresolve;
 mod broadcast;
+mod clock;
 mod compress;
 mod conn;
 mod control;
