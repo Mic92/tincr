@@ -6,17 +6,31 @@
 //! same offset would collide in the map. Same disambiguation as a
 //! pointer compare, but stable across runs.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::fmt;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-/// Opaque timer handle. Returned by `add`, passed to `set`/`del`.
-///
-/// In C the caller owns the `timeout_t` struct (it's a static or a
-/// field). Here the `Timers` owns the slot; the caller holds an id.
-/// `TimerId` is a slab index, not the `BTreeMap` key — the map key
-/// changes on every re-arm, the id doesn't.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct TimerId(usize);
+/// Owned timer slot. Dropping it cancels the timer, so a timer can't
+/// outlive the state that armed it.
+#[must_use]
+pub(crate) struct TimerHandle {
+    idx: usize,
+    dropped: Rc<RefCell<Vec<usize>>>,
+}
+
+impl Drop for TimerHandle {
+    fn drop(&mut self) {
+        self.dropped.borrow_mut().push(self.idx);
+    }
+}
+
+impl fmt::Debug for TimerHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "TimerHandle({})", self.idx)
+    }
+}
 
 /// One timer slot. `at` is `None` when disarmed (after `del`, or
 /// freshly created and not yet `set`).
@@ -44,6 +58,8 @@ pub(crate) struct Timers<W> {
     /// the `slab` crate is +1 dep for 30 LOC.
     slots: Vec<Option<Slot<W>>>,
     free: Vec<usize>,
+    /// Slots whose handle was dropped, freed on the next `&mut` call.
+    dropped: Rc<RefCell<Vec<usize>>>,
 
     /// Monotonic tiebreak. Increments every `set`. `u64` won't wrap
     /// in practice (1 set per nanosecond for 584 years).
@@ -62,16 +78,15 @@ impl<W: Copy> Timers<W> {
             by_deadline: BTreeMap::new(),
             slots: Vec::new(),
             free: Vec::new(),
+            dropped: Rc::default(),
             seq: 0,
             now: Instant::now(),
         }
     }
 
-    /// Allocate a timer slot; `set` arms it separately. `add` is per construction,
-    /// `set` per re-arm, which keeps pre-creating dynamic timers
-    /// (`RetryOutgoing(OutgoingId)`) cheap. The handle is stable and, unlike
-    /// `IoId`, not a poll token.
-    pub(crate) fn add(&mut self, what: W) -> TimerId {
+    /// Allocate a timer slot; `set` arms it separately.
+    pub(crate) fn add(&mut self, what: W) -> TimerHandle {
+        self.reap();
         let slot = Some(Slot { what, at: None });
         let idx = if let Some(idx) = self.free.pop() {
             #[expect(
@@ -87,20 +102,27 @@ impl<W: Copy> Timers<W> {
             self.slots.push(slot);
             self.slots.len() - 1
         };
-        TimerId(idx)
+        TimerHandle {
+            idx,
+            dropped: Rc::clone(&self.dropped),
+        }
+    }
+
+    /// `add` plus `set`.
+    pub(crate) fn add_after(&mut self, what: W, after: Duration) -> TimerHandle {
+        let h = self.add(what);
+        self.set(&h, after);
+        h
     }
 
     /// Arm a timer `after` the cached `now`, replacing any existing entry.
-    ///
-    /// # Panics
-    /// If `id` was `del`'d (C would dereference freed memory; we are louder).
     #[expect(
         clippy::indexing_slicing,
         clippy::expect_used,
-        reason = "documented panic: callers never set a del'd TimerId"
+        reason = "a live handle keeps its slot allocated"
     )]
-    pub(crate) fn set(&mut self, id: TimerId, after: Duration) {
-        let slot = self.slots[id.0].as_mut().expect("dangling TimerId");
+    pub(crate) fn set(&mut self, h: &TimerHandle, after: Duration) {
+        let slot = self.slots[h.idx].as_mut().expect("live handle");
         if let Some(old_key) = slot.at.take() {
             self.by_deadline.remove(&old_key);
         }
@@ -112,25 +134,21 @@ impl<W: Copy> Timers<W> {
         self.seq += 1;
         let key = (when, self.seq);
         slot.at = Some(key);
-        // Can't duplicate (seq is monotonic), so the unwrap-is-none is
-        // a debug assertion not a runtime check.
-        let prev = self.by_deadline.insert(key, id.0);
+        let prev = self.by_deadline.insert(key, h.idx);
         debug_assert!(prev.is_none(), "seq tiebreak collided — impossible");
     }
 
-    /// Delete a timer. Idempotent.
-    ///
-    /// Slot is returned to the freelist. Caller must not use `id`
-    /// after this. (C nulls `cb` and zeroes `tv`; the `timeout_t`
-    /// struct is caller-owned and lives on.)
-    pub(crate) fn del(&mut self, id: TimerId) {
-        let Some(slot) = self.slots.get_mut(id.0).and_then(Option::take) else {
-            return; // already del'd — idempotent
-        };
-        if let Some(key) = slot.at {
-            self.by_deadline.remove(&key);
+    /// Free the slots of dropped handles.
+    fn reap(&mut self) {
+        let dropped = self.dropped.take();
+        for idx in dropped {
+            if let Some(slot) = self.slots.get_mut(idx).and_then(Option::take) {
+                if let Some(key) = slot.at {
+                    self.by_deadline.remove(&key);
+                }
+                self.free.push(idx);
+            }
         }
-        self.free.push(id.0);
     }
 
     /// Snapshot `now`, drain expired timers into `out` (reused across ticks),
@@ -140,6 +158,7 @@ impl<W: Copy> Timers<W> {
     /// disarmed until the daemon `set`s it again.
     pub(crate) fn tick(&mut self, out: &mut Vec<W>) -> Option<Duration> {
         out.clear();
+        self.reap();
         // Single clock read per execute.
         self.now = Instant::now();
 
@@ -196,7 +215,8 @@ impl<W: Copy> Timers<W> {
     /// (it always has `pingtimer` armed).
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn is_idle(&self) -> bool {
+    pub(crate) fn is_idle(&mut self) -> bool {
+        self.reap();
         self.by_deadline.is_empty()
     }
 }
@@ -237,7 +257,7 @@ mod tests {
     fn fires_after_duration() {
         let mut t = Timers::new();
         let ping = t.add(What::Ping);
-        t.set(ping, Duration::from_millis(5));
+        t.set(&ping, Duration::from_millis(5));
 
         let mut out = Vec::new();
         // Immediately: not yet expired (5ms in the future from `t.now`
@@ -257,9 +277,9 @@ mod tests {
     fn rearm_removes_old_deadline() {
         let mut t = Timers::new();
         let ping = t.add(What::Ping);
-        t.set(ping, Duration::from_millis(1));
+        t.set(&ping, Duration::from_millis(1));
         // Re-arm to far future before the old one fires.
-        t.set(ping, Duration::from_hours(1));
+        t.set(&ping, Duration::from_hours(1));
 
         sleep(Duration::from_millis(5));
         let mut out = Vec::new();
@@ -282,8 +302,8 @@ mod tests {
         let a = t.add(What::Retry(1));
         let b = t.add(What::Retry(2));
         // Same offset, same cached `now` → same Instant.
-        t.set(a, Duration::from_millis(1));
-        t.set(b, Duration::from_millis(1));
+        t.set(&a, Duration::from_millis(1));
+        t.set(&b, Duration::from_millis(1));
 
         // The map keys differ only in seq.
         assert_eq!(t.by_deadline.len(), 2);
@@ -304,43 +324,24 @@ mod tests {
         assert!(out.contains(&What::Retry(2)));
     }
 
-    /// Double `del` must not push the same index onto the freelist
-    /// twice — subsequent `add`s would alias one slot.
+    /// Dropping a handle disarms it and frees the slot for reuse.
     #[test]
-    fn del_double_does_not_alias_ids() {
+    fn drop_cancels() {
         let mut t = Timers::new();
-        let a = t.add(What::Retry(1));
-        t.del(a);
-        t.del(a);
-
+        let ping = t.add_after(What::Ping, Duration::from_millis(1));
+        let idx = ping.idx;
+        drop(ping);
+        assert!(t.is_idle());
         let b = t.add(What::Retry(10));
         let c = t.add(What::Retry(20));
-        assert_ne!(b.0, c.0, "double-del caused freelist duplicate; ids alias");
+        assert_eq!(b.idx, idx, "freelist reused slot");
+        assert_ne!(b.idx, c.idx);
 
-        // And `b` fires its own payload, not `c`'s.
-        t.set(b, Duration::from_millis(1));
+        t.set(&b, Duration::from_millis(1));
         sleep(Duration::from_millis(5));
         let mut out = Vec::new();
         t.tick(&mut out);
         assert_eq!(out, vec![What::Retry(10)]);
-    }
-
-    /// del is idempotent.
-    #[test]
-    fn del_idempotent() {
-        let mut t = Timers::new();
-        let ping = t.add(What::Ping);
-        t.set(ping, Duration::from_secs(1));
-
-        t.del(ping);
-        assert!(t.is_idle());
-        // Second del — must not panic, must not mess up freelist.
-        t.del(ping);
-        assert!(t.is_idle());
-
-        // Freelist reuse: next add gets the same slot.
-        let periodic = t.add(What::Periodic);
-        assert_eq!(periodic.0, ping.0, "freelist reused slot");
     }
 
     /// When the head is in the future, return the diff (poll timeout)
@@ -349,7 +350,7 @@ mod tests {
     fn future_timer_returns_diff() {
         let mut t = Timers::new();
         let ping = t.add(What::Ping);
-        t.set(ping, Duration::from_secs(10));
+        t.set(&ping, Duration::from_secs(10));
 
         let mut out = Vec::new();
         let next = t.tick(&mut out);
@@ -371,7 +372,7 @@ mod tests {
     fn fire_disarms_slot() {
         let mut t = Timers::new();
         let ping = t.add(What::Ping);
-        t.set(ping, Duration::from_millis(1));
+        t.set(&ping, Duration::from_millis(1));
 
         sleep(Duration::from_millis(5));
         let mut out = Vec::new();
@@ -380,10 +381,10 @@ mod tests {
 
         // Slot is disarmed: `at` is None, not in the map.
         assert!(t.is_idle());
-        assert!(t.slots[ping.0].as_ref().unwrap().at.is_none());
+        assert!(t.slots[ping.idx].as_ref().unwrap().at.is_none());
 
         // But not freed — re-arm works without re-adding.
-        t.set(ping, Duration::from_secs(1));
+        t.set(&ping, Duration::from_secs(1));
         assert!(!t.is_idle());
     }
 
@@ -395,9 +396,9 @@ mod tests {
         let a = t.add(What::Retry(1));
         let b = t.add(What::Retry(2));
         let c = t.add(What::Retry(3));
-        t.set(a, Duration::from_millis(1));
-        t.set(b, Duration::from_millis(2));
-        t.set(c, Duration::from_hours(1)); // far future
+        t.set(&a, Duration::from_millis(1));
+        t.set(&b, Duration::from_millis(2));
+        t.set(&c, Duration::from_hours(1)); // far future
 
         sleep(Duration::from_millis(10));
         let mut out = Vec::new();
@@ -442,7 +443,7 @@ mod tests {
         let mut t = Timers::new();
         let a = t.add(What::Ping);
         let b = t.add(What::Periodic);
-        t.set(a, Duration::from_millis(1));
+        t.set(&a, Duration::from_millis(1));
 
         sleep(Duration::from_millis(5));
         let mut out = Vec::new();
@@ -452,11 +453,11 @@ mod tests {
         assert_eq!(t.next_timeout(), None, "agrees while empty");
 
         // "Dispatch": handler arms B already-due (relative to cached now).
-        t.set(b, Duration::ZERO);
+        t.set(&b, Duration::ZERO);
         assert_eq!(t.next_timeout(), Some(Duration::ZERO));
 
         // A re-armed in the future — head is still B.
-        t.set(a, Duration::from_secs(10));
+        t.set(&a, Duration::from_secs(10));
         assert_eq!(t.next_timeout(), Some(Duration::ZERO));
 
         // Next tick drains B; A remains.

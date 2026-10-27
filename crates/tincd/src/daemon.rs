@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::event::{EventLoop, Ready, SelfPipe, TimerId, Timers};
+use crate::event::{EventLoop, Ready, SelfPipe, TimerHandle, Timers};
 use crate::graph::{EdgeId, Graph, NodeId, Route};
 use slotmap::SlotMap;
 use tinc_conf::HostDirs;
@@ -417,7 +417,7 @@ pub struct Daemon {
     /// Per-outgoing retry timer. Parallel map: `Outgoing` stays
     /// independent of the timer wheel. `setup_outgoing_connection`
     /// disarms it first thing.
-    pub(crate) outgoing_timers: slotmap::SecondaryMap<OutgoingId, TimerId>,
+    pub(crate) outgoing_timers: slotmap::SecondaryMap<OutgoingId, TimerHandle>,
 
     /// Names whose `hosts/NAME` has an `Address =` line; populated by
     /// `load_all_nodes`, read by `autoconnect::decide` as the eligible-to-dial
@@ -429,14 +429,14 @@ pub struct Daemon {
     /// Cleared on dial / expiry / peer connecting another way.
     pub(crate) punches: HashMap<NodeId, punch::PunchEntry>,
     /// One-shot dial timers for `PunchState::Delaying`.
-    pub(crate) punch_timers: HashMap<NodeId, TimerId>,
+    pub(crate) punch_timers: HashMap<NodeId, TimerHandle>,
     /// Pre-bound ephemeral sockets per inflight punch (≤2: v4 + v6).
     /// Bound before `PUNCH` so the port is known; consumed at dial.
     pub(crate) punch_socks: HashMap<NodeId, Vec<PunchSock>>,
     /// Punch conns in flight, for RST recovery.
     pub(crate) punch_dials: HashMap<ConnId, punch::PunchDial>,
     /// Failed punch dials awaiting their re-dial timer.
-    pub(crate) punch_redials: HashMap<NodeId, Vec<punch::PunchDial>>,
+    pub(crate) punch_redials: HashMap<NodeId, (TimerHandle, Vec<punch::PunchDial>)>,
 
     /// Per-node "don't re-add as a shortcut before" stamp. Set in
     /// `execute_auto_action` on `Disconnect{AutoShortcut}` and
@@ -484,7 +484,7 @@ pub struct Daemon {
     /// Lazy-created on the first `learn()` (when `learn()` returns
     /// `true` = "table was empty"). `Option` skips an idempotency
     /// check.
-    pub(crate) age_subnets_timer: Option<TimerId>,
+    pub(crate) age_subnets_timer: Option<TimerHandle>,
 
     // settings.
     /// The config knobs. Reload swaps this.
@@ -505,18 +505,18 @@ pub struct Daemon {
     /// Self-pipe + handler table. Generic over `SignalWhat`.
     pub(crate) signals: SelfPipe<SignalWhat>,
     /// Kept so the match arm can re-arm.
-    pub(crate) pingtimer: TimerId,
+    pub(crate) pingtimer: TimerHandle,
     /// Re-arms +10s.
-    pub(crate) age_timer: TimerId,
+    pub(crate) age_timer: TimerHandle,
     /// Re-arms +5s.
-    pub(crate) periodictimer: TimerId,
+    pub(crate) periodictimer: TimerHandle,
     /// Re-arms +`keylifetime`.
-    pub(crate) keyexpire_timer: TimerId,
+    pub(crate) keyexpire_timer: TimerHandle,
     /// `sd_notify(WATCHDOG=1)` timer + interval. `None` when not
     /// running under a systemd unit with `WatchdogSec=` (the env
     /// var was unset). The interval is cached so the match arm can
     /// re-arm without re-reading env.
-    pub(crate) watchdog: Option<(TimerId, Duration)>,
+    pub(crate) watchdog: Option<(TimerHandle, Duration)>,
 
     /// Loaded from `confbase/invitations/ed25519_key.priv`. `None`
     /// when no invitations have been issued (the file doesn't
@@ -778,8 +778,8 @@ impl Daemon {
                     }
                     TimerWhat::Watchdog => {
                         sd_notify::notify_watchdog();
-                        if let Some((tid, iv)) = self.watchdog {
-                            self.timers.set(tid, iv);
+                        if let Some((tid, iv)) = &self.watchdog {
+                            self.timers.set(tid, *iv);
                         }
                     }
                     TimerWhat::Punch(nid) => {

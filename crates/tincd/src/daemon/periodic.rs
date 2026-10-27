@@ -42,7 +42,7 @@ impl Daemon {
         script::reap_children();
 
         // re-arm +1s
-        self.timers.set(self.pingtimer, PING_SWEEP);
+        self.timers.set(&self.pingtimer, PING_SWEEP);
     }
 
     /// Dead-conn sweep and ping: skip control conns; time out stalled handshakes
@@ -250,7 +250,7 @@ impl Daemon {
             let d = Duration::from_secs(u64::from(self.sleeptime));
             for (oid, outgoing) in &mut self.outgoings {
                 outgoing.timeout = outgoing.timeout.max(self.sleeptime);
-                if let Some(&tid) = self.outgoing_timers.get(oid) {
+                if let Some(tid) = self.outgoing_timers.get(oid) {
                     self.timers.set(tid, d);
                 }
             }
@@ -303,7 +303,7 @@ impl Daemon {
         }
 
         self.timers
-            .set(self.periodictimer, PERIODIC_TICK.max(slept));
+            .set(&self.periodictimer, PERIODIC_TICK.max(slept));
 
         slept
     }
@@ -452,7 +452,7 @@ impl Daemon {
             log::debug!(target: "tincd::proto",
                         "Aging past requests: deleted {deleted}, left {left}");
         }
-        self.timers.set(self.age_timer, HOUSEKEEP_SWEEP);
+        self.timers.set(&self.age_timer, HOUSEKEEP_SWEEP);
     }
 
     /// Expire learned MAC subnets. Lazy-armed by `learn_mac`.
@@ -497,11 +497,11 @@ impl Daemon {
         // Re-arm only if leases remain. Else clear slot; next
         // learn_mac re-creates (learn() returns true on empty).
         if any_left {
-            if let Some(tid) = self.age_subnets_timer {
+            if let Some(tid) = &self.age_subnets_timer {
                 self.timers.set(tid, HOUSEKEEP_SWEEP);
             }
-        } else if let Some(tid) = self.age_subnets_timer.take() {
-            self.timers.del(tid);
+        } else {
+            self.age_subnets_timer = None;
         }
     }
 
@@ -543,7 +543,7 @@ impl Daemon {
         // it unconditionally at insert).
         for (oid, outgoing) in &mut self.outgoings {
             outgoing.timeout = 0;
-            if let Some(&tid) = self.outgoing_timers.get(oid) {
+            if let Some(tid) = self.outgoing_timers.get(oid) {
                 self.timers.set(tid, Duration::ZERO);
             }
         }
@@ -568,7 +568,7 @@ impl Daemon {
         // (when, seq); same `when`, lower seq wins) so by the time
         // the sweep runs, any new in-progress conns from the retry
         // already have a fresh `last_ping_time` and survive.
-        self.timers.set(self.pingtimer, Duration::ZERO);
+        self.timers.set(&self.pingtimer, Duration::ZERO);
     }
 
     /// False if config re-read failed; daemon continues either way.
@@ -703,9 +703,7 @@ impl Daemon {
                     }
                     self.terminate(cid);
                 }
-                if let Some(tid) = self.outgoing_timers.remove(oid) {
-                    self.timers.del(tid);
-                }
+                self.outgoing_timers.remove(oid);
                 self.outgoings.remove(oid);
                 log::info!(target: "tincd",
                             "Removed outgoing connection to {name}");
@@ -809,7 +807,7 @@ impl Daemon {
         }
 
         self.timers.set(
-            self.keyexpire_timer,
+            &self.keyexpire_timer,
             Duration::from_secs(u64::from(self.settings.keylifetime)),
         );
     }
