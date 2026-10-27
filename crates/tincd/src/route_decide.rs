@@ -6,7 +6,7 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use crate::packet::{ETH_P_ARP, ETH_P_IP};
+use crate::packet::{ETH_P_ARP, ETH_P_IP, ETH_P_IPV6};
 use crate::subnet_tree::SubnetTree;
 use crate::wire::{array, array_mut, be16, u8_at};
 
@@ -16,7 +16,6 @@ const ETHER_SIZE: usize = 14;
 const IP_SIZE: usize = 20;
 const IP6_SIZE: usize = 40;
 const ICMP6_SIZE: usize = 8;
-const ETH_P_IPV6: u16 = 0x86DD;
 const ETH_P_8021Q: u16 = 0x8100;
 
 // ICMPv4 (RFC 792, RFC 1122).
