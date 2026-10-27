@@ -176,7 +176,13 @@ pub fn invite(
     // Sweep invitations/: unlink 24-char-named files older than a week, count the
     // survivors. Zero survivors means the invitation key can be rotated, rendering
     // any leaked old key useless.
-    let live_count = sweep_expired(&inv_dir, now)?;
+    // Same lifetime the daemon accepts, or we'd delete live invitations.
+    let lifetime = tinc_conf::read_server_config(&paths.confbase)
+        .ok()
+        .and_then(|c| c.lookup("InvitationExpire").next()?.get_int().ok())
+        .and_then(|v| u64::try_from(v).ok())
+        .map_or(EXPIRY, Duration::from_secs);
+    let live_count = sweep_expired(&inv_dir, now, lifetime)?;
 
     // Load or generate invitation key
     let key_path = paths.invitation_key();
@@ -298,10 +304,10 @@ fn run_created_hook(paths: &Paths, inv_path: &Path, env: &[(&str, &str)]) -> Res
 }
 
 /// Expiry sweep plus live count over `inv_dir`: entries with a 24-char
-/// (`SLUG_PART_LEN`) name are unlinked if `mtime + 1 week < now`, else counted;
+/// (`SLUG_PART_LEN`) name are unlinked if `mtime + lifetime < now`, else counted;
 /// other names are skipped. `now` is injectable so tests needn't touch mtimes.
-fn sweep_expired(inv_dir: &Path, now: SystemTime) -> Result<u32, CmdError> {
-    let deadline = now.checked_sub(EXPIRY).unwrap_or(SystemTime::UNIX_EPOCH);
+fn sweep_expired(inv_dir: &Path, now: SystemTime, lifetime: Duration) -> Result<u32, CmdError> {
+    let deadline = now.checked_sub(lifetime).unwrap_or(SystemTime::UNIX_EPOCH);
 
     let mut count = 0u32;
     let entries = fs::read_dir(inv_dir).map_err(io_err(inv_dir))?;
@@ -717,7 +723,7 @@ mod tests {
         // 23 chars: not counted.
         fs::write(inv.join("c".repeat(23)), "").unwrap();
 
-        let count = sweep_expired(&inv, SystemTime::now()).unwrap();
+        let count = sweep_expired(&inv, SystemTime::now(), EXPIRY).unwrap();
         assert_eq!(count, 2);
 
         // Nothing deleted (all fresh).
@@ -748,7 +754,12 @@ mod tests {
         // = real-now, well after the deadline.
         let sweep_now = old + Duration::from_hours(192);
 
-        let count = sweep_expired(&inv, sweep_now).unwrap();
+        // A 9-day InvitationExpire keeps it.
+        assert_eq!(
+            sweep_expired(&inv, sweep_now, Duration::from_hours(216)).unwrap(),
+            2
+        );
+        let count = sweep_expired(&inv, sweep_now, EXPIRY).unwrap();
         assert_eq!(count, 1, "live should be counted, dead should not");
         assert!(live.exists());
         assert!(!dead.exists(), "dead should be deleted");
