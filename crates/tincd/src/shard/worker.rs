@@ -201,7 +201,7 @@ fn run(
         }
 
         let mut punted = false;
-        let mut gro = Some(mem::take(&mut gro_spare));
+        let mut gro = tun.supports_super().then(|| mem::take(&mut gro_spare));
         for (sock, fd) in (0u8..).zip(udp) {
             punted |= rx_batch(
                 (fd, sock),

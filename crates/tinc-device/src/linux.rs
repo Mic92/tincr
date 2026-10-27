@@ -434,6 +434,10 @@ impl Device for Tun {
         }
     }
 
+    fn supports_super(&self) -> bool {
+        self.mode == Mode::Tun
+    }
+
     /// GRO super write: `buf` is `[vnet_hdr(10)][IP ≤65535]` from
     /// `GroBucket::flush`, already in `tun_get_user` shape (`tun.c:1731`). The
     /// daemon only calls this in `Mode::Tun`, where `IFF_VNET_HDR` is always on;

@@ -122,10 +122,15 @@ pub trait Device: Send {
     /// payload. The daemon drops the packet.
     fn write(&mut self, buf: &[u8]) -> io::Result<usize>;
 
+    /// Whether [`Self::write_super`] works. The daemon only feeds a GRO
+    /// bucket when it does, or every coalesced burst would be lost.
+    fn supports_super(&self) -> bool {
+        false
+    }
+
     /// GRO super write: pass `[vnet_hdr(10)][IP super]` straight to the TUN fd, no
     /// eth-header munging. Only Linux `Tun` (the one `IFF_VNET_HDR` backend)
-    /// overrides; the daemon gates on `Mode::Tun`, so the default `Unsupported` is
-    /// a don't-panic guard that degrades to per-packet `write()`.
+    /// overrides.
     ///
     /// # Errors
     /// `write(2)` errors, or `Unsupported` for backends without `vnet_hdr`.
