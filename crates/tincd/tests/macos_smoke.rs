@@ -62,6 +62,6 @@ fn utun_icmp_unreachable() {
     node.signal(Signal::SIGTERM);
     assert!(node.wait_exit().success());
     let log = node.log();
-    assert!(log.contains("unreachable, sending ICMP"), "{log}");
+    assert!(log.contains("sending ICMP UNREACH"), "{log}");
     assert!(!node.pidfile.exists() && !node.socket.exists());
 }
