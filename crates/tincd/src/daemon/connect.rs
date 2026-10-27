@@ -63,8 +63,6 @@ impl Daemon {
                    "Connection with {} ({}) activated",
                    conn.name, conn.hostname);
 
-        // Dup-conn: already have a live conn to this node → new
-        // wins, terminate old.
         let name = conn.name.clone();
         let conn_outgoing = conn.outgoing;
         let conn_addr = conn.address;
@@ -100,21 +98,26 @@ impl Daemon {
             && let Some(old_conn) = old.conn
             && old_conn != id
         {
-            log::debug!(target: "tincd::conn",
-                                "Established a second connection with {name}, \
-                                 closing old connection");
-            // Move the dropped conn's `outgoing` onto the survivor so `terminate()`
-            // doesn't redial. C always keeps the new conn; under mutual `ConnectTo` with
-            // symmetric latency both ends then keep the stream the other just dropped, so
-            // we pick by name instead: the smaller name keeps its outgoing conn. Both ends
-            // agree on one stream and the tunnel settles (`tests/reqkey_simultaneous.rs`).
+            // The new conn wins, as in C, unless both are fresh: then a mutual
+            // ConnectTo would make each end drop the stream the other kept, so
+            // the smaller name keeps its outgoing conn. An older conn may be a
+            // dead stream the peer is replacing.
+            let now = self.timers.now();
+            let race = Duration::from_secs(u64::from(self.settings.pingtimeout));
             let new_is_outgoing = conn_outgoing.is_some();
-            let old_is_outgoing = self
-                .conns
-                .get(old_conn)
-                .is_some_and(|oc| oc.outgoing.is_some());
-            let keep_old = old_is_outgoing != new_is_outgoing
+            let (old_is_outgoing, old_fresh) =
+                self.conns.get(old_conn).map_or((false, false), |oc| {
+                    let fresh = oc
+                        .activated_at
+                        .is_some_and(|t| now.saturating_duration_since(t) < race);
+                    (oc.outgoing.is_some(), fresh)
+                });
+            let keep_old = old_fresh
+                && old_is_outgoing != new_is_outgoing
                 && old_is_outgoing == (self.name.as_str() < name.as_str());
+            log::debug!(target: "tincd::conn",
+                        "Established a second connection with {name}, closing the {}",
+                        if keep_old { "new one" } else { "old one" });
             let (keep, drop_id) = if keep_old {
                 (old_conn, id)
             } else {
