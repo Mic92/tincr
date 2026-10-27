@@ -473,6 +473,8 @@ pub struct Daemon {
     /// `mac_table` (via gossip `ADD_SUBNET`) but not here. Lifecycles
     /// kept separate (see `mac_lease.rs` doc).
     pub(crate) mac_leases: mac_lease::MacLeases,
+    /// What the sandbox must leave openable for the device.
+    pub(crate) device_node: Option<PathBuf>,
     /// Our `Subnet =` lines as of the last (re)load. Reload diffs these.
     pub(crate) config_subnets: HashSet<Subnet>,
 
@@ -677,6 +679,12 @@ impl Bound {
     #[must_use]
     pub fn hosts_overlay(&self) -> Option<&Path> {
         self.0.hosts.overlay()
+    }
+
+    /// For the sandbox allow-list.
+    #[must_use]
+    pub fn device_node(&self) -> Option<&Path> {
+        self.0.device_node.as_deref()
     }
 
     /// Rebase stored paths after `chroot(root)`.
