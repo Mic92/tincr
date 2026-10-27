@@ -19,6 +19,7 @@ use nix::errno::Errno;
 use nix::sys::socket::send;
 use nix::unistd::read;
 
+use tinc_crypto::os_rng;
 use tinc_crypto::sign::PUBLIC_LEN;
 use tinc_proto::Request;
 use tinc_proto::msg::{SptpsPacket, TcpPacket};
@@ -649,7 +650,16 @@ impl Connection {
             return false;
         };
         match sptps.send_record(record_type, body) {
-            Ok(outs) => self.queue_wire(outs) && was_empty,
+            Ok(mut outs) => {
+                // Nothing else rekeys a meta link, and a long-lived
+                // TCP-only one can reach the nonce limit.
+                if sptps.rekey_due()
+                    && let Ok(kex) = sptps.force_kex(&mut os_rng())
+                {
+                    outs.extend(kex);
+                }
+                self.queue_wire(outs) && was_empty
+            }
             Err(e) => {
                 log::error!(target: "tincd::conn",
                             "{}: cannot send {}-byte record: {e:?}", self.name, body.len());
