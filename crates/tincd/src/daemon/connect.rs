@@ -129,9 +129,7 @@ impl Daemon {
                         // or it leaks for the daemon lifetime.
                         log::warn!(target: "tincd::conn",
                             "Two outgoing connections to the same node {name}!");
-                        if let Some(tid) = self.outgoing_timers.remove(dropped_oid) {
-                            self.timers.del(tid);
-                        }
+                        self.outgoing_timers.remove(dropped_oid);
                         self.outgoings.remove(dropped_oid);
                     }
                 }
@@ -673,7 +671,7 @@ impl Daemon {
         let name = outgoing.node_name.clone();
         log::info!(target: "tincd::conn",
                    "Trying to re-establish outgoing connection in {timeout} seconds");
-        if let Some(&tid) = self.outgoing_timers.get(oid) {
+        if let Some(tid) = self.outgoing_timers.get(oid) {
             self.timers
                 .set(tid, Duration::from_secs(u64::from(timeout)));
         }

@@ -209,9 +209,10 @@ impl Daemon {
         // Arm only when learn() says table was empty and no slot
         // (defensive).
         if arm_timer && self.age_subnets_timer.is_none() {
-            let tid = self.timers.add(TimerWhat::AgeSubnets);
-            self.timers.set(tid, HOUSEKEEP_SWEEP);
-            self.age_subnets_timer = Some(tid);
+            self.age_subnets_timer = Some(
+                self.timers
+                    .add_after(TimerWhat::AgeSubnets, HOUSEKEEP_SWEEP),
+            );
         }
 
         nw

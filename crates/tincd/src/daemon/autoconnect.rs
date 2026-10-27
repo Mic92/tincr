@@ -222,9 +222,7 @@ impl Daemon {
                 if let Some(cid) = cid {
                     let oid = self.conns.get_mut(cid).and_then(|c| c.outgoing.take());
                     if let Some(oid) = oid {
-                        if let Some(tid) = self.outgoing_timers.remove(oid) {
-                            self.timers.del(tid);
-                        }
+                        self.outgoing_timers.remove(oid);
                         self.outgoings.remove(oid);
                     }
                     self.terminate(cid);
@@ -253,9 +251,7 @@ impl Daemon {
                     .find(|(_, o)| o.node_name == name)
                     .map(|(id, _)| id);
                 if let Some(oid) = oid {
-                    if let Some(tid) = self.outgoing_timers.remove(oid) {
-                        self.timers.del(tid);
-                    }
+                    self.outgoing_timers.remove(oid);
                     self.outgoings.remove(oid);
                 }
             }

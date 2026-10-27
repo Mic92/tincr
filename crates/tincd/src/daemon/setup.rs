@@ -18,7 +18,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use crate::event::{EventLoop, Io, SelfPipe, TimerId, Timers};
+use crate::event::{EventLoop, Io, SelfPipe, TimerHandle, Timers};
 use crate::graph::Graph;
 use slotmap::SlotMap;
 use tinc_conf::HostDirs;
@@ -545,40 +545,15 @@ fn load_dns_config(
 fn register_timers(
     timers: &mut Timers<TimerWhat>,
     settings: &DaemonSettings,
-) -> (TimerId, TimerId, TimerId, TimerId) {
-    // ping timer
-    // Initial fire is `pingtimeout` seconds from now; the handler
-    // re-arms at +1s. tinc-event re-arm is explicit - the match
-    // arm calls `timers.set(pingtimer, ...)`.
-    let pingtimer = timers.add(TimerWhat::Ping);
-    timers.set(
-        pingtimer,
-        Duration::from_secs(u64::from(settings.pingtimeout)),
-    );
-
-    // age_past_requests timer
-    // Re-arms +10s. The eviction window is `pinginterval` (the
-    // cache key TTL); the timer's 10s is just the sweep frequency.
-    let age_timer = timers.add(TimerWhat::AgePastRequests);
-    timers.set(age_timer, HOUSEKEEP_SWEEP);
-
-    // periodic timer
-    // Arm +5s directly: no contradictions exist at setup, counters
-    // are zero, an immediate first call would just halve sleeptime
-    // (10 → 5 → floored to 10) and re-arm.
-    let periodictimer = timers.add(TimerWhat::Periodic);
-    timers.set(periodictimer, PERIODIC_TICK);
-
-    // keyexpire timer
-    // Arm unconditionally: SPTPS needs the rekey to bound the
-    // ChaCha20 nonce counter (see `keylifetime` doc).
-    let keyexpire_timer = timers.add(TimerWhat::KeyExpire);
-    timers.set(
-        keyexpire_timer,
-        Duration::from_secs(u64::from(settings.keylifetime)),
-    );
-
-    (pingtimer, age_timer, periodictimer, keyexpire_timer)
+) -> (TimerHandle, TimerHandle, TimerHandle, TimerHandle) {
+    let ping = Duration::from_secs(u64::from(settings.pingtimeout));
+    let keyexpire = Duration::from_secs(u64::from(settings.keylifetime));
+    (
+        timers.add_after(TimerWhat::Ping, ping),
+        timers.add_after(TimerWhat::AgePastRequests, HOUSEKEEP_SWEEP),
+        timers.add_after(TimerWhat::Periodic, PERIODIC_TICK),
+        timers.add_after(TimerWhat::KeyExpire, keyexpire),
+    )
 }
 
 /// Register the signal handlers and the self-pipe read end on `ev`.
@@ -838,11 +813,8 @@ impl Daemon {
         // Driven from the event loop, not a free thread: a hung
         // loop must stop pinging so systemd's WatchdogSec actually
         // catches a wedge. No-op when WATCHDOG_USEC unset.
-        let watchdog = sd_notify::watchdog_interval().map(|iv| {
-            let tid = timers.add(TimerWhat::Watchdog);
-            timers.set(tid, iv);
-            (tid, iv)
-        });
+        let watchdog = sd_notify::watchdog_interval()
+            .map(|iv| (timers.add_after(TimerWhat::Watchdog, iv), iv));
 
         let listeners = open_all_listeners(&config, &settings, socket_activation)?;
         #[expect(

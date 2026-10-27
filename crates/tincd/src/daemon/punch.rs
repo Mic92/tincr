@@ -191,9 +191,7 @@ impl Daemon {
         self.punches.remove(&nid);
         self.punch_socks.remove(&nid);
         self.punch_redials.remove(&nid);
-        if let Some(tid) = self.punch_timers.remove(&nid) {
-            self.timers.del(tid);
-        }
+        self.punch_timers.remove(&nid);
         self.punch_dials.retain(|_, d| d.nid != nid);
     }
 
@@ -222,8 +220,7 @@ impl Daemon {
                         self.punches.remove(&nid);
                         self.dial_punch(nid, name, &addrs);
                     } else {
-                        let tid = self.timers.add(TimerWhat::Punch(nid));
-                        self.timers.set(tid, delay);
+                        let tid = self.timers.add_after(TimerWhat::Punch(nid), delay);
                         self.punch_timers.insert(nid, tid);
                     }
                 }
@@ -345,17 +342,17 @@ impl Daemon {
         if dial.tries >= MAX_REDIALS {
             return;
         }
-        let pending = self.punch_redials.entry(dial.nid).or_default();
+        let timers = &mut self.timers;
+        let (_, pending) = self.punch_redials.entry(dial.nid).or_insert_with(|| {
+            let tid = timers.add_after(TimerWhat::PunchRedial(dial.nid), REDIAL_BACKOFF);
+            (tid, Vec::new())
+        });
         pending.push(dial);
-        if pending.len() == 1 {
-            let tid = self.timers.add(TimerWhat::PunchRedial(dial.nid));
-            self.timers.set(tid, REDIAL_BACKOFF);
-        }
     }
 
     /// `TimerWhat::PunchRedial(nid)` fired: rebind and reconnect.
     pub(super) fn on_punch_redial_timer(&mut self, nid: NodeId) {
-        let Some(dials) = self.punch_redials.remove(&nid) else {
+        let Some((_, dials)) = self.punch_redials.remove(&nid) else {
             return;
         };
         if self.nodes.get(&nid).and_then(|ns| ns.conn).is_some() {

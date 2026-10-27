@@ -23,7 +23,7 @@ mod timer;
 mod sig;
 
 pub(crate) use io::{EventLoop, Io, IoId, Ready};
-pub(crate) use timer::{TimerId, Timers};
+pub(crate) use timer::{TimerHandle, Timers};
 
 #[cfg(unix)]
 pub(crate) use sig::SelfPipe;
