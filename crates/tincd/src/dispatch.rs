@@ -10,7 +10,7 @@ use std::time::Instant;
 use tinc_crypto::sign::{PUBLIC_LEN, SigningKey};
 use tinc_proto::Request;
 use tinc_proto::request::{PROT_MAJOR, PROT_MINOR};
-use tinc_sptps::{Framing, Output, Role, Sptps, SptpsKex, SptpsLabel};
+use tinc_sptps::{Framing, Output, Role, Sptps, SptpsLabel};
 
 use crate::conn::Connection;
 use crate::keys;
@@ -354,10 +354,6 @@ pub(crate) struct IdCtx<'a> {
     /// Global tinc.conf `PMTU`. Clamps in addition to per-host (min
     /// wins).
     pub global_pmtu: Option<u16>,
-    /// tinc.conf `SPTPSCipher` and `SPTPSKex`, the defaults for
-    /// [`keys::link_sptps_modes`].
-    pub sptps_cipher: tinc_sptps::SptpsAead,
-    pub sptps_kex: SptpsKex,
 }
 
 /// SPTPS label for invitation handshakes. No trailing NUL — unlike
@@ -698,13 +694,8 @@ fn load_peer_host_config(
         .lookup("Weight")
         .next()
         .and_then(|e| e.get_int().ok());
-    (conn.sptps_kex, conn.sptps_cipher) = keys::link_sptps_modes(
-        ctx.hosts,
-        ctx.my_name,
-        &host_config,
-        name,
-        (ctx.sptps_kex, ctx.sptps_cipher),
-    );
+    (conn.sptps_kex, conn.sptps_cipher) =
+        keys::link_sptps_modes(ctx.hosts, ctx.my_name, &host_config, name);
     let host_pmtu = host_config
         .lookup("PMTU")
         .next()

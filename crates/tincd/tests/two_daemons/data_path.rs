@@ -64,18 +64,13 @@ fn packet_crosses_tunnel_and_is_counted() {
     );
 }
 
-/// A peer that doesn't advertise the hybrid KEX gets classic, not `BadKex`.
+/// A peer that doesn't advertise the hybrid KEX gets classic, not `BadKex`,
+/// also when our tinc.conf asks for it.
 #[test]
 fn link_falls_back_when_peer_lacks_pq_kex() {
     let tmp = tmp!("kex-fallback");
-    let pair = FdPair::with_host_conf(
-        tmp.path(),
-        "",
-        "",
-        "SPTPSKex = x25519-mlkem768\nSPTPSCipher = aes-256-gcm\n",
-        "",
-    )
-    .start();
+    let pq = "SPTPSKex = x25519-mlkem768\nSPTPSCipher = aes-256-gcm\n";
+    let pair = FdPair::with_host_conf(tmp.path(), pq, "", pq, "").start();
     pair.establish_udp_key();
     pair.alice_to_bob(b"classic fallback");
     pair.bob_to_alice(b"classic fallback");

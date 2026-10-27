@@ -43,8 +43,6 @@ fn mkctx(cookie: &str) -> IdCtx<'_> {
         hosts: nohosts(),
         invitation_key: None,
         global_pmtu: None,
-        sptps_cipher: tinc_sptps::SptpsAead::default(),
-        sptps_kex: SptpsKex::default(),
     }
 }
 
@@ -216,8 +214,6 @@ fn peer_ctx<'a>(setup: &'a PeerSetup, mykey: &'a SigningKey, cookie: &'a str) ->
         hosts: &setup.hosts,
         invitation_key: None,
         global_pmtu: None,
-        sptps_cipher: tinc_sptps::SptpsAead::default(),
-        sptps_kex: SptpsKex::default(),
     }
 }
 impl Drop for PeerSetup {
@@ -332,8 +328,6 @@ fn id_invitation_bad_throwaway() {
         hosts: nohosts(),
         invitation_key: Some(&inv_key),
         global_pmtu: None,
-        sptps_cipher: tinc_sptps::SptpsAead::default(),
-        sptps_kex: SptpsKex::default(),
     };
 
     // Too short (32 bytes b64 → 43 chars; this is 7).

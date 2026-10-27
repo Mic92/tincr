@@ -16,7 +16,6 @@ use crate::{broadcast, compress, mac_lease};
 
 use super::SetupError;
 use crate::daemon::UpnpMode;
-use crate::keys;
 use crate::sandbox;
 use crate::sandbox::Action;
 
@@ -235,20 +234,9 @@ pub struct DaemonSettings {
     /// Global `PMTU` from tinc.conf. Clamps all peers. Per-host
     /// `PMTU` also clamps (both apply, min wins).
     pub global_pmtu: Option<u16>,
-    /// Global `SPTPSCipher` default. Per-peer override comes from
-    /// `hosts/NAME`. Default `ChaCha20Poly1305` — the only value
-    /// wire-compatible with C tinc 1.1.
-    pub sptps_cipher: tinc_sptps::SptpsAead,
     /// Global `Weight` from tinc.conf. Fallback when per-host
     /// `Weight` is absent. Overrides the RTT measurement.
     pub global_weight: Option<i32>,
-    /// `SPTPSKex` from tinc.conf: KEX mode for *all* SPTPS sessions
-    /// (meta-connection and per-tunnel). Default `x25519` is wire-
-    /// identical to C tinc; `x25519-mlkem768` adds the post-quantum
-    /// leg. Per-host override (in `hosts/PEER`) takes precedence —
-    /// see [`read_sptps_kex`]. Non-reloadable: changing it mid-run
-    /// would desync the next rekey.
-    pub sptps_kex: tinc_sptps::SptpsKex,
     /// `DeviceStandby`. When set, `tinc-up` is not fired at setup:
     /// the script defers until the first peer becomes reachable.
     /// Mirror for tinc-down: fired when the LAST peer becomes
@@ -329,7 +317,6 @@ impl DaemonSettings {
             "Proxy" => proxy,
             "UDPRcvBuf/UDPSndBuf/FWMark/BindToInterface" => sockopts,
             "DeviceStandby" => device_standby,
-            "SPTPSKex" => sptps_kex,
             "UPnP" => upnp,
             "UPnPDiscoverWait" => upnp_discover_wait,
             "UPnPRefreshPeriod" => upnp_refresh_period,
@@ -384,9 +371,7 @@ impl Default for DaemonSettings {
             max_connection_burst: 10,
             udp_discovery: true,
             global_pmtu: None,
-            sptps_cipher: tinc_sptps::SptpsAead::default(),
             global_weight: None,
-            sptps_kex: tinc_sptps::SptpsKex::default(),
             device_standby: false,
             upnp: UpnpMode::No,
             upnp_discover_wait: 5,
@@ -412,21 +397,12 @@ fn parse_reloadable(config: &tinc_conf::Config, settings: &mut DaemonSettings) {
     // Per-host PMTU is read in dispatch.rs::handle_id; this is the
     // tinc.conf-level clamp.
     cfg_int!(config, "PMTU", u16, |v| settings.global_pmtu = Some(v));
-    // Static AEAD selection. Reloadable in the sense that new tunnels
-    // pick it up; existing sessions keep their negotiated-at-start
-    // cipher until the next `KeyExpire` rekey restarts them.
-    if let Some(e) = config.lookup("SPTPSCipher").next() {
-        match tinc_sptps::SptpsAead::from_config_str(e.get_str()) {
-            Some(a) => {
-                settings.sptps_cipher = a;
-                if a == tinc_sptps::SptpsAead::Aes256Gcm {
-                    keys::warn_aes_no_hw_once();
-                }
-            }
-            None => log::error!(target: "tincd::conf",
-                "SPTPSCipher = {}: unknown value \
-                 (want chacha20-poly1305 | aes-256-gcm); using default",
-                e.get_str()),
+    // Per link, from the two host files only. A tinc.conf value would be
+    // invisible to the peer.
+    for k in ["SPTPSKex", "SPTPSCipher"] {
+        if config.lookup(k).next().is_some() {
+            log::warn!(target: "tincd::conf",
+                "{k} in tinc.conf has no effect; set it in hosts/NAME on both nodes");
         }
     }
     // Fallback when per-host Weight absent.
@@ -734,13 +710,6 @@ pub(crate) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings
     // DeviceStandby. Non-reloadable: decides whether tinc-up
     // fires at setup vs first-peer.
     cfg_bool!(config, "DeviceStandby" => settings.device_standby);
-
-    // SPTPSKex. Non-reloadable. Unknown values are a hard error,
-    // not a silent default — a typo here would silently strip the PQ
-    // leg the operator asked for.
-    settings.sptps_kex = read_sptps_kex(config, tinc_sptps::SptpsKex::default()).map_err(|v| {
-        SetupError::Config(format!("SPTPSKex = {v}: expected x25519|x25519-mlkem768"))
-    })?;
 
     // UPnP. Non-reloadable (thread spawned once at setup).
     if let Some(e) = config.lookup("UPnP").next() {

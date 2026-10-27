@@ -181,10 +181,10 @@ from PING/PONG and re-gossiped within a few `PingInterval`s.
 
 ## Post-quantum key exchange
 
-Opt-in via `SPTPSKex = x25519-mlkem768`, settable in `tinc.conf`
-(mesh-wide default) and overridable per node in `hosts/NODE`. The
-hybrid exchange is used on a link only if **both** nodes ask for it,
-judged from the two host files each end reads. Otherwise the link
+Opt-in via `SPTPSKex = x25519-mlkem768` in `hosts/NODE`. The hybrid
+exchange is used on a link only if **both** nodes ask for it, judged
+from the two host files each end reads. A `tinc.conf` value is ignored
+with a warning, because the peer cannot see it. Otherwise the link
 falls back to `x25519`, so a half-rolled-out mesh or a C tinc peer
 just gets the classic exchange. Both ends must run a tincr that
 implements this rule; older builds read only the peer's file and fail
@@ -309,8 +309,8 @@ sides read the same two files and arrive at the same answer):
 SPTPSCipher = aes-256-gcm
 ```
 
-or set it once in `tinc.conf` as a mesh-wide default and leave
-per-host overrides for the C-tinc peers.
+A `tinc.conf` value is ignored with a warning, because the peer cannot
+see it.
 
 AES-GCM is used on an edge only if both nodes ask for it; otherwise
 the edge uses `chacha20-poly1305`. C tinc 1.1 ignores the key and

@@ -109,27 +109,26 @@ pub(crate) fn read_sptps_cipher(host_config: &Config, name: &str) -> Option<Sptp
     Some(aead)
 }
 
-/// KEX mode and record AEAD for the link to `peer_name`. The non-classic
-/// value is used only when our own host file (else `default`) and the peer's
-/// both ask for it: each end reads the same two files, so both pick the same
-/// mode, and a peer that lacks it gets classic instead of a failed handshake.
+/// KEX mode and record AEAD for the link to `peer_name`. A non-classic
+/// value is used only when `hosts/{my_name}` and the peer's host file both
+/// ask for it. Nothing else counts: both ends read the same two files, so
+/// they pick the same mode, and a C peer's silent file means classic.
 #[must_use]
 pub(crate) fn link_sptps_modes(
     hosts: &HostDirs,
     my_name: &str,
     peer: &Config,
     peer_name: &str,
-    default: (SptpsKex, SptpsAead),
 ) -> (SptpsKex, SptpsAead) {
     let own = read_host_config(hosts, my_name);
     let kex = |cfg: &Config, name: &str| {
-        read_sptps_kex(cfg, default.0).unwrap_or_else(|v| {
+        read_sptps_kex(cfg, SptpsKex::default()).unwrap_or_else(|v| {
             log::warn!(target: "tincd::keys",
-                       "hosts/{name}: SPTPSKex = {v}: invalid, using {}", default.0);
-            default.0
+                       "hosts/{name}: SPTPSKex = {v}: invalid, using x25519");
+            SptpsKex::default()
         })
     };
-    let aead = |cfg: &Config, name: &str| read_sptps_cipher(cfg, name).unwrap_or(default.1);
+    let aead = |cfg: &Config, name: &str| read_sptps_cipher(cfg, name).unwrap_or_default();
 
     (
         agree(kex(&own, my_name), &kex(peer, peer_name)),
@@ -373,15 +372,14 @@ mod tests {
         tinc_conf::write_pem(&mut w, TY_PRIVATE, &sk.to_blob()).unwrap();
     }
 
-    fn link_modes(own: &str, peer: &str, default_kex: SptpsKex) -> (SptpsKex, SptpsAead) {
+    fn link_modes(own: &str, peer: &str) -> (SptpsKex, SptpsAead) {
         let tmp = TmpDir::new("link-modes");
         fs::create_dir(tmp.path().join("hosts")).unwrap();
         fs::write(tmp.path().join("hosts/me"), own).unwrap();
         fs::write(tmp.path().join("hosts/peer"), peer).unwrap();
         let hosts = HostDirs::new(tmp.path(), None);
         let peer = read_host_config(&hosts, "peer");
-        let default = (default_kex, SptpsAead::default());
-        link_sptps_modes(&hosts, "me", &peer, "peer", default)
+        link_sptps_modes(&hosts, "me", &peer, "peer")
     }
 
     /// A replaced file is re-read even with the same size and mtime (Nix
@@ -423,26 +421,14 @@ mod tests {
 
     #[test]
     fn link_modes_need_both_sides() {
-        let c = SptpsKex::X25519;
-        assert_eq!(link_modes(PQ, PQ, c), (PQ_KEX, SptpsAead::Aes256Gcm));
-        assert_eq!(link_modes(PQ, "", c), CLASSIC);
-        assert_eq!(link_modes("", PQ, c), CLASSIC);
-        assert_eq!(link_modes("", "", c), CLASSIC);
-    }
-
-    #[test]
-    fn link_modes_kex_and_cipher_are_independent() {
+        assert_eq!(link_modes(PQ, PQ), (PQ_KEX, SptpsAead::Aes256Gcm));
+        assert_eq!(link_modes(PQ, ""), CLASSIC);
+        assert_eq!(link_modes("", PQ), CLASSIC);
+        assert_eq!(link_modes("", ""), CLASSIC);
         let kex_only = "SPTPSKex = x25519-mlkem768\n";
-        let want = (PQ_KEX, SptpsAead::ChaCha20Poly1305);
-        assert_eq!(link_modes(PQ, kex_only, SptpsKex::X25519), want);
-    }
-
-    #[test]
-    fn link_modes_global_default_applies_to_silent_hosts() {
-        assert_eq!(link_modes("", "", PQ_KEX).0, PQ_KEX);
         assert_eq!(
-            link_modes("SPTPSKex = x25519\n", "", PQ_KEX).0,
-            SptpsKex::X25519
+            link_modes(PQ, kex_only),
+            (PQ_KEX, SptpsAead::ChaCha20Poly1305)
         );
     }
 

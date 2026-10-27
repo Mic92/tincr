@@ -341,7 +341,9 @@ fn control_reload_after_hosts_swap_drops_rekeyed_peer() {
         ),
     )
     .unwrap();
-    let pin = fs::File::options().write(true).open(new_hosts.join("alice"));
+    let pin = fs::File::options()
+        .write(true)
+        .open(new_hosts.join("alice"));
     pin.unwrap().set_modified(SystemTime::UNIX_EPOCH).unwrap();
     fs::rename(&hosts, bob.confbase.join("hosts.old")).unwrap();
     fs::rename(&new_hosts, &hosts).unwrap();

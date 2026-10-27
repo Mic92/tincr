@@ -32,8 +32,8 @@ mod bench {
     use std::time::Duration;
 
     use super::common::bench::{
-        Impl, PingStats, Tunnel, bench_conf, c_tincd_bin, iperf3_available, iperf3_client,
-        perf_enabled,
+        Impl, PingStats, Tunnel, bench_conf, bench_host_conf, c_tincd_bin, iperf3_available,
+        iperf3_client, perf_enabled,
     };
     use super::common::macos::{route_del_host, run, wait_for_utun};
     use super::common::{Node, TmpGuard, node_traffic};
@@ -82,6 +82,7 @@ mod bench {
                 .iface(iface)
                 .subnet(&format!("{ip}/32"))
                 .with_conf(&bench_conf(2))
+                .with_host_conf(&bench_host_conf())
         };
         let alice = node("alice", 0xAC, ALICE_IFACE, ALICE_IP);
         let bob = node("bob", 0xBC, BOB_IFACE, BOB_IP);
