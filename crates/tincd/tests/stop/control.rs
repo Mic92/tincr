@@ -3,7 +3,7 @@ use super::testnode;
 use std::fs;
 use std::fs::Permissions;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::UdpSocket;
+use std::net::{TcpStream, UdpSocket};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::process::Stdio;
@@ -143,7 +143,9 @@ fn control_abuse_keeps_serving() {
 
 /// `REQ_LOG` turns a control connection into a log sink that receives
 /// records regardless of the stderr filter: with `RUST_LOG=warn` the
-/// debug-level "Connection from" line still arrives.
+/// debug-level "Connection from" line still arrives. An oversized ID
+/// line from an unauthenticated peer arrives truncated, since clients end
+/// the session on a record over 1024 bytes.
 #[test]
 fn req_log_streams_records_below_stderr_level() {
     let tmp = tmp!("req-log");
@@ -154,32 +156,36 @@ fn req_log_streams_records_below_stderr_level() {
     // level 2 ≈ debug, colour off; no ack.
     writeln!(&mut &log_writer, "18 15 2 0").unwrap();
 
+    let peer = TcpStream::connect(node.tcp_addr()).unwrap();
+    writeln!(&peer, "0 {} 17.7", "!".repeat(1500)).unwrap();
     // Opening another control connection makes the daemon log.
     let _trigger = control_socket(&node);
 
-    let mut seen = Vec::new();
-    let found = (0..10).any(|_| {
+    let mut seen: Vec<String> = Vec::new();
+    let mut accepted = false;
+    let found = (0..40).any(|_| {
         let mut header = String::new();
         assert_ne!(log_reader.read_line(&mut header).unwrap(), 0, "EOF");
         let len: usize = header
             .strip_prefix("18 15 ")
             .and_then(|rest| rest.trim_end().parse().ok())
             .unwrap_or_else(|| panic!("log header: {header:?}"));
+        assert!(len <= 1024, "{len}-byte record");
         let mut body = vec![0u8; len];
         log_reader.read_exact(&mut body).unwrap();
         let message = String::from_utf8_lossy(&body).into_owned();
-        let is_accept = message.contains("Connection from") && message.contains("(control)");
+        accepted |= message.contains("Connection from") && message.contains("(control)");
         seen.push(message);
-        is_accept
+        accepted && seen.iter().any(|m| m.contains(&"!".repeat(64)))
     });
-    assert!(found, "no accept record among {seen:#?}");
+    assert!(found, "no accept or ID record among {seen:#?}");
 }
 
 /// `REQ_SET_DEBUG N` replies with the previous level and then applies
-/// N if it is non-negative; the level reverts when the connection
-/// closes. A request without a level is a protocol error.
+/// N if it is non-negative. As in C it outlives the connection and
+/// reaches stderr. A request without a level is a protocol error.
 #[test]
-fn set_debug_reports_previous_and_reverts_on_close() {
+fn set_debug_reports_previous_and_persists() {
     let tmp = tmp!("set-debug");
     let mut node = testnode(tmp.path());
     let mut cmd = tincd_at(&node.confbase, &node.pidfile, &node.socket);
@@ -194,7 +200,14 @@ fn set_debug_reports_previous_and_reverts_on_close() {
     assert_eq!(request_line(&mut reader, &writer, "18 9"), "", "dropped");
 
     let (mut reader, writer) = control_socket(&node);
-    assert_eq!(request_line(&mut reader, &writer, "18 9 -1"), "18 9 0\n");
+    assert_eq!(request_line(&mut reader, &writer, "18 9 -1"), "18 9 2\n");
+    drop((reader, writer));
+    let _trigger = control_socket(&node);
+    let stderr = node.stop();
+    assert!(
+        stderr.contains("Connection from"),
+        "debug line missing:\n{stderr}"
+    );
 }
 
 /// Scripts inherit the daemon's cwd, and C tinc chdirs to confbase

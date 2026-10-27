@@ -374,10 +374,6 @@ impl Daemon {
                     return (DispatchResult::Drop, false);
                 };
                 let prev = log_tap::set_debug_level(level);
-                if level >= 0 {
-                    // Remember the first prev so close restores the original.
-                    self.conn_mut(id).prev_debug_level.get_or_insert(prev);
-                }
                 self.ctl_ack(id, REQ_SET_DEBUG, prev)
             }
             DispatchResult::Disconnect(name) => {

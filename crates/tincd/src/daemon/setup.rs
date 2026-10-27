@@ -966,6 +966,7 @@ impl Daemon {
             dns_worker: DnsWorker::new(),
             dns_hints: HashMap::new(),
             addr_owners: HashMap::new(),
+            state_changed: HashMap::new(),
             proxy_addrs: Vec::new(),
             #[cfg(feature = "upnp")]
             portmapper: None,

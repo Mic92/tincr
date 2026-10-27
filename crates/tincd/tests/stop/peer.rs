@@ -83,6 +83,14 @@ fn ack_activates_connection_and_subnet_gossip_applies() {
         "{peer_row}"
     );
 
+    let nodes = ctl.dump(3);
+    let since: u64 = find_row(&nodes, "18 3 testpeer ")
+        .split_whitespace()
+        .nth(19)
+        .and_then(|s| s.parse().ok())
+        .unwrap();
+    assert!(since > 1_700_000_000, "last_state_change {since}");
+
     // Default weight 10 is omitted in the dump.
     let add_subnet = b"10 deadbeef testpeer 192.168.99.0/24#10\n";
     peer.send_record(add_subnet);

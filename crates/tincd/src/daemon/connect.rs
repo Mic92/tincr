@@ -309,7 +309,6 @@ impl Daemon {
             self.pending_meta = self.pending_meta.saturating_sub(1);
         }
         let was_log = conn.log_level.is_some();
-        let restore_debug = conn.prev_debug_level;
         let conn_name = conn.name.clone();
         let conn_outgoing = conn.outgoing;
         // Pre-ACK conns have no node_ids entry (only on_ack inserts).
@@ -323,9 +322,6 @@ impl Daemon {
         // timeout, error).
         if was_log && !self.conns.values().any(|c| c.log_level.is_some()) {
             log_tap::set_active(false);
-        }
-        if let Some(prev) = restore_debug {
-            log_tap::set_debug_level(prev);
         }
 
         // Clear the back-ref (node outlives conn).

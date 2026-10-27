@@ -10,9 +10,8 @@ use tinc_proto::Request;
 
 impl Daemon {
     /// 21 fields per row; CLI parses 22 (`" port "` re-split).
-    /// Placeholders: cipher/digest/maclength=0 (legacy-only);
-    /// `last_state_change=0` (deferred). status bitfield: bit 4
-    /// reachable feeds CLI's filter.
+    /// Placeholders: cipher/digest/maclength=0 (legacy-only).
+    /// Status bit 4 (reachable) feeds the CLI's filter.
     pub(super) fn dump_nodes_rows(&self) -> Vec<String> {
         let mut rows = Vec::new();
         for nid in self.graph.node_ids() {
@@ -80,7 +79,7 @@ impl Daemon {
                 tunnel.and_then(|t| t.path.pmtu()).map_or(0, |p| p.mtu), // %d mtu
                 tunnel.and_then(|t| t.path.pmtu()).map_or(0, |p| p.minmtu), // %d minmtu
                 tunnel.and_then(|t| t.path.pmtu()).map_or(0, |p| p.maxmtu), // %d maxmtu
-                0,                                                  // %ld last_state_change
+                self.state_changed.get(&nid).copied().unwrap_or(0), // %ld last_state_change
                 tunnel
                     .and_then(|t| t.path.pmtu())
                     .and_then(|p| p.udp_ping_rtt)

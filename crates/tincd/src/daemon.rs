@@ -543,6 +543,9 @@ pub struct Daemon {
     /// its hub's listener (#100).
     pub(crate) addr_owners: HashMap<SocketAddr, String>,
 
+    /// Unix time of each node's last reachability change, for `tinc info`.
+    pub(crate) state_changed: HashMap<NodeId, u64>,
+
     /// Resolved SOCKS/HTTP proxy address(es). Empty until the worker
     /// answers (or after a failed lookup) — callers don't distinguish
     /// "pending" from "NXDOMAIN", they just retry. `do_outgoing_
