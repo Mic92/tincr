@@ -166,6 +166,12 @@ impl AddrFamily {
     pub(crate) const fn try_v6(self) -> bool {
         matches!(self, Self::Any | Self::Ipv6)
     }
+    pub(crate) const fn allows(self, a: &SocketAddr) -> bool {
+        match a {
+            SocketAddr::V4(_) => self.try_v4(),
+            SocketAddr::V6(_) => self.try_v6(),
+        }
+    }
 }
 
 /// One TCP+UDP listener pair: the sockets (owning the fds) plus the

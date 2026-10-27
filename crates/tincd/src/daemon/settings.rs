@@ -182,11 +182,9 @@ pub struct DaemonSettings {
     /// saturate the ~20 Gbit/s per-queue kernel egress path. `1`
     /// disables sharding (single-thread datapath, today's code).
     pub shards: Option<u16>,
-    /// When set, outgoing meta-connections `bind()` to this local
-    /// address before `connect()`. Useful for multi-homed hosts
-    /// where the default route doesn't go via the desired interface.
-    /// Config: `BindToAddress = HOST PORT` (port 0 = any).
-    pub bind_to_address: Option<SocketAddr>,
+    /// `BindToAddress` hosts with port 0. A dial binds the one of the
+    /// target's family.
+    pub bind_to_address: Vec<SocketAddr>,
     /// `None` = direct connect. `Exec` is socketpair+fork (no
     /// handshake). SOCKS and HTTP send their request before the ID line
     /// and `Connection::proxy` consumes the reply.
@@ -355,7 +353,7 @@ impl Default for DaemonSettings {
             invitation_lifetime: Duration::from_hours(168), // 1 week
             local_discovery: true,
             shards: None,
-            bind_to_address: None,
+            bind_to_address: Vec::new(),
             proxy: None,
             autoconnect: true,
             udp_info_interval: 5,
@@ -605,15 +603,15 @@ pub(crate) fn load_settings(config: &tinc_conf::Config) -> Result<DaemonSettings
 
     parse_reloadable(config, &mut settings);
 
-    // BindToAddress for outgoing source-addr selection. Non-
-    // reloadable. We only stash the first entry here for the
-    // outgoing-connect bind; the FULL set is re-read below in the
-    // listener-creation block.
-    if let Some(e) = config.lookup("BindToAddress").next() {
+    // Dial sources. The port is the listener's, so it is dropped here.
+    for e in config.lookup("BindToAddress") {
         let s = e.get_str();
-        let (host, port) = parse_bind_addr(s, 0);
-        match (host, port).to_socket_addrs() {
-            Ok(mut iter) => settings.bind_to_address = iter.next(),
+        let (host, _) = parse_bind_addr(s, 0);
+        if host == "*" {
+            continue;
+        }
+        match (host, 0).to_socket_addrs() {
+            Ok(addrs) => settings.bind_to_address.extend(addrs),
             Err(e) => {
                 log::warn!(target: "tincd",
                            "BindToAddress = {s}: {e}; not binding");
@@ -806,6 +804,19 @@ mod tests {
             c.merge([e]);
         }
         c
+    }
+
+    /// Every `BindToAddress` is a dial source, without the listener's port.
+    #[test]
+    fn bind_to_address_drops_port() {
+        let s = load_settings(&cfg(&[
+            "BindToAddress = 127.0.0.1 655",
+            "BindToAddress = ::1 655",
+        ]))
+        .unwrap();
+        let want: Vec<SocketAddr> =
+            vec!["127.0.0.1:0".parse().unwrap(), "[::1]:0".parse().unwrap()];
+        assert_eq!(s.bind_to_address, want);
     }
 
     #[test]
