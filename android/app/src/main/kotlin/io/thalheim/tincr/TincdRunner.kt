@@ -9,20 +9,28 @@ import java.util.concurrent.TimeUnit
 class TincdRunner(context: Context, private val config: NetworkConfig) {
     private val binary = File(context.applicationInfo.nativeLibraryDir, "libtincd.so")
     private val confDir = config.dir
+    private val log = DaemonLog(confDir)
     private var process: Process? = null
 
+    val alive: Boolean
+        get() = process?.isAlive == true
+
+    // -D keeps tincd our child, so its exit is visible and stderr feeds the log.
     fun start() {
         reapOrphan()
         val p = ProcessBuilder(
             binary.absolutePath,
+            "-D",
             "--config", confDir.absolutePath,
             "--pidfile", File(confDir, "tincd.pid").absolutePath,
-            "--logfile", File(confDir, "tincd.log").absolutePath,
-            "--debug", "5",
+            "--debug", config.logLevel.toString(),
         ).redirectErrorStream(true).start()
         process = p
         Thread {
-            p.inputStream.bufferedReader().forEachLine { Log.i("tincd", it) }
+            p.inputStream.bufferedReader().forEachLine {
+                Log.i("tincd", it)
+                log.append(it)
+            }
         }.apply { isDaemon = true }.start()
     }
 
