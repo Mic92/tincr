@@ -47,8 +47,6 @@ let
 
         nodeName = mkOption {
           type = types.strMatching "[a-zA-Z0-9_]+";
-          default = config._module.args.name or name;
-          defaultText = literalExpression "<network attr name>";
           description = ''
             Tinc node name (the local node's identity inside the
             mesh). Must match a host file in `hosts` and is written
@@ -236,19 +234,33 @@ let
 
   # networkd .netdev unit: persistent TUN with flags matching what
   # tincd asks for, owned by `serviceUser`.
-  mkNetdev = netName: net: {
-    netdevConfig = {
-      Name = net.interfaceName;
-      Kind = "tun";
-    };
-    tunConfig = {
-      User = serviceUser;
-      VNetHeader = "yes";
-      PacketInfo = "no";
-      # tincd shards the data plane across queues (Shards = auto).
-      MultiQueue = "yes";
-    };
-  };
+  mkNetdev =
+    netName: net:
+    {
+      netdevConfig = {
+        Name = net.interfaceName;
+        Kind = net.deviceType;
+      };
+    }
+    // (
+      if net.deviceType == "tun" then
+        {
+          tunConfig = {
+            User = serviceUser;
+            VNetHeader = "yes";
+            PacketInfo = "no";
+            # tincd shards the data plane across queues (Shards = auto).
+            MultiQueue = "yes";
+          };
+        }
+      else
+        {
+          tapConfig = {
+            User = serviceUser;
+            PacketInfo = "no";
+          };
+        }
+    );
 
   # systemd-networkd .network unit per tinc interface. Address
   # assignment + split-DNS handed off to networkd/resolved.
@@ -299,7 +311,7 @@ let
     netName: net:
     let
       pkg = net.package;
-      pidfile = "/run/tincr/${netName}.pid";
+      pidfile = "/run/tincr/${netName}/tinc.pid";
     in
     {
       description = "tinc VPN (network ${netName})";
@@ -326,7 +338,7 @@ let
         # tincd dials out. Do not let switch-to-configuration leave it to the socket.
         X-NotSocketActivated = true;
         ExecStart = "${pkg}/bin/tincd -D -n ${netName} --pidfile=${pidfile}";
-        ExecReload = "${pkg}/bin/tinc -n ${netName} reload";
+        ExecReload = "${pkg}/bin/tinc -n ${netName} --pidfile=${pidfile} reload";
         PIDFile = pidfile;
         WatchdogSec = 30;
         Restart = "on-failure";
@@ -339,7 +351,7 @@ let
         LoadCredential = [ "ed25519_key:${toString net.ed25519PrivateKeyFile}" ];
         Environment = [ "TINCR_ED25519_PRIVATE_KEY_FILE=%d/ed25519_key" ];
 
-        RuntimeDirectory = "tincr";
+        RuntimeDirectory = "tincr/${netName}";
         RuntimeDirectoryMode = "0755";
         StateDirectory = "tincr/${netName}";
         StateDirectoryMode = "0700";
@@ -348,14 +360,12 @@ let
         AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
         NoNewPrivileges = true;
 
-        # Default-deny bind, then allow the listeners plus the
-        # ephemeral range (outgoing meta, punch sockets).
-        SocketBindDeny = [ "any" ];
+        # Deny privileged ports but the listener. Ephemeral binds are
+        # seen as port 0, which no rule may name.
+        SocketBindDeny = [ "1-1023" ];
         SocketBindAllow = [
           "tcp:${toString net.listenPort}"
           "udp:${toString net.listenPort}"
-          "tcp:1024-65535"
-          "udp:1024-65535"
         ];
 
         ProtectSystem = "strict";
@@ -441,6 +451,10 @@ in
           {
             assertion = !net.dns.enable || net.dns.address4 != null || net.dns.address6 != null;
             message = "services.tincr.networks.${n}.dns: address4 or address6 must be set.";
+          }
+          {
+            assertion = net.hosts ? ${net.nodeName};
+            message = "services.tincr.networks.${n}: hosts.${net.nodeName} (nodeName) is missing.";
           }
           {
             assertion = !net.dns.enable || net.dns.suffix != "";
