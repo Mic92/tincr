@@ -970,7 +970,6 @@ impl Daemon {
             addr_owners: HashMap::new(),
             state_changed: HashMap::new(),
             proxy_addrs: Vec::new(),
-            #[cfg(feature = "upnp")]
             portmapper: None,
             tx_snap: None,
             shards: shard_runtime,
@@ -1014,7 +1013,6 @@ impl Daemon {
 
 impl Daemon {
     /// PCP/UPnP portmapper; needs the resolved port.
-    #[cfg(feature = "upnp")]
     pub(super) fn spawn_portmapper(&mut self) {
         if self.settings.upnp == UpnpMode::No {
             return;

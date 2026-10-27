@@ -48,7 +48,6 @@
 //! through to IGD — still mapped, just slower.
 
 #![forbid(unsafe_code)]
-#![cfg(feature = "upnp")]
 
 mod igd;
 mod pcp;
