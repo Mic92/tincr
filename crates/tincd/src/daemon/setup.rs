@@ -42,7 +42,6 @@ use crate::listen::{
 };
 use crate::mac_lease;
 use crate::node_id::NodeId6Table;
-use crate::outgoing::Outgoing;
 use crate::seen::SeenRequests;
 use crate::shard::runtime::{ShardRuntime, resolve as resolve_shards};
 use crate::subnet_tree::SubnetTree;
@@ -55,7 +54,6 @@ use super::settings::{
     parse_subnets_from_config,
 };
 use super::{Daemon, IoWhat, ListenerSlot, SetupError, SignalWhat, TimerWhat, net};
-use crate::addrcache::AddressCache;
 use crate::bgresolve::DnsWorker;
 use crate::control::BindError;
 use crate::daemon::Bound;
@@ -938,7 +936,6 @@ impl Daemon {
             mymac,
             device_errors: 0,
             outgoings: SlotMap::with_key(),
-            outgoing_timers: slotmap::SecondaryMap::new(),
             has_address: HashSet::new(),
             punches: HashMap::new(),
             punch_timers: HashMap::new(),
@@ -992,7 +989,7 @@ impl Daemon {
         daemon.request_proxy_resolve();
 
         for peer in connect_to {
-            daemon.add_config_outgoing(peer);
+            daemon.add_outgoing(peer, OutOrigin::ConfigConnectTo);
         }
         daemon.load_all_nodes();
 
@@ -1022,23 +1019,6 @@ impl Daemon {
 }
 
 impl Daemon {
-    /// Seed one `ConnectTo` outgoing. The node goes into the graph first so
-    /// an `ADD_EDGE` arriving via another path can find it.
-    fn add_config_outgoing(&mut self, peer: String) {
-        self.lookup_or_add_node(&peer);
-        let addr_cache = AddressCache::open(&self.confbase, &peer);
-        let oid = self.outgoings.insert(Outgoing {
-            node_name: peer,
-            origin: OutOrigin::ConfigConnectTo,
-            timeout: 0,
-            addr_cache,
-        });
-        // Disarmed; `retry_outgoing` arms it.
-        let tid = self.timers.add(TimerWhat::RetryOutgoing(oid));
-        self.outgoing_timers.insert(oid, tid);
-        self.setup_outgoing_connection(oid);
-    }
-
     /// PCP/UPnP portmapper; needs the resolved port.
     #[cfg(feature = "upnp")]
     pub(super) fn spawn_portmapper(&mut self) {

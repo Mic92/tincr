@@ -357,3 +357,26 @@ fn control_reload_after_hosts_swap_drops_rekeyed_peer() {
         "re-authenticated with stale key"
     );
 }
+
+/// `ConnectTo` added while the peer is already connected inbound: the slot
+/// follows that conn, so losing it redials.
+#[test]
+fn connect_to_added_while_connected_redials() {
+    let tmp = tmp!("attach");
+    let mut alice = Node::new(tmp.path(), "alice", 0xA5);
+    let mut bob = Node::new(tmp.path(), "bob", 0xB5);
+    bob.start_dialing(&mut alice);
+
+    alice.write_config(&bob, true);
+    assert_eq!(alice.ctl().reload(), 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !alice.log().contains("Already connected to bob") {
+        assert!(Instant::now() < deadline, "{}", alice.log());
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    bob.stop();
+    bob.write_config(&alice, false);
+    bob.start();
+    alice.wait_for_peer("bob", true, Duration::from_secs(15));
+}

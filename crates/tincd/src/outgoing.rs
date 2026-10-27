@@ -34,6 +34,8 @@ use crate::addrcache::AddressCache;
 use crate::listen::SockOpts;
 
 use crate::bind_to_interface;
+use crate::event::TimerHandle;
+use crate::ids::ConnId;
 pub(crate) use crate::ids::OutgoingId;
 use crate::keys;
 use crate::script;
@@ -74,16 +76,48 @@ pub(crate) struct Outgoing {
     /// `outgoing->timeout`. Exponential backoff seconds. `retry_
     /// outgoing` adds 5, caps at `maxtimeout` (default 900). Starts 0.
     pub timeout: u32,
-    /// `outgoing->node->address_cache`. Tries cached-recent then
-    /// config `Address` lines. `next_addr()` walks; `reset()` on
-    /// retry; `add_recent()` on connect success.
+    /// Tries cached-recent, then config `Address` lines.
     pub addr_cache: AddressCache,
+    pub state: OutState,
+}
+
+/// Where a slot is in its dial cycle. Only `Idle` and `Backoff` may
+/// start a dial, so a retry can't put a second conn on one slot.
+#[derive(Debug, Default)]
+pub(crate) enum OutState {
+    #[default]
+    Idle,
+    Dialing(ConnId),
+    Connected(ConnId),
+    Backoff(TimerHandle),
+}
+
+impl OutState {
+    /// The conn serving this slot.
+    #[must_use]
+    pub(crate) const fn conn(&self) -> Option<ConnId> {
+        match self {
+            Self::Dialing(c) | Self::Connected(c) => Some(*c),
+            Self::Idle | Self::Backoff(_) => None,
+        }
+    }
 }
 
 /// `MaxTimeout` default: 900 = 15 minutes. The retry backoff caps here.
 pub(crate) const MAX_TIMEOUT_DEFAULT: u32 = 900;
 
 impl Outgoing {
+    #[must_use]
+    pub(crate) fn new(node_name: String, origin: OutOrigin, addr_cache: AddressCache) -> Self {
+        Self {
+            node_name,
+            origin,
+            timeout: 0,
+            addr_cache,
+            state: OutState::Idle,
+        }
+    }
+
     /// Bumps `timeout += 5`, capped at `maxtimeout`; returns the new
     /// timeout for the daemon to arm (it owns `Timers`).
     pub(crate) fn bump_timeout(&mut self, maxtimeout: u32) -> u32 {
@@ -711,12 +745,11 @@ mod tests {
     /// `maxtimeout`.
     #[test]
     fn bump_timeout_backoff() {
-        let mut o = Outgoing {
-            node_name: "bob".into(),
-            origin: OutOrigin::default(),
-            timeout: 0,
-            addr_cache: AddressCache::new(vec![]),
-        };
+        let mut o = Outgoing::new(
+            "bob".into(),
+            OutOrigin::default(),
+            AddressCache::new(vec![]),
+        );
         // Starts at 0 (xzalloc). First bump: 5.
         assert_eq!(o.bump_timeout(900), 5);
         assert_eq!(o.bump_timeout(900), 10);

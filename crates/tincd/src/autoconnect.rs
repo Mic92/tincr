@@ -154,7 +154,7 @@ impl Default for ShortcutKnobs {
 /// `do_autoconnect`. `nodes` is every known node (`myself` filtered),
 /// sorted by name for deterministic index picks; `active_outgoing_conns`
 /// are ours past ACK (inbound conns aren't ours to close);
-/// `pending_outgoings` are slots without a live conn. The random index
+/// `pending_outgoings` are slots backing off between dials. The random index
 /// deliberately spans all nodes: an ineligible pick is `Noop`, making
 /// P(connect) = eligible/all — that is the back-off. A pick already
 /// pending is also `Noop`, no re-roll.
@@ -257,16 +257,9 @@ pub(crate) fn decide(
         }
     }
 
-    // nc >= D_LO: cancel pending outgoings. Exempt shortcut
-    // slots: at nc==D_LO the previous tick may have just returned
-    // Connect{AutoShortcut}; the new slot is pending until the TCP
-    // handshake completes, and cancelling it here would loop.
-    // ConfigConnectTo slots are still cancellable — that's
-    // see [`AutoAction::CancelPending`].
-    if let Some(p) = pending_outgoings
-        .iter()
-        .find(|p| p.origin != OutOrigin::AutoShortcut)
-    {
+    // nc >= D_LO: cancel a slot waiting to redial. A dial in flight
+    // isn't pending, so a shortcut only lands here after it failed.
+    if let Some(p) = pending_outgoings.first() {
         return AutoAction::CancelPending {
             name: p.name.clone(),
         };
@@ -959,11 +952,10 @@ mod tests {
         );
     }
 
-    /// nc=3, one pending `AutoShortcut` still handshaking → not
-    /// `CancelPending`. Regression: unfiltered `first()` would cancel
-    /// the slot the previous tick just added and loop.
+    /// nc=3, a shortcut slot backing off after a failed dial is cancelled,
+    /// so undialable hot peers can't hold the shortcut slots.
     #[test]
-    fn pending_shortcut_not_cancelled() {
+    fn failed_shortcut_cancelled() {
         let mut nodes = vec![
             node("me", true, true, false, 3),
             node("a", true, true, true, 2),
@@ -976,7 +968,8 @@ mod tests {
         for seed in 0..20 {
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
             let act = dflt("me", &nodes, &outs(&["a", "b", "c"]), &pending, &mut rng);
-            assert_eq!(act, AutoAction::Noop, "seed {seed}: {act:?}");
+            let want = AutoAction::CancelPending { name: "hot".into() };
+            assert_eq!(act, want, "seed {seed}");
         }
     }
 

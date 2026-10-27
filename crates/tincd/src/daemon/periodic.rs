@@ -4,7 +4,7 @@ use super::intervals::{
     EDGE_STORM_THRESHOLD, HOUSEKEEP_SWEEP, PERIODIC_TICK, PING_SWEEP, SLEEPTIME_MAX, SLEEPTIME_MIN,
 };
 use super::{
-    ConnId, Daemon, SignalWhat, TimerWhat, load_settings, parse_connect_to_from_config,
+    ConnId, Daemon, SignalWhat, load_settings, parse_connect_to_from_config,
     parse_subnets_from_config,
 };
 
@@ -14,12 +14,11 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::outgoing::Outgoing;
+use crate::outgoing::OutState;
 use crate::script::{ScriptEnv, ScriptResult};
 use crate::{invitation_serve, reload, script};
 
 use super::setup;
-use crate::addrcache::AddressCache;
 use crate::graph::NodeId;
 use crate::outgoing::OutOrigin;
 use crate::portmap::PortmapEvent;
@@ -248,9 +247,9 @@ impl Daemon {
                        "Possible node with same Name as us! Sleeping {} seconds.",
                        self.sleeptime);
             let d = Duration::from_secs(u64::from(self.sleeptime));
-            for (oid, outgoing) in &mut self.outgoings {
+            for outgoing in self.outgoings.values_mut() {
                 outgoing.timeout = outgoing.timeout.max(self.sleeptime);
-                if let Some(tid) = self.outgoing_timers.get(oid) {
+                if let OutState::Backoff(tid) = &outgoing.state {
                     self.timers.set(tid, d);
                 }
             }
@@ -538,12 +537,10 @@ impl Daemon {
     /// pre-suspend fd are reaped this turn. Otherwise a laptop suspended past
     /// `MaxTimeout` waits up to 15 minutes.
     pub(super) fn on_retry(&mut self) {
-        // Per outgoing, zero backoff + arm timer for now. Every
-        // `outgoings` slot has a paired timer (`Daemon::setup` adds
-        // it unconditionally at insert).
-        for (oid, outgoing) in &mut self.outgoings {
+        // Zero backoff and wake waiting slots. Dialing ones are left alone.
+        for outgoing in self.outgoings.values_mut() {
             outgoing.timeout = 0;
-            if let Some(tid) = self.outgoing_timers.get(oid) {
+            if let OutState::Backoff(tid) = &outgoing.state {
                 self.timers.set(tid, Duration::ZERO);
             }
         }
@@ -703,7 +700,6 @@ impl Daemon {
                     }
                     self.terminate(cid);
                 }
-                self.outgoing_timers.remove(oid);
                 self.outgoings.remove(oid);
                 log::info!(target: "tincd",
                             "Removed outgoing connection to {name}");
@@ -716,17 +712,7 @@ impl Daemon {
                 o.origin = OutOrigin::ConfigConnectTo;
                 continue;
             }
-            self.lookup_or_add_node(&peer);
-            let addr_cache = AddressCache::open(&self.confbase, &peer);
-            let oid = self.outgoings.insert(Outgoing {
-                node_name: peer,
-                origin: OutOrigin::ConfigConnectTo,
-                timeout: 0,
-                addr_cache,
-            });
-            let tid = self.timers.add(TimerWhat::RetryOutgoing(oid));
-            self.outgoing_timers.insert(oid, tid);
-            self.setup_outgoing_connection(oid);
+            self.add_outgoing(peer, OutOrigin::ConfigConnectTo);
         }
 
         // host file mtime check. Plus a changed key, which a pinned
