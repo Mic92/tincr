@@ -671,7 +671,8 @@ impl Daemon {
                 try_connect(
                     &mut outgoing.addr_cache,
                     &name,
-                    self.settings.bind_to_address,
+                    self.settings.addressfamily,
+                    &self.settings.bind_to_address,
                     &self.settings.sockopts,
                 )
             };

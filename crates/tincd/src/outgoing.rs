@@ -31,7 +31,7 @@ use nix::sys::socket::{MsgFlags, getsockopt, send, sockopt};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::addrcache::AddressCache;
-use crate::listen::SockOpts;
+use crate::listen::{AddrFamily, SockOpts};
 
 use crate::bind_to_interface;
 use crate::event::TimerHandle;
@@ -47,6 +47,7 @@ use crate::socks::ProxyType;
 use core::ptr;
 use std::env;
 use std::fmt;
+use std::iter;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 
@@ -290,14 +291,16 @@ pub(crate) fn punch_connect(ps: PunchSock, target: SocketAddr) -> Option<Socket>
 pub(crate) fn try_connect(
     addr_cache: &mut AddressCache,
     node_name: &str,
-    bind_to: Option<SocketAddr>,
+    family: AddrFamily,
+    bind_to: &[SocketAddr],
     sockopts: &SockOpts,
 ) -> ConnectAttempt {
-    let Some(addr) = addr_cache.next_addr() else {
+    let Some(addr) = iter::from_fn(|| addr_cache.next_addr()).find(|a| family.allows(a)) else {
         log::error!(target: "tincd::conn",
                     "Could not set up a meta connection to {node_name}");
         return ConnectAttempt::Exhausted;
     };
+    let bind_to = dial_bind(bind_to, addr);
     log::info!(target: "tincd::conn",
                "Trying to connect to {node_name} ({addr})");
     match dial_nonblocking(
@@ -309,6 +312,15 @@ pub(crate) fn try_connect(
         Some(sock) => ConnectAttempt::Started { sock, addr },
         None => ConnectAttempt::Retry,
     }
+}
+
+/// The first `BindToAddress` of the target's family, as the source.
+#[must_use]
+pub(crate) fn dial_bind(binds: &[SocketAddr], target: SocketAddr) -> Option<SocketAddr> {
+    binds
+        .iter()
+        .copied()
+        .find(|b| b.is_ipv4() == target.is_ipv4())
 }
 
 /// `do_outgoing_connection` proxy branch. Connects to `proxy_addr`
@@ -739,6 +751,28 @@ mod tests {
         };
         apply_dial_sockopts(&sock, &opts);
         assert_eq!(getsockopt(&sock.as_fd(), sockopt::Mark).unwrap(), 0x1234);
+    }
+
+    /// Dials skip addresses of an excluded family and bind a source of
+    /// the target's family.
+    #[test]
+    fn dial_honours_family_and_bind() {
+        let v4: SocketAddr = "10.0.0.1:0".parse().unwrap();
+        let v6: SocketAddr = "[2001:db8::1]:0".parse().unwrap();
+        let binds = [v4, v6];
+        assert_eq!(dial_bind(&binds, "1.2.3.4:655".parse().unwrap()), Some(v4));
+        assert_eq!(dial_bind(&binds, "[::1]:655".parse().unwrap()), Some(v6));
+        assert_eq!(dial_bind(&[v4], "[::1]:655".parse().unwrap()), None);
+
+        let mut cache = AddressCache::new(vec!["[::1]:1".parse().unwrap()]);
+        let r = try_connect(
+            &mut cache,
+            "bob",
+            AddrFamily::Ipv4,
+            &[],
+            &SockOpts::default(),
+        );
+        assert!(matches!(r, ConnectAttempt::Exhausted), "{r:?}");
     }
 
     /// `retry_outgoing` arithmetic: +5 each time, capped at
