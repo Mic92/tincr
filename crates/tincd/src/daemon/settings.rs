@@ -188,11 +188,8 @@ pub struct DaemonSettings {
     /// Config: `BindToAddress = HOST PORT` (port 0 = any).
     pub bind_to_address: Option<SocketAddr>,
     /// `None` = direct connect. `Exec` is socketpair+fork (no
-    /// handshake); `Socks4`/`Socks5` connect to the proxy then send
-    /// `socks::build_request` bytes before the ID line and read the
-    /// fixed-length reply via `conn.tcplen`. `Http` sends
-    /// `CONNECT host:port` then intercepts the line-based response
-    /// in `metaconn.rs` before `check_gate` while `allow_request==Id`.
+    /// handshake). SOCKS and HTTP send their request before the ID line
+    /// and `Connection::proxy` consumes the reply.
     pub proxy: Option<ProxyConfig>,
     /// Default **true**. When set, `periodic_handler` runs
     /// `do_autoconnect` every 5s: converge to ~3 direct connections.

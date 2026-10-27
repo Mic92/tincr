@@ -1,5 +1,6 @@
 /// `/dev/null` fd; handlers don't touch the fd, just need a valid conn.
 use super::*;
+use crate::conn::{FeedResult, SptpsEvent};
 use GateExpect::{Ok, Unauthorized, UnknownRequest};
 use std::env;
 use std::fs;
@@ -123,7 +124,7 @@ fn id_control_rejected_on_non_unix_conn() {
 #[test]
 fn id_invitation_rejected_on_outgoing_conn() {
     let mut c = mkconn();
-    c.outgoing = Some(slotmap::KeyData::from_ffi(1).into());
+    c.role = Role::Initiator;
     let line = b"0 ?AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA 17.7";
     let r = handle_id(&mut c, line, &mkctx("x"), Instant::now(), &mut os_rng());
     assert!(matches!(r, Err(DispatchError::BadId(_))), "got {r:?}");
@@ -839,4 +840,85 @@ fn record_body_strip() {
     assert_eq!(record_body(b"4 655 50 c"), b"4 655 50 c"); // no \n: unchanged
     assert_eq!(record_body(b""), b"");
     assert_eq!(record_body(b"\n"), b"");
+}
+
+/// Sim-open punch: both ends dialled and neither owns an `Outgoing`. The
+/// punch roles alone decide who greets first and who signs first.
+#[test]
+fn punch_roles_complete_handshake() {
+    let ka = SigningKey::from_seed(&[1; 32]);
+    let kb = SigningKey::from_seed(&[2; 32]);
+    let tmp = env::temp_dir().join(format!("tincd-proto-punch-{:?}", thread::current().id()));
+    fs::create_dir_all(tmp.join("hosts")).unwrap();
+    for (name, key) in [("alice", &ka), ("bob", &kb)] {
+        let b64 = tinc_crypto::b64::encode(key.public_key());
+        let line = format!("Ed25519PublicKey = {b64}\n");
+        fs::write(tmp.join("hosts").join(name), line).unwrap();
+    }
+    let hosts = HostDirs::new(&tmp, None);
+    let ctx = |my_name, mykey| IdCtx {
+        cookie: "",
+        my_name,
+        mykey,
+        hosts: &hosts,
+        invitation_key: None,
+        global_pmtu: None,
+    };
+    let (ctx_a, ctx_b) = (ctx("alice", &ka), ctx("bob", &kb));
+
+    let mut a = mkconn();
+    a.name = "bob".into();
+    a.role = Role::Initiator;
+    let mut b = mkconn();
+    b.name = "alice".into();
+    a.send(format_args!(
+        "{} alice {PROT_MAJOR}.{PROT_MINOR}",
+        Request::Id
+    ));
+
+    let mut done = 0;
+    for _ in 0..6 {
+        done += pump(&mut a, &mut b, &ctx_b) + pump(&mut b, &mut a, &ctx_a);
+    }
+    let _ = fs::remove_dir_all(&tmp);
+    assert_eq!(done, 2);
+}
+
+/// Move `src`'s output into `dst` the way the daemon would. Returns the
+/// number of completed handshakes.
+fn pump(src: &mut Connection, dst: &mut Connection, ctx: &IdCtx<'_>) -> usize {
+    let bytes = src.outbuf.live().to_vec();
+    src.outbuf.consume(bytes.len());
+    let mut events = Vec::new();
+    match dst.feed_bytes(&bytes, &mut os_rng()) {
+        FeedResult::Sptps(evs) => events = evs,
+        FeedResult::Data => {
+            if let Some(r) = dst.inbuf.read_line() {
+                let line = dst.inbuf.bytes_raw()[r].to_vec();
+                let Result::Ok(IdOk::Peer { init, .. }) =
+                    handle_id(dst, &line, ctx, Instant::now(), &mut os_rng())
+                else {
+                    panic!("ID rejected: {}", String::from_utf8_lossy(&line));
+                };
+                events.extend(init.into_iter().map(SptpsEvent::Record));
+                let rest = dst.inbuf.take_rest();
+                let FeedResult::Sptps(evs) = dst.feed_bytes(&rest, &mut os_rng()) else {
+                    panic!("piggyback");
+                };
+                events.extend(evs);
+            }
+        }
+        r => panic!("{r:?}"),
+    }
+    let mut done = 0;
+    for ev in events {
+        match ev {
+            SptpsEvent::Record(Output::Wire { bytes, .. }) => {
+                dst.send_raw(&bytes);
+            }
+            SptpsEvent::Record(Output::HandshakeDone) => done += 1,
+            ev => panic!("{ev:?}"),
+        }
+    }
+    done
 }

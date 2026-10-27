@@ -7,11 +7,6 @@
 //! `LineBuf::read_line` returns `Range<usize>` rather than `&str`:
 //! the equivalent `&str` is invalidated by the next push, like C's
 //! `char*` from `buffer_readline`.
-#![expect(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    reason = "C2 allow-list (PLAN.md Phase 1): shrink, never grow"
-)]
 
 use std::fmt::Write as _;
 use std::io;
@@ -26,7 +21,8 @@ use nix::unistd::read;
 
 use tinc_crypto::sign::PUBLIC_LEN;
 use tinc_proto::Request;
-use tinc_sptps::{Output, Sptps, SptpsError};
+use tinc_proto::msg::{SptpsPacket, TcpPacket};
+use tinc_sptps::{Output, Role, Sptps, SptpsError};
 
 use crate::dispatch;
 use crate::dispatch::ConnOptions;
@@ -36,6 +32,7 @@ use crate::ids::OutgoingId;
 use crate::invitation_serve::InvitePhase;
 use crate::msg_nosignal;
 use crate::seen::FloodLimiter;
+use crate::socks::ProxyWait;
 use std::fmt;
 use std::fmt::Arguments;
 use std::mem;
@@ -53,10 +50,18 @@ impl fmt::Write for VecFmt<'_> {
 /// Read chunk size: max packet (1673, no jumbo) rounded to 2048 + 128.
 pub(crate) const MAXBUFSIZE: usize = 2176;
 
-/// C's request bound. Enforced on receive so that anything we relay,
-/// with an address appended, still fits one SPTPS record.
-fn oversize_request(o: &Output) -> bool {
-    matches!(o, Output::Record { bytes, .. } if bytes.len() > MAXBUFSIZE)
+/// `name` of an accepted conn until its ID arrives.
+pub(crate) const UNKNOWN_NAME: &str = "<unknown>";
+
+/// What the next bytes of an SPTPS meta stream are.
+#[derive(Debug, Default)]
+enum Expect {
+    #[default]
+    Request,
+    /// After `17 LEN`: the next record is a raw VPN frame.
+    Packet(u16),
+    /// After `21 LEN`: that many unframed bytes.
+    Blob(u16, Vec<u8>),
 }
 
 /// Hard cap on queued outbuf bytes. The periodic sweep also checks
@@ -95,24 +100,11 @@ impl LineBuf {
     /// cleared buffer. Reset lives in
     /// `add()`/`consume()` instead.
     pub(crate) fn read_line(&mut self) -> Option<Range<usize>> {
-        let live = &self.data[self.offset..];
-        let nl = live.iter().position(|&b| b == b'\n')?;
+        let nl = self.live().iter().position(|&b| b == b'\n')?;
         let start = self.offset;
         let end = start + nl;
         self.offset = end + 1;
         Some(start..end)
-    }
-
-    /// `buffer_read(buffer, n)`. Exact-N read. Used for the SOCKS
-    /// reply (binary, fixed-length, not
-    /// line-terminated). Same range-validity contract as `read_line`.
-    pub(crate) const fn read_n(&mut self, n: usize) -> Option<Range<usize>> {
-        if self.live_len() < n {
-            return None;
-        }
-        let start = self.offset;
-        self.offset += n;
-        Some(start..start + n)
     }
 
     #[must_use]
@@ -133,7 +125,7 @@ impl LineBuf {
 
     #[must_use]
     pub(crate) fn live(&self) -> &[u8] {
-        &self.data[self.offset..]
+        self.data.get(self.offset..).unwrap_or_default()
     }
 
     /// Advance the cursor (after partial `send()`).
@@ -150,7 +142,7 @@ impl LineBuf {
     /// this mid-read in `receive_meta`'s do-while; we split
     /// feed/drain, so the daemon calls this after `id_h` and re-feeds.
     pub(crate) fn take_rest(&mut self) -> Vec<u8> {
-        let rest = self.data[self.offset..].to_vec();
+        let rest = self.live().to_vec();
         self.data.clear();
         self.offset = 0;
         rest
@@ -239,16 +231,12 @@ pub(crate) struct Connection {
     /// EINPROGRESS probe runs instead of read/write dispatch when set.
     pub connecting: bool,
     pub outgoing: Option<OutgoingId>,
-    /// After `PACKET 17 <len>`, the next record is a raw VPN-packet
-    /// blob. We never send these but C tinc peers do.
-    pub tcplen: u16,
-    /// After `SPTPS_PACKET 21 <len>`, the next `sptpslen` raw bytes
-    /// (not SPTPS-framed) are an encrypted UDP wireframe. Checked in
-    /// the outer read loop; `tcplen` is inside the SPTPS callback.
-    pub sptpslen: u16,
-    /// `sptpslen` accumulator. Separate Vec keeps the "inbuf is
-    /// plaintext-only" invariant.
-    pub sptps_buf: Vec<u8>,
+    /// Handshake side, fixed at construction. Not `outgoing.is_some()`:
+    /// that moves between conns and punch conns have none.
+    pub role: Role,
+    /// Proxy reply still to be read before the peer's ID line.
+    pub proxy: Option<ProxyWait>,
+    expect: Expect,
 
     // Per-host config extracted during the ID handshake; just the keys
     // the ACK exchange reads. None = absent.
@@ -286,6 +274,8 @@ pub(crate) struct Connection {
 #[derive(Debug)]
 pub(crate) enum SptpsEvent {
     Record(Output),
+    /// `PACKET` payload: a raw VPN frame.
+    Packet(Vec<u8>),
     /// `SPTPS_PACKET` blob (`dst[6]‖src[6]‖ct`).
     Blob(Vec<u8>),
 }
@@ -342,9 +332,9 @@ impl Connection {
             last_weight_gossip: None,
             connecting: false,
             outgoing: None,
-            tcplen: 0,
-            sptpslen: 0,
-            sptps_buf: Vec::new(),
+            role: Role::Responder,
+            proxy: None,
+            expect: Expect::Request,
             host_indirect: None,
             host_tcponly: None,
             host_clamp_mss: None,
@@ -383,7 +373,7 @@ impl Connection {
     ) -> Self {
         Self {
             address: Some(address),
-            ..Self::new_base(fd, "<unknown>".to_string(), hostname, now)
+            ..Self::new_base(fd, UNKNOWN_NAME.to_string(), hostname, now)
         }
     }
 
@@ -402,6 +392,7 @@ impl Connection {
             address: Some(address),
             connecting: true,
             outgoing: Some(outgoing),
+            role: Role::Initiator,
             ..Self::new_base(fd, name, hostname, now)
         }
     }
@@ -466,7 +457,7 @@ impl Connection {
             }
             MAXBUFSIZE - self.inbuf.live_len()
         };
-        let buf = &mut stack[..cap];
+        let buf = stack.get_mut(..cap).unwrap_or_default();
 
         // `nix::unistd::read`: `OwnedFd` doesn't impl `io::Read`, and
         // `UnixStream::from(fd)` would take ownership (double-close).
@@ -492,132 +483,127 @@ impl Connection {
                 return FeedResult::Dead;
             }
         };
-        let chunk = &buf[..n];
-
-        if self.sptps.is_some() {
-            // Inlined rather than delegated to feed_sptps: one chunk can
-            // hold [SPTPS-framed "21 LEN" | raw blob], and feed_sptps
-            // would eat the whole chunk before sptpslen could be set.
-            // We peek the record body for "21 " instead.
-            //
-            // take() the Box: can't `&mut sptps` + `&mut self.sptpslen`.
-            let mut sptps = self.sptps.take().expect("checked is_some");
-            let mut events = Vec::new();
-            let mut off = 0;
-            'outer: while off < chunk.len() {
-                if self.sptpslen > 0 {
-                    let want = usize::from(self.sptpslen) - self.sptps_buf.len();
-                    let take = want.min(chunk.len() - off);
-                    self.sptps_buf.extend_from_slice(&chunk[off..off + take]);
-                    off += take;
-                    if self.sptps_buf.len() < usize::from(self.sptpslen) {
-                        break; // blob spans recv()s
-                    }
-                    events.push(SptpsEvent::Blob(mem::take(&mut self.sptps_buf)));
-                    self.sptpslen = 0;
-                    continue;
-                }
-                // One record.
-                match sptps.receive(&chunk[off..], rng) {
-                    Ok((0, _)) => {
-                        // Unreachable in stream mode; defensive.
-                        log::warn!(target: "tincd::meta",
-                                   "SPTPS receive returned 0 for {}", self.name);
-                        break;
-                    }
-                    Ok((consumed, outs)) => {
-                        off += consumed;
-                        if outs.iter().any(oversize_request) {
-                            log::error!(target: "tincd::meta",
-                                        "Oversized request from {}", self.name);
-                            self.sptps = Some(sptps);
-                            return FeedResult::Dead;
-                        }
-                        for o in outs {
-                            // "21 LEN" peek to learn the raw-blob length.
-                            if let Output::Record {
-                                record_type: 0,
-                                ref bytes,
-                            } = o
-                            {
-                                let body = dispatch::record_body(bytes);
-                                // Same gate check_gate would apply.
-                                if self.allow_request.is_none()
-                                    && body.starts_with(b"21 ")
-                                    && let Some(pkt) = str::from_utf8(body)
-                                        .ok()
-                                        .and_then(|s| tinc_proto::msg::SptpsPacket::parse(s).ok())
-                                {
-                                    self.sptpslen = pkt.len;
-                                    continue 'outer;
-                                }
-                            }
-                            events.push(SptpsEvent::Record(o));
-                        }
-                    }
-                    Err(e) => {
-                        let level = match e {
-                            SptpsError::DecryptFailed | SptpsError::BadSig => log::Level::Error,
-                            _ => log::Level::Info,
-                        };
-                        log::log!(target: "tincd::meta", level,
-                                  "SPTPS error from {}: {e:?}", self.name);
-                        self.sptps = Some(sptps);
-                        return FeedResult::Dead;
-                    }
-                }
-            }
-            self.sptps = Some(sptps);
-            return FeedResult::Sptps(events);
-        }
-
-        self.inbuf.add(chunk);
-        FeedResult::Data
+        let chunk = buf.get(..n).unwrap_or_default();
+        self.feed_bytes(chunk, rng)
     }
 
-    /// SPTPS receive-loop. Factored out for the `take_rest` re-feed (post-id_h mode-switch).
-    pub(crate) fn feed_sptps(
-        sptps: &mut Sptps,
+    /// Bytes from the socket, or the leftover after the ID line.
+    pub(crate) fn feed_bytes(
+        &mut self,
         chunk: &[u8],
-        name: &str,
         rng: &mut impl rand_core::CryptoRng,
     ) -> FeedResult {
-        if chunk.is_empty() {
-            // Common: the ID line was the whole recv.
-            return FeedResult::Sptps(Vec::new());
-        }
+        let Some(mut sptps) = self.sptps.take() else {
+            self.inbuf.add(chunk);
+            return FeedResult::Data;
+        };
+        let r = self.feed_sptps(&mut sptps, chunk, rng);
+        self.sptps = Some(sptps);
+        r
+    }
+
+    /// One chunk can hold `[record "21 LEN" | raw blob | record]`, so the
+    /// framing is decided record by record.
+    fn feed_sptps(
+        &mut self,
+        sptps: &mut Sptps,
+        chunk: &[u8],
+        rng: &mut impl rand_core::CryptoRng,
+    ) -> FeedResult {
         let mut events = Vec::new();
-        let mut off = 0;
-        while off < chunk.len() {
-            match sptps.receive(&chunk[off..], rng) {
+        let mut rest = chunk;
+        while !rest.is_empty() {
+            if let Expect::Blob(len, buf) = &mut self.expect {
+                let want = usize::from(*len) - buf.len();
+                let (now, later) = rest.split_at(want.min(rest.len()));
+                buf.extend_from_slice(now);
+                rest = later;
+                if now.len() < want {
+                    break;
+                }
+                let blob = mem::take(buf);
+                self.expect = Expect::Request;
+                events.push(SptpsEvent::Blob(blob));
+                continue;
+            }
+            let outs = match sptps.receive(rest, rng) {
                 Ok((0, _)) => {
-                    // Unreachable in stream mode; defensive.
                     log::warn!(target: "tincd::meta",
-                               "SPTPS receive returned 0 consumed for {name}");
+                               "SPTPS receive returned 0 for {}", self.name);
                     break;
                 }
                 Ok((consumed, outs)) => {
-                    if outs.iter().any(oversize_request) {
-                        log::error!(target: "tincd::meta", "Oversized request from {name}");
-                        return FeedResult::Dead;
-                    }
-                    events.extend(outs.into_iter().map(SptpsEvent::Record));
-                    off += consumed;
+                    rest = rest.get(consumed..).unwrap_or_default();
+                    outs
                 }
                 Err(e) => {
-                    // `if(!len) return false`.
                     let level = match e {
-                        // Key mismatch or tampering → ERR; rest → INFO.
                         SptpsError::DecryptFailed | SptpsError::BadSig => log::Level::Error,
                         _ => log::Level::Info,
                     };
                     log::log!(target: "tincd::meta", level,
-                              "SPTPS error from {name}: {e:?}");
+                              "SPTPS error from {}: {e:?}", self.name);
                     return FeedResult::Dead;
+                }
+            };
+            for o in outs {
+                match self.frame(o) {
+                    Ok(Some(ev)) => events.push(ev),
+                    Ok(None) => {}
+                    Err(()) => return FeedResult::Dead,
                 }
             }
         }
         FeedResult::Sptps(events)
+    }
+
+    /// `None` for a `17`/`21` request whose payload follows.
+    fn frame(&mut self, o: Output) -> Result<Option<SptpsEvent>, ()> {
+        let Output::Record { record_type, bytes } = o else {
+            return Ok(Some(SptpsEvent::Record(o)));
+        };
+        // C's request bound, so anything we relay, with an address
+        // appended, still fits one SPTPS record.
+        if bytes.len() > MAXBUFSIZE {
+            log::error!(target: "tincd::meta", "Oversized request from {}", self.name);
+            return Err(());
+        }
+        if record_type == 0 {
+            if let Expect::Packet(len) = self.expect {
+                self.expect = Expect::Request;
+                if bytes.len() != usize::from(len) {
+                    log::error!(target: "tincd::proto",
+                        "TCP packet length mismatch from {}: record {} != {len}",
+                        self.name, bytes.len());
+                    return Err(());
+                }
+                return Ok(Some(SptpsEvent::Packet(bytes)));
+            }
+            // Only after ACK, where check_gate would admit them.
+            let line = str::from_utf8(dispatch::record_body(&bytes)).ok();
+            if self.allow_request.is_none()
+                && let Some(line) = line
+            {
+                if line.starts_with("17 ")
+                    && let Ok(p) = TcpPacket::parse(line)
+                {
+                    self.expect = Expect::Packet(p.len);
+                    return Ok(None);
+                }
+                if line.starts_with("21 ")
+                    && let Ok(p) = SptpsPacket::parse(line)
+                {
+                    if p.len > 0 {
+                        self.expect = Expect::Blob(p.len, Vec::with_capacity(p.len.into()));
+                    }
+                    return Ok(None);
+                }
+            }
+        }
+        Ok(Some(SptpsEvent::Record(Output::Record {
+            record_type,
+            bytes,
+        })))
     }
 
     /// Returns `true` when caller must skip the append. Sets `dead`

@@ -10,8 +10,8 @@ use crate::outgoing::{
     ConnectAttempt, OutOrigin, OutgoingId, ProxyConfig, probe_connecting, try_connect,
     try_connect_via_proxy,
 };
-use crate::packet::len_u16;
 use crate::{local_addr, socks};
+use tinc_sptps::Role;
 
 use crate::event::Io;
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
@@ -774,7 +774,7 @@ impl Daemon {
                     needs_write |= conn.send_raw(line.as_bytes());
                     log::debug!(target: "tincd::conn",
                         "Queued HTTP CONNECT for {} → {target}", conn.name);
-                    // No tcplen — response is line-based.
+                    conn.proxy = Some(socks::ProxyWait::Http);
                 }
                 ProxyConfig::Socks4 { .. } | ProxyConfig::Socks5 { .. } => {
                     // Target = PEER addr.
@@ -787,12 +787,9 @@ impl Daemon {
                     };
                     let creds = proxy.socks_creds();
                     match socks::build_request(socks_type, target, creds.as_ref()) {
-                        Ok((bytes, resp_len)) => {
+                        Ok(bytes) => {
                             needs_write |= conn.send_raw(&bytes);
-                            conn.tcplen = len_u16(resp_len);
-                            log::debug!(target: "tincd::conn",
-                                "Queued {} SOCKS bytes for {}, expecting {} reply bytes",
-                                bytes.len(), conn.name, resp_len);
+                            conn.proxy = Some(socks::ProxyWait::Socks(socks_type));
                         }
                         Err(e) => {
                             // SOCKS4+IPv6, or 256-byte cred.
@@ -807,18 +804,19 @@ impl Daemon {
             }
         }
 
-        // send_id. We go first (initiator); peer replies.
-        // Split borrow: `conn_mut` would lock all of `self`.
+        // The initiator speaks first. A punch responder waits.
         let Some(conn) = self.conns.get_mut(id) else {
             return;
         };
-        needs_write |= conn.send(format_args!(
-            "{} {} {}.{}",
-            Request::Id,
-            self.name,
-            tinc_proto::request::PROT_MAJOR,
-            tinc_proto::request::PROT_MINOR
-        ));
+        if conn.role == Role::Initiator {
+            needs_write |= conn.send(format_args!(
+                "{} {} {}.{}",
+                Request::Id,
+                self.name,
+                tinc_proto::request::PROT_MAJOR,
+                tinc_proto::request::PROT_MINOR
+            ));
+        }
 
         // Re-register: was ReadWrite (probe); now READ (or RW if
         // queued).

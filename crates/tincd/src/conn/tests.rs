@@ -80,51 +80,6 @@ fn linebuf_range_survives_going_empty() {
 }
 
 #[test]
-fn linebuf_read_n_exact() {
-    let mut b = LineBuf::default();
-    b.add(b"0123456789");
-    let r = b.read_n(10).unwrap();
-    assert_eq!(&b.bytes_raw()[r], b"0123456789");
-    assert!(b.is_empty());
-}
-
-#[test]
-fn linebuf_read_n_partial() {
-    let mut b = LineBuf::default();
-    b.add(b"01234");
-    assert!(b.read_n(10).is_none());
-    assert_eq!(b.live_len(), 5); // offset unchanged
-    b.add(b"56789");
-    let r = b.read_n(10).unwrap();
-    assert_eq!(&b.bytes_raw()[r], b"0123456789");
-}
-
-/// `buffer_read(buf, 0)`: returns ptr, advances 0.
-#[test]
-fn linebuf_read_n_zero() {
-    let mut b = LineBuf::default();
-    b.add(b"data");
-    let r = b.read_n(0).unwrap();
-    assert_eq!(r.len(), 0);
-    assert_eq!(b.live_len(), 4); // unchanged
-}
-
-/// `read_n` then `read_line`: shared cursor stays coherent
-/// (`meta.c`'s `while(inbuf.len)` does tcplen-then-line).
-#[test]
-fn linebuf_read_n_after_read_line() {
-    let mut b = LineBuf::default();
-    // SOCKS4 reply + ID line.
-    b.add(&[0x00, 0x5A, 0, 0, 0, 0, 0, 0]);
-    b.add(b"0 bob 17.7\n");
-    let r1 = b.read_n(8).unwrap();
-    assert_eq!(&b.bytes_raw()[r1.clone()], &[0x00, 0x5A, 0, 0, 0, 0, 0, 0]);
-    let r2 = b.read_line().unwrap();
-    assert_eq!(&b.bytes_raw()[r2], b"0 bob 17.7");
-    assert!(b.is_empty());
-}
-
-#[test]
 fn linebuf_consume_partial() {
     let mut b = LineBuf::default();
     b.add(b"0123456789");
@@ -244,7 +199,13 @@ fn take_rest_empty_after_full_line() {
     assert!(b.take_rest().is_empty());
 }
 
-// feed_sptps.
+// feed_bytes in SPTPS mode.
+
+fn with_sptps(sptps: Sptps) -> Connection {
+    let mut c = Connection::test_with_fd(devnull());
+    c.sptps = Some(Box::new(sptps));
+    c
+}
 
 /// Panics if touched. Receive-only handshake doesn't `send_kex`.
 struct NoRng;
@@ -262,12 +223,12 @@ impl rand_core::TryRng for NoRng {
     }
 }
 
-/// `feed_sptps([])` → empty. Early-return before sptps is touched.
+/// Empty chunk → no events. Early-return before sptps is touched.
 #[test]
 fn feed_sptps_empty_chunk() {
     let mykey = SigningKey::from_seed(&[1; 32]);
     let hispub = *SigningKey::from_seed(&[2; 32]).public_key();
-    let (mut sptps, _) = Sptps::start(
+    let (sptps, _) = Sptps::start(
         Role::Responder,
         Framing::Stream,
         mykey,
@@ -277,7 +238,7 @@ fn feed_sptps_empty_chunk() {
         &mut os_rng(),
     );
 
-    let r = Connection::feed_sptps(&mut sptps, &[], "test", &mut NoRng);
+    let r = with_sptps(sptps).feed_bytes(&[], &mut NoRng);
     match r {
         FeedResult::Sptps(evs) => assert!(evs.is_empty()),
         _ => panic!("expected Sptps(empty), got {r:?}"),
@@ -352,7 +313,7 @@ fn feed_sptps_two_records_one_chunk() {
     let mut chunk = rec1;
     chunk.extend_from_slice(&rec2);
 
-    let r = Connection::feed_sptps(&mut bob, &chunk, "alice", &mut NoRng);
+    let r = with_sptps(bob).feed_bytes(&chunk, &mut NoRng);
     match r {
         FeedResult::Sptps(evs) => {
             assert_eq!(evs.len(), 2, "loop must process both records");
@@ -377,7 +338,7 @@ fn feed_sptps_two_records_one_chunk() {
 fn feed_sptps_partial_record() {
     let mykey = SigningKey::from_seed(&[1; 32]);
     let hispub = *SigningKey::from_seed(&[2; 32]).public_key();
-    let (mut sptps, _) = Sptps::start(
+    let (sptps, _) = Sptps::start(
         Role::Responder,
         Framing::Stream,
         mykey,
@@ -387,7 +348,7 @@ fn feed_sptps_partial_record() {
         &mut os_rng(),
     );
 
-    let r = Connection::feed_sptps(&mut sptps, &[0x00, 0x05], "test", &mut NoRng);
+    let r = with_sptps(sptps).feed_bytes(&[0x00, 0x05], &mut NoRng);
     match r {
         FeedResult::Sptps(evs) => assert!(evs.is_empty()),
         _ => panic!("expected Sptps(empty), got {r:?}"),
@@ -399,7 +360,7 @@ fn feed_sptps_partial_record() {
 fn feed_sptps_decrypt_fail_is_dead() {
     let mykey = SigningKey::from_seed(&[1; 32]);
     let hispub = *SigningKey::from_seed(&[2; 32]).public_key();
-    let (mut sptps, _) = Sptps::start(
+    let (sptps, _) = Sptps::start(
         Role::Responder,
         Framing::Stream,
         mykey,
@@ -411,11 +372,11 @@ fn feed_sptps_decrypt_fail_is_dead() {
 
     // App-data record pre-handshake → BadRecord.
     let bad = [0x00, 0x05, 0x00, b'x', b'x', b'x', b'x', b'x'];
-    let r = Connection::feed_sptps(&mut sptps, &bad, "test", &mut NoRng);
+    let r = with_sptps(sptps).feed_bytes(&bad, &mut NoRng);
     assert!(matches!(r, FeedResult::Dead), "expected Dead, got {r:?}");
 }
 
-// feed() sptpslen mechanism.
+// feed() blob framing.
 // Tested via socketpair: write chunk to one end, feed() reads other.
 
 /// Handshaked pair with bob as a Connection's sptps.
@@ -486,11 +447,11 @@ fn write_all(fd: &OwnedFd, mut buf: &[u8]) {
     }
 }
 
-/// `sptpslen` pre-set; blob in one chunk.
+/// Blob expected; it arrives in one chunk.
 #[test]
 fn feed_sptpslen_single_chunk() {
     let (mut conn, _alice, wr) = sptps_conn_pair();
-    conn.sptpslen = 12;
+    conn.expect = Expect::Blob(12, Vec::new());
     let blob = b"abcdefghijkl"; // 12 bytes, not SPTPS-framed
     write_all(&wr, blob);
     let r = conn.feed(&mut NoRng);
@@ -499,27 +460,25 @@ fn feed_sptpslen_single_chunk() {
             assert_eq!(evs.len(), 1);
             match &evs[0] {
                 SptpsEvent::Blob(b) => assert_eq!(b, blob),
-                SptpsEvent::Record(_) => panic!("expected Blob, got {evs:?}"),
+                _ => panic!("expected Blob, got {evs:?}"),
             }
         }
         _ => panic!("expected Sptps, got {r:?}"),
     }
-    assert_eq!(conn.sptpslen, 0);
-    assert!(conn.sptps_buf.is_empty());
+    assert!(matches!(conn.expect, Expect::Request));
 }
 
 /// Blob spans two recv()s.
 #[test]
 fn feed_sptpslen_straddle() {
     let (mut conn, _alice, wr) = sptps_conn_pair();
-    conn.sptpslen = 12;
+    conn.expect = Expect::Blob(12, Vec::new());
     write_all(&wr, b"abcde"); // 5 of 12
     match conn.feed(&mut NoRng) {
         FeedResult::Sptps(evs) => assert!(evs.is_empty(), "partial: no event yet"),
         r => panic!("expected Sptps(empty), got {r:?}"),
     }
-    assert_eq!(conn.sptpslen, 12);
-    assert_eq!(conn.sptps_buf.len(), 5);
+    assert!(matches!(&conn.expect, Expect::Blob(12, b) if b.len() == 5));
 
     write_all(&wr, b"fghijkl"); // 7 more
     match conn.feed(&mut NoRng) {
@@ -527,62 +486,56 @@ fn feed_sptpslen_straddle() {
             assert_eq!(evs.len(), 1);
             match &evs[0] {
                 SptpsEvent::Blob(b) => assert_eq!(b, b"abcdefghijkl"),
-                SptpsEvent::Record(_) => panic!("expected Blob"),
+                _ => panic!("expected Blob"),
             }
         }
         r => panic!("expected Sptps, got {r:?}"),
     }
-    assert_eq!(conn.sptpslen, 0);
-    assert!(conn.sptps_buf.is_empty());
+    assert!(matches!(conn.expect, Expect::Request));
 }
 
-/// THE TRAP. `["21 12\n" record | 12 raw bytes | PING record]` as
-/// one chunk. Before fix: `receive()` re-called on raw bytes →
-/// `DecryptFailed` → Dead. After: `feed()` peeks "21 ", sets sptpslen,
-/// next iter eats blob. Events must be `[Blob, Record(PING)]`.
+/// `[17 6 | frame | 21 11 | 11 raw bytes | PING]` in one chunk. The raw
+/// bytes look like a record and the frame looks like `21 9`, but neither
+/// may be parsed as what it resembles.
 #[test]
-fn feed_sptpslen_then_record() {
+fn feed_packet_and_blob_framing() {
     let (mut conn, mut alice, wr) = sptps_conn_pair();
     conn.allow_request = None; // peek is gated to post-ACK
 
-    let wire = |outs: Vec<Output>| -> Vec<u8> {
-        outs.into_iter()
+    let mut rec = |body: &[u8]| -> Vec<u8> {
+        alice
+            .send_record(0, body)
+            .unwrap()
+            .into_iter()
             .find_map(|o| match o {
                 Output::Wire { bytes, .. } => Some(bytes),
                 _ => None,
             })
             .expect("one Wire")
     };
-
-    // Crafted to mis-parse as SPTPS: len=9 + 9 garbage. Post-
-    // handshake, receive() would try decrypt → DecryptFailed.
-    let blob = b"\x00\x09junkjunk!"; // 2-byte len + 9 body = 11
-    assert_eq!(blob.len(), 11);
-    let req_rec = wire(alice.send_record(0, b"21 11\n").unwrap());
-    let ping_rec = wire(alice.send_record(0, b"8\n").unwrap());
-
-    let mut chunk = req_rec;
+    let frame = b"21 9 x";
+    let blob = b"\x00\x09junkjunk!";
+    let mut chunk = rec(b"17 6\n");
+    chunk.extend(rec(frame));
+    chunk.extend(rec(b"21 11\n"));
     chunk.extend_from_slice(blob);
-    chunk.extend_from_slice(&ping_rec);
+    chunk.extend(rec(b"8\n"));
     write_all(&wr, &chunk);
 
-    let r = conn.feed(&mut NoRng);
-    match r {
-        FeedResult::Sptps(evs) => {
-            // "21 11\n" consumed — not in events.
-            assert_eq!(evs.len(), 2, "got {evs:?}");
-            match (&evs[0], &evs[1]) {
-                (SptpsEvent::Blob(b), SptpsEvent::Record(Output::Record { bytes, .. })) => {
-                    assert_eq!(b.as_slice(), blob);
-                    assert_eq!(bytes, b"8\n");
-                }
-                _ => panic!("expected [Blob, Record(PING)], got {evs:?}"),
-            }
+    let FeedResult::Sptps(evs) = conn.feed(&mut NoRng) else {
+        panic!("framing desynced");
+    };
+    match &evs[..] {
+        [
+            SptpsEvent::Packet(p),
+            SptpsEvent::Blob(b),
+            SptpsEvent::Record(Output::Record { bytes, .. }),
+        ] => {
+            assert_eq!(p, frame);
+            assert_eq!(b, blob);
+            assert_eq!(bytes, b"8\n");
         }
-        FeedResult::Dead => {
-            panic!("trap fired: blob parsed as SPTPS framing")
-        }
-        _ => panic!("expected Sptps, got {r:?}"),
+        _ => panic!("got {evs:?}"),
     }
 }
 

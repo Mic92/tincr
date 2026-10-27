@@ -16,8 +16,8 @@ use crate::dispatch::{
 };
 use crate::invitation_serve::InvitePhase;
 use crate::keys;
-use crate::outgoing::ProxyConfig;
 use crate::script::ScriptEnv;
+use crate::socks::Reply;
 use crate::tunnel::{MTU, Via};
 use crate::{invitation_serve, socks};
 
@@ -137,43 +137,6 @@ impl Daemon {
                 .unwrap_or_default()
                 .to_vec();
 
-            // HTTP proxy response intercept.
-            // `read_line` excludes `\n`, includes `\r`.
-            //
-            // Real HTTP proxies (Squid) send headers in 2xx CONNECT
-            // (RFC 7231 §4.3.6). Don't let them fall through to
-            // check_gate — they'd parse as garbage protocol commands.
-            // TODO(http-proxy-lenient): skip lines until blank.
-            if conn.outgoing.is_some()
-                && conn.allow_request == Some(Request::Id)
-                && matches!(self.settings.proxy, Some(ProxyConfig::Http { .. }))
-            {
-                if line.first().is_none_or(|&b| b == b'\r') {
-                    continue; // blank line
-                }
-                // RFC 7230 case-insensitive.
-                if let Some(status) = line
-                    .split_at_checked(9)
-                    .filter(|(proto, status)| {
-                        proto.eq_ignore_ascii_case(b"HTTP/1.1 ") && status.len() >= 3
-                    })
-                    .map(|(_, status)| status)
-                {
-                    if status.starts_with(b"200") {
-                        log::debug!(target: "tincd::conn",
-                            "HTTP proxy request granted for {}", conn.name);
-                        continue;
-                    }
-                    let status = String::from_utf8_lossy(status);
-                    log::error!(target: "tincd::conn",
-                        "HTTP proxy request rejected for {}: {:?}",
-                        conn.name, status.trim_end_matches('\r'));
-                    self.terminate(id);
-                    return FeedDrain::Done;
-                }
-                // Fall through — header → check_gate → terminate.
-            }
-
             // check_gate.
             let req = match check_gate(conn, &line) {
                 Ok(r) => r,
@@ -241,7 +204,7 @@ impl Daemon {
 
     /// `Request::Id` arm: build `IdCtx`, run the pure `handle_id`, then handle the
     /// SPTPS-init piggyback: queue the first KEX `Output::Wire` and re-feed
-    /// whatever followed the ID line in the same segment through `feed_sptps`,
+    /// whatever followed the ID line in the same segment through `feed_bytes`,
     /// since those bytes are SPTPS framing. Peer and invitation differ only in
     /// `conn.invite` and the logged name. `None` if the conn was terminated; the
     /// caller returns `FeedDrain::Done`.
@@ -291,49 +254,22 @@ impl Daemon {
             }
         }
 
-        // take_rest: bytes after the ID-line newline are SPTPS now,
-        // not protocol lines. feed_sptps is an associated fn taking
-        // &mut Sptps directly (borrow split: &mut conn.sptps + &conn.name).
+        // Bytes after the ID line in the same segment are SPTPS.
         let leftover = conn.inbuf.take_rest();
-        let outs = if leftover.is_empty() {
-            Vec::new()
+        if let FeedResult::Sptps(events) = conn.feed_bytes(&leftover, &mut os_rng()) {
+            self.on_feed_sptps(id, events);
         } else {
             let log_name = if is_invite {
                 &conn.hostname
             } else {
                 &conn.name
             };
-            #[expect(clippy::expect_used, reason = "handle_id just installed it")]
-            let sptps = conn
-                .sptps
-                .as_deref_mut()
-                .expect("handle_id just installed it");
-            match Connection::feed_sptps(sptps, &leftover, &conn.name, &mut os_rng()) {
-                FeedResult::Sptps(evs) => evs
-                    .into_iter()
-                    .map(|ev| match ev {
-                        SptpsEvent::Record(o) => o,
-                        SptpsEvent::Blob(_) => unreachable!("feed_sptps emits Record only"),
-                    })
-                    .collect(),
-                FeedResult::Dead => {
-                    log::error!(
-                        target: "tincd::proto",
-                        "SPTPS error in {}piggyback from {}",
-                        if is_invite { "invitation " } else { "" },
-                        log_name
-                    );
-                    self.terminate(id);
-                    return None;
-                }
-                _ => unreachable!(),
-            }
-        };
-
-        if self.dispatch_sptps_outputs(id, outs) {
-            nw = true;
+            log::error!(target: "tincd::proto",
+                "SPTPS error in {}piggyback from {log_name}",
+                if is_invite { "invitation " } else { "" });
+            self.terminate(id);
+            return None;
         }
-        self.flush_graph_dirty();
         if !self.conns.contains_key(id) {
             return None;
         }
@@ -505,72 +441,32 @@ impl Daemon {
 
     /// Returns `io_set` signal. May `terminate(id)` — caller checks
     /// `conns.contains_key(id)`.
-    /// `FeedResult::Data` body: pre-SPTPS tcplen consume (SOCKS proxy
-    /// reply). Returns `Some(FeedDrain)` if the conn is mid-SOCKS
-    /// (caller should return that), `None` if SOCKS either didn't
-    /// apply or completed cleanly and the caller should fall through
-    /// to the line-based dispatch loop.
+    /// `FeedResult::Data` body: consume the proxy reply, if one is due.
+    /// `Some` means the caller returns it, `None` means drain lines.
     fn on_feed_data(&mut self, id: ConnId) -> Option<FeedDrain> {
-        // pre-SPTPS tcplen consume (SOCKS proxy reply).
-        // Mutually exclusive with the Sptps arm: SOCKS sets
-        // tcplen before SPTPS starts.
-        // Split borrow: `conn_mut` would lock all of `self`.
         let conn = self.conns.get_mut(id)?;
-        if conn.tcplen != 0 && conn.outgoing.is_some() && conn.allow_request == Some(Request::Id) {
-            let n = usize::from(conn.tcplen);
-            let Some(range) = conn.inbuf.read_n(n) else {
-                // Partial. Don't fall through to read_line
-                // (SOCKS bytes would parse as garbage).
-                return Some(FeedDrain::Done);
-            };
-            let buf: Vec<u8> = conn
-                .inbuf
-                .bytes_raw()
-                .get(range)
-                .unwrap_or_default()
-                .to_vec();
-            conn.tcplen = 0;
-
-            // Only SOCKS sets tcplen in finish_connecting.
-            let Some(proxy) = &self.settings.proxy else {
+        let wait = conn.proxy?;
+        match socks::parse_reply(wait, conn.inbuf.live()) {
+            Reply::Incomplete => Some(FeedDrain::Done),
+            Reply::Granted(n) => {
+                log::debug!(target: "tincd::conn", "Proxy request granted for {}", conn.name);
+                conn.inbuf.consume(n);
+                conn.proxy = None;
+                None
+            }
+            Reply::Rejected(why) => {
                 log::error!(target: "tincd::conn",
-                    "tcplen set but no proxy configured for {}",
-                    conn.name);
+                    "Proxy request rejected for {}: {why}", conn.name);
                 self.terminate(id);
-                return Some(FeedDrain::Done);
-            };
-            let Some(socks_type) = proxy.socks_type() else {
+                Some(FeedDrain::Done)
+            }
+            Reply::Malformed(why) => {
                 log::error!(target: "tincd::conn",
-                    "tcplen set but proxy is not SOCKS for {}",
-                    conn.name);
+                    "Malformed proxy response for {}: {why}", conn.name);
                 self.terminate(id);
-                return Some(FeedDrain::Done);
-            };
-            let creds = proxy.socks_creds();
-            match socks::check_response(socks_type, creds.as_ref(), &buf) {
-                socks::SocksResponse::Granted => {
-                    // Fall through: peer's ID may already be
-                    // in inbuf (same segment).
-                    log::debug!(target: "tincd::conn",
-                        "Proxy request granted for {} ({n} reply bytes)",
-                        conn.name);
-                }
-                socks::SocksResponse::Rejected => {
-                    log::error!(target: "tincd::conn",
-                        "Proxy request rejected for {}", conn.name);
-                    self.terminate(id);
-                    return Some(FeedDrain::Done);
-                }
-                socks::SocksResponse::Malformed(why) => {
-                    log::error!(target: "tincd::conn",
-                        "Malformed proxy response for {}: {why}",
-                        conn.name);
-                    self.terminate(id);
-                    return Some(FeedDrain::Done);
-                }
+                Some(FeedDrain::Done)
             }
         }
-        None
     }
 
     /// `FeedResult::Sptps` body: drain SPTPS events in order.
@@ -585,6 +481,10 @@ impl Daemon {
             match ev {
                 SptpsEvent::Record(o) => {
                     needs_write |= self.dispatch_sptps_outputs(id, vec![o]);
+                }
+                SptpsEvent::Packet(mut frame) => {
+                    self.flush_graph_dirty();
+                    needs_write |= self.on_tcp_packet(id, &mut frame);
                 }
                 SptpsEvent::Blob(blob) => {
                     self.flush_graph_dirty();
@@ -606,6 +506,27 @@ impl Daemon {
         // SPTPS mode doesn't touch inbuf. Loop back to feed()
         // (edge-triggered; must drain to EAGAIN).
         FeedDrain::Again
+    }
+
+    /// `PACKET` payload from a direct neighbour, which C peers use for
+    /// MTU probes. An oversized frame is dropped, the conn kept.
+    fn on_tcp_packet(&mut self, id: ConnId, frame: &mut [u8]) -> bool {
+        let Some(conn) = self.conns.get(id) else {
+            return false;
+        };
+        if frame.len() > usize::from(MTU) {
+            log::warn!(target: "tincd::proto",
+                "Oversized PACKET 17 from {} ({} > MTU {MTU})", conn.name, frame.len());
+            return false;
+        }
+        let Some(&from_nid) = self.node_ids.get(&conn.name) else {
+            log::warn!(target: "tincd::proto",
+                "PACKET 17 from {} before ACK — dropping", conn.name);
+            return false;
+        };
+        let tunnel = self.dp.tunnels.entry(from_nid).or_default();
+        tunnel.stats.add_in(1, frame.len() as u64);
+        self.forward_packet(frame, Some(from_nid))
     }
 
     pub(super) fn dispatch_sptps_outputs(
@@ -645,45 +566,7 @@ impl Daemon {
                         );
                     }
                 }
-                Output::Record { mut bytes, .. } => {
-                    // tcplen short-circuit.
-                    // PACKET 17 sets tcplen; the NEXT record is a raw
-                    // VPN blob (single-encrypted, meta-SPTPS only —
-                    // direct neighbors only). crossimpl.rs pins this:
-                    // terminating here drops every C-peer MTU probe.
-                    if conn.tcplen != 0 {
-                        // SPTPS records are exact; mismatch is a
-                        // framing bug, not a partial read.
-                        if bytes.len() != usize::from(conn.tcplen) {
-                            log::error!(target: "tincd::proto",
-                                "TCP packet length mismatch from {}: \
-                                 record {} != tcplen {}",
-                                conn.name, bytes.len(), conn.tcplen);
-                            self.terminate(id);
-                            return needs_write;
-                        }
-                        conn.tcplen = 0;
-                        // oversize → drop packet, KEEP conn.
-                        if bytes.len() > usize::from(MTU) {
-                            log::warn!(target: "tincd::proto",
-                                "Oversized PACKET 17 from {} ({} > MTU {})",
-                                conn.name, bytes.len(), crate::tunnel::MTU);
-                            continue;
-                        }
-                        let conn_name = conn.name.clone();
-                        // PACKET 17 before ACK is a peer bug.
-                        let Some(from_nid) = self.node_ids.get(&conn_name).copied() else {
-                            log::warn!(target: "tincd::proto",
-                                "PACKET 17 from {conn_name} before ACK — dropping");
-                            continue;
-                        };
-                        let len = bytes.len() as u64;
-                        let tunnel = self.dp.tunnels.entry(from_nid).or_default();
-                        tunnel.stats.add_in(1, len);
-                        needs_write |= self.forward_packet(&mut bytes, Some(from_nid));
-                        continue;
-                    }
-
+                Output::Record { bytes, .. } => {
                     // strip `\n`, dispatch.
                     let body = record_body(&bytes);
 
@@ -735,20 +618,6 @@ impl Daemon {
                                 self.confirm_outgoing_address(oid, addr);
                             }
                             Ok(self.on_pong_rtt(id, now))
-                        }
-                        Request::Packet => {
-                            // set tcplen; NEXT record is the blob.
-                            let conn = self.conn_mut(id);
-                            str::from_utf8(body)
-                                .ok()
-                                .and_then(|s| tinc_proto::msg::TcpPacket::parse(s).ok())
-                                .map_or_else(
-                                    || Err(DispatchError::BadKey("PACKET parse".into())),
-                                    |pkt| {
-                                        conn.tcplen = pkt.len;
-                                        Ok(false)
-                                    },
-                                )
                         }
                         Request::KeyChanged => {
                             // Legacy-crypto peers broadcast this every `KeyExpire` seconds;

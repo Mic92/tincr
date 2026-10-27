@@ -393,7 +393,7 @@ pub(crate) fn handle_id(
     if let Some(throwaway_b64) = name_tok.strip_prefix(b"?") {
         // Invitations are accept-side only; an outgoing ConnectTo peer
         // answering `?` is impersonating a joiner.
-        if conn.outgoing.is_some() {
+        if conn.role == Role::Initiator {
             return Err(DispatchError::BadId(format!(
                 "invitation greeting on outgoing connection ({})",
                 conn.hostname
@@ -436,7 +436,7 @@ fn id_peer(
 
     // Outgoing: the name was already set by `ConnectTo`; peer must
     // confirm (DNS hijack / stale config / NAT confusion).
-    let is_outgoing = conn.outgoing.is_some();
+    let is_outgoing = conn.role == Role::Initiator;
     if is_outgoing {
         if conn.name != name {
             return Err(DispatchError::WrongPeer {
@@ -500,13 +500,8 @@ fn id_peer(
     // SigningKey deliberately isn't Clone; blob roundtrip makes copy visible.
     let mykey_clone = SigningKey::from_blob(&ctx.mykey.to_blob());
 
-    let role = if is_outgoing {
-        Role::Initiator
-    } else {
-        Role::Responder
-    };
     let (sptps, init) = Sptps::start_with(
-        role,
+        conn.role,
         Framing::Stream,
         conn.sptps_kex,
         mykey_clone,

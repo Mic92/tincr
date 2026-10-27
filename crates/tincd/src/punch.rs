@@ -9,6 +9,7 @@
 use crate::local_addr;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
+use tinc_sptps::Role;
 
 /// B's wait for A's `PUNCH` reply.
 pub(crate) const AWAIT_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -35,10 +36,11 @@ pub(crate) enum PunchState {
         b_addrs: Vec<SocketAddr>,
         armed: Instant,
     },
-    /// B only: dial scheduled at `fire_at` (SYNC send + rtt/2).
+    /// Dial scheduled at `fire_at`. B dials as the handshake initiator.
     Delaying {
         addrs: Vec<SocketAddr>,
         fire_at: Instant,
+        role: Role,
     },
 }
 
@@ -50,7 +52,11 @@ pub(crate) enum PunchAction {
     /// `REQ_KEY <me> <peer> 65 v1;<nonce>`.
     SendSync,
     /// One-shot timer; on fire, dial in parallel.
-    DialAt { at: Instant, addrs: Vec<SocketAddr> },
+    DialAt {
+        at: Instant,
+        addrs: Vec<SocketAddr>,
+        role: Role,
+    },
 }
 
 /// B: start a punch.
@@ -92,12 +98,14 @@ pub(crate) fn on_punch_reply(
         PunchState::Delaying {
             addrs: a_addrs.clone(),
             fire_at,
+            role: Role::Initiator,
         },
         vec![
             PunchAction::SendSync,
             PunchAction::DialAt {
                 at: fire_at,
                 addrs: a_addrs,
+                role: Role::Initiator,
             },
         ],
     ))
@@ -112,10 +120,12 @@ pub(crate) fn on_sync(state: &PunchState, now: Instant) -> Option<(PunchState, V
         PunchState::Delaying {
             addrs: b_addrs.clone(),
             fire_at: now,
+            role: Role::Responder,
         },
         vec![PunchAction::DialAt {
             at: now,
             addrs: b_addrs.clone(),
+            role: Role::Responder,
         }],
     ))
 }
@@ -227,7 +237,8 @@ mod tests {
                 PunchAction::SendSync,
                 PunchAction::DialAt {
                     at: expect,
-                    addrs: theirs
+                    addrs: theirs,
+                    role: Role::Initiator,
                 }
             ]
         );
@@ -241,7 +252,8 @@ mod tests {
             acts,
             vec![PunchAction::DialAt {
                 at: later,
-                addrs: b_addrs
+                addrs: b_addrs,
+                role: Role::Responder,
             }]
         );
     }
@@ -272,6 +284,7 @@ mod tests {
         let st = PunchState::Delaying {
             addrs: vec![sa("1.1.1.1:1")],
             fire_at: now,
+            role: Role::Initiator,
         };
         assert_eq!(on_punch_reply(&st, now, vec![sa("9.9.9.9:9")]), None);
         assert_eq!(on_sync(&st, now), None);
@@ -297,7 +310,8 @@ mod tests {
         assert!(!is_expired(
             &PunchState::Delaying {
                 addrs: vec![],
-                fire_at: t0
+                fire_at: t0,
+                role: Role::Initiator,
             },
             t0 + Duration::from_hours(1)
         ));
