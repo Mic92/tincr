@@ -130,16 +130,6 @@ pub(crate) fn on_sync(state: &PunchState, now: Instant) -> Option<(PunchState, V
     ))
 }
 
-/// Periodic-sweep expiry check. `Delaying` is timer-owned, never swept.
-pub(crate) fn is_expired(state: &PunchState, now: Instant) -> bool {
-    let (since, limit) = match state {
-        PunchState::AwaitConnect { t0 } => (*t0, AWAIT_CONNECT_TIMEOUT),
-        PunchState::AwaitSync { armed, .. } => (*armed, AWAIT_SYNC_TIMEOUT),
-        PunchState::Delaying { .. } => return false,
-    };
-    now.saturating_duration_since(since) > limit
-}
-
 /// `v1;<nonce_hex>;<addrlist>` — one wire token.
 pub(crate) fn format_punch_payload(nonce: u64, addrs: &[SocketAddr]) -> String {
     format!("{VERSION};{nonce:016x};{}", format_addrlist(addrs))
@@ -288,32 +278,5 @@ mod tests {
         };
         assert_eq!(on_punch_reply(&st, now, vec![sa("9.9.9.9:9")]), None);
         assert_eq!(on_sync(&st, now), None);
-    }
-
-    #[test]
-    fn expiry() {
-        let t0 = Instant::now();
-        let eps = Duration::from_millis(1);
-        for (st, limit) in [
-            (PunchState::AwaitConnect { t0 }, AWAIT_CONNECT_TIMEOUT),
-            (
-                PunchState::AwaitSync {
-                    b_addrs: vec![],
-                    armed: t0,
-                },
-                AWAIT_SYNC_TIMEOUT,
-            ),
-        ] {
-            assert!(!is_expired(&st, t0 + limit));
-            assert!(is_expired(&st, t0 + limit + eps));
-        }
-        assert!(!is_expired(
-            &PunchState::Delaying {
-                addrs: vec![],
-                fire_at: t0,
-                role: Role::Initiator,
-            },
-            t0 + Duration::from_hours(1)
-        ));
     }
 }

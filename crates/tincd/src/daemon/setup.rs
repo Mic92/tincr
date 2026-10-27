@@ -938,8 +938,6 @@ impl Daemon {
             outgoings: SlotMap::with_key(),
             has_address: HashSet::new(),
             punches: HashMap::new(),
-            punch_timers: HashMap::new(),
-            punch_socks: HashMap::new(),
             punch_dials: HashMap::new(),
             punch_redials: HashMap::new(),
             shortcut_backoff: HashMap::new(),

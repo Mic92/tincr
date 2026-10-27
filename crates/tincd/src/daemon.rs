@@ -59,7 +59,6 @@ use crate::bgresolve::DnsWorker;
 use crate::dispatch::ConnOptions;
 use crate::dns::DnsConfig;
 use crate::event::MAX_EVENTS_PER_TURN;
-use crate::outgoing::PunchSock;
 use crate::portmap::Portmapper;
 #[cfg(feature = "upnp")]
 pub use crate::portmap::UpnpMode;
@@ -423,11 +422,6 @@ pub struct Daemon {
     /// In-flight sim-open punches by peer. One per peer max.
     /// Cleared on dial / expiry / peer connecting another way.
     pub(crate) punches: HashMap<NodeId, punch::PunchEntry>,
-    /// One-shot dial timers for `PunchState::Delaying`.
-    pub(crate) punch_timers: HashMap<NodeId, TimerHandle>,
-    /// Pre-bound ephemeral sockets per inflight punch (≤2: v4 + v6).
-    /// Bound before `PUNCH` so the port is known; consumed at dial.
-    pub(crate) punch_socks: HashMap<NodeId, Vec<PunchSock>>,
     /// Punch conns in flight, for RST recovery.
     pub(crate) punch_dials: HashMap<ConnId, punch::PunchDial>,
     /// Failed punch dials awaiting their re-dial timer.
