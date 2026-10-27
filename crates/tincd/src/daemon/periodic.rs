@@ -482,7 +482,9 @@ impl Daemon {
             // Originator's expiry doesn't run subnet-down (only
             // receiver's del_subnet_h does).
             self.subnets.del(&subnet, &myname);
-            self.mac_table.remove(mac);
+            if self.mac_table.get(mac) == Some(&myname) {
+                self.mac_table.remove(mac);
+            }
         }
         // One refresh after the loop. MAC subnets are Switch-mode
         // only; `slowpath_all` is true for Switch (the `!= Router`

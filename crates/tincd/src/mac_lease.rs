@@ -93,9 +93,9 @@ impl MacLeases {
         self.leases.iter()
     }
 
-    #[must_use]
-    pub(crate) fn contains(&self, mac: Mac) -> bool {
-        self.leases.contains_key(&mac)
+    /// Drop a lease. `true` if we held it.
+    pub(crate) fn remove(&mut self, mac: Mac) -> bool {
+        self.leases.remove(&mac).is_some()
     }
 
     #[cfg(test)]

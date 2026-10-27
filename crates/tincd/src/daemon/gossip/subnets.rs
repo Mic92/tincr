@@ -91,17 +91,6 @@ impl Daemon {
             return Ok(nw);
         }
 
-        // Reject peer claims on MACs we still actively lease.
-        if let Subnet::Mac { addr, .. } = subnet
-            && owner != self.myself
-            && self.mac_leases.contains(addr)
-        {
-            log::warn!(target: "tincd::proto",
-                "Rejecting ADD_SUBNET from {owner_name} for MAC \
-                 {addr:02x?}: we hold the lease");
-            return Ok(false);
-        }
-
         self.subnets.add(subnet, owner_name.clone());
         self.tx_snap_refresh_subnets();
 
@@ -120,7 +109,22 @@ impl Daemon {
         // seen.check above prevents the loop. tunnelserver already
         // returned at the unauthorized-subnet gate above, so this
         // path always forwards.
-        let nw = self.forward_request(from_conn, body);
+        let mut nw = self.forward_request(from_conn, body);
+
+        // The host roamed to the claimant: hand our lease over at once.
+        if let Subnet::Mac { addr, .. } = subnet
+            && owner != self.myself
+            && self.mac_leases.remove(addr)
+        {
+            let ours = Subnet::Mac { addr, weight: 10 };
+            log::info!(target: "tincd::net", "MAC {addr:02x?} roamed to {owner_name}");
+            let myname = self.name.clone();
+            self.subnets.del(&ours, &myname);
+            self.tx_snap_refresh_subnets();
+            for cid in self.broadcast_targets(None) {
+                nw |= self.send_subnet(cid, Request::DelSubnet, &myname, &ours);
+            }
+        }
 
         Ok(nw)
     }
