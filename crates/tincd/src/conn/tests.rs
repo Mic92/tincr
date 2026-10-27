@@ -576,6 +576,20 @@ fn send_rekeys_meta_sptps() {
     );
 }
 
+/// A queue that keeps draining is not stalled, however full.
+#[test]
+fn flush_stalled_tracks_progress() {
+    let mut c = Connection::test_with_fd(devnull());
+    let t0 = Instant::now();
+    let s = Duration::from_secs;
+    assert_eq!(c.flush_stalled(t0 + s(5)), s(0), "empty");
+    c.send_raw(&[0; 64]);
+    assert_eq!(c.flush_stalled(t0 + s(10)), s(5));
+    c.outbuf.consume(1);
+    assert_eq!(c.flush_stalled(t0 + s(20)), s(0), "drained a byte");
+    assert_eq!(c.flush_stalled(t0 + s(90)), s(70));
+}
+
 /// No `\n` appended; 0x0a mid-body left alone.
 #[test]
 fn send_raw_no_newline() {

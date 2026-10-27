@@ -81,14 +81,16 @@ impl Daemon {
 
             let stale = now.saturating_duration_since(conn.last_ping_time);
 
-            // Outbuf cap. Control conns: unconditional (their `stale` is
-            // pinned at 0 by the +1h window). Meta conns: only once stale.
-            if (conn.control || stale > pingtimeout)
-                && conn.outbuf.live_len() > self.settings.maxoutbufsize
-            {
+            // Reap a peer that stopped reading: over the cap and nothing
+            // drained for PingTimeout. A busy queue that still moves stays.
+            let Some(conn) = self.conns.get_mut(id) else {
+                continue;
+            };
+            let stalled = conn.flush_stalled(now);
+            if stalled > pingtimeout && conn.outbuf.live_len() > self.settings.maxoutbufsize {
                 log::warn!(target: "tincd::conn",
                            "{} ({}) could not flush for {} seconds ({} bytes pending)",
-                           conn.name, conn.hostname, stale.as_secs(),
+                           conn.name, conn.hostname, stalled.as_secs(),
                            conn.outbuf.live_len());
                 self.terminate(id);
                 continue;
