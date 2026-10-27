@@ -1,5 +1,5 @@
 use super::super::Daemon;
-use super::{UDP_RX_BATCH, UDP_RX_BUFSZ, UdpRxBatch, ss_to_std};
+use super::{PUNT_DRAIN_CAP, UDP_RX_BATCH, UDP_RX_BUFSZ, UdpRxBatch, ss_to_std};
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 use nix::sys::socket::{SockaddrStorage as NixSS, recvfrom};
 use std::io;
@@ -327,8 +327,22 @@ impl Daemon {
         };
         let mut buf = [0u8; 8];
         let _ = nix::unistd::read(&*efd, &mut buf);
+        if punt.device_failed() {
+            log::error!(target: "tincd", "Too many errors from device, exiting!");
+            self.running = false;
+            return;
+        }
         let mut nw = false;
-        while let Some(mut p) = punt.pop() {
+        for n in 0.. {
+            // The worker refills concurrently: yield after a batch and
+            // re-kick ourselves so timers and meta conns get their turn.
+            if n == PUNT_DRAIN_CAP {
+                let _ = nix::unistd::write(&*efd, &1u64.to_ne_bytes());
+                break;
+            }
+            let Some(mut p) = punt.pop() else {
+                break;
+            };
             if let Some(buf) = p.buf.get_mut(..usize::from(p.len)) {
                 match p.src {
                     Some(src) => self.handle_incoming_vpn_packet(buf, Some(src)),

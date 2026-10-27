@@ -279,6 +279,20 @@ mod tests {
         Conn(u32),
     }
 
+    /// An fd reporting only ERR (a pipe's write end once the reader is
+    /// gone) still reaches its read handler instead of spinning silently.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn error_only_event_dispatches() {
+        let (r, w) = nix::unistd::pipe().unwrap();
+        let mut ev = EventLoop::new().unwrap();
+        ev.add(w.as_fd(), Io::Read, What::Device).unwrap();
+        drop(r);
+        let mut out = Vec::new();
+        ev.turn(Some(Duration::from_millis(100)), &mut out).unwrap();
+        assert_eq!(out, vec![(What::Device, Ready::Read)]);
+    }
+
     /// Level-triggered: partially-drained fd re-fires next turn.
     /// Pins kqueue to no-`EV_CLEAR` / epoll to no-`EPOLLET`.
     #[test]

@@ -164,6 +164,7 @@ fn run(
     let mut bufs = vec![[0u8; PUNT_SLOT]; RX_BATCH];
     let mut scratch: Vec<u8> = Vec::with_capacity(PUNT_SLOT);
     let mut gro_spare = GroBucket::new();
+    let mut device_errors = 0u32;
     let mut tx = TxState {
         arena: DeviceArena::new(DRAIN_CAP),
         tso_scratch: vec![0u8; DRAIN_CAP * DeviceArena::STRIDE].into_boxed_slice(),
@@ -223,26 +224,54 @@ fn run(
         if let Err(e) = tun.write_flush() {
             log::debug!(target: "tincd::shard", "tun flush: {e}");
         }
-        punted |= tun_drain(&mut tun, snap.as_deref(), punt, &mut tx);
-        if punted {
+        let drained = tun_drain(&mut tun, snap.as_deref(), punt, &mut tx);
+        punted |= drained.punted;
+        if drained.failed {
+            device_errors += 1;
+        } else {
+            device_errors = 0;
+        }
+        if device_errors > MAX_DEVICE_ERRORS {
+            punt.set_device_failed();
+        }
+        if punted || punt.device_failed() {
             let one = 1u64.to_ne_bytes();
             let _ = nix::unistd::write(punt_efd.as_fd(), &one);
+        }
+        if punt.device_failed() {
+            return;
         }
     }
 }
 
+/// Consecutive TUN read errors before the worker gives up, as
+/// `on_device_read` does on the control thread.
+const MAX_DEVICE_ERRORS: u32 = 10;
+
+struct Drained {
+    punted: bool,
+    failed: bool,
+}
+
 /// Drain the worker's TUN queue: supers go through the seal-send fast
-/// path, everything else punts. Returns whether anything was punted.
+/// path, everything else punts.
 fn tun_drain(
     tun: &mut Box<dyn Device + Send>,
     snap: Option<&TxSnapshot>,
     punt: &PuntQueue,
     tx: &mut TxState,
-) -> bool {
+) -> Drained {
     let mut punted = false;
     for _ in 0..DRAIN_CAP {
         match tun.drain(&mut tx.arena, DRAIN_CAP) {
-            Ok(DrainResult::Empty) | Err(_) => break,
+            Ok(DrainResult::Empty) => break,
+            Err(e) => {
+                log::error!(target: "tincd::shard", "Error reading from device: {e}");
+                return Drained {
+                    punted,
+                    failed: true,
+                };
+            }
             Ok(DrainResult::Frames { count }) => {
                 for i in 0..count {
                     punted |= punt.push(tx.arena.slot(i), None);
@@ -281,7 +310,10 @@ fn tun_drain(
             }
         }
     }
-    punted
+    Drained {
+        punted,
+        failed: false,
+    }
 }
 
 /// Seal-send one split super; punts the segments when the fast path

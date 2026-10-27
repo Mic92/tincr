@@ -77,7 +77,8 @@ pub(super) fn wait(
     Ok(ep.wait(events, to)?)
 }
 
-// Event accessors. Only EPOLLIN/EPOLLOUT — see module doc.
+// Event accessors. ERR and HUP count as both readable and writable so the
+// handler sees the error. Level-triggered, an undispatched one spins.
 
 #[inline]
 #[expect(clippy::cast_possible_truncation)] // tokens are slot indices, fit usize on any platform
@@ -87,10 +88,12 @@ pub(super) fn ev_token(e: &RawEvent) -> usize {
 
 #[inline]
 pub(super) fn ev_readable(e: &RawEvent) -> bool {
-    e.events().contains(EpollFlags::EPOLLIN)
+    e.events()
+        .intersects(EpollFlags::EPOLLIN | EpollFlags::EPOLLERR | EpollFlags::EPOLLHUP)
 }
 
 #[inline]
 pub(super) fn ev_writable(e: &RawEvent) -> bool {
-    e.events().contains(EpollFlags::EPOLLOUT)
+    e.events()
+        .intersects(EpollFlags::EPOLLOUT | EpollFlags::EPOLLERR | EpollFlags::EPOLLHUP)
 }
