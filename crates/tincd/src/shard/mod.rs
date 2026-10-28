@@ -36,7 +36,7 @@ mod snapshot;
 pub(crate) mod worker;
 pub(crate) use probe::tx_probe;
 pub(crate) use rx::{RxDstMemo, rx_open, rx_probe};
-pub(crate) use seal::seal_super;
+pub(crate) use seal::{SealErr, seal_super};
 pub(crate) use snapshot::NodeView;
 
 use std::sync::atomic::{AtomicU16, AtomicU64};

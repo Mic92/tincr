@@ -17,8 +17,9 @@
 
 use super::probe::TxTarget;
 use crate::daemon::PKT_NORMAL;
-use crate::egress::{TxBatch, UdpEgress};
+use crate::egress::{TxBatch, UdpEgress, is_udp_unreachable_errno};
 use crate::graph::NodeId;
+use std::io;
 use std::io::ErrorKind;
 
 /// Stats for the daemon's `myself_tunnel.out_{packets,bytes}` and the
@@ -30,16 +31,21 @@ pub(crate) struct SealOk {
     pub bytes: u64,
 }
 
-/// `EMSGSIZE` from `send_batch`. `(relay, origlen)` is exactly what
-/// `TxBatch::take()` returned — caller dispatches `on_emsgsize`.
-pub(crate) type SealErr = (NodeId, u16);
+/// A `send_batch` failure the caller must act on. The frames are lost.
+#[derive(Debug)]
+pub(crate) enum SealErr {
+    /// `on_emsgsize(origlen)` for `relay`.
+    Emsgsize(NodeId, u16),
+    /// `relay`'s address is unusable from here.
+    Unreachable(NodeId, io::Error),
+}
 
 /// Seal each chunk at `scratch_in[i*stride..][..lens[i]]` (eth header
 /// stripped here), stage into `batch`, ship when full and at the end.
 /// `batch` must be empty or staged for `egress`'s listener.
 ///
 /// # Errors
-/// `EMSGSIZE` from `send_batch` (PMTU shrank mid-super; TCP retransmits).
+/// See [`SealErr`].
 #[expect(clippy::cast_possible_truncation)] // body_len ≤ MTU < u16::MAX
 pub(crate) fn seal_super(
     target: &TxTarget,
@@ -101,9 +107,6 @@ pub(crate) fn seal_super(
 
 /// `take` → `send_batch` → `reset`, with the borrow-ordering dance
 /// (`EgressBatch<'_>` borrows `batch.buf`; can't `reset` while alive).
-/// `WouldBlock` and other-errors are dropped+logged here; only
-/// `EMSGSIZE` propagates because only it needs caller-side state
-/// (PMTU). UDP is unreliable; dropped frames retransmit at TCP layer.
 fn ship(batch: &mut TxBatch, egress: &mut dyn UdpEgress) -> Result<(), SealErr> {
     let Some(run) = batch.take() else {
         return Ok(());
@@ -112,7 +115,10 @@ fn ship(batch: &mut TxBatch, egress: &mut dyn UdpEgress) -> Result<(), SealErr> 
     let r = egress.send_batch(&run.batch);
     batch.reset();
     match r {
-        Err(e) if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) => Err((relay, origlen)),
+        Err(e) if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) => {
+            Err(SealErr::Emsgsize(relay, origlen))
+        }
+        Err(e) if is_udp_unreachable_errno(&e) => Err(SealErr::Unreachable(relay, e)),
         // sndbuf full. GSO send is all-or-nothing (`udp_send_skb`);
         // no partial-accept to recover. Same as `ship_tx_batch`.
         Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(()),
@@ -121,5 +127,40 @@ fn ship(batch: &mut TxBatch, egress: &mut dyn UdpEgress) -> Result<(), SealErr> 
             Ok(())
         }
         Ok(()) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::egress::EgressBatch;
+    use socket2::SockAddr;
+    use std::net::SocketAddr;
+
+    struct Failing(i32);
+    impl UdpEgress for Failing {
+        fn send_batch(&mut self, _: &EgressBatch<'_>) -> io::Result<()> {
+            Err(io::Error::from_raw_os_error(self.0))
+        }
+    }
+
+    #[test]
+    fn ship_reports_errors_the_caller_must_handle() {
+        let dst = SockAddr::from("192.0.2.1:655".parse::<SocketAddr>().unwrap());
+        let ship_with = |errno| {
+            let mut batch = TxBatch::new(2048);
+            batch.stage(&dst, 0, None, NodeId(7), 100, &[0; 64]);
+            ship(&mut batch, &mut Failing(errno))
+        };
+        assert!(matches!(
+            ship_with(libc::EMSGSIZE),
+            Err(SealErr::Emsgsize(NodeId(7), 100))
+        ));
+        assert!(matches!(
+            ship_with(libc::ENETUNREACH),
+            Err(SealErr::Unreachable(NodeId(7), _))
+        ));
+        assert!(matches!(ship_with(libc::EAGAIN), Ok(())));
+        assert!(matches!(ship_with(libc::ENOBUFS), Ok(())));
     }
 }
