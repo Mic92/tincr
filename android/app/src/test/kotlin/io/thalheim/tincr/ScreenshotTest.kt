@@ -10,7 +10,6 @@ import io.thalheim.tincr.ui.HomeState
 import io.thalheim.tincr.ui.JoinScreen
 import io.thalheim.tincr.ui.Link
 import io.thalheim.tincr.ui.MainScreen
-import io.thalheim.tincr.ui.Notice
 import io.thalheim.tincr.ui.OnboardingScreen
 import io.thalheim.tincr.ui.Tab
 import io.thalheim.tincr.ui.TincrTheme
@@ -62,9 +61,11 @@ class ScreenshotTest {
     @Test fun homeConnecting() = shot("2_home_connecting") { main(family.copy(link = Link.Connecting), Tab.Home) }
     @Test fun devices() = shot("3_devices") { main(family, Tab.Devices) }
     @Test fun devicesNoInternet() =
-        shot("3_devices_no_internet") { main(family.copy(notice = Notice.NoInternet), Tab.Devices) }
+        shot("3_devices_no_internet") { main(family.copy(notice = Problems.noInternet()), Tab.Devices) }
+    @Test fun homePeerUnreachable() =
+        shot("2_home_peer_unreachable") { main(family.copy(link = Link.Connecting, notice = Problems.peerUnreachable("Dad", 40, "Trying to connect to gate (203.0.113.5 port 655)\nTimeout from gate")), Tab.Home) }
     @Test fun homeNewPhone() =
-        shot("2_home_new_phone") { main(family.copy(link = Link.Off, notice = Notice.NewPhone), Tab.Home) }
+        shot("2_home_new_phone") { main(family.copy(link = Link.Off, notice = Problems.newPhone("Dad")), Tab.Home) }
     @Test fun help() = shot("4_help") { main(family, Tab.Help) }
     @Test fun advanced() = shot("5_advanced") {
         AdvancedScreen("tincd 0.1.0 starting\nListening on 0.0.0.0 port 12655\nConnected to gate", onBack = {})
