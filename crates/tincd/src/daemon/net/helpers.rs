@@ -115,19 +115,18 @@ pub(super) fn handle_udp_unreachable(
     relay_name: &str,
     err: &io::Error,
     now: Instant,
-) {
-    let warn_now = tunnels.get_mut(&relay_nid).is_none_or(|t| {
-        t.path
-            .on_unreachable(now)
-            .is_none_or(|t| now.saturating_duration_since(t) >= UDP_UNREACHABLE_WARN_INTERVAL)
-    });
+) -> bool {
+    let warn = tunnels
+        .get_mut(&relay_nid)
+        .is_none_or(|t| t.path.on_unreachable(now, UDP_UNREACHABLE_WARN_INTERVAL));
     publish_path(tunnels, listeners, tunnel_handles, relay_nid);
 
-    if warn_now {
+    if warn {
         log::warn!(target: "tincd::net",
                    "UDP send to {relay_name} failed: {err}; \
                     clearing cached address, will retry via cold path");
     }
+    warn
 }
 
 /// `EMSGSIZE` on UDP send. The frames are the caller's to re-route or drop.
@@ -238,25 +237,18 @@ mod tests {
         tunnels.insert(nid, t);
 
         let err = io::Error::from_raw_os_error(101);
-        handle_udp_unreachable(&mut tunnels, &[], &tunnel_handles, nid, "peer", &err, now);
+        let mut fail = |nid, secs| {
+            let at = now + Duration::from_secs(secs);
+            handle_udp_unreachable(&mut tunnels, &[], &tunnel_handles, nid, "peer", &err, at)
+        };
+        let warned: Vec<bool> = [0, 30, 61, 90].map(|s| fail(nid, s)).into();
+        assert_eq!(warned, [true, false, true, false]);
+        assert!(fail(NodeId(99), 0));
 
         let t = tunnels.get(&nid).expect("tunnel still present");
         assert!(t.path.addr().is_none());
         assert!(t.path.target().is_none());
         assert!(!t.path.confirmed());
         assert_eq!(t.path.minmtu(), 0);
-        assert_eq!(t.path.send_failed_at(), Some(now));
-
-        handle_udp_unreachable(&mut tunnels, &[], &tunnel_handles, nid, "peer", &err, now);
-        let missing = NodeId(99);
-        handle_udp_unreachable(
-            &mut tunnels,
-            &[],
-            &tunnel_handles,
-            missing,
-            "ghost",
-            &err,
-            now,
-        );
     }
 }

@@ -3,7 +3,7 @@
 
 use std::mem;
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use socket2::SockAddr;
 
@@ -17,7 +17,7 @@ pub(crate) struct UdpPath {
     /// Listener the peer last reached us on; replies leave from it.
     rx_sock: u8,
     pmtu: Option<PmtuState>,
-    send_failed_at: Option<Instant>,
+    warned_at: Option<Instant>,
     /// Derived by [`Self::refresh_target`], cached for the hot path.
     target: Option<(SockAddr, u8)>,
 }
@@ -61,12 +61,6 @@ impl UdpPath {
     #[must_use]
     pub(crate) fn maxmtu(&self) -> u16 {
         self.pmtu.as_ref().map_or(MTU, |p| p.maxmtu)
-    }
-
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) const fn send_failed_at(&self) -> Option<Instant> {
-        self.send_failed_at
     }
 
     #[must_use]
@@ -124,15 +118,21 @@ impl UdpPath {
             .map_or_else(Vec::new, |p| p.on_emsgsize(len))
     }
 
-    /// Returns the previous failure time.
-    pub(crate) fn on_unreachable(&mut self, now: Instant) -> Option<Instant> {
+    /// Whether to warn: at most once per `interval` while sends keep failing.
+    pub(crate) fn on_unreachable(&mut self, now: Instant, interval: Duration) -> bool {
         self.addr = None;
         self.target = None;
         self.addr_seen = false;
         if let Some(p) = self.pmtu.as_mut() {
             p.reset_path();
         }
-        self.send_failed_at.replace(now)
+        let warn = self
+            .warned_at
+            .is_none_or(|t| now.saturating_duration_since(t) >= interval);
+        if warn {
+            self.warned_at = Some(now);
+        }
+        warn
     }
 
     pub(crate) fn on_timeout(&mut self) {
@@ -159,7 +159,7 @@ impl UdpPath {
         self.addr = None;
         self.target = None;
         self.addr_seen = false;
-        self.send_failed_at = None;
+        self.warned_at = None;
         if let Some(p) = self.pmtu.as_mut() {
             p.reset_path();
         }
@@ -215,7 +215,7 @@ mod tests {
         };
         let cases: [(&str, Kill); 3] = [
             ("unreachable", |p, now| {
-                p.on_unreachable(now);
+                p.on_unreachable(now, Duration::ZERO);
             }),
             ("timeout", |p, _| p.on_timeout()),
             ("reset", |p, _| p.reset()),
@@ -241,7 +241,7 @@ mod tests {
         assert!(!p.on_addr_hint(addr("198.51.100.7:655")));
         assert_eq!(p.addr(), Some(addr("192.0.2.1:655")));
 
-        p.on_unreachable(now);
+        p.on_unreachable(now, Duration::ZERO);
         assert!(p.on_addr_hint(addr("198.51.100.7:655")));
         assert_eq!(p.minmtu(), 0);
     }
