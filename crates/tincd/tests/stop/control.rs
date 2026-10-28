@@ -11,6 +11,7 @@ use std::thread;
 use std::time::Duration;
 #[cfg(target_os = "macos")]
 use std::{mem, ptr};
+use tincd::node_id::NodeId6;
 
 fn count_open_fds(pid: nix::unistd::Pid) -> usize {
     #[cfg(target_os = "linux")]
@@ -54,18 +55,23 @@ fn request_line(reader: &mut BufReader<UnixStream>, writer: &UnixStream, request
 
 /// Garbage on the UDP port (a stale peer, a scanner) is read and
 /// dropped; the daemon neither dies nor spins on a level-triggered fd
-/// it never drains. UDP shares the TCP port number.
+/// it never drains. UDP shares the TCP port number. Our own source ID
+/// (NAT hairpin) must not start a tunnel to ourselves.
 #[test]
 fn stray_udp_is_drained() {
     let tmp = tmp!("udp-stray");
     let mut node = testnode(tmp.path());
     node.start();
 
+    let mut own = NodeId6::NULL.as_bytes().to_vec();
+    own.extend_from_slice(NodeId6::from_name("testnode").as_bytes());
+    own.extend_from_slice(&[0xAA; 100]);
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
-    for _ in 0..5 {
-        sender
-            .send_to(b"not a tinc packet", node.tcp_addr())
-            .unwrap();
+    for pkt in [&b"not a tinc packet"[..]; 5]
+        .iter()
+        .chain([&own[..]].iter())
+    {
+        sender.send_to(pkt, node.tcp_addr()).unwrap();
     }
     thread::sleep(Duration::from_millis(100));
 
@@ -73,6 +79,8 @@ fn stray_udp_is_drained() {
     let _ = node.ctl().dump(3);
     let log = node.stop();
     assert!(!log.contains("panicked"), "{log}");
+    let to_self = |l: &&str| l.contains("WARN") && l.contains("testnode");
+    assert!(!log.lines().any(|l| to_self(&l)), "{log}");
 }
 
 /// Regression: purge before any peer or graph run took a path that
