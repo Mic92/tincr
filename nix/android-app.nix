@@ -7,6 +7,8 @@
   tincd-android,
   # Emulator runs x86_64 while devices want aarch64.
   abi ? "arm64-v8a",
+  versionCode ? 1,
+  versionName ? null,
 }:
 let
   android = import ./android-env.nix { inherit lib androidenv; };
@@ -46,6 +48,10 @@ stdenv.mkDerivation (finalAttrs: {
     cp ${tincd}/bin/tincd app/src/main/jniLibs/${abi}/libtincd.so
     cp ${tincd}/bin/tinc app/src/main/jniLibs/${abi}/libtinc.so
     echo "android.aapt2FromMavenOverride=${android.aapt2}" >> gradle.properties
+    echo "tincr.versionCode=${toString versionCode}" >> gradle.properties
+    ${lib.optionalString (
+      versionName != null
+    ) ''echo "tincr.versionName=${versionName}" >> gradle.properties''}
   '';
 
   preBuild = ''
@@ -55,19 +61,24 @@ stdenv.mkDerivation (finalAttrs: {
   gradleBuildTask = [
     "assembleDebug"
     "assembleDebugAndroidTest"
+    "assembleRelease"
   ];
   # Renders every screen state on the JVM. The PNGs go to $out/screenshots.
   doCheck = true;
   gradleCheckTask = "recordRoborazziDebug";
   # AGP variant matching breaks the generic nixDownloadDeps task.
-  gradleUpdateTask = "assembleDebug assembleDebugAndroidTest recordRoborazziDebug";
+  gradleUpdateTask = "assembleDebug assembleDebugAndroidTest assembleRelease recordRoborazziDebug";
 
   env.ANDROID_HOME = android.fullSdkRoot;
+  passthru = { inherit versionCode; };
 
   installPhase = ''
     runHook preInstall
     install -Dm644 app/build/outputs/apk/debug/app-debug.apk \
       $out/tincr.apk
+    # Signed by the publish effect, not here.
+    install -Dm644 app/build/outputs/apk/release/app-release-unsigned.apk \
+      $out/tincr-release-unsigned.apk
     install -Dm644 app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk \
       $out/tincr-test.apk
     cp -r app/build/outputs/roborazzi $out/screenshots
