@@ -363,16 +363,7 @@ impl Daemon {
                 log::debug!(target: "tincd::proto",
                             "UDP_INFO from {conn_name}: learned {} at {new_addr}",
                             parsed.from);
-                if self
-                    .dp
-                    .tunnels
-                    .entry(from)
-                    .or_default()
-                    .path
-                    .on_addr_hint(new_addr)
-                {
-                    self.publish_path(from);
-                }
+                self.learn_udp_addr(from, new_addr, "UDP_INFO");
                 Ok(self.send_udp_info_forward(from, to))
             }
             UdpInfoAction::Forward { from, to } => Ok(self.send_udp_info_forward(from, to)),
