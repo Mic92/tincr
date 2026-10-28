@@ -21,6 +21,7 @@ use crate::egress::{TxBatch, UdpEgress, is_udp_unreachable_errno};
 use crate::graph::NodeId;
 use std::io;
 use std::io::ErrorKind;
+use std::net::SocketAddr;
 
 /// Stats for the daemon's `myself_tunnel.out_{packets,bytes}` and the
 /// per-dst tunnel counters. `bytes` is sum of BODY lengths (the inner
@@ -36,8 +37,8 @@ pub(crate) struct SealOk {
 pub(crate) enum SealErr {
     /// `on_emsgsize(origlen)` for `relay`.
     Emsgsize(NodeId, u16),
-    /// `relay`'s address is unusable from here.
-    Unreachable(NodeId, io::Error),
+    /// `relay`'s address `dst` is unusable from here.
+    Unreachable(NodeId, Option<SocketAddr>, io::Error),
 }
 
 /// Seal each chunk at `scratch_in[i*stride..][..lens[i]]` (eth header
@@ -112,13 +113,14 @@ fn ship(batch: &mut TxBatch, egress: &mut dyn UdpEgress) -> Result<(), SealErr> 
         return Ok(());
     };
     let (relay, origlen) = (run.relay, run.origlen);
+    let dst = run.batch.dst.as_socket();
     let r = egress.send_batch(&run.batch);
     batch.reset();
     match r {
         Err(e) if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) => {
             Err(SealErr::Emsgsize(relay, origlen))
         }
-        Err(e) if is_udp_unreachable_errno(&e) => Err(SealErr::Unreachable(relay, e)),
+        Err(e) if is_udp_unreachable_errno(&e) => Err(SealErr::Unreachable(relay, dst, e)),
         // sndbuf full. GSO send is all-or-nothing (`udp_send_skb`);
         // no partial-accept to recover. Same as `ship_tx_batch`.
         Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(()),
@@ -146,10 +148,10 @@ mod tests {
 
     #[test]
     fn ship_reports_errors_the_caller_must_handle() {
-        let dst = SockAddr::from("192.0.2.1:655".parse::<SocketAddr>().unwrap());
+        let dst: SocketAddr = "192.0.2.1:655".parse().unwrap();
         let ship_with = |errno| {
             let mut batch = TxBatch::new(2048);
-            batch.stage(&dst, 0, None, NodeId(7), 100, &[0; 64]);
+            batch.stage(&SockAddr::from(dst), 0, None, NodeId(7), 100, &[0; 64]);
             ship(&mut batch, &mut Failing(errno))
         };
         assert!(matches!(
@@ -158,7 +160,7 @@ mod tests {
         ));
         assert!(matches!(
             ship_with(libc::ENETUNREACH),
-            Err(SealErr::Unreachable(NodeId(7), _))
+            Err(SealErr::Unreachable(NodeId(7), d, _)) if d == Some(dst)
         ));
         assert!(matches!(ship_with(libc::EAGAIN), Ok(())));
         assert!(matches!(ship_with(libc::ENOBUFS), Ok(())));

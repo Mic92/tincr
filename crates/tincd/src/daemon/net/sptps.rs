@@ -751,6 +751,7 @@ impl Daemon {
                 &self.tunnel_handles,
                 relay_nid,
                 &relay_name,
+                sockaddr.as_socket(),
                 &e,
                 self.timers.now(),
             );

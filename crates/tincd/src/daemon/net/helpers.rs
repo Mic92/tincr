@@ -86,25 +86,28 @@ impl Daemon {
     }
 }
 
-/// "Destination unreachable" on UDP send. A routing event: SPTPS stays.
+/// "Destination unreachable" on a UDP send to `dst`. A routing event: SPTPS stays.
+#[expect(clippy::too_many_arguments)] // explicit field borrows, as for `ship_tx_batch`
 pub(super) fn handle_udp_unreachable(
     tunnels: &mut IntHashMap<NodeId, TunnelState>,
     listeners: &[ListenerSlot],
     tunnel_handles: &IntHashMap<NodeId, Arc<TunnelHandles>>,
     relay_nid: NodeId,
     relay_name: &str,
+    dst: Option<SocketAddr>,
     err: &io::Error,
     now: Instant,
 ) -> bool {
-    let warn = tunnels
-        .get_mut(&relay_nid)
-        .is_none_or(|t| t.path.on_unreachable(now, UDP_UNREACHABLE_WARN_INTERVAL));
+    let warn = tunnels.get_mut(&relay_nid).is_none_or(|t| {
+        t.path
+            .on_unreachable(dst, now, UDP_UNREACHABLE_WARN_INTERVAL)
+    });
     publish_path(tunnels, listeners, tunnel_handles, relay_nid);
 
     if warn {
         log::warn!(target: "tincd::net",
                    "UDP send to {relay_name} failed: {err}; \
-                    clearing cached address, will retry via cold path");
+                    will retry via cold path");
     }
     warn
 }
@@ -188,10 +191,20 @@ mod tests {
         assert!(t.path.refresh_target(|_, _| 0));
         tunnels.insert(nid, t);
 
+        let dst = Some("10.0.0.1:655".parse().unwrap());
         let err = io::Error::from_raw_os_error(101);
         let mut fail = |nid, secs| {
             let at = now + Duration::from_secs(secs);
-            handle_udp_unreachable(&mut tunnels, &[], &tunnel_handles, nid, "peer", &err, at)
+            handle_udp_unreachable(
+                &mut tunnels,
+                &[],
+                &tunnel_handles,
+                nid,
+                "peer",
+                dst,
+                &err,
+                at,
+            )
         };
         let warned: Vec<bool> = [0, 30, 61, 90].map(|s| fail(nid, s)).into();
         assert_eq!(warned, [true, false, true, false]);
