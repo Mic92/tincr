@@ -11,10 +11,12 @@ use super::ListenerSlot;
 use super::helpers;
 use super::sptps::inherit_tos;
 use crate::egress::TxBatch;
+use crate::egress::is_udp_unreachable_errno;
 use crate::graph::Graph;
 use crate::graph::NodeId;
 use crate::inthash::IntHashMap;
 use crate::shard;
+use crate::shard::SealErr;
 use crate::shard::TunnelHandles;
 use crate::shard::TxSnapshot;
 use std::mem;
@@ -323,7 +325,7 @@ impl Daemon {
                     relay_nid,
                     origlen,
                 );
-            } else if helpers::is_udp_unreachable_errno(&e) {
+            } else if is_udp_unreachable_errno(&e) {
                 let relay_name = graph
                     .node(relay_nid)
                     .map_or("<gone>", |n| n.name.as_str())
@@ -451,9 +453,7 @@ impl Daemon {
                 // forward_packet → send_sptps_packet; we sum once.
                 target.handles.stats.add_out(ok.packets, ok.bytes);
             }
-            Err((relay, origlen)) => {
-                // PMTU shrank under us; frames lost, inner-TCP
-                // retransmits. Cap min/maxmtu for the next super.
+            Err(SealErr::Emsgsize(relay, origlen)) => {
                 helpers::handle_udp_emsgsize(
                     &mut self.dp.tunnels,
                     &self.listeners,
@@ -461,6 +461,18 @@ impl Daemon {
                     &self.tunnel_handles,
                     relay,
                     origlen,
+                );
+            }
+            Err(SealErr::Unreachable(relay, e)) => {
+                let name = self.node_log_name(relay).to_owned();
+                helpers::handle_udp_unreachable(
+                    &mut self.dp.tunnels,
+                    &self.listeners,
+                    &self.tunnel_handles,
+                    relay,
+                    &name,
+                    &e,
+                    Instant::now(),
                 );
             }
         }

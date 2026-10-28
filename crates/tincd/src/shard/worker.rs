@@ -17,7 +17,7 @@ use nix::poll::{PollFd, PollFlags, PollTimeout};
 use nix::sys::socket::{MsgFlags, SockaddrStorage, recvmmsg};
 
 use super::punt::{PUNT_SLOT, PuntQueue};
-use super::{RxDstMemo, TxSnapshot, rx_open, rx_probe, seal_super, tx_probe};
+use super::{RxDstMemo, SealErr, TxSnapshot, rx_open, rx_probe, seal_super, tx_probe};
 use crate::daemon::net::helpers::gro_offer_or_write;
 use crate::egress::{TxBatch, UdpEgress};
 use crate::listen::unmap;
@@ -341,7 +341,10 @@ fn tx_super(snap: Option<&TxSnapshot>, punt: &PuntQueue, tx: &mut TxState, count
                 target.handles.stats.add_out(ok.packets, ok.bytes);
                 return false;
             }
-            Err(_) => return false, // EMSGSIZE: dropped, control's probes re-shrink
+            // Control's probes re-shrink.
+            Err(SealErr::Emsgsize(..)) => return false,
+            // Control's slow path hits the same errno and resets the path.
+            Err(SealErr::Unreachable(..)) => {}
         }
     }
     let mut punted = false;

@@ -86,26 +86,6 @@ impl Daemon {
     }
 }
 
-/// `sendmsg` errnos meaning the destination address is unusable from
-/// here, so it should be forgotten. `EPERM` is a firewall reject; `EIO`
-/// is what Android returns when a protected socket targets an address
-/// routed back into the VPN.
-pub(super) fn is_udp_unreachable_errno(e: &io::Error) -> bool {
-    let Some(raw) = e.raw_os_error() else {
-        return false;
-    };
-    matches!(
-        raw,
-        libc::ENETUNREACH
-            | libc::EHOSTUNREACH
-            | libc::ENETDOWN
-            | libc::EAFNOSUPPORT
-            | libc::EADDRNOTAVAIL
-            | libc::EPERM
-            | libc::EIO
-    )
-}
-
 /// "Destination unreachable" on UDP send. A routing event: SPTPS stays.
 pub(super) fn handle_udp_unreachable(
     tunnels: &mut IntHashMap<NodeId, TunnelState>,
@@ -194,34 +174,6 @@ mod tests {
     use super::*;
     use crate::tunnel::TunnelState;
     use std::io;
-
-    #[test]
-    fn is_udp_unreachable_errno_matches_routing_failures() {
-        for raw in [
-            libc::ENETUNREACH,
-            libc::EHOSTUNREACH,
-            libc::ENETDOWN,
-            libc::EAFNOSUPPORT,
-            libc::EADDRNOTAVAIL,
-            libc::EPERM,
-            libc::EIO,
-        ] {
-            let e = io::Error::from_raw_os_error(raw);
-            assert!(
-                is_udp_unreachable_errno(&e),
-                "errno {raw} should be classified as udp-unreachable"
-            );
-        }
-        for raw in [libc::EMSGSIZE, libc::EAGAIN] {
-            let e = io::Error::from_raw_os_error(raw);
-            assert!(
-                !is_udp_unreachable_errno(&e),
-                "errno {raw} should NOT be classified as udp-unreachable"
-            );
-        }
-        let e = io::Error::other("synthetic");
-        assert!(!is_udp_unreachable_errno(&e));
-    }
 
     #[test]
     fn handle_udp_unreachable_clears_state_and_rate_limits() {

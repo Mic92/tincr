@@ -12,6 +12,7 @@ use super::helpers;
 use crate::daemon::ListenerSlot;
 use crate::dispatch::OPTION_TCPONLY;
 use crate::egress::EgressBatch;
+use crate::egress::is_udp_unreachable_errno;
 use crate::graph::NodeId;
 use crate::packet::ETH_P_IP;
 use crate::set_udp_tos;
@@ -741,7 +742,7 @@ impl Daemon {
                 at_len,
             );
             return UdpSubmit::TooBig;
-        } else if helpers::is_udp_unreachable_errno(&e) {
+        } else if is_udp_unreachable_errno(&e) {
             // node_log_name borrows self; clone for the helper.
             let relay_name = self.node_log_name(relay_nid).to_owned();
             helpers::handle_udp_unreachable(
