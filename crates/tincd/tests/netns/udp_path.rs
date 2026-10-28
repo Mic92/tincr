@@ -10,8 +10,9 @@
 use std::fmt;
 use std::time::Duration;
 
+use super::common::linux::run_ip;
 use super::common::{TmpGuard, node_status, try_poll};
-use super::rig::{Node, TunPair, enter_netns, iptables, node_pmtu, ping, ping_once};
+use super::rig::{Node, TunPair, enter_netns, iptables, node_pmtu, ping, ping_once, ping_received};
 
 /// `node_status` bit: UDP to this node is confirmed.
 const UDP_CONFIRMED: u32 = 0x80;
@@ -264,6 +265,72 @@ fn relayed_frames_do_not_confirm_direct_pmtu() {
     let logs = s.finish();
     assert_eq!(bogus, None, "bob learned a minmtu to alice\n{logs}");
     assert!(confirmed, "bob lost the small-packet UDP path\n{logs}");
+}
+
+/// UDP turns `ENETUNREACH` under a converged tunnel. Unconfirmed UDP
+/// must mean `minmtu` 0, so data falls back to TCP at once instead of
+/// failing locally, and UDP re-confirms once the address works again.
+#[test]
+fn unreachable_falls_back_to_tcp() {
+    // `Shards = 1`: the unreachable errno is handled on the control path.
+    let Some(s) = Scenario::start(
+        "unreachable_falls_back_to_tcp",
+        Topology::Direct,
+        "PingInterval = 1\nShards = 1",
+        &[],
+    ) else {
+        return;
+    };
+    s.pair.wait_udp_confirmed();
+
+    let fixed = try_poll(Duration::from_secs(20), || {
+        ping_once("10.42.0.2");
+        let alice = node_pmtu(&s.alice_view(), "bob")?;
+        let bob = node_pmtu(&s.bob_view(), "alice")?;
+        (alice.0 != 0 && bob.0 != 0).then_some(())
+    });
+
+    // Daemon UDP now fails with ENETUNREACH; TCP is untouched. The
+    // local rule moves behind ours so loopback is affected too, and
+    // 10.42/16 stays routable (ping `connect()`s a UDP socket).
+    run_ip(&["rule", "add", "pref", "100", "lookup", "local"]);
+    run_ip(&["rule", "del", "pref", "0", "lookup", "local"]);
+    run_ip(&[
+        "rule",
+        "add",
+        "pref",
+        "10",
+        "to",
+        "127.0.0.0/8",
+        "ipproto",
+        "udp",
+        "unreachable",
+    ]);
+    let output = ping(&["-c", "5", "-i", "0.5", "-W", "2"], "10.42.0.2");
+    let received = ping_received(&output);
+    let alice_nodes = s.alice_view();
+    run_ip(&["rule", "del", "pref", "10"]);
+
+    let recovered = try_poll(Duration::from_secs(20), || {
+        ping_once("10.42.0.2");
+        let nodes = s.alice_view();
+        (node_status(&nodes, "bob")? & UDP_CONFIRMED != 0 && node_pmtu(&nodes, "bob")?.1 != 0)
+            .then_some(())
+    });
+    let logs = s.finish();
+    assert!(fixed.is_some(), "PMTU never fixed\n{logs}");
+    assert!(logs.alice.contains("Network is unreachable"), "{logs}");
+    let status = node_status(&alice_nodes, "bob").unwrap_or(0);
+    let pmtu = node_pmtu(&alice_nodes, "bob");
+    assert!(
+        received >= 3,
+        "{received}/5 over TCP fallback; status {status:#x} pmtu {pmtu:?}\n{logs}"
+    );
+    assert!(
+        status & UDP_CONFIRMED == 0 && pmtu.is_some_and(|p| p.1 == 0),
+        "unconfirmed UDP must imply minmtu 0: status {status:#x} pmtu {pmtu:?}"
+    );
+    assert!(recovered.is_some(), "UDP never re-confirmed\n{logs}");
 }
 
 #[test]
