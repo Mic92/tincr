@@ -99,7 +99,7 @@ lz4_flex = "0.14"
 # default-gateway lookup (v4 *and* v6 — 0.42 fixed the Linux v6
 # parser); PCP needs the gateway addr to send to. Always built: the
 # runtime `UPnP` setting is what turns it on.
-netdev = "0.46"
+netdev = "0.47"
 shake = { version = "0.1", default-features = false }
 
 # LZO levels 10–11: vendored minilzo.c (GPL-2.0+, same as tinc) via
