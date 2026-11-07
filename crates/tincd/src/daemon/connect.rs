@@ -11,7 +11,7 @@ use crate::outgoing::{
     ConnectAttempt, OutOrigin, OutState, Outgoing, OutgoingId, ProxyConfig, probe_connecting,
     try_connect, try_connect_via_proxy,
 };
-use crate::{local_addr, socks};
+use crate::socks;
 use tinc_sptps::Role;
 
 use crate::event::Io;
@@ -170,11 +170,18 @@ impl Daemon {
             .add_edge(self.myself, peer_id, edge_weight, edge_options.bits());
 
         // getsockname → local_address, port rewritten to myport.udp.
-        // SockRef is the non-owning wrapper.
-        let local_addr = self.conns.get(id).and_then(|c| {
-            let sockref = socket2::SockRef::from(c.owned_fd());
-            sockref.local_addr().ok().and_then(|sa| sa.as_socket())
-        });
+        // SockRef is the non-owning wrapper. A tunnel-side local
+        // address (the conn came through the VPN; accept/dial gates
+        // should have stopped it) is published as `unspec` so no
+        // peer's LocalDiscovery probes our tun.
+        let local_addr = self
+            .conns
+            .get(id)
+            .and_then(|c| {
+                let sockref = socket2::SockRef::from(c.owned_fd());
+                sockref.local_addr().ok().and_then(|sa| sa.as_socket())
+            })
+            .filter(|sa| !self.is_tunnel_addr(sa.ip()));
         if let Some(ea) = edge_addr {
             // Ipv6Addr::Display doesn't bracket (matches NI_NUMERICHOST).
             let (addr, port) = AddrStr::from_socket_addr(ea);
@@ -511,15 +518,13 @@ impl Daemon {
         // reported seeing bob at. Reverseless edges (half-arrived gossip) are skipped;
         // an ungossiped bob leaves tier 2 empty.
         // Behind NAT that can be another node's listener (#100), so candidates
-        // `addr_owners` attributes to someone else are dropped.
+        // `addr_owners` attributes to someone else are dropped. Tunnel addresses
+        // are gated in `edge_wire_addr` (and at dial time for other tiers).
         let known: Vec<SocketAddr> = nid
             .into_iter()
             .flat_map(|n| self.graph.node_edges(n).iter().copied())
             .filter_map(|eid| self.graph.edge(eid)?.reverse)
-            .filter_map(|rev| {
-                let (addr, port, _, _) = self.edge_addrs.get(&rev)?;
-                local_addr::parse_addr_port(addr.as_str(), port.as_str())
-            })
+            .filter_map(|rev| self.edge_wire_addr(rev))
             // ADD_EDGE addrs are peer-authored gossip; don't let them
             // steer us at loopback/link-local.
             .filter(|sa| !addr::is_unwanted_dial_addr(sa))
@@ -587,16 +592,28 @@ impl Daemon {
             };
             let name = outgoing.node_name.clone();
 
+            // One address per iteration, from whichever tier the
+            // cache is on. A tunnel address (inside a mesh Subnet)
+            // is skipped whatever its tier — a persisted "recent"
+            // entry or an `Address =` line can carry one — because a
+            // meta connection through the VPN it bootstraps cannot
+            // survive on its own (see `daemon::endpoint`).
+            let Some(addr) = outgoing.addr_cache.next_addr() else {
+                log::error!(target: "tincd::conn",
+                            "Could not set up a meta connection to {name}");
+                self.retry_outgoing(oid);
+                return;
+            };
+            if self.is_tunnel_addr(addr.ip()) {
+                log::info!(target: "tincd::conn",
+                           "Not connecting to {name} at {addr}: address is inside the VPN");
+                continue;
+            }
+
             // PROXY_EXEC.
             // Walk addr cache for env vars; fd is socketpair half
             // (no probe).
             if let Some(ProxyConfig::Exec { cmd }) = &proxy {
-                let Some(addr) = outgoing.addr_cache.next_addr() else {
-                    log::error!(target: "tincd::conn",
-                                "Could not set up a meta connection to {name}");
-                    self.retry_outgoing(oid);
-                    return;
-                };
                 log::info!(target: "tincd::conn",
                             "Trying to connect to {name} ({addr}) via proxy exec");
                 let fd = match outgoing::do_outgoing_pipe(
@@ -650,17 +667,10 @@ impl Daemon {
                 return;
             }
 
-            // SOCKS/HTTP: connect to PROXY addr.
-            // Addr cache still walks PEER addrs (CONNECT target
-            // varies).
+            // SOCKS/HTTP: connect to PROXY addr; `addr` is the
+            // CONNECT target.
             let proxy_hp = proxy.as_ref().and_then(ProxyConfig::proxy_addr);
             let attempt = if proxy_hp.is_some() {
-                let Some(peer_addr) = outgoing.addr_cache.next_addr() else {
-                    log::error!(target: "tincd::conn",
-                                "Could not set up a meta connection to {name}");
-                    self.retry_outgoing(oid);
-                    return;
-                };
                 // Pre-resolved off-thread (setup) and refreshed in
                 // `retry_outgoing`. Empty ⇒ worker hasn't answered
                 // yet, or NXDOMAIN — either way back off; the retry
@@ -671,10 +681,10 @@ impl Daemon {
                     self.retry_outgoing(oid);
                     return;
                 };
-                try_connect_via_proxy(proxy_addr, peer_addr, &name, &self.settings.sockopts)
+                try_connect_via_proxy(proxy_addr, addr, &name, &self.settings.sockopts)
             } else {
                 try_connect(
-                    &mut outgoing.addr_cache,
+                    addr,
                     &name,
                     self.settings.addressfamily,
                     &self.settings.bind_to_address,

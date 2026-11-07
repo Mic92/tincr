@@ -4,7 +4,6 @@
 use crate::daemon::Daemon;
 
 use crate::graph::{NodeId, Transition, run_graph};
-use crate::local_addr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -76,19 +75,10 @@ impl Daemon {
                         .and_then(|ns| ns.edge_addr)
                         .or_else(|| {
                             let prev = self.route_of(node)?.prevedge?;
-                            let (a, p, _, _) = self.edge_addrs.get(&prev)?;
-                            local_addr::parse_addr_port(a.as_str(), p.as_str())
+                            self.edge_wire_addr(prev)
                         });
-                    if let Some(addr) = addr
-                        && self
-                            .dp
-                            .tunnels
-                            .entry(node)
-                            .or_default()
-                            .path
-                            .on_addr_hint(addr)
-                    {
-                        self.publish_path(node);
+                    if let Some(addr) = addr {
+                        self.learn_udp_addr(node, addr, "reachable via edge");
                     }
 
                     // host-up after addr known.

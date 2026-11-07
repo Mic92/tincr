@@ -428,16 +428,7 @@ impl Daemon {
             log::debug!(target: "tincd::proto",
                         "Relay-observed UDP address for {} (REQ_KEY): {addr}",
                         msg.from);
-            if self
-                .dp
-                .tunnels
-                .entry(from_nid)
-                .or_default()
-                .path
-                .on_addr_hint(addr)
-            {
-                self.publish_path(from_nid);
-            }
+            self.learn_udp_addr(from_nid, addr, "REQ_KEY");
         }
 
         // Responder start() always emits KEX (→ ANS_KEY via
@@ -616,16 +607,7 @@ impl Daemon {
                 log::debug!(target: "tincd::proto",
                                 "Using reflexive UDP address from {}: {addr}",
                                 msg.from);
-                if self
-                    .dp
-                    .tunnels
-                    .entry(from_nid)
-                    .or_default()
-                    .path
-                    .on_addr_hint(addr)
-                {
-                    self.publish_path(from_nid);
-                }
+                self.learn_udp_addr(from_nid, addr, "ANS_KEY");
 
                 // Punch coordination, initiator side: validkey just went true and we hold a
                 // fresh relay-observed address, so probe now rather than on the next `try_tx`
