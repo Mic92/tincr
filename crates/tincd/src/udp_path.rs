@@ -118,13 +118,22 @@ impl UdpPath {
             .map_or_else(Vec::new, |p| p.on_emsgsize(len))
     }
 
+    /// The kernel refused `dst`. Forgets the path only if `dst` is its
+    /// address: a failed probe to an edge candidate keeps a hinted one.
     /// Whether to warn: at most once per `interval` while sends keep failing.
-    pub(crate) fn on_unreachable(&mut self, now: Instant, interval: Duration) -> bool {
-        self.addr = None;
-        self.target = None;
-        self.addr_seen = false;
-        if let Some(p) = self.pmtu.as_mut() {
-            p.reset_path();
+    pub(crate) fn on_unreachable(
+        &mut self,
+        dst: Option<SocketAddr>,
+        now: Instant,
+        interval: Duration,
+    ) -> bool {
+        if dst.is_some() && self.addr == dst {
+            self.addr = None;
+            self.target = None;
+            self.addr_seen = false;
+            if let Some(p) = self.pmtu.as_mut() {
+                p.reset_path();
+            }
         }
         let warn = self
             .warned_at
@@ -215,7 +224,7 @@ mod tests {
         };
         let cases: [(&str, Kill); 3] = [
             ("unreachable", |p, now| {
-                p.on_unreachable(now, Duration::ZERO);
+                p.on_unreachable(Some(addr("192.0.2.1:655")), now, Duration::ZERO);
             }),
             ("timeout", |p, _| p.on_timeout()),
             ("reset", |p, _| p.reset()),
@@ -241,9 +250,23 @@ mod tests {
         assert!(!p.on_addr_hint(addr("198.51.100.7:655")));
         assert_eq!(p.addr(), Some(addr("192.0.2.1:655")));
 
-        p.on_unreachable(now, Duration::ZERO);
+        p.on_unreachable(Some(addr("192.0.2.1:655")), now, Duration::ZERO);
         assert!(p.on_addr_hint(addr("198.51.100.7:655")));
         assert_eq!(p.minmtu(), 0);
+    }
+
+    /// A v4-only host explores a v6 edge address next to the peer's v4
+    /// reflexive hint; ENETUNREACH on the v6 one must not drop the hint,
+    /// the only address that carries the peer's NAT mapping.
+    #[test]
+    fn unreachable_candidate_keeps_hinted_addr() {
+        let now = Instant::now();
+        let mut p = UdpPath::default();
+        assert!(p.on_addr_hint(addr("198.51.100.7:40000")));
+        p.on_unreachable(Some(addr("[2001:db8::1]:655")), now, Duration::ZERO);
+        assert_eq!(p.addr(), Some(addr("198.51.100.7:40000")));
+        p.on_unreachable(Some(addr("198.51.100.7:40000")), now, Duration::ZERO);
+        assert_eq!(p.addr(), None);
     }
 
     #[test]

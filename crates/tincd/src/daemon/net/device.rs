@@ -299,6 +299,7 @@ impl Daemon {
         let result = listeners
             .get_mut(usize::from(run.sock))
             .map(|slot| slot.egress.send_batch(&run.batch));
+        let dst = run.batch.dst.as_socket();
         batch.reset();
 
         let Some(result) = result else {
@@ -336,6 +337,7 @@ impl Daemon {
                     tunnel_handles,
                     relay_nid,
                     &relay_name,
+                    dst,
                     &e,
                     now,
                 );
@@ -463,7 +465,7 @@ impl Daemon {
                     origlen,
                 );
             }
-            Err(SealErr::Unreachable(relay, e)) => {
+            Err(SealErr::Unreachable(relay, dst, e)) => {
                 let name = self.node_log_name(relay).to_owned();
                 helpers::handle_udp_unreachable(
                     &mut self.dp.tunnels,
@@ -471,6 +473,7 @@ impl Daemon {
                     &self.tunnel_handles,
                     relay,
                     &name,
+                    dst,
                     &e,
                     Instant::now(),
                 );
