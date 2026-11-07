@@ -204,7 +204,11 @@ impl Daemon {
                             replay: sptps.replay_handle(),
                             outcipher: tinc_crypto::aead::SptpsCipher::new(sptps.aead(), &outkey),
                             incipher: tinc_crypto::aead::SptpsCipher::new(sptps.aead(), &inkey),
-                            udp_addr: Mutex::new(tunnel.path.target().cloned()),
+                            udp_addr: Mutex::new(
+                                tunnel
+                                    .path
+                                    .target(|a, h| helpers::listener_for(&self.listeners, a, h)),
+                            ),
                             minmtu: AtomicU16::new(tunnel.minmtu()),
                             outcompression: tunnel.outcompression,
                             stats: Arc::clone(&tunnel.stats),
@@ -621,15 +625,13 @@ impl Daemon {
             *src = *src_id.as_bytes();
         }
 
-        // Send to RELAY, not `to`. Fast path: `path.target()` set
-        // when udp_confirmed flips; once confirmed the answer is
-        // deterministic. Full choose_udp_address was 2.18% self-time
-        // (Vec alloc + scan per packet).
-        let cached = self
-            .dp
-            .tunnels
-            .get(&relay_nid)
-            .and_then(|t| t.path.target().cloned());
+        // Send to RELAY, not `to`. A confirmed path has one target; full
+        // choose_udp_address was 2.18% self-time (Vec alloc + scan per
+        // packet), so only unconfirmed paths take it.
+        let cached = self.dp.tunnels.get(&relay_nid).and_then(|t| {
+            t.path
+                .target(|a, h| helpers::listener_for(&self.listeners, a, h))
+        });
         let cold_sockaddr;
         let (sockaddr, sock) = if let Some((sa, sock)) = &cached {
             (sa, *sock)
@@ -751,6 +753,7 @@ impl Daemon {
                 &self.tunnel_handles,
                 relay_nid,
                 &relay_name,
+                sockaddr.as_socket(),
                 &e,
                 self.timers.now(),
             );

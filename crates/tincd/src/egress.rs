@@ -49,9 +49,7 @@ const TX_BATCH_CAP: usize = BATCH_MAX_BYTES;
 /// UDP datagrams either way.
 pub(crate) struct EgressBatch<'a> {
     /// Destination. `SockAddr` not `SocketAddr` — `socket2::send_to`
-    /// takes `&SockAddr` and the daemon already has one cached
-    /// (`path.target()`, the hot path; cold path builds with
-    /// `SockAddr::from(SocketAddr)` once per send anyway).
+    /// takes `&SockAddr`, which `path.target()` already returns.
     pub dst: &'a SockAddr,
     /// Contiguous: `count` chunks at `stride` each, last possibly
     /// shorter. For `UDP_SEGMENT` this is exactly the buffer the
@@ -129,9 +127,8 @@ pub(crate) struct TxBatch {
     count: u16,
     /// Destination of this run. `None` when empty. `SockAddr` is
     /// `Clone` (`derive`, socket2 `sockaddr.rs:20`); cloning the
-    /// tunnel's `path.target()` once per RUN (not per frame) is
-    /// fine. We can't borrow it: the daemon mutates `tunnels`
-    /// between stage calls.
+    /// tunnel's target once per RUN (not per frame) is fine. We can't
+    /// borrow it: the daemon mutates `tunnels` between stage calls.
     dst: Option<SockAddr>,
     /// Listener index (`ListenerSlot`). Paired with `dst`: same
     /// destination on a different listener (different bound addr)

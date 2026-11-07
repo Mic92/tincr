@@ -305,7 +305,7 @@ mod tests {
         };
         t.stats.add_in(100, 50000);
         t.path
-            .on_authenticated_rx("10.0.0.1:655".parse().unwrap(), 0);
+            .on_authenticated_rx("10.0.0.1:655".parse().unwrap(), 0, now);
         let _ = t.path.on_probe_reply(1400, now);
         t.path.pmtu_mut(now).mtu = 1400;
 

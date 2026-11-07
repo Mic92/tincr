@@ -44,11 +44,9 @@ pub(super) fn publish_path(
     let Some(t) = tunnels.get_mut(&nid) else {
         return;
     };
-    let moved = t.path.refresh_target(|a, h| listener_for(listeners, a, h));
     if let Some(h) = tunnel_handles.get(&nid) {
-        if moved {
-            *h.udp_addr.lock().unwrap_or_else(PoisonError::into_inner) = t.path.target().cloned();
-        }
+        *h.udp_addr.lock().unwrap_or_else(PoisonError::into_inner) =
+            t.path.target(|a, hint| listener_for(listeners, a, hint));
         h.minmtu.store(t.path.minmtu(), atomic::Ordering::Relaxed);
     }
 }
@@ -59,10 +57,7 @@ impl Daemon {
             return;
         }
         for (nid, t) in &self.dp.tunnels {
-            let derived = t
-                .path
-                .derive_target(|a, h| listener_for(&self.listeners, a, h));
-            debug_assert!(t.path.target() == derived.as_ref(), "{nid:?}: stale target");
+            let derived = t.path.target(|a, h| listener_for(&self.listeners, a, h));
             if let Some(h) = self.tunnel_handles.get(nid) {
                 debug_assert!(t.status.validkey, "{nid:?}: fast path outlived its session");
                 let published = h.udp_addr.lock().unwrap_or_else(PoisonError::into_inner);
@@ -86,25 +81,27 @@ impl Daemon {
     }
 }
 
-/// "Destination unreachable" on UDP send. A routing event: SPTPS stays.
+/// "Destination unreachable" on UDP send to `dst`. A routing event: SPTPS stays.
+#[expect(clippy::too_many_arguments)] // split borrows of `Daemon`, called where `self` is borrowed
 pub(super) fn handle_udp_unreachable(
     tunnels: &mut IntHashMap<NodeId, TunnelState>,
     listeners: &[ListenerSlot],
     tunnel_handles: &IntHashMap<NodeId, Arc<TunnelHandles>>,
     relay_nid: NodeId,
     relay_name: &str,
+    dst: Option<SocketAddr>,
     err: &io::Error,
     now: Instant,
 ) -> bool {
-    let warn = tunnels
-        .get_mut(&relay_nid)
-        .is_none_or(|t| t.path.on_unreachable(now, UDP_UNREACHABLE_WARN_INTERVAL));
+    let warn = tunnels.get_mut(&relay_nid).is_none_or(|t| {
+        t.path
+            .on_unreachable(dst, now, UDP_UNREACHABLE_WARN_INTERVAL)
+    });
     publish_path(tunnels, listeners, tunnel_handles, relay_nid);
 
     if warn {
         log::warn!(target: "tincd::net",
-                   "UDP send to {relay_name} failed: {err}; \
-                    clearing cached address, will retry via cold path");
+                   "UDP send to {relay_name} failed: {err}");
     }
     warn
 }
@@ -183,15 +180,24 @@ mod tests {
         let now = Instant::now();
         let mut t = TunnelState::default();
         t.path
-            .on_authenticated_rx("10.0.0.1:655".parse().unwrap(), 0);
+            .on_authenticated_rx("10.0.0.1:655".parse().unwrap(), 0, now);
         let _ = t.path.on_probe_reply(1400, now);
-        assert!(t.path.refresh_target(|_, _| 0));
         tunnels.insert(nid, t);
 
         let err = io::Error::from_raw_os_error(101);
         let mut fail = |nid, secs| {
             let at = now + Duration::from_secs(secs);
-            handle_udp_unreachable(&mut tunnels, &[], &tunnel_handles, nid, "peer", &err, at)
+            let dst = Some("10.0.0.1:655".parse().unwrap());
+            handle_udp_unreachable(
+                &mut tunnels,
+                &[],
+                &tunnel_handles,
+                nid,
+                "peer",
+                dst,
+                &err,
+                at,
+            )
         };
         let warned: Vec<bool> = [0, 30, 61, 90].map(|s| fail(nid, s)).into();
         assert_eq!(warned, [true, false, true, false]);
@@ -199,7 +205,7 @@ mod tests {
 
         let t = tunnels.get(&nid).expect("tunnel still present");
         assert!(t.path.addr().is_none());
-        assert!(t.path.target().is_none());
+        assert!(t.path.target(|_, _| 0).is_none());
         assert!(!t.path.confirmed());
         assert_eq!(t.path.minmtu(), 0);
     }
