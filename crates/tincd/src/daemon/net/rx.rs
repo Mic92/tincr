@@ -453,7 +453,7 @@ impl Daemon {
                 .entry(from_nid)
                 .or_default()
                 .path
-                .on_authenticated_rx(src, sock)
+                .on_authenticated_rx(src, sock, self.timers.now())
         {
             log::debug!(target: "tincd::net", "UDP address of {from_name} is {src}");
             self.publish_path(from_nid);
@@ -498,19 +498,18 @@ impl Daemon {
         // Hot relay path. `from_nid` so the wire prefix carries
         // the ORIGINAL source ID.
         if to_nid != self.myself {
-            // Unauthenticated sender cannot relay. Without this
-            // gate anyone who knows two node names can use us as
-            // a 1:1 UDP reflector (security audit `2f72c2ba`).
-            // O(nodes) scan is fine (relay is the rare branch):
-            // "does this UDP src addr belong to a node that has
-            // confirmed UDP with us?"
-            let n_confirmed = peer.is_some_and(|peer_addr| {
+            // Anyone who knows two node names could otherwise use us
+            // as a UDP reflector (audit `2f72c2ba`). Not `confirmed()`:
+            // a sender behind a one-way filter never gets our replies.
+            let now = self.timers.now();
+            let window = Duration::from_secs(u64::from(self.settings.udp_discovery_timeout));
+            let authenticated = peer.is_some_and(|peer_addr| {
                 self.dp
                     .tunnels
                     .values()
-                    .any(|t| t.path.confirmed() && t.path.addr() == Some(peer_addr))
+                    .any(|t| t.path.authenticated_source(now, window) == Some(peer_addr))
             });
-            if !n_confirmed {
+            if !authenticated {
                 log::debug!(target: "tincd::net",
                             "Dropping relay request from unauthenticated UDP \
                              sender ({peer:?}): dst={dst_id} src={src_id}");

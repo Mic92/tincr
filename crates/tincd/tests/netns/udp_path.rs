@@ -10,8 +10,9 @@
 use std::fmt;
 use std::time::Duration;
 
+use super::common::linux::run_ip;
 use super::common::{TmpGuard, node_status, try_poll};
-use super::rig::{Node, TunPair, enter_netns, iptables, node_pmtu, ping, ping_once};
+use super::rig::{Node, TunPair, enter_netns, iptables, node_pmtu, ping, ping_once, ping_received};
 
 /// `node_status` bit: UDP to this node is confirmed.
 const UDP_CONFIRMED: u32 = 0x80;
@@ -35,6 +36,10 @@ enum Drop {
     UdpToAlice,
     /// alice↔bob UDP of at least this many bytes, both directions.
     BigUdpBetweenPeers(u16),
+    /// All alice↔bob UDP, both directions.
+    UdpBetweenPeers,
+    /// UDP from relay to alice.
+    UdpRelayToAlice,
 }
 
 struct Scenario {
@@ -68,7 +73,9 @@ impl Scenario {
                 None
             }
             Topology::ViaRelay => {
-                let mut relay = Node::new(tmp.path(), "relay", 0xCC).with_conf(&conf);
+                let mut relay = Node::new(tmp.path(), "relay", 0xCC)
+                    .with_conf(&conf)
+                    .log_level("tincd=info,tincd::net=debug");
                 relay.write_config_multi(&[&alice, &bob], &[]);
                 relay.start();
                 alice.write_config_multi(&[&relay, &bob], &[&relay]);
@@ -82,7 +89,11 @@ impl Scenario {
             alice.write_config(&bob, true);
         }
 
-        if !rules.iter().all(|&rule| apply(rule, alice_port, bob.port)) {
+        let relay_port = relay.as_ref().map_or(0, |r| r.port);
+        if !rules
+            .iter()
+            .all(|&rule| apply(rule, alice_port, bob.port, relay_port))
+        {
             bob.stop();
             if let Some(relay) = relay.as_mut() {
                 relay.stop();
@@ -133,8 +144,8 @@ impl fmt::Display for Logs {
     }
 }
 
-fn apply(rule: Drop, alice: u16, bob: u16) -> bool {
-    let (alice, bob) = (alice.to_string(), bob.to_string());
+fn apply(rule: Drop, alice: u16, bob: u16, relay: u16) -> bool {
+    let (alice, bob, relay) = (alice.to_string(), bob.to_string(), relay.to_string());
     match rule {
         Drop::AllUdp => drop_input(&["-p", "udp"]),
         Drop::UdpToAlice => drop_input(&["-p", "udp", "--dport", &alice]),
@@ -149,6 +160,10 @@ fn apply(rule: Drop, alice: u16, bob: u16) -> bool {
                     ])
                 })
         }
+        Drop::UdpBetweenPeers => [(&bob, &alice), (&alice, &bob)]
+            .iter()
+            .all(|(sport, dport)| drop_input(&["-p", "udp", "--sport", sport, "--dport", dport])),
+        Drop::UdpRelayToAlice => drop_input(&["-p", "udp", "--sport", &relay, "--dport", &alice]),
     }
 }
 
@@ -264,6 +279,102 @@ fn relayed_frames_do_not_confirm_direct_pmtu() {
     let logs = s.finish();
     assert_eq!(bogus, None, "bob learned a minmtu to alice\n{logs}");
     assert!(confirmed, "bob lost the small-packet UDP path\n{logs}");
+}
+
+/// relay's UDP to alice is dropped: alice confirms relay through meta
+/// acks, relay never confirms alice, yet must relay her UDP to bob.
+#[test]
+fn relay_forwards_for_one_way_sender() {
+    let Some(s) = Scenario::start(
+        "relay_forwards_for_one_way_sender",
+        Topology::ViaRelay,
+        "MTUInfoInterval = 1\nPingInterval = 1",
+        &[Drop::UdpBetweenPeers, Drop::UdpRelayToAlice],
+    ) else {
+        return;
+    };
+    s.pair.wait_validkey();
+    // Data only takes UDP to relay once a meta ack raised minmtu.
+    let relay_confirmed = try_poll(Duration::from_secs(20), || {
+        ping_once("10.42.0.2");
+        let nodes = s.alice_view();
+        let (_, minmtu, _) = node_pmtu(&nodes, "relay")?;
+        (node_status(&nodes, "relay")? & UDP_CONFIRMED != 0 && minmtu > 0).then_some(())
+    });
+
+    let output = ping(&["-c", "5", "-i", "0.2", "-W", "2"], "10.42.0.2");
+    let logs = s.finish();
+    assert!(
+        relay_confirmed.is_some(),
+        "alice never confirmed relay\n{logs}"
+    );
+    assert_eq!(ping_received(&output), 5, "{logs}");
+}
+
+/// UDP turns `ENETUNREACH` under a converged tunnel. Unconfirmed UDP
+/// must mean `minmtu` 0, so data falls back to TCP at once instead of
+/// failing locally, and UDP re-confirms once the address works again.
+#[test]
+fn unreachable_falls_back_to_tcp() {
+    // `Shards = 1`: the unreachable errno is handled on the control path.
+    let Some(s) = Scenario::start(
+        "unreachable_falls_back_to_tcp",
+        Topology::Direct,
+        "PingInterval = 1\nShards = 1",
+        &[],
+    ) else {
+        return;
+    };
+    s.pair.wait_udp_confirmed();
+
+    let fixed = try_poll(Duration::from_secs(20), || {
+        ping_once("10.42.0.2");
+        let alice = node_pmtu(&s.alice_view(), "bob")?;
+        let bob = node_pmtu(&s.bob_view(), "alice")?;
+        (alice.0 != 0 && bob.0 != 0).then_some(())
+    });
+
+    // Daemon UDP now fails with ENETUNREACH; TCP is untouched. The
+    // local rule moves behind ours so loopback is affected too, and
+    // 10.42/16 stays routable (ping `connect()`s a UDP socket).
+    run_ip(&["rule", "add", "pref", "100", "lookup", "local"]);
+    run_ip(&["rule", "del", "pref", "0", "lookup", "local"]);
+    run_ip(&[
+        "rule",
+        "add",
+        "pref",
+        "10",
+        "to",
+        "127.0.0.0/8",
+        "ipproto",
+        "udp",
+        "unreachable",
+    ]);
+    let output = ping(&["-c", "5", "-i", "0.5", "-W", "2"], "10.42.0.2");
+    let received = ping_received(&output);
+    let alice_nodes = s.alice_view();
+    run_ip(&["rule", "del", "pref", "10"]);
+
+    let recovered = try_poll(Duration::from_secs(20), || {
+        ping_once("10.42.0.2");
+        let nodes = s.alice_view();
+        (node_status(&nodes, "bob")? & UDP_CONFIRMED != 0 && node_pmtu(&nodes, "bob")?.1 != 0)
+            .then_some(())
+    });
+    let logs = s.finish();
+    assert!(fixed.is_some(), "PMTU never fixed\n{logs}");
+    assert!(logs.alice.contains("Network is unreachable"), "{logs}");
+    let status = node_status(&alice_nodes, "bob").unwrap_or(0);
+    let pmtu = node_pmtu(&alice_nodes, "bob");
+    assert!(
+        received >= 3,
+        "{received}/5 over TCP fallback; status {status:#x} pmtu {pmtu:?}\n{logs}"
+    );
+    assert!(
+        status & UDP_CONFIRMED == 0 && pmtu.is_some_and(|p| p.1 == 0),
+        "unconfirmed UDP must imply minmtu 0: status {status:#x} pmtu {pmtu:?}"
+    );
+    assert!(recovered.is_some(), "UDP never re-confirmed\n{logs}");
 }
 
 #[test]

@@ -21,6 +21,7 @@ use crate::egress::{TxBatch, UdpEgress, is_udp_unreachable_errno};
 use crate::graph::NodeId;
 use std::io;
 use std::io::ErrorKind;
+use std::net::SocketAddr;
 
 /// Stats for the daemon's `myself_tunnel.out_{packets,bytes}` and the
 /// per-dst tunnel counters. `bytes` is sum of BODY lengths (the inner
@@ -36,8 +37,8 @@ pub(crate) struct SealOk {
 pub(crate) enum SealErr {
     /// `on_emsgsize(origlen)` for `relay`.
     Emsgsize(NodeId, u16),
-    /// `relay`'s address is unusable from here.
-    Unreachable(NodeId, io::Error),
+    /// The kernel refused `relay` at this address.
+    Unreachable(NodeId, Option<SocketAddr>, io::Error),
 }
 
 /// Seal each chunk at `scratch_in[i*stride..][..lens[i]]` (eth header
@@ -112,17 +113,19 @@ fn ship(batch: &mut TxBatch, egress: &mut dyn UdpEgress) -> Result<(), SealErr> 
         return Ok(());
     };
     let (relay, origlen) = (run.relay, run.origlen);
-    let r = egress.send_batch(&run.batch);
+    let r = egress
+        .send_batch(&run.batch)
+        .map_err(|e| (e, run.batch.dst.as_socket()));
     batch.reset();
     match r {
-        Err(e) if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) => {
+        Err((e, _)) if e.raw_os_error() == Some(nix::Error::EMSGSIZE as i32) => {
             Err(SealErr::Emsgsize(relay, origlen))
         }
-        Err(e) if is_udp_unreachable_errno(&e) => Err(SealErr::Unreachable(relay, e)),
+        Err((e, dst)) if is_udp_unreachable_errno(&e) => Err(SealErr::Unreachable(relay, dst, e)),
         // sndbuf full. GSO send is all-or-nothing (`udp_send_skb`);
         // no partial-accept to recover. Same as `ship_tx_batch`.
-        Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(()),
-        Err(e) => {
+        Err((e, _)) if e.kind() == ErrorKind::WouldBlock => Ok(()),
+        Err((e, _)) => {
             log::warn!(target: "tincd::net", "fast-path sendmsg: {e}");
             Ok(())
         }
@@ -135,7 +138,6 @@ mod tests {
     use super::*;
     use crate::egress::EgressBatch;
     use socket2::SockAddr;
-    use std::net::SocketAddr;
 
     struct Failing(i32);
     impl UdpEgress for Failing {
@@ -158,7 +160,7 @@ mod tests {
         ));
         assert!(matches!(
             ship_with(libc::ENETUNREACH),
-            Err(SealErr::Unreachable(NodeId(7), _))
+            Err(SealErr::Unreachable(NodeId(7), Some(a), _)) if a == "192.0.2.1:655".parse().unwrap()
         ));
         assert!(matches!(ship_with(libc::EAGAIN), Ok(())));
         assert!(matches!(ship_with(libc::ENOBUFS), Ok(())));
