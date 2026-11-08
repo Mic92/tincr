@@ -99,13 +99,10 @@ fn second_tick_rate_is_delta_over_dt() {
     let alice = &s.nodes["alice"];
     // `(1100 - 1000) / 1.0 = 100.0`. f32 is exact for small
     // integers.
-    #[expect(clippy::float_cmp)] // small int / 1.0 = exact f32; no epsilon needed
-    {
-        assert_eq!(alice.in_packets_rate, 100.0);
-        assert_eq!(alice.in_bytes_rate, 50000.0);
-        assert_eq!(alice.out_packets_rate, 200.0);
-        assert_eq!(alice.out_bytes_rate, 100_000.0);
-    }
+    assert_eq!(alice.in_packets_rate, 100.0);
+    assert_eq!(alice.in_bytes_rate, 50000.0);
+    assert_eq!(alice.out_packets_rate, 200.0);
+    assert_eq!(alice.out_bytes_rate, 100_000.0);
 }
 
 /// Half-second tick. Rate = delta / 0.5 = 2 × delta.
@@ -120,10 +117,7 @@ fn fractional_dt() {
     );
     let alice = &s.nodes["alice"];
     // `(1050 - 1000) / 0.5 = 100.0`.
-    #[expect(clippy::float_cmp)] // 50 / 0.5 = exact f32 (both representable)
-    {
-        assert_eq!(alice.in_packets_rate, 100.0);
-    }
+    assert_eq!(alice.in_packets_rate, 100.0);
 }
 
 /// `known` cleared on every entry, set true on rows present. A

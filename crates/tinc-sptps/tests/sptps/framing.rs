@@ -62,7 +62,7 @@ fn stream_preauth_reclen_clamp() {
         .receive(&at.to_be_bytes(), &mut SeedRng(0))
         .unwrap();
     assert_eq!(taken, 2);
-    assert!(outs.is_empty());
+    assert_eq!(outs, []);
 }
 
 /// Hybrid KEX is the largest legitimate pre-auth record; the clamp
@@ -79,7 +79,7 @@ fn stream_hybrid_kex_passes_clamp() {
 fn stream_empty_input_is_noop() {
     let (taken, outs) = stream_responder().receive(&[], &mut SeedRng(0)).unwrap();
     assert_eq!(taken, 0);
-    assert!(outs.is_empty());
+    assert_eq!(outs, []);
 }
 
 /// After a valid KEX the responder expects a SIG; a second KEX has the

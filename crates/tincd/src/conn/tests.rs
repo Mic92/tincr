@@ -197,7 +197,7 @@ fn take_rest_empty_after_full_line() {
     let r = b.read_line().unwrap();
     assert_eq!(&b.bytes_raw()[r], b"0 alice 17.7");
     assert!(b.is_empty());
-    assert!(b.take_rest().is_empty());
+    assert_eq!(b.take_rest(), []);
 }
 
 // feed_bytes in SPTPS mode.
@@ -293,7 +293,7 @@ fn feed_sptps_two_records_one_chunk() {
 
     let (n, outs) = bob.receive(&a_kex, &mut NoRng).unwrap();
     assert_eq!(n, a_kex.len());
-    assert!(outs.is_empty());
+    assert_eq!(outs, []);
 
     let (n, outs) = bob.receive(&a_sig, &mut NoRng).unwrap();
     assert_eq!(n, a_sig.len());
@@ -419,7 +419,7 @@ fn sptps_conn_pair() -> (Connection, tinc_sptps::Sptps, OwnedFd) {
     let (_, outs) = alice.receive(&b_kex, &mut NoRng).unwrap();
     let a_sig = wire(outs);
     let (_, outs) = bob.receive(&a_kex, &mut NoRng).unwrap();
-    assert!(outs.is_empty());
+    assert_eq!(outs, []);
     let (_, outs) = bob.receive(&a_sig, &mut NoRng).unwrap();
     let b_sig = match &outs[0] {
         Output::Wire { bytes, .. } => bytes.clone(),

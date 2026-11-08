@@ -50,7 +50,7 @@ fn reference(aseed: u64, bseed: u64) -> (Vec<u8>, Vec<u8>, Vec<Output>, Vec<Outp
 
     // bob ← KEX_a (no output)
     let w = step(&mut bob, &a2b, &mut bob_obs);
-    debug_assert!(w.is_empty());
+    debug_assert_eq!(w, []);
     let a2b_mark = a2b.len();
 
     // alice ← KEX_b → SIG_a
@@ -62,7 +62,7 @@ fn reference(aseed: u64, bseed: u64) -> (Vec<u8>, Vec<u8>, Vec<Output>, Vec<Outp
 
     // alice ← SIG_b → HandshakeDone
     let w = step(&mut alice, &b2a[b2a_mark..], &mut alice_obs);
-    debug_assert!(w.is_empty());
+    debug_assert_eq!(w, []);
 
     (a2b, b2a, alice_obs, bob_obs)
 }

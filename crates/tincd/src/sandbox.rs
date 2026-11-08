@@ -514,7 +514,7 @@ mod tests {
             hosts_overlay: None,
         };
         let p = discover_paths(Level::High, &paths);
-        assert!(p.scripts.is_empty());
+        assert!(p.scripts.is_empty(), "{:?}", p.scripts);
         assert!(!p.has_logfile);
         assert_eq!(p.runtime_files.len(), 2);
     }

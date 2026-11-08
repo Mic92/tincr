@@ -1311,7 +1311,7 @@ mod tests {
         // first `.` then sanitised). A set `$HOST` exercises the env path with the
         // same postconditions.
         let n = expand_name("$HOST").unwrap();
-        assert!(!n.is_empty());
+        assert_ne!(n, "");
         assert!(n.chars().all(|c| c.is_alphanumeric() || c == '_'));
     }
 }

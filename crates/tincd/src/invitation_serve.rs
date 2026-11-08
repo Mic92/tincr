@@ -649,7 +649,7 @@ mod tests {
     fn chunk_file_empty() {
         let data: &[u8] = &[];
         let chunks = chunk_file(data, 1024);
-        assert!(chunks.is_empty());
+        assert!(chunks.is_empty(), "{chunks:?}");
     }
 
     // read_invitation_key.

@@ -596,7 +596,7 @@ mod tests {
         let mut s = PmtuState::new(now, MTU);
         s.tick(now, Duration::from_mins(1));
         let out = s.tick(now + Duration::from_millis(100), Duration::from_mins(1));
-        assert!(out.is_empty());
+        assert_eq!(out, []);
         assert_eq!(s.phase, PmtuPhase::Discovery { sent: 1 });
         let out = s.tick(now + Duration::from_millis(400), Duration::from_mins(1));
         assert_eq!(out.len(), 1);
@@ -637,7 +637,7 @@ mod tests {
         let mut s = PmtuState::new(now, MTU);
         s.minmtu = 1000;
         let out = s.on_probe_reply(1200, now);
-        assert!(out.is_empty());
+        assert_eq!(out, []);
         assert_eq!(s.minmtu, 1200);
         assert!(s.udp_confirmed);
     }
@@ -683,7 +683,7 @@ mod tests {
         s.minmtu = 1400;
         s.phase = PmtuPhase::Revalidate { misses: 2 };
         let out = s.on_probe_reply(1400, now + Duration::from_secs(5));
-        assert!(out.is_empty());
+        assert_eq!(out, []);
         assert_eq!(s.phase, PmtuPhase::Steady);
         assert_eq!(s.mtu_ping_sent, now + Duration::from_secs(5));
     }
@@ -715,7 +715,7 @@ mod tests {
         let mut s = PmtuState::new(now, MTU);
         s.mtu = 1500;
         let out = s.on_emsgsize(1450);
-        assert!(out.is_empty());
+        assert_eq!(out, []);
         assert_eq!(s.maxmtu, 1449);
         assert_eq!(s.mtu, 1449);
     }
@@ -754,7 +754,7 @@ mod tests {
         s.phase = PmtuPhase::Steady;
         s.mtu_ping_sent = now;
         let out = s.tick(now + Duration::from_secs(30), Duration::from_mins(1));
-        assert!(out.is_empty());
+        assert_eq!(out, []);
         let out = s.tick(now + Duration::from_secs(61), Duration::from_mins(1));
         assert_eq!(
             out,
@@ -868,13 +868,13 @@ mod tests {
         s.phase = PmtuPhase::Steady;
         let out = s.on_emsgsize(1294);
         // Already fixed: no LogFixed, phase untouched.
-        assert!(out.is_empty());
+        assert_eq!(out, []);
         assert_eq!(s.phase, PmtuPhase::Steady);
         assert_eq!((s.mtu, s.minmtu, s.maxmtu), (1293, 1293, 1293));
 
         // Larger EMSGSIZE than the current bound is a no-op.
         let out = s.on_emsgsize(1500);
-        assert!(out.is_empty());
+        assert_eq!(out, []);
         assert_eq!((s.mtu, s.minmtu, s.maxmtu), (1293, 1293, 1293));
 
         let _ = s.on_emsgsize(100);

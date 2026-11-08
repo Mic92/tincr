@@ -194,7 +194,7 @@ mod tests {
         let mut out = Vec::new();
         let n = list(d.path(), &mut out).unwrap();
         assert_eq!(n, 0);
-        assert!(out.is_empty());
+        assert_eq!(out, b"");
     }
 
     /// Three networks → three lines, sorted. `.` not present (no

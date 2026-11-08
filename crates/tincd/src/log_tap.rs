@@ -192,7 +192,7 @@ mod tests {
         assert_eq!(d[0], (log::Level::Info, "hello".to_string()));
         assert_eq!(d[1], (log::Level::Debug, "world".to_string()));
         assert_eq!(d[2].1.len(), MAX_RECORD);
-        assert!(drain().is_empty());
+        assert_eq!(drain(), []);
 
         for _ in 0..TAP_CAP + 3 {
             push(log::Level::Info, String::new());

@@ -118,8 +118,8 @@ mod tests {
     fn subnets_no_change() {
         let s = set([v4(10, 0, 0, 0, 24, 10), v4(192, 168, 1, 0, 24, 10)]);
         let diff = diff_subnets(&s, &s);
-        assert!(diff.added.is_empty());
-        assert!(diff.removed.is_empty());
+        assert_eq!(diff.added, []);
+        assert_eq!(diff.removed, []);
     }
 
     #[test]
@@ -128,7 +128,7 @@ mod tests {
         let new = set([v4(10, 0, 0, 0, 24, 10), v4(10, 0, 1, 0, 24, 10)]);
         let diff = diff_subnets(&current, &new);
         assert_eq!(diff.added, vec![v4(10, 0, 1, 0, 24, 10)]);
-        assert!(diff.removed.is_empty());
+        assert_eq!(diff.removed, []);
     }
 
     #[test]
@@ -136,7 +136,7 @@ mod tests {
         let current = set([v4(10, 0, 0, 0, 24, 10), v4(10, 0, 1, 0, 24, 10)]);
         let new = set([v4(10, 0, 0, 0, 24, 10)]);
         let diff = diff_subnets(&current, &new);
-        assert!(diff.added.is_empty());
+        assert_eq!(diff.added, []);
         assert_eq!(diff.removed, vec![v4(10, 0, 1, 0, 24, 10)]);
     }
 
@@ -180,8 +180,8 @@ mod tests {
     fn connect_to_no_change() {
         let s: BTreeSet<String> = ["bob".to_string(), "carol".to_string()].into();
         let (add, remove) = diff_connect_to(&s, &s);
-        assert!(add.is_empty());
-        assert!(remove.is_empty());
+        assert!(add.is_empty(), "{add:?}");
+        assert!(remove.is_empty(), "{remove:?}");
     }
 
     // conns_to_terminate.
@@ -199,7 +199,7 @@ mod tests {
         let last = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
         let mtime = last - Duration::from_secs(1);
         let out = conns_to_terminate(&["bob".to_string()], &[("bob".to_string(), mtime)], last);
-        assert!(out.is_empty());
+        assert!(out.is_empty(), "{out:?}");
     }
 
     /// `stat()` fails → terminate. Operator deleted `hosts/bob` →
@@ -221,7 +221,7 @@ mod tests {
     fn conns_to_terminate_mtime_exactly_equal() {
         let last = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
         let out = conns_to_terminate(&["bob".to_string()], &[("bob".to_string(), last)], last);
-        assert!(out.is_empty());
+        assert!(out.is_empty(), "{out:?}");
     }
 
     #[test]

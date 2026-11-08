@@ -215,7 +215,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join("hosts")).unwrap();
         let d = HostDirs::new(tmp.path(), Some(tmp.path().join("nope")));
-        assert!(d.names().unwrap().is_empty());
+        assert_eq!(d.names().unwrap(), Vec::<String>::new());
         let file = tmp.path().join("file");
         fs::write(&file, "").unwrap();
         let d = HostDirs::new(tmp.path(), Some(file));
@@ -244,7 +244,7 @@ mod tests {
 
         fs::write(tmp.path().join("hosts/bob"), "").unwrap();
         assert_eq!(d.file("bob"), tmp.path().join("hosts/bob"));
-        assert!(d.overridden().is_empty());
+        assert_eq!(d.overridden(), Vec::<String>::new());
         fs::write(ov.join("bob"), "").unwrap();
         assert_eq!(d.file("bob"), ov.join("bob"));
         assert_eq!(d.overridden(), ["bob"]);

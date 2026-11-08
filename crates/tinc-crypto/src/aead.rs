@@ -436,7 +436,7 @@ mod tests {
     #[test]
     fn default_label_suffix_empty() {
         assert_eq!(SptpsAead::default(), SptpsAead::ChaCha20Poly1305);
-        assert!(SptpsAead::default().label_suffix().is_empty());
+        assert_eq!(SptpsAead::default().label_suffix(), []);
         assert_eq!(SptpsAead::Aes256Gcm.label_suffix(), b"\x00\x01");
     }
 

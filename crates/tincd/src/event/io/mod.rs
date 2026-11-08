@@ -343,7 +343,7 @@ mod tests {
         // Nothing ready yet — short timeout, expect empty.
         let mut out = Vec::new();
         ev.turn(Some(Duration::from_millis(1)), &mut out).unwrap();
-        assert!(out.is_empty());
+        assert_eq!(out, []);
 
         // Write a byte. Now the read end is readable.
         wr.write_all(b"x").unwrap();
@@ -524,6 +524,6 @@ mod tests {
         let mut ev: EventLoop<What> = EventLoop::new().unwrap();
         let mut out = vec![(What::Device, Ready::Read)]; // stale
         ev.turn(Some(Duration::from_millis(1)), &mut out).unwrap();
-        assert!(out.is_empty());
+        assert_eq!(out, []);
     }
 }
