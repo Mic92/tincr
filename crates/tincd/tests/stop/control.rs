@@ -146,7 +146,7 @@ fn control_abuse_keeps_serving() {
             .write_all(b"18 3\n18 4\n18 5\n18 6\n18 13\n")
             .unwrap();
     }
-    assert!(!node.ctl().dump(3).is_empty());
+    assert_ne!(node.ctl().dump(3), Vec::<String>::new());
 }
 
 /// `REQ_LOG` turns a control connection into a log sink that receives

@@ -785,7 +785,7 @@ mod tests {
         let d = g.add_node("d");
         assert_eq!(d, b, "freed node slot recycled");
         assert_eq!(g.node(d).unwrap().name, "d");
-        assert!(g.node(d).unwrap().edges.is_empty()); // fresh, not stale
+        assert_eq!(g.node(d).unwrap().edges, []); // fresh, not stale
     }
 
     #[test]
@@ -1125,7 +1125,7 @@ mod glue_tests {
         let (mut g, [a, ..]) = chain();
         let routes = g.sssp(a);
         let t = diff_reachability(&mut g, a, &routes);
-        assert!(t.is_empty());
+        assert_eq!(t, []);
     }
 
     #[test]
@@ -1168,7 +1168,7 @@ mod glue_tests {
         g.set_reachable(a, false);
         let routes = g.sssp(a);
         let t = diff_reachability(&mut g, a, &routes);
-        assert!(t.is_empty());
+        assert_eq!(t, []);
         // Untouched — the `continue` skips the update.
         assert!(!g.node(a).unwrap().reachable);
     }

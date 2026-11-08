@@ -95,7 +95,7 @@ fn help_commands_aligned() {
             gap + body[gap..].len() - body[gap..].trim_start().len()
         })
         .collect();
-    assert!(!columns.is_empty());
+    assert_ne!(columns, Vec::<usize>::new());
     assert!(columns.iter().all(|&c| c == columns[0]), "{columns:?}");
 }
 

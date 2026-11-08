@@ -870,7 +870,7 @@ mod tests {
         // No hosts/ dir at all.
 
         let addrs = resolve_config_addrs(&HostDirs::new(&tmp, None), "bob");
-        assert!(addrs.is_empty());
+        assert_eq!(addrs, []);
 
         let _ = fs::remove_dir_all(&tmp);
     }

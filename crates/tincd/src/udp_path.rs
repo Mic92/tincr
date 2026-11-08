@@ -332,7 +332,7 @@ mod tests {
         p.pmtu_mut(now).ping_sent = true;
         let _ = p.on_probe_reply(18, now);
         assert_eq!((p.minmtu(), p.maxmtu(), p.mtu()), (1400, 1400, 1400));
-        assert!(p.pmtu_mut(now).tick(now, Duration::ZERO).is_empty());
+        assert_eq!(p.pmtu_mut(now).tick(now, Duration::ZERO), []);
     }
 
     #[test]

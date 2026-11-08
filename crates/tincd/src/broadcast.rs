@@ -134,7 +134,7 @@ mod tests {
         let conns = [(1u32, 10u32), (2, 20)];
         let mst: [u32; 0] = [];
         let got = mst_targets(conns.into_iter(), &mst, None);
-        assert!(got.is_empty());
+        assert_eq!(got, []);
     }
 
     #[test]
@@ -158,7 +158,7 @@ mod tests {
         // via=Z(2) (relay) → not in targets
         let nodes = [(1u32, Some(2u32), Some(2u32))];
         let got = direct_targets(nodes.into_iter(), 0, true);
-        assert!(got.is_empty());
+        assert_eq!(got, []);
     }
 
     #[test]
@@ -166,7 +166,7 @@ mod tests {
         // Node would otherwise qualify (via=self, nexthop=self).
         let nodes = [(1u32, Some(0u32), Some(1u32))];
         let got = direct_targets(nodes.into_iter(), 0, false);
-        assert!(got.is_empty());
+        assert_eq!(got, []);
     }
 
     #[test]

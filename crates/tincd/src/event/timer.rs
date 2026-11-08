@@ -247,7 +247,7 @@ mod tests {
         let mut t: Timers<What> = Timers::new();
         let mut out = Vec::new();
         assert_eq!(t.tick(&mut out), None);
-        assert!(out.is_empty());
+        assert_eq!(out, []);
         assert!(t.is_idle());
     }
 
@@ -354,7 +354,7 @@ mod tests {
 
         let mut out = Vec::new();
         let next = t.tick(&mut out);
-        assert!(out.is_empty());
+        assert_eq!(out, []);
         let next = next.expect("timer is armed");
         // tick() refreshed `now`; some time passed since `set`.
         // The diff is < 10s but >> 0. Don't pin exact — CI jitter.
@@ -418,7 +418,7 @@ mod tests {
         let mut t: Timers<What> = Timers::new();
         let mut out = vec![What::Ping, What::Periodic]; // stale junk
         t.tick(&mut out);
-        assert!(out.is_empty());
+        assert_eq!(out, []);
     }
 
     /// `now()` accessor returns the cached value. Doesn't tick.

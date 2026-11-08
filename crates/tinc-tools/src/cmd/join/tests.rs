@@ -131,7 +131,7 @@ fn finalize_minimal_blob() {
 
     assert_eq!(r.name, "bob");
     assert_eq!(r.pubkey_b64.len(), 43); // 32 bytes → 43 b64
-    assert!(r.hosts_written.is_empty());
+    assert_eq!(r.hosts_written, Vec::<String>::new());
 
     // tinc.conf has just Name.
     assert_eq!(fs::read_to_string(p.tinc_conf()).unwrap(), "Name = bob\n");

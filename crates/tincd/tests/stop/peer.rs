@@ -109,7 +109,7 @@ fn ack_activates_connection_and_subnet_gossip_applies() {
 
     peer.send_record(b"11 cafef00d testpeer 192.168.99.0/24#10\n");
     assert_no_reply(&mut peer, "DEL_SUBNET");
-    assert!(ctl.dump(5).is_empty());
+    assert_eq!(ctl.dump(5), Vec::<String>::new());
 
     let log = peer.kill_and_stderr();
     for expected in [

@@ -171,7 +171,7 @@ mod tests {
         let t = t0();
         m.learn(A, t, 600);
         let (exp, left) = m.age(t + secs(100));
-        assert!(exp.is_empty());
+        assert!(exp.is_empty(), "{exp:?}");
         assert!(left);
     }
 
@@ -224,7 +224,7 @@ mod tests {
         let (exp1, _) = m.age(now);
         assert_eq!(exp1.len(), 2);
         let (exp2, left) = m.age(now);
-        assert!(exp2.is_empty());
+        assert!(exp2.is_empty(), "{exp2:?}");
         assert!(!left);
     }
 }

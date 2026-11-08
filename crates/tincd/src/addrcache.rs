@@ -448,7 +448,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("a"), "10.0.0.9:655\n").unwrap();
         fs::write(dir.join("b"), "tinc-addrcache 2\n10.0.0.9:655\n").unwrap();
-        assert!(load(&dir.join("a")).is_empty());
-        assert!(load(&dir.join("b")).is_empty());
+        assert_eq!(load(&dir.join("a")), []);
+        assert_eq!(load(&dir.join("b")), []);
     }
 }
