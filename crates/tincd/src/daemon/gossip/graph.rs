@@ -2,9 +2,9 @@
 //! transition handling driven by gossip-mutated topology.
 
 use crate::daemon::Daemon;
+use crate::underlay::UnderlayAddr;
 
 use crate::graph::{NodeId, Transition, run_graph};
-use crate::local_addr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -74,11 +74,7 @@ impl Daemon {
                         .nodes
                         .get(&node)
                         .and_then(|ns| ns.edge_addr)
-                        .or_else(|| {
-                            let prev = self.route_of(node)?.prevedge?;
-                            let (a, p, _, _) = self.edge_addrs.get(&prev)?;
-                            local_addr::parse_addr_port(a.as_str(), p.as_str())
-                        });
+                        .or_else(|| self.edge_addr(self.route_of(node)?.prevedge?));
                     if let Some(addr) = addr
                         && self
                             .dp
@@ -92,7 +88,7 @@ impl Daemon {
                     }
 
                     // host-up after addr known.
-                    self.run_host_script(true, &name_owned, addr);
+                    self.run_host_script(true, &name_owned, addr.map(UnderlayAddr::get));
 
                     // subnet-up for every owned subnet.
                     for s in &self.subnets.owned_by(&name_owned) {
@@ -149,7 +145,12 @@ impl Daemon {
             .tunnels
             .get(&node)
             .and_then(|t| t.path.addr())
-            .or_else(|| self.nodes.get(&node).and_then(|ns| ns.edge_addr));
+            .or_else(|| {
+                self.nodes
+                    .get(&node)
+                    .and_then(|ns| ns.edge_addr)
+                    .map(UnderlayAddr::get)
+            });
         self.run_host_script(false, &name, addr);
         for s in &self.subnets.owned_by(&name) {
             self.run_subnet_script(false, &name, s);

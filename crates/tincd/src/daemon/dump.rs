@@ -24,8 +24,8 @@ impl Daemon {
             // rewritten to UDP in on_ack. Transitives: literal.
             let hostname = if nid == self.myself {
                 format!("MYSELF port {}", self.my_udp_port)
-            } else if let Some(ea) = self.nodes.get(&nid).and_then(|ns| ns.edge_addr.as_ref()) {
-                fmt_addr(ea) // "%s port %s", no v6 brackets
+            } else if let Some(ea) = self.nodes.get(&nid).and_then(|ns| ns.edge_addr) {
+                fmt_addr(&ea.get()) // "%s port %s", no v6 brackets
             } else if let Some(addr) = self.dp.tunnels.get(&nid).and_then(|t| t.path.addr()) {
                 // Indirect node: address learned via UDP (hole-punch /
                 // UDP_INFO), not meta-conn ACK. C: update_node_udp().

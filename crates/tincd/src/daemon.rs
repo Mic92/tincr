@@ -3,6 +3,7 @@
 //! Loop shape: tick → turn → match. `IoWhat` is the `W` in
 //! `EventLoop<W>`. `run()` consumes `self`; teardown is `Drop`.
 
+use crate::underlay::UnderlayAddr;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tinc_proto::Subnet;
@@ -47,6 +48,7 @@ mod settings;
 mod setup;
 mod tx_control;
 mod udp_info;
+mod underlay;
 
 pub(crate) use dp::DataPlane;
 pub use settings::{DaemonSettings, ForwardingMode, RoutingMode};
@@ -91,7 +93,7 @@ pub struct NodeState {
     /// Direct connection. None = known but not directly connected.
     pub conn: Option<ConnId>,
     /// TCP addr, port rewritten to UDP.
-    pub edge_addr: Option<SocketAddr>,
+    pub(crate) edge_addr: Option<UnderlayAddr>,
     /// Avg of RTTs, ms.
     pub edge_weight: i32,
     /// Top byte = peer's `PROT_MINOR`.

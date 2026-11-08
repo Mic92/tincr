@@ -6,6 +6,7 @@
 
 use super::net::TunnelSendOutcome;
 use super::{ConnId, Daemon, PKT_PROBE};
+use crate::underlay::UnderlayAddr;
 
 use std::net::SocketAddr;
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -570,10 +571,8 @@ impl Daemon {
                 .graph
                 .node_edges(to_nid)
                 .iter()
-                .filter_map(|eid| {
-                    let (_, _, la, lp) = self.edge_addrs.get(eid)?;
-                    local_addr::parse_addr_port(la.as_str(), lp.as_str())
-                })
+                .filter_map(|&eid| self.edge_local_addr(eid))
+                .map(UnderlayAddr::get)
                 .collect();
             if let Some((addr, sock)) =
                 local_addr::choose_local(&candidates, &mut os_rng(), &listener_addrs)
@@ -611,15 +610,12 @@ impl Daemon {
             .get(&to_nid)
             .and_then(|ns| ns.edge_addr)
             .or_else(|| {
-                let mut cands: Vec<SocketAddr> = self
+                let mut cands: Vec<UnderlayAddr> = self
                     .graph
                     .node_edges(to_nid)
                     .iter()
                     .filter_map(|&eid| self.graph.edge(eid)?.reverse)
-                    .filter_map(|rev| {
-                        let (a, p, _, _) = self.edge_addrs.get(&rev)?;
-                        local_addr::parse_addr_port(a.as_str(), p.as_str())
-                    })
+                    .filter_map(|rev| self.edge_addr(rev))
                     .collect();
                 if cands.is_empty() {
                     return None;
@@ -628,7 +624,8 @@ impl Daemon {
                 // different addrs (NAT).
                 let i = (os_rng().next_u32() as usize) % cands.len();
                 Some(cands.swap_remove(i))
-            })?;
+            })?
+            .get();
         // Exploring: any listener may be the one the peer can reach.
         #[expect(clippy::cast_possible_truncation)] // ≤ MAXSOCKETS
         let any = (os_rng().next_u32() as usize % listener_addrs.len().max(1)) as u8;

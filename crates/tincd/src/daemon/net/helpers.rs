@@ -170,6 +170,7 @@ pub(crate) fn gro_offer_or_write(
 mod tests {
     use super::*;
     use crate::tunnel::TunnelState;
+    use crate::underlay::UnderlayAddr;
     use std::io;
 
     #[test]
@@ -179,8 +180,11 @@ mod tests {
         let nid = NodeId(42);
         let now = Instant::now();
         let mut t = TunnelState::default();
-        t.path
-            .on_authenticated_rx("10.0.0.1:655".parse().unwrap(), 0, now);
+        t.path.on_authenticated_rx(
+            UnderlayAddr::unchecked("10.0.0.1:655".parse().unwrap()),
+            0,
+            now,
+        );
         let _ = t.path.on_probe_reply(1400, now);
         tunnels.insert(nid, t);
 

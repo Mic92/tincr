@@ -30,6 +30,7 @@
 //! which fires on edge events — seconds to minutes apart in steady state,
 //! per-second during a reconnect storm. Either way, off the hot path.
 
+use crate::underlay::UnderlayAddr;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -190,7 +191,7 @@ impl NodeView {
                 *slot = Some(NodeViewEntry {
                     has_direct_conn: ns.is_some_and(|s| s.conn.is_some()),
                     reachable,
-                    edge_addr: ns.and_then(|s| s.edge_addr),
+                    edge_addr: ns.and_then(|s| s.edge_addr).map(UnderlayAddr::get),
                     name: Arc::clone(&name),
                 });
             }
@@ -262,7 +263,7 @@ mod tests {
             NodeState {
                 edge: None,
                 conn: None,
-                edge_addr: Some("10.0.0.2:655".parse().unwrap()),
+                edge_addr: Some(UnderlayAddr::unchecked("10.0.0.2:655".parse().unwrap())),
                 edge_weight: 0,
                 edge_options: ConnOptions::empty(),
             },

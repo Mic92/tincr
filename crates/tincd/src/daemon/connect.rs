@@ -1,4 +1,5 @@
 use super::{ConnId, Daemon, IoWhat, NodeState, TimerWhat};
+use crate::underlay::UnderlayAddr;
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, OwnedFd};
 use std::time::Duration;
@@ -6,12 +7,12 @@ use std::time::Duration;
 use crate::addrcache::AddressCache;
 use crate::conn::Connection;
 use crate::dispatch::parse_ack;
-use crate::listen::fmt_addr;
+use crate::listen::{AddrFamily, fmt_addr};
 use crate::outgoing::{
-    ConnectAttempt, OutOrigin, OutState, Outgoing, OutgoingId, ProxyConfig, probe_connecting,
-    try_connect, try_connect_via_proxy,
+    ConnectAttempt, OutOrigin, OutState, Outgoing, OutgoingId, ProxyConfig, next_dial_addr,
+    probe_connecting, try_connect, try_connect_via_proxy,
 };
-use crate::{local_addr, socks};
+use crate::socks;
 use tinc_sptps::Role;
 
 use crate::event::Io;
@@ -77,6 +78,9 @@ impl Daemon {
         let edge_weight = i32::midpoint(parsed.his_weight, conn.estimated_weight);
         let edge_options = conn.options;
 
+        let edge_addr = edge_addr.and_then(|a| self.underlay(a));
+        let conn_addr = conn_addr.and_then(|a| self.underlay(a));
+
         // ACK reached — address worked. Pinned by tests/addrcache.rs.
         if let Some(oid) = conn_outgoing {
             if let Some(o) = self.outgoings.get_mut(oid)
@@ -86,7 +90,7 @@ impl Daemon {
             }
             self.confirm_outgoing_address(oid, conn_addr);
             if let Some(a) = conn_addr {
-                self.addr_owners.insert(a, name.clone());
+                self.addr_owners.insert(a.get(), name.clone());
             }
         }
 
@@ -171,16 +175,21 @@ impl Daemon {
 
         // getsockname → local_address, port rewritten to myport.udp.
         // SockRef is the non-owning wrapper.
-        let local_addr = self.conns.get(id).and_then(|c| {
-            let sockref = socket2::SockRef::from(c.owned_fd());
-            sockref.local_addr().ok().and_then(|sa| sa.as_socket())
-        });
+        let local_addr = self
+            .conns
+            .get(id)
+            .and_then(|c| {
+                let sockref = socket2::SockRef::from(c.owned_fd());
+                sockref.local_addr().ok().and_then(|sa| sa.as_socket())
+            })
+            .and_then(|a| self.underlay(a));
         if let Some(ea) = edge_addr {
             // Ipv6Addr::Display doesn't bracket (matches NI_NUMERICHOST).
-            let (addr, port) = AddrStr::from_socket_addr(ea);
+            let (addr, port) = AddrStr::from_socket_addr(ea.get());
             // Rewrite local port to our udp port (peer sends UDP
             // there, not the ephemeral TCP port).
-            let (la, lp) = if let Some(mut local) = local_addr {
+            let (la, lp) = if let Some(local) = local_addr {
+                let mut local = local.get();
                 local.set_port(self.my_udp_port);
                 AddrStr::from_socket_addr(local)
             } else {
@@ -245,7 +254,7 @@ impl Daemon {
     /// cache. Called from `on_ack` (handshake completed) and the
     /// `Pong` arm (first-liveness-after-backoff). Centralised so the
     /// two sites can't drift; see conn-lifecycle P4.
-    pub(super) fn confirm_outgoing_address(&mut self, oid: OutgoingId, addr: Option<SocketAddr>) {
+    pub(super) fn confirm_outgoing_address(&mut self, oid: OutgoingId, addr: Option<UnderlayAddr>) {
         let Some(o) = self.outgoings.get_mut(oid) else {
             return;
         };
@@ -516,10 +525,8 @@ impl Daemon {
             .into_iter()
             .flat_map(|n| self.graph.node_edges(n).iter().copied())
             .filter_map(|eid| self.graph.edge(eid)?.reverse)
-            .filter_map(|rev| {
-                let (addr, port, _, _) = self.edge_addrs.get(&rev)?;
-                local_addr::parse_addr_port(addr.as_str(), port.as_str())
-            })
+            .filter_map(|rev| self.edge_addr(rev))
+            .map(UnderlayAddr::get)
             // ADD_EDGE addrs are peer-authored gossip; don't let them
             // steer us at loopback/link-local.
             .filter(|sa| !addr::is_unwanted_dial_addr(sa))
@@ -590,18 +597,26 @@ impl Daemon {
             // PROXY_EXEC.
             // Walk addr cache for env vars; fd is socketpair half
             // (no probe).
+            // A proxy dials the peer, so our address family does not apply.
+            let family = if proxy.is_some() {
+                AddrFamily::Any
+            } else {
+                self.settings.addressfamily
+            };
+            let next = next_dial_addr(&mut outgoing.addr_cache, &self.subnets, family, &name);
+            let Some(addr) = next else {
+                log::error!(target: "tincd::conn",
+                            "Could not set up a meta connection to {name}");
+                self.retry_outgoing(oid);
+                return;
+            };
+
             if let Some(ProxyConfig::Exec { cmd }) = &proxy {
-                let Some(addr) = outgoing.addr_cache.next_addr() else {
-                    log::error!(target: "tincd::conn",
-                                "Could not set up a meta connection to {name}");
-                    self.retry_outgoing(oid);
-                    return;
-                };
                 log::info!(target: "tincd::conn",
                             "Trying to connect to {name} ({addr}) via proxy exec");
                 let fd = match outgoing::do_outgoing_pipe(
                     cmd,
-                    addr,
+                    addr.get(),
                     &name,
                     &self.name,
                     self.netname.as_deref(),
@@ -617,6 +632,7 @@ impl Daemon {
                 let _ = fcntl(&fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK));
                 // No async connect; ready NOW.
                 let now = self.timers.now();
+                let addr = addr.get();
                 let mut conn =
                     Connection::new_outgoing(fd, name.clone(), fmt_addr(&addr), addr, oid, now);
                 conn.connecting = false;
@@ -655,12 +671,6 @@ impl Daemon {
             // varies).
             let proxy_hp = proxy.as_ref().and_then(ProxyConfig::proxy_addr);
             let attempt = if proxy_hp.is_some() {
-                let Some(peer_addr) = outgoing.addr_cache.next_addr() else {
-                    log::error!(target: "tincd::conn",
-                                "Could not set up a meta connection to {name}");
-                    self.retry_outgoing(oid);
-                    return;
-                };
                 // Pre-resolved off-thread (setup) and refreshed in
                 // `retry_outgoing`. Empty ⇒ worker hasn't answered
                 // yet, or NXDOMAIN — either way back off; the retry
@@ -671,12 +681,11 @@ impl Daemon {
                     self.retry_outgoing(oid);
                     return;
                 };
-                try_connect_via_proxy(proxy_addr, peer_addr, &name, &self.settings.sockopts)
+                try_connect_via_proxy(proxy_addr, addr.get(), &name, &self.settings.sockopts)
             } else {
                 try_connect(
-                    &mut outgoing.addr_cache,
+                    addr,
                     &name,
-                    self.settings.addressfamily,
                     &self.settings.bind_to_address,
                     &self.settings.sockopts,
                 )

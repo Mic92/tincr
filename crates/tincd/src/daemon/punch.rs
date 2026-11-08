@@ -15,6 +15,7 @@ use crate::graph::NodeId;
 use crate::listen::fmt_addr;
 use crate::outgoing::{self, PunchSock};
 use crate::punch::{self, AWAIT_CONNECT_TIMEOUT, AWAIT_SYNC_TIMEOUT, PunchAction, PunchState};
+use crate::underlay::UnderlayAddr;
 use rand_core::Rng;
 use socket2::Domain;
 use tinc_crypto::os_rng;
@@ -101,6 +102,11 @@ impl Daemon {
                 else {
                     return false; // unknown version / malformed
                 };
+                let peer_addrs: Vec<SocketAddr> = peer_addrs
+                    .into_iter()
+                    .filter_map(|a| self.underlay(a))
+                    .map(UnderlayAddr::get)
+                    .collect();
                 if peer_addrs.is_empty() {
                     return false;
                 }

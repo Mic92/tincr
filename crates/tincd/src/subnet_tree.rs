@@ -31,7 +31,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use tinc_proto::Subnet;
 
@@ -200,6 +200,27 @@ pub(crate) struct SubnetTree {
     mac: BTreeSet<MacKey>,
 }
 
+/// Is `ip` inside `subnet`? Prefixes shorter than /8 are default-route
+/// style gateway advertisements (`0.0.0.0/0`, the `/1` split) that say
+/// nothing about where an address lives.
+#[must_use]
+pub(crate) fn covers(subnet: &Subnet, ip: IpAddr) -> bool {
+    let host = match (subnet, ip) {
+        (Subnet::V4 { prefix, .. }, IpAddr::V4(addr)) if *prefix >= 8 => Subnet::V4 {
+            addr,
+            prefix: 32,
+            weight: 0,
+        },
+        (Subnet::V6 { prefix, .. }, IpAddr::V6(addr)) if *prefix >= 8 => Subnet::V6 {
+            addr,
+            prefix: 128,
+            weight: 0,
+        },
+        _ => return false,
+    };
+    subnet.matches(&host, true)
+}
+
 impl SubnetTree {
     #[must_use]
     pub(crate) fn new() -> Self {
@@ -356,6 +377,16 @@ impl SubnetTree {
             }
         }
         last_hit
+    }
+
+    /// Is `ip` inside a Subnet somebody advertises?
+    #[must_use]
+    pub(crate) fn covers(&self, ip: IpAddr) -> bool {
+        if ip.is_ipv4() {
+            self.ipv4.iter().any(|k| covers(&k.subnet, ip))
+        } else {
+            self.ipv6.iter().any(|k| covers(&k.subnet, ip))
+        }
     }
 
     /// Iterate all owned subnets in C tinc's dump/gossip order:

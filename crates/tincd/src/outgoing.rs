@@ -32,6 +32,8 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::addrcache::AddressCache;
 use crate::listen::{AddrFamily, SockOpts};
+use crate::subnet_tree::SubnetTree;
+use crate::underlay::UnderlayAddr;
 
 use crate::bind_to_interface;
 use crate::event::TimerHandle;
@@ -286,20 +288,35 @@ pub(crate) fn punch_connect(ps: PunchSock, target: SocketAddr) -> Option<Socket>
     }
 }
 
-/// One direct (no proxy) connect attempt: next cached addr, socket,
-/// nonblocking `connect()`.
-pub(crate) fn try_connect(
+/// The next cached address of `family` outside the VPN. Checked at
+/// dial time: cache entries and `Address =` lines may predate the
+/// Subnet that now covers them.
+pub(crate) fn next_dial_addr(
     addr_cache: &mut AddressCache,
-    node_name: &str,
+    subnets: &SubnetTree,
     family: AddrFamily,
+    node_name: &str,
+) -> Option<UnderlayAddr> {
+    iter::from_fn(|| addr_cache.next_addr())
+        .filter(|a| family.allows(a))
+        .find_map(|a| {
+            let addr = UnderlayAddr::check(subnets, a);
+            if addr.is_none() {
+                log::info!(target: "tincd::conn",
+                           "Not connecting to {node_name} at {a}: address is inside the VPN");
+            }
+            addr
+        })
+}
+
+/// One direct (no proxy) connect attempt: socket, nonblocking `connect()`.
+pub(crate) fn try_connect(
+    addr: UnderlayAddr,
+    node_name: &str,
     bind_to: &[SocketAddr],
     sockopts: &SockOpts,
 ) -> ConnectAttempt {
-    let Some(addr) = iter::from_fn(|| addr_cache.next_addr()).find(|a| family.allows(a)) else {
-        log::error!(target: "tincd::conn",
-                    "Could not set up a meta connection to {node_name}");
-        return ConnectAttempt::Exhausted;
-    };
+    let addr = addr.get();
     let bind_to = dial_bind(bind_to, addr);
     log::info!(target: "tincd::conn",
                "Trying to connect to {node_name} ({addr})");
@@ -771,14 +788,20 @@ mod tests {
         assert_eq!(dial_bind(&[v4], "[::1]:655".parse().unwrap()), None);
 
         let mut cache = AddressCache::new(vec!["[::1]:1".parse().unwrap()]);
-        let r = try_connect(
-            &mut cache,
-            "bob",
-            AddrFamily::Ipv4,
-            &[],
-            &SockOpts::default(),
-        );
-        assert!(matches!(r, ConnectAttempt::Exhausted), "{r:?}");
+        let next = next_dial_addr(&mut cache, &SubnetTree::new(), AddrFamily::Ipv4, "bob");
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn dial_skips_tunnel_addresses() {
+        let mut subnets = SubnetTree::new();
+        subnets.add("10.42.0.0/24".parse().unwrap(), "bob".into());
+        let mut cache = AddressCache::new(vec![
+            "10.42.0.2:655".parse().unwrap(),
+            "192.0.2.1:655".parse().unwrap(),
+        ]);
+        let next = next_dial_addr(&mut cache, &subnets, AddrFamily::Any, "bob");
+        assert_eq!(next.map(UnderlayAddr::get), "192.0.2.1:655".parse().ok());
     }
 
     /// `retry_outgoing` arithmetic: +5 each time, capped at

@@ -284,6 +284,7 @@ pub(crate) fn make_udp_label(initiator: &str, responder: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::underlay::UnderlayAddr;
     use std::time::Duration;
 
     #[test]
@@ -304,8 +305,11 @@ mod tests {
             ..TunnelState::default()
         };
         t.stats.add_in(100, 50000);
-        t.path
-            .on_authenticated_rx("10.0.0.1:655".parse().unwrap(), 0, now);
+        t.path.on_authenticated_rx(
+            UnderlayAddr::unchecked("10.0.0.1:655".parse().unwrap()),
+            0,
+            now,
+        );
         let _ = t.path.on_probe_reply(1400, now);
         t.path.pmtu_mut(now).mtu = 1400;
 

@@ -7,6 +7,7 @@ use super::{
     ConnId, Daemon, SignalWhat, load_settings, parse_connect_to_from_config,
     parse_subnets_from_config,
 };
+use crate::underlay::UnderlayAddr;
 
 use crate::clock;
 use crate::keys;
@@ -396,6 +397,7 @@ impl Daemon {
                 .get(owner)
                 .and_then(|nid| self.nodes.get(nid))
                 .and_then(|ns| ns.edge_addr)
+                .map(UnderlayAddr::get)
         {
             env.add("REMOTEADDRESS", addr.ip().to_string());
             env.add("REMOTEPORT", addr.port().to_string());
@@ -666,7 +668,7 @@ impl Daemon {
         }
         // added → add, send ADD, subnet-up
         for s in diff.added {
-            self.subnets.add(s, myname.clone());
+            self.add_subnet(s, myname.clone());
             let line = SubnetMsg {
                 owner: myname.clone(),
                 subnet: s,

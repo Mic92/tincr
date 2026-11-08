@@ -433,3 +433,16 @@ fn families_isolated() {
     assert!(t.del(&sn("10.0.0.0/24"), "v4"));
     assert_eq!(t.len(), 2);
 }
+
+#[test]
+fn covers_tunnel_addrs_not_default_routes() {
+    let mut t = SubnetTree::new();
+    t.add("10.42.0.0/24".parse().unwrap(), "a".into());
+    t.add("42:0:3c46::/48".parse().unwrap(), "b".into());
+    t.add("0.0.0.0/0".parse().unwrap(), "gw".into());
+    t.add("::/1".parse().unwrap(), "gw".into());
+    assert!(t.covers("10.42.0.7".parse().unwrap()));
+    assert!(t.covers("42:0:3c46::1".parse().unwrap()));
+    assert!(!t.covers("192.0.2.1".parse().unwrap()));
+    assert!(!t.covers("2001:db8::1".parse().unwrap()));
+}
