@@ -78,6 +78,13 @@ impl Daemon {
             (Ipv4Addr::UNSPECIFIED, 0).into()
         };
 
+        // Came through the tunnel; the dialer moves on to its next address.
+        if self.underlay(peer).is_none() {
+            log::info!(target: "tincd::conn",
+                       "Refusing connection from {peer}: address is inside the VPN");
+            return; // `sock` drops → close
+        }
+
         // Checked after accept: refusing to accept would busy-loop
         // LT epoll. accept+close is cheap; the SPTPS state isn't.
         if self.pending_meta >= MAX_PENDING_META {
@@ -446,17 +453,26 @@ impl Daemon {
             }
         };
 
-        if let Via::Udp(src) = via
-            && self
+        if let Via::Udp(src) = via {
+            // The subnet lookup only runs when the address moves.
+            let known = self
                 .dp
                 .tunnels
-                .entry(from_nid)
-                .or_default()
-                .path
-                .on_authenticated_rx(src, sock, self.timers.now())
-        {
-            log::debug!(target: "tincd::net", "UDP address of {from_name} is {src}");
-            self.publish_path(from_nid);
+                .get(&from_nid)
+                .and_then(|t| t.path.underlay())
+                .filter(|a| a.get() == src);
+            match known.or_else(|| self.underlay(src)) {
+                Some(src) => {
+                    let now = self.timers.now();
+                    let path = &mut self.dp.tunnels.entry(from_nid).or_default().path;
+                    if path.on_authenticated_rx(src, sock, now) {
+                        log::debug!(target: "tincd::net", "UDP address of {from_name} is {src}");
+                        self.publish_path(from_nid);
+                    }
+                }
+                None => log::debug!(target: "tincd::net",
+                                    "Ignoring UDP address {src} of {from_name}: inside the VPN"),
+            }
         }
         let mut nw = false;
         if via == Via::UdpRelayed {

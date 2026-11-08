@@ -91,7 +91,7 @@ impl Daemon {
             return Ok(nw);
         }
 
-        self.subnets.add(subnet, owner_name.clone());
+        self.add_subnet(subnet, owner_name.clone());
         self.tx_snap_refresh_subnets();
 
         // mac_table sync for route_mac.rs.

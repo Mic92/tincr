@@ -19,4 +19,5 @@ mod ping;
 mod portmap;
 mod sandbox;
 mod stress;
+mod tunnel_addr;
 mod udp_path;

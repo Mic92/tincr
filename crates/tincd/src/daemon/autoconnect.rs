@@ -46,7 +46,7 @@ impl Daemon {
             // saves a parse).
             if self.settings.strict_subnets() && fname != self.name {
                 for s in parse_subnets_from_config(&cfg, &fname) {
-                    self.subnets.add(s, fname.clone());
+                    self.add_subnet(s, fname.clone());
                 }
             }
         }

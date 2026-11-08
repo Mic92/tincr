@@ -33,6 +33,7 @@
 
 #![forbid(unsafe_code)]
 
+use crate::underlay::UnderlayAddr;
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
@@ -232,7 +233,8 @@ impl AddressCache {
     /// (or prepends if new), so the next round tries it first.
     /// Doesn't touch the cursor — callers reach this from a success
     /// path that will `reset` before dialling again.
-    pub(crate) fn add_recent(&mut self, addr: SocketAddr) {
+    pub(crate) fn add_recent(&mut self, addr: UnderlayAddr) {
+        let addr = addr.get();
         self.recent.retain(|a| *a != addr);
         self.recent.insert(0, addr);
     }
@@ -357,8 +359,8 @@ mod tests {
     #[test]
     fn add_recent_moves_to_front() {
         let mut c = AddressCache::new(vec![sa("10.0.0.1:655"), sa("10.0.0.2:655")]);
-        c.add_recent(sa("10.0.0.9:655"));
-        c.add_recent(sa("10.0.0.2:655")); // existing → rotate, no growth
+        c.add_recent(UnderlayAddr::unchecked(sa("10.0.0.9:655")));
+        c.add_recent(UnderlayAddr::unchecked(sa("10.0.0.2:655"))); // existing → rotate, no growth
         assert_eq!(
             c.recent,
             vec![sa("10.0.0.2:655"), sa("10.0.0.9:655"), sa("10.0.0.1:655")]
@@ -370,8 +372,8 @@ mod tests {
         let tmp = tmpdir("roundtrip");
         {
             let mut c = AddressCache::open(&tmp, "bob");
-            c.add_recent(sa("[::1]:655"));
-            c.add_recent(sa("192.168.1.1:655"));
+            c.add_recent(UnderlayAddr::unchecked(sa("[::1]:655")));
+            c.add_recent(UnderlayAddr::unchecked(sa("192.168.1.1:655")));
         }
         let mut c = AddressCache::open(&tmp, "bob");
         c.set_config(vec![("10.0.0.1".into(), 655)]);
@@ -388,7 +390,7 @@ mod tests {
         {
             let mut c = AddressCache::open(&tmp, "bob");
             for i in 0..10u8 {
-                c.add_recent(sa(&format!("10.0.0.{i}:655")));
+                c.add_recent(UnderlayAddr::unchecked(sa(&format!("10.0.0.{i}:655"))));
             }
             assert_eq!(c.recent.len(), 10);
         }

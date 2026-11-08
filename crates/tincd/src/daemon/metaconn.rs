@@ -622,6 +622,7 @@ impl Daemon {
                             if let Some(oid) = oid
                                 && self.outgoings.get(oid).is_some_and(|o| o.timeout != 0)
                             {
+                                let addr = addr.and_then(|a| self.underlay(a));
                                 self.confirm_outgoing_address(oid, addr);
                             }
                             Ok(self.on_pong_rtt(id, now))
@@ -902,7 +903,7 @@ impl Daemon {
                             // Outgoing not per-Node, but write the
                             // file anyway so a future ConnectTo finds
                             // it.
-                            if let Some(addr) = conn_addr {
+                            if let Some(addr) = conn_addr.and_then(|a| self.underlay(a)) {
                                 let mut cache = AddressCache::open(&self.confbase, &name);
                                 cache.add_recent(addr);
                                 if let Some((path, bytes)) = cache.serialize() {

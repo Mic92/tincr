@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use socket2::SockAddr;
 
 use crate::pmtu::{MTU, PmtuAction, PmtuState};
+use crate::underlay::UnderlayAddr;
 
 /// Where the peer's UDP address came from. Only `Seen` identifies the
 /// peer, so a hint must not displace it.
@@ -15,9 +16,9 @@ use crate::pmtu::{MTU, PmtuAction, PmtuState};
 enum Endpoint {
     #[default]
     Unknown,
-    Hint(SocketAddr),
+    Hint(UnderlayAddr),
     Seen {
-        addr: SocketAddr,
+        addr: UnderlayAddr,
         /// Listener the peer reached us on; replies leave from it.
         sock: u8,
         at: Instant,
@@ -25,7 +26,7 @@ enum Endpoint {
 }
 
 impl Endpoint {
-    const fn addr(self) -> Option<SocketAddr> {
+    const fn addr(self) -> Option<UnderlayAddr> {
         match self {
             Self::Unknown => None,
             Self::Hint(addr) | Self::Seen { addr, .. } => Some(addr),
@@ -42,8 +43,13 @@ pub(crate) struct UdpPath {
 
 impl UdpPath {
     #[must_use]
-    pub(crate) const fn addr(&self) -> Option<SocketAddr> {
+    pub(crate) const fn underlay(&self) -> Option<UnderlayAddr> {
         self.endpoint.addr()
+    }
+
+    #[must_use]
+    pub(crate) fn addr(&self) -> Option<SocketAddr> {
+        self.underlay().map(UnderlayAddr::get)
     }
 
     /// Listener the peer last reached us on, 0 if none.
@@ -65,7 +71,7 @@ impl UdpPath {
     ) -> Option<SocketAddr> {
         match self.endpoint {
             Endpoint::Seen { addr, at, .. } if now.saturating_duration_since(at) < window => {
-                Some(addr)
+                Some(addr.get())
             }
             _ => None,
         }
@@ -116,8 +122,13 @@ impl UdpPath {
 
     /// Proves only the peer→us leg, so it moves the address without
     /// confirming the path.
-    pub(crate) fn on_authenticated_rx(&mut self, src: SocketAddr, sock: u8, now: Instant) -> bool {
-        let moved = self.addr() != Some(src) || self.rx_sock() != sock;
+    pub(crate) fn on_authenticated_rx(
+        &mut self,
+        src: UnderlayAddr,
+        sock: u8,
+        now: Instant,
+    ) -> bool {
+        let moved = self.underlay() != Some(src) || self.rx_sock() != sock;
         self.endpoint = Endpoint::Seen {
             addr: src,
             sock,
@@ -171,8 +182,8 @@ impl UdpPath {
 
     /// Gossip or relay hints can't displace a confirmed or seen address,
     /// which stops forged `REQ_KEY`s redirecting traffic.
-    pub(crate) fn on_addr_hint(&mut self, addr: SocketAddr) -> bool {
-        if self.confirmed() || self.addr_seen() || self.addr() == Some(addr) {
+    pub(crate) fn on_addr_hint(&mut self, addr: UnderlayAddr) -> bool {
+        if self.confirmed() || self.addr_seen() || self.underlay() == Some(addr) {
             return false;
         }
         self.endpoint = Endpoint::Hint(addr);
@@ -187,7 +198,7 @@ impl UdpPath {
         self.warned_at = None;
     }
 
-    fn forget_endpoint(&mut self) {
+    pub(crate) fn forget_endpoint(&mut self) {
         self.endpoint = Endpoint::Unknown;
         if let Some(p) = self.pmtu.as_mut() {
             p.reset_path();
@@ -226,6 +237,10 @@ mod tests {
         s.parse().unwrap()
     }
 
+    fn ua(s: &str) -> UnderlayAddr {
+        UnderlayAddr::unchecked(addr(s))
+    }
+
     #[test]
     fn invalidation_is_atomic() {
         type Kill = fn(&mut UdpPath, Instant);
@@ -233,7 +248,7 @@ mod tests {
         let listeners = |_: &SocketAddr, _| 0;
         let confirmed = || {
             let mut p = UdpPath::default();
-            p.on_authenticated_rx(addr("192.0.2.1:655"), 0, now);
+            p.on_authenticated_rx(ua("192.0.2.1:655"), 0, now);
             let pm = p.pmtu_mut(now);
             pm.ping_sent = true;
             let _ = pm.on_probe_reply(1400, now);
@@ -263,14 +278,14 @@ mod tests {
     fn hint_does_not_displace_confirmed_addr() {
         let now = Instant::now();
         let mut p = UdpPath::default();
-        assert!(p.on_addr_hint(addr("192.0.2.1:655")));
-        assert!(p.on_addr_hint(addr("192.0.2.2:655")));
-        p.on_authenticated_rx(addr("192.0.2.1:655"), 0, now);
-        assert!(!p.on_addr_hint(addr("198.51.100.7:655")));
+        assert!(p.on_addr_hint(ua("192.0.2.1:655")));
+        assert!(p.on_addr_hint(ua("192.0.2.2:655")));
+        p.on_authenticated_rx(ua("192.0.2.1:655"), 0, now);
+        assert!(!p.on_addr_hint(ua("198.51.100.7:655")));
         assert_eq!(p.addr(), Some(addr("192.0.2.1:655")));
 
         p.on_unreachable(Some(addr("192.0.2.1:655")), now, Duration::ZERO);
-        assert!(p.on_addr_hint(addr("198.51.100.7:655")));
+        assert!(p.on_addr_hint(ua("198.51.100.7:655")));
         assert_eq!(p.minmtu(), 0);
     }
 
@@ -279,17 +294,17 @@ mod tests {
         let now = Instant::now();
         let listeners = |_: &SocketAddr, _| 0;
         let mut p = UdpPath::default();
-        assert!(p.on_authenticated_rx(addr("192.0.2.1:655"), 0, now));
-        assert!(!p.on_authenticated_rx(addr("192.0.2.1:655"), 0, now));
+        assert!(p.on_authenticated_rx(ua("192.0.2.1:655"), 0, now));
+        assert!(!p.on_authenticated_rx(ua("192.0.2.1:655"), 0, now));
         let pm = p.pmtu_mut(now);
         pm.ping_sent = true;
         let _ = pm.on_probe_reply(18, now);
-        assert!(p.on_authenticated_rx(addr("192.0.2.1:40000"), 0, now));
+        assert!(p.on_authenticated_rx(ua("192.0.2.1:40000"), 0, now));
         assert_eq!(
             p.target(listeners).and_then(|(sa, _)| sa.as_socket()),
             Some(addr("192.0.2.1:40000"))
         );
-        assert!(p.on_authenticated_rx(addr("192.0.2.1:40000"), 1, now));
+        assert!(p.on_authenticated_rx(ua("192.0.2.1:40000"), 1, now));
         assert_eq!(p.target(|_, hint| hint).map(|(_, s)| s), Some(1));
     }
 
@@ -324,7 +339,7 @@ mod tests {
     fn unreachable_candidate_keeps_endpoint() {
         let now = Instant::now();
         let mut p = UdpPath::default();
-        assert!(p.on_addr_hint(addr("198.51.100.7:40000")));
+        assert!(p.on_addr_hint(ua("198.51.100.7:40000")));
         p.on_unreachable(Some(addr("[2001:db8::1]:655")), now, Duration::ZERO);
         assert_eq!(p.addr(), Some(addr("198.51.100.7:40000")));
         p.on_unreachable(Some(addr("198.51.100.7:40000")), now, Duration::ZERO);
@@ -336,9 +351,9 @@ mod tests {
         let now = Instant::now();
         let window = Duration::from_secs(30);
         let mut p = UdpPath::default();
-        assert!(p.on_addr_hint(addr("192.0.2.1:655")));
+        assert!(p.on_addr_hint(ua("192.0.2.1:655")));
         assert_eq!(p.authenticated_source(now, window), None);
-        p.on_authenticated_rx(addr("192.0.2.1:655"), 0, now);
+        p.on_authenticated_rx(ua("192.0.2.1:655"), 0, now);
         assert!(!p.confirmed());
         assert_eq!(
             p.authenticated_source(now, window),
