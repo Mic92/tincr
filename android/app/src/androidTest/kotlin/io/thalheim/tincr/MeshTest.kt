@@ -142,12 +142,19 @@ class MeshTest {
         poll(10_000, "dump nodes over control socket") { TincCtl(phoneDir).nodes()["gate"] == true }
     }
 
+    // ACTION_STOP is asynchronous; the next test's freshDirs must not
+    // pull the dir out from under a still running phone tincd.
     @After
     fun tearDown() {
+        val phonePid = File(phoneDir, "tincd.pid").takeIf { it.isFile }
+            ?.readText()?.split(Regex("\\s+"))?.firstOrNull()
         ctx.startService(
             Intent(ctx, TincrVpnService::class.java)
                 .setAction(TincrVpnService.ACTION_STOP)
         )
         gate?.stop()
+        if (phonePid != null) {
+            poll(10_000, "phone tincd exit") { !File("/proc/$phonePid").isDirectory }
+        }
     }
 }
