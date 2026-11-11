@@ -180,6 +180,31 @@ impl UdpPath {
         }
     }
 
+    /// A seen address proves only the peer→us leg. Once our probes to it
+    /// went unanswered for `timeout` (a flushed NAT mapping, a rewritten
+    /// source), it is no better than a hint: release it so edge addresses
+    /// are explored and hints may replace it. It stays the address we probe,
+    /// now as a hint. Returns whether it was released.
+    pub(crate) fn release_unanswered_seen(&mut self, now: Instant, timeout: Duration) -> bool {
+        let Endpoint::Seen { addr, .. } = self.endpoint else {
+            return false;
+        };
+        if self.confirmed() {
+            return false;
+        }
+        let Some(p) = self.pmtu.as_mut() else {
+            return false;
+        };
+        if p.unanswered_since
+            .is_none_or(|t| now.saturating_duration_since(t) < timeout)
+        {
+            return false;
+        }
+        p.unanswered_since = None;
+        self.endpoint = Endpoint::Hint(addr);
+        true
+    }
+
     /// Gossip or relay hints can't displace a confirmed or seen address,
     /// which stops forged `REQ_KEY`s redirecting traffic.
     pub(crate) fn on_addr_hint(&mut self, addr: UnderlayAddr) -> bool {
@@ -289,6 +314,23 @@ mod tests {
         assert_eq!(p.minmtu(), 0);
     }
 
+    /// A dead seen address stops pinning once probes to it go unanswered
+    /// for a timeout window, so a hint may replace it.
+    #[test]
+    fn unanswered_seen_addr_is_released() {
+        let now = Instant::now();
+        let timeout = Duration::from_secs(30);
+        let mut p = UdpPath::default();
+        p.on_authenticated_rx(ua("192.0.2.1:655"), 0, now);
+        p.pmtu_mut(now).on_udp_probe_attempt(now, true);
+        assert!(!p.release_unanswered_seen(now + timeout / 2, timeout));
+        assert!(!p.on_addr_hint(ua("198.51.100.7:655")));
+        assert!(p.release_unanswered_seen(now + timeout, timeout));
+        assert!(!p.addr_seen());
+        assert_eq!(p.addr(), Some(addr("192.0.2.1:655")));
+        assert!(p.on_addr_hint(ua("198.51.100.7:655")));
+        assert_eq!(p.addr(), Some(addr("198.51.100.7:655")));
+    }
     #[test]
     fn rebinding_moves_the_target() {
         let now = Instant::now();
