@@ -399,6 +399,11 @@ impl Daemon {
         }
 
         let tunnel = self.dp.tunnels.entry(target).or_default();
+        if tunnel.path.release_unanswered_seen(now, timeout) {
+            log::info!(target: "tincd::net",
+                       "UDP probes to {target_name} at {} went unanswered; trying other addresses",
+                       tunnel.path.addr().map_or_else(|| "?".to_owned(), |a| a.to_string()));
+        }
         let udp_confirmed = tunnel.path.confirmed();
 
         // Gratuitous keepalive: a type-2 reply at the largest
