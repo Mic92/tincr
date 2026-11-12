@@ -68,6 +68,34 @@ let
 
   enabledNets = lib.filterAttrs (_: n: n.enable) cfg.networks;
 
+  # Canonical network address of an IPv4 CIDR, route(8) matches
+  # deletes against the masked key, so the delete below must not
+  # carry host bits.
+  maskV4 =
+    addr: plen:
+    let
+      octets = map lib.toInt (lib.splitString "." addr);
+      maskOctet =
+        i:
+        let
+          bits = lib.toInt plen - 8 * i;
+        in
+        if bits >= 8 then
+          255
+        else if bits <= 0 then
+          0
+        else
+          256 - lib.pow 2 (8 - bits);
+    in
+    lib.concatStringsSep "." (
+      map (i: toString (lib.bitAnd (lib.elemAt octets i) (maskOctet i))) [
+        0
+        1
+        2
+        3
+      ]
+    );
+
   utunUnit =
     name: net:
     if net.utunUnit != null then
@@ -113,8 +141,14 @@ let
           ''
         else
           ''
-            /sbin/ifconfig "$INTERFACE" inet ${addr}/${plen} ${addr}
-            /sbin/route -n add -inet ${addr}/${plen} -interface "$INTERFACE" 2>/dev/null || true
+            # Host address only: a wide on-link prefix gets swept by
+            # route-managing VPN clients (tailscaled's exit-node "Allow
+            # local network access" pass re-routes it via the physical
+            # gateway; the stale route survives even after tailscale quits).
+            # tincr routes by its subnet tree, not the interface mask.
+            /sbin/ifconfig "$INTERFACE" inet ${addr} ${addr} netmask 255.255.255.255
+            /sbin/route -n delete -inet -net ${maskV4 addr plen}/${plen} 2>/dev/null || true
+            /sbin/route -n add -inet -net ${maskV4 addr plen}/${plen} -interface "$INTERFACE" || true
           ''
       ) net.addresses}
     '';
