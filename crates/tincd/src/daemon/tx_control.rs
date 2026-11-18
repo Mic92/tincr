@@ -141,7 +141,7 @@ impl Daemon {
             Self::log_pmtu_action(peer_name, a);
         }
         self.publish_path(peer);
-        false
+        !was_confirmed && self.advertise_udp_edge_addr(peer)
     }
 
     /// Type-2 reply: length in bytes [1..3], wire packet is

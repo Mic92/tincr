@@ -453,6 +453,7 @@ impl Daemon {
             }
         };
 
+        let mut nw = false;
         if let Via::Udp(src) = via {
             // The subnet lookup only runs when the address moves.
             let known = self
@@ -465,16 +466,24 @@ impl Daemon {
                 Some(src) => {
                     let now = self.timers.now();
                     let path = &mut self.dp.tunnels.entry(from_nid).or_default().path;
+                    let old = path.underlay();
                     if path.on_authenticated_rx(src, sock, now) {
-                        log::debug!(target: "tincd::net", "UDP address of {from_name} is {src}");
+                        let confirmed = path.confirmed();
+                        match old.filter(|old| confirmed && *old != src) {
+                            Some(old) => log::info!(target: "tincd::net",
+                                                    "UDP address of {from_name} moved from {old} to {src}"),
+                            None => log::debug!(target: "tincd::net",
+                                                "UDP address of {from_name} is {src}"),
+                        }
                         self.publish_path(from_nid);
+                        // A NAT rebind: third nodes punch the advertised port.
+                        nw |= confirmed && self.advertise_udp_edge_addr(from_nid);
                     }
                 }
                 None => log::debug!(target: "tincd::net",
                                     "Ignoring UDP address {src} of {from_name}: inside the VPN"),
             }
         }
-        let mut nw = false;
         if via == Via::UdpRelayed {
             nw |= self.send_mtu_info(from_nid, &from_name, i32::from(MTU), true);
         }
