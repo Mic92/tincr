@@ -8,6 +8,8 @@
 //! regressions should be a new scenario here, not a new file.
 
 use std::fmt;
+use std::fs;
+use std::process::Command;
 use std::time::Duration;
 
 use super::common::linux::run_ip;
@@ -375,6 +377,135 @@ fn unreachable_falls_back_to_tcp() {
         "unconfirmed UDP must imply minmtu 0: status {status:#x} pmtu {pmtu:?}"
     );
     assert!(recovered.is_some(), "UDP never re-confirmed\n{logs}");
+}
+
+/// `iptables`/`ip6tables` `op` (`-I`/`-D`) of rules dropping UDP between
+/// ports `a` and `b`, both directions.
+fn drop_udp_between(xtables: &str, op: &str, a: u16, b: u16) -> bool {
+    let (a, b) = (a.to_string(), b.to_string());
+    [(&a, &b), (&b, &a)].iter().all(|(sport, dport)| {
+        let args = [
+            op, "INPUT", "-p", "udp", "--sport", sport, "--dport", dport, "-j", "DROP",
+        ];
+        let out = Command::new(xtables)
+            .args(args)
+            .output()
+            .expect("spawn xtables");
+        if !out.status.success() {
+            eprintln!(
+                "SKIP: {xtables} {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        out.status.success()
+    })
+}
+
+/// `write_config_multi` pins IPv4; listen on both families.
+fn dual_stack(node: &Node) {
+    let path = node.confbase.join("tinc.conf");
+    let conf = fs::read_to_string(&path).unwrap();
+    fs::write(
+        path,
+        conf.replace("AddressFamily = ipv4", "AddressFamily = any"),
+    )
+    .unwrap();
+}
+
+/// UDP address `node` has for `peer` (`dump nodes` host field).
+fn udp_host(node: &Node, peer: &str) -> Option<String> {
+    node.ctl().dump(3).iter().find_map(|row| {
+        let mut fields = row.strip_prefix("18 3 ")?.split_whitespace();
+        (fields.next()? == peer).then_some(())?;
+        fields.nth(1).map(str::to_owned)
+    })
+}
+
+/// A confirmed UDP path whose address dies silently (a NAT mapping
+/// flushed, a source the peer can no longer be reached at) must not pin
+/// both ends to it forever while another address works.
+///
+/// alice and bob each dial only relay: alice over IPv4, bob over IPv6,
+/// so the edges advertise alice at `127.0.0.1` and bob at `::1`. IPv4
+/// UDP between them is dropped first, so they confirm each other over
+/// IPv6 and each learns the other's `::1` source. Then IPv6 UDP between
+/// them dies and IPv4 opens: bob must find alice's IPv4 edge address
+/// again instead of probing only the dead `::1` one.
+#[test]
+fn dead_seen_address_is_released() {
+    let Some(netns) = enter_netns("udp_path::dead_seen_address_is_released") else {
+        return;
+    };
+    let tmp = tmp!("deadseen");
+    let conf = "AutoConnect = no\nLocalDiscovery = no\nPingInterval = 1\n\
+                UDPDiscoveryTimeout = 3\nUDPDiscoveryKeepaliveInterval = 1\n\
+                UDPDiscoveryInterval = 1\n";
+    let TunPair {
+        netns,
+        mut alice,
+        mut bob,
+    } = TunPair::new(netns, &tmp, conf);
+    let (a, b) = (alice.reserve_port(), bob.reserve_port());
+    let mut relay = Node::new(tmp.path(), "relay", 0xCC).with_conf(conf);
+    relay.write_config_multi(&[&alice, &bob], &[]);
+    dual_stack(&relay);
+    relay.start();
+    alice.write_config_multi(&[&relay, &bob], &[&relay]);
+    bob.write_config_multi(&[&relay, &alice], &[&relay]);
+    let relay_host = bob.confbase.join("hosts/relay");
+    let host = fs::read_to_string(&relay_host).unwrap();
+    fs::write(&relay_host, host.replace("127.0.0.1", "::1")).unwrap();
+    dual_stack(&alice);
+    dual_stack(&bob);
+    if !drop_udp_between("iptables", "-I", a, b) {
+        relay.stop();
+        return;
+    }
+    bob.start();
+    alice.start();
+    netns.place_devices();
+    let pair = TunPair { netns, alice, bob };
+    pair.wait_reachable();
+    let confirmed = |node: &Node, peer| {
+        node_status(&node.ctl().dump(3), peer).is_some_and(|s| s & UDP_CONFIRMED != 0)
+    };
+    let over_v6 = try_poll(Duration::from_secs(15), || {
+        ping_once("10.42.0.2");
+        (confirmed(&pair.alice, "bob") && confirmed(&pair.bob, "alice")).then_some(())
+    });
+    let v6 = Some("::1".to_owned());
+    if over_v6.is_none() || udp_host(&pair.alice, "bob") != v6 || udp_host(&pair.bob, "alice") != v6
+    {
+        relay.stop();
+        let (alice_log, bob_log) = pair.finish();
+        panic!(
+            "no IPv6 UDP path to start from\n=== alice ===\n{alice_log}\n=== bob ===\n{bob_log}"
+        );
+    }
+
+    assert!(drop_udp_between("iptables", "-D", a, b));
+    assert!(drop_udp_between("ip6tables", "-I", a, b));
+
+    // Data keeps flowing over relay meanwhile; it is what drives probing
+    // towards a peer without a meta connection.
+    let recovered = try_poll(Duration::from_secs(30), || {
+        ping_once("10.42.0.2");
+        (confirmed(&pair.alice, "bob")
+            && confirmed(&pair.bob, "alice")
+            && udp_host(&pair.bob, "alice").as_deref() == Some("127.0.0.1"))
+        .then_some(())
+    });
+    let alice_sees = udp_host(&pair.alice, "bob");
+    let bob_sees = udp_host(&pair.bob, "alice");
+    let relay_log = relay.stop();
+    let (alice_log, bob_log) = pair.finish();
+    let logs =
+        format!("=== alice ===\n{alice_log}\n=== relay ===\n{relay_log}\n=== bob ===\n{bob_log}");
+    assert!(
+        recovered.is_some(),
+        "UDP never re-confirmed over IPv4 (alice has bob at {alice_sees:?}, \
+         bob has alice at {bob_sees:?})\n{logs}"
+    );
 }
 
 #[test]
