@@ -2,7 +2,7 @@
 
 use crate::daemon::{ConnId, Daemon};
 
-use crate::graph::EdgeId;
+use crate::graph::{EdgeId, NodeId};
 use tinc_proto::msg::{AddEdge, DelEdge, SubnetMsg};
 use tinc_proto::{AddrStr, Request, Subnet};
 
@@ -32,6 +32,32 @@ impl Daemon {
             local,
         };
         Some(msg.format(nonce))
+    }
+
+    /// A NAT may map `peer`'s UDP to another port than its TCP-derived
+    /// edge address; advertise the confirmed one so others can punch it.
+    pub(in crate::daemon) fn advertise_udp_edge_addr(&mut self, peer: NodeId) -> bool {
+        let Some(udp) = self.dp.tunnels.get(&peer).and_then(|t| t.path.underlay()) else {
+            return false;
+        };
+        let Some(ns) = self.nodes.get_mut(&peer) else {
+            return false;
+        };
+        let (Some(eid), Some(old)) = (ns.edge, ns.edge_addr) else {
+            return false;
+        };
+        if old == udp || old.get().ip() != udp.get().ip() || self.settings.tunnelserver {
+            return false;
+        }
+        ns.edge_addr = Some(udp);
+        let Some(entry) = self.edge_addrs.get_mut(&eid) else {
+            return false;
+        };
+        (entry.0, entry.1) = AddrStr::from_socket_addr(udp.get());
+        let Some(line) = self.fmt_add_edge(eid, Self::nonce()) else {
+            return false;
+        };
+        self.broadcast_line(&line)
     }
 
     /// Correction path: send back what we know about an edge.

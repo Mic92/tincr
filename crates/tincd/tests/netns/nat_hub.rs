@@ -291,3 +291,258 @@ fn wrong_peer_id_is_learnt_once() {
         "one rejected ID expected:\n{log}"
     );
 }
+
+const UDP_CONFIRMED: u32 = 0x80;
+/// Where acheron's NAT maps styx's UDP after its uplink flaps.
+const REBOUND_PORT: u16 = 20988;
+
+fn ping_from(ns: &str, dst: &str) -> bool {
+    Command::new("ip")
+        .args(["netns", "exec", ns, "ping", "-c", "1", "-W", "1", dst])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// `(status, nexthop)` of `peer` in `node`'s `dump nodes`.
+fn peer_view(node: &Node, peer: &str) -> Option<(u32, String)> {
+    node.ctl().dump(3).iter().find_map(|row| {
+        let f: Vec<&str> = row.strip_prefix("18 3 ")?.split_whitespace().collect();
+        (f.first() == Some(&peer)).then_some(())?;
+        Some((
+            u32::from_str_radix(f.get(10)?, 16).ok()?,
+            (*f.get(11)?).to_owned(),
+        ))
+    })
+}
+
+/// `"host port"` of the `from -> to` edge in `node`'s `dump edges`.
+fn edge_addr(node: &Node, from: &str, to: &str) -> Option<String> {
+    node.ctl().dump(4).iter().find_map(|row| {
+        let f: Vec<&str> = row.strip_prefix("18 4 ")?.split_whitespace().collect();
+        (f.first() == Some(&from) && f.get(1) == Some(&to)).then_some(())?;
+        Some(format!("{} {}", f.get(2)?, f.get(4)?))
+    })
+}
+
+/// NAT gateway `ns` in front of a LAN: masquerade out of `wan` (with
+/// `udp_port`, UDP leaves from that port) and drop everything unsolicited,
+/// so only mappings the inside punched let UDP in.
+fn gateway_rules(wan: &str, udp_port: Option<u16>, forward: &str) -> String {
+    let udp = udp_port.map_or_else(String::new, |p| {
+        format!("oifname \"{wan}\" meta l4proto udp masquerade to :{p}\n")
+    });
+    format!(
+        "flush ruleset\n\
+         table inet nat {{\n\
+           chain postrouting {{\n\
+             type nat hook postrouting priority 100; policy accept;\n\
+             {udp}oifname \"{wan}\" masquerade\n\
+           }}\n\
+           chain input {{\n\
+             type filter hook input priority 0; policy accept;\n\
+             iifname \"{wan}\" drop\n\
+           }}\n\
+           chain forward {{\n\
+             type filter hook forward priority 0; policy accept;\n\
+             {forward}\n\
+           }}\n\
+         }}\n"
+    )
+}
+
+/// 2026-11-18: styx sits behind acheron's NAT; coaxmetal behind a
+/// port-restricted NAT has no meta connection to it. acheron's uplink
+/// flaps and styx's UDP comes back from a new port. neoprism stays
+/// UDP-confirmed and follows the move; its edge to styx, which coaxmetal
+/// punches, must follow too.
+#[test]
+fn confirmed_udp_roam_is_readvertised() {
+    let test_name = "nat_hub::confirmed_udp_roam_is_readvertised";
+    if !enter_bwrap(test_name) {
+        return;
+    }
+    let tmp = TmpGuard::new("nathub", "roam");
+    let _netns = ["neo", "styx", "ach", "coax", "cgw"].map(ChildNetNs::new);
+    veth_pair(
+        ("styx", "s-eth", "192.168.44.2/24"),
+        ("ach", "ach-lan", "192.168.44.1/24"),
+    );
+    veth_pair(
+        ("coax", "c-eth", "192.168.55.2/24"),
+        ("cgw", "cgw-lan", "192.168.55.1/24"),
+    );
+    for (ns, wan, outer, inner) in [
+        ("neo", "neo-wan", "10.77.1.1/24", "10.77.1.2/24"),
+        ("ach", "ach-wan", "10.77.2.1/24", "10.77.2.2/24"),
+        ("cgw", "cgw-wan", "10.77.3.1/24", "10.77.3.2/24"),
+    ] {
+        let out = format!("o-{ns}");
+        run_ip(&["link", "add", &out, "type", "veth", "peer", "name", wan]);
+        run_ip(&["link", "set", wan, "netns", ns]);
+        run_ip(&["addr", "add", outer, "dev", &out]);
+        run_ip(&["link", "set", &out, "up"]);
+        run_ip_in(ns, &["addr", "add", inner, "dev", wan]);
+        run_ip_in(ns, &["link", "set", wan, "up"]);
+        let gw = outer.replace("/24", "");
+        run_ip_in(ns, &["route", "add", "default", "via", &gw]);
+    }
+    run_ip_in("styx", &["route", "add", "default", "via", "192.168.44.1"]);
+    run_ip_in("coax", &["route", "add", "default", "via", "192.168.55.1"]);
+    fs::write("/proc/sys/net/ipv4/ip_forward", "1").unwrap();
+    for ns in ["ach", "cgw"] {
+        nsexec(ns, &["sysctl", "-q", "-w", "net.ipv4.ip_forward=1"]);
+    }
+
+    let dir = tmp.path();
+    let conf = "AutoConnect = no\nLocalDiscovery = no\nPingInterval = 1\n\
+                UDPDiscoveryTimeout = 3\nUDPDiscoveryKeepaliveInterval = 1\n\
+                UDPDiscoveryInterval = 1\n";
+    let mut eva = Node::new(dir, "eva", 0x05).with_conf(conf);
+    let tun = |name, seed, iface, ip| {
+        Node::new(dir, name, seed)
+            .with_conf(conf)
+            .iface(iface)
+            .subnet(ip)
+            .log_level("tincd=info,tincd::net=debug")
+    };
+    let mut neoprism = tun("neoprism", 0x06, "tinc2", "10.42.0.3/32");
+    let mut styx = tun("styx", 0x07, "tinc1", "10.42.0.2/32");
+    let mut coax = tun("coaxmetal", 0x08, "tinc0", "10.42.0.1/32");
+    for node in [&mut eva, &mut neoprism, &mut styx, &mut coax] {
+        node.reserve_port();
+    }
+    // eva relays meta only: what it learns from styx's UDP would be
+    // a second way for coaxmetal to find styx.
+    let ach_forward = format!("oifname \"ach-wan\" udp dport {} drop", eva.port);
+    if !load_nft(
+        "ach",
+        test_name,
+        &dir.join("ach.nft"),
+        &gateway_rules("ach-wan", None, &ach_forward),
+    ) || !load_nft(
+        "cgw",
+        test_name,
+        &dir.join("cgw.nft"),
+        &gateway_rules("cgw-wan", None, ""),
+    ) {
+        return;
+    }
+
+    for (node, others, dials) in [
+        (&eva, [&neoprism, &styx, &coax], ""),
+        (&neoprism, [&eva, &styx, &coax], ""),
+        (
+            &styx,
+            [&eva, &neoprism, &coax],
+            "ConnectTo = eva\nConnectTo = neoprism\n",
+        ),
+        (&coax, [&eva, &neoprism, &styx], "ConnectTo = eva\n"),
+    ] {
+        node.write_config_multi(&others, &[]);
+        let path = node.confbase.join("tinc.conf");
+        // The flap must not cost styx its meta connections.
+        let text = fs::read_to_string(&path)
+            .unwrap()
+            .replace("PingTimeout = 1\n", "PingTimeout = 10\n");
+        fs::write(path, text + dials).unwrap();
+        if node.name != "eva" && node.name != "neoprism" {
+            let ip = if node.name == "styx" {
+                "10.77.2.1"
+            } else {
+                "10.77.3.1"
+            };
+            set_address(node, &eva, ip, eva.port);
+            set_address(node, &neoprism, "10.77.1.2", neoprism.port);
+        }
+    }
+    for (ns, dev) in [("neo", "tinc2"), ("styx", "tinc1"), ("coax", "tinc0")] {
+        run_ip_in(ns, &["tuntap", "add", "mode", "tun", "name", dev]);
+    }
+    start_in(&mut eva, None);
+    start_in(&mut neoprism, Some("neo"));
+    start_in(&mut styx, Some("styx"));
+    start_in(&mut coax, Some("coax"));
+    for (ns, dev, ip) in [
+        ("coax", "tinc0", "10.42.0.1/24"),
+        ("styx", "tinc1", "10.42.0.2/24"),
+        ("neo", "tinc2", "10.42.0.3/24"),
+    ] {
+        run_ip_in(ns, &["addr", "add", ip, "dev", dev]);
+        run_ip_in(ns, &["link", "set", dev, "up"]);
+    }
+
+    let confirmed = |a: &Node, b: &str| peer_view(a, b).is_some_and(|v| v.0 & UDP_CONFIRMED != 0);
+    let traffic = || {
+        ping_from("neo", "10.42.0.2");
+        ping_from("coax", "10.42.0.2");
+    };
+    let direct = || confirmed(&coax, "styx") && confirmed(&styx, "coaxmetal");
+    let up = try_poll(Duration::from_secs(30), || {
+        traffic();
+        (direct() && confirmed(&neoprism, "styx")).then_some(())
+    });
+    let old_edge = edge_addr(&coax, "neoprism", "styx");
+    if up.is_none() || old_edge != Some(format!("10.77.2.2 {}", styx.port)) {
+        let logs = [coax.stop(), styx.stop(), neoprism.stop(), eva.stop()];
+        panic!("no direct UDP to start from (edge {old_edge:?})\n{logs:#?}");
+    }
+
+    // The flap drops acheron's masquerade state; UDP comes back on a new port.
+    run_ip_in("ach", &["link", "set", "ach-wan", "down"]);
+    assert!(load_nft(
+        "ach",
+        test_name,
+        &dir.join("ach2.nft"),
+        &gateway_rules("ach-wan", Some(REBOUND_PORT), &ach_forward),
+    ));
+    run_ip_in("ach", &["link", "set", "ach-wan", "up"]);
+    run_ip_in("ach", &["route", "replace", "default", "via", "10.77.2.1"]);
+
+    let new_addr = format!("10.77.2.2:{REBOUND_PORT}");
+    let neo_moved = try_poll(Duration::from_secs(15), || {
+        traffic();
+        neoprism
+            .log()
+            .lines()
+            .any(|l| l.contains("UDP address of styx") && l.contains(&new_addr))
+            .then_some(())
+    });
+    let rebound = format!("10.77.2.2 {REBOUND_PORT}");
+    let readvertised = try_poll(Duration::from_secs(20), || {
+        traffic();
+        (edge_addr(&coax, "neoprism", "styx").as_deref() == Some(rebound.as_str())).then_some(())
+    });
+    let recovered = try_poll(Duration::from_secs(30), || {
+        traffic();
+        direct().then_some(())
+    });
+    let neo_kept = confirmed(&neoprism, "styx");
+    let coax_edge = edge_addr(&coax, "neoprism", "styx");
+    let coax_sees = peer_view(&coax, "styx");
+    let neo_log = neoprism.stop();
+    let neo_lost = neo_log.contains("UDP ping response from styx");
+    let logs = format!(
+        "=== coaxmetal ===\n{}\n=== styx ===\n{}\n=== neoprism ===\n{neo_log}\n=== eva ===\n{}",
+        coax.stop(),
+        styx.stop(),
+        eva.stop()
+    );
+    assert!(
+        neo_moved.is_some() && neo_kept,
+        "neoprism did not follow styx to {new_addr} while confirmed\n{logs}"
+    );
+    assert!(
+        !neo_lost,
+        "neoprism lost UDP to styx, so this is not a roam\n{logs}"
+    );
+    assert!(
+        readvertised.is_some(),
+        "coaxmetal still has neoprism -> styx at {coax_edge:?}, not {rebound}\n{logs}"
+    );
+    assert!(
+        recovered.is_some(),
+        "no direct UDP coaxmetal <-> styx after the rebind ({coax_sees:?})\n{logs}"
+    );
+}
