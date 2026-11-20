@@ -211,7 +211,7 @@ impl UdpPath {
 
     pub(crate) fn set_provisional_mtu(&mut self, mtu: u16) {
         if let Some(p) = self.pmtu.as_mut() {
-            p.mtu = mtu;
+            p.set_provisional_mtu(mtu);
         }
     }
 
@@ -272,6 +272,43 @@ mod tests {
             assert_eq!(p.maxmtu(), MTU, "{name}");
             assert!(p.target(listeners).is_none(), "{name}");
         }
+    }
+
+    /// Live on starkstrom→shodan: cold revalidation of a path converged
+    /// at 1399 kept `mtu`, a relayed `MTU_INFO` hint then set `mtu` to
+    /// 989/1009 while our own probes had already proven 1003/1012
+    /// (`pmtu 989 (min 1003 max 1439)`). `mtu` gates the frag-needed
+    /// ICMP and MSS clamp in `route`, so hearsay below our measurement
+    /// must not stick, neither set after nor before the minmtu raise.
+    #[test]
+    fn provisional_mtu_never_below_measured_minmtu() {
+        let now = Instant::now();
+        let mut p = UdpPath::default();
+        p.on_authenticated_rx(ua("192.0.2.1:655"), 0, now);
+        let pm = p.pmtu_mut(now);
+        pm.ping_sent = true;
+        let _ = pm.on_probe_reply(1399, now);
+        pm.mtu = 1399;
+        pm.minmtu = 1399;
+        pm.maxmtu = 1399;
+        p.on_timeout();
+        assert_eq!(p.mtu(), 1399, "mtu survives rediscovery");
+
+        // Probe reply first, hint second.
+        let _ = p.pmtu_mut(now).on_probe_reply(1003, now);
+        p.set_provisional_mtu(989);
+        assert_eq!((p.mtu(), p.minmtu()), (1003, 1003));
+
+        // Hint first, probe reply second.
+        p.set_provisional_mtu(1009);
+        assert_eq!(p.mtu(), 1009);
+        let _ = p.pmtu_mut(now).on_probe_reply(1012, now);
+        assert_eq!((p.mtu(), p.minmtu()), (1012, 1012));
+
+        // Same for the meta-channel ack (tincr extension).
+        p.pmtu_mut(now).ping_sent = true;
+        assert_eq!(p.on_meta_ack(1020, now), Some(true));
+        assert_eq!((p.mtu(), p.minmtu()), (1020, 1020));
     }
 
     #[test]
