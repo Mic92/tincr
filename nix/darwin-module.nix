@@ -85,7 +85,16 @@ let
         else if bits <= 0 then
           0
         else
-          256 - lib.pow 2 (8 - bits);
+          lib.elemAt [
+            0
+            128
+            192
+            224
+            240
+            248
+            252
+            254
+          ] bits;
     in
     lib.concatStringsSep "." (
       map (i: toString (lib.bitAnd (lib.elemAt octets i) (maskOctet i))) [
