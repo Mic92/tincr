@@ -368,6 +368,7 @@ impl PmtuState {
         }
         if len >= MINMTU && len > self.minmtu {
             self.minmtu = len;
+            self.lift_mtu_to_minmtu();
         }
         if !self.discovery {
             self.pin();
@@ -406,6 +407,7 @@ impl PmtuState {
         if len > self.maxmtu {
             out.push(PmtuAction::LogIncrease);
             self.minmtu = if len >= MINMTU { len } else { 0 };
+            self.lift_mtu_to_minmtu();
             self.maxmtu = self.cap;
             self.phase = PmtuPhase::Discovery { sent: 1 };
             return out;
@@ -420,6 +422,7 @@ impl PmtuState {
 
         if len >= MINMTU && self.minmtu < len {
             self.minmtu = len;
+            self.lift_mtu_to_minmtu();
             self.try_fix_mtu(&mut out);
         }
 
@@ -469,9 +472,27 @@ impl PmtuState {
         self.debug_check_bounds();
     }
 
-    /// `mtu` is not checked against `minmtu`: it survives rediscovery
-    /// (`minmtu = 0`) by design.
+    /// Relayed `MTU_INFO` hint, used until discovery fixes `mtu`.
+    /// Floored at `minmtu`: hearsay never beats our own measurement.
+    pub(crate) fn set_provisional_mtu(&mut self, mtu: u16) {
+        self.mtu = mtu.max(self.minmtu);
+        self.debug_check_bounds();
+    }
+
+    /// A non-zero `mtu` (kept across rediscovery, or a provisional
+    /// hint) must not stay below a freshly proven `minmtu`: `route`
+    /// would answer frames in `(mtu, minmtu]` with frag-needed and
+    /// clamp MSS to `mtu`. `0` stays: it means "not discovered yet".
+    const fn lift_mtu_to_minmtu(&mut self) {
+        if self.mtu != 0 && self.mtu < self.minmtu {
+            self.mtu = self.minmtu;
+        }
+    }
+
+    /// `mtu` survives rediscovery (`minmtu = 0`) by design, but is
+    /// never below a non-zero `minmtu` unless still undiscovered (`0`).
     const fn debug_check_bounds(&self) {
+        debug_assert!(self.mtu == 0 || self.mtu >= self.minmtu, "mtu below minmtu");
         debug_assert!(
             self.minmtu == 0 || (self.minmtu >= MINMTU && self.minmtu <= MTU),
             "minmtu outside 0 / MINMTU..=MTU"
