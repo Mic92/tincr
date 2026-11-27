@@ -12,7 +12,7 @@
 //! | 1–9 | zlib | `compress2(..., level)` | `flate2::Compress` (miniz) |
 //! | 10 | LZO low | `lzo1x_1_compress` | vendored `minilzo.c` (FFI) |
 //! | 11 | LZO hi | `lzo1x_999_compress` | compress stubbed (minilzo lacks `_999`); decompress works |
-//! | 12 | LZ4 | `LZ4_compress_fast_extState` | `lz4_flex::block` |
+//! | 12 | LZ4 | `LZ4_compress_fast_extState` | `lz4rip::block::Compressor` |
 //!
 //! Wire-level int is the `compression_level_t` enum verbatim.
 //!
@@ -22,9 +22,9 @@
 //! shows up, switch to a persistent `flate2::Decompress` here.
 //!
 //! **LZ4 wire compat**: `LZ4_compress_fast_extState` produces RAW LZ4
-//! block format — no frame header, no length prefix. `lz4_flex::
-//! block::compress` matches. Do NOT use `compress_prepend_size`; that
-//! prepends a u32 the C side won't expect.
+//! block format — no frame header, no length prefix. `lz4rip::block`
+//! writes and reads exactly that; never prepend a size, the C side
+//! won't expect one.
 //!
 //! **LZO via vendored minilzo**: not pure Rust. We compile
 //! `minilzo/minilzo.c` (`build.rs` + `cc` crate) and call it through
@@ -110,10 +110,10 @@ impl Level {
 
 /// Per-daemon compression workspace.
 ///
-/// `lz4_flex::block` is stateless, `flate2` is one-shot per call. LZO
-/// needs `LZO1X_1_MEM_COMPRESS` bytes of scratch (~128KB on 64-bit);
-/// we lazy-allocate on first LZO compress so daemons that never
-/// negotiate LZO pay nothing. The C's static `z_stream` reuse is a
+/// `flate2` is one-shot per call. LZ4 keeps an 8KB hash table across
+/// packets (the C's `lz4_stream`), and LZO needs `LZO1X_1_MEM_COMPRESS`
+/// bytes of scratch (~128KB on 64-bit); both are allocated on first
+/// compress, so daemons that never negotiate them pay nothing. The C's static `z_stream` reuse is a
 /// micro-opt we defer.
 #[derive(Debug, Default)]
 pub(crate) struct Compressor {
@@ -122,6 +122,9 @@ pub(crate) struct Compressor {
     /// on the stack is too much. `u64` element type guarantees the
     /// 8-byte alignment minilzo expects for its `lzo_dict_t*` cast.
     lzo_wrkmem: Option<Vec<u64>>,
+    /// The C's `lz4_stream`: the LZ4 hash table, reused (not cleared)
+    /// from packet to packet. `None` until first `Lz4` compress.
+    lz4: Option<lz4rip::block::Compressor>,
 }
 
 impl Compressor {
@@ -142,11 +145,12 @@ impl Compressor {
             Level::None => Some(src.to_vec()),
 
             Level::Lz4 => {
-                // lz4_flex::block::compress is infallible: worst case
-                // it emits literals + overhead. Matches C's
-                // LZ4_compress_fast_extState which only returns 0 if
-                // dest is too small — we size dest to the bound.
-                Some(lz4_flex::block::compress(src))
+                // Infallible: worst case it emits literals + overhead.
+                // Matches C's LZ4_compress_fast_extState which only
+                // returns 0 if dest is too small — we size dest to the
+                // bound.
+                let lz4 = self.lz4.get_or_insert_with(lz4rip::block::Compressor::new);
+                Some(lz4.compress(src))
             }
 
             Level::LzoLo => {
@@ -196,7 +200,7 @@ impl Compressor {
                 // Raw block decode, no length prefix. Matches
                 // LZ4_decompress_safe wire format. Err on corrupt
                 // input or output > max_len.
-                lz4_flex::block::decompress(src, max_len).ok()
+                lz4rip::block::decompress(src, max_len).ok()
             }
 
             Level::LzoLo | Level::LzoHi => {
@@ -631,7 +635,7 @@ mod tests {
 
     /// Cross-impl KAT: liblz4's `LZ4_compress_default` output (raw
     /// block, no frame, no prefix — same as `LZ4_compress_fast_
-    /// extState` at accel=0). Proves `lz4_flex::block` wire compat.
+    /// extState` at accel=0). Proves we read C peers' packets.
     #[test]
     fn lz4_kat_cross_decompress() {
         let mut c = Compressor::new();
@@ -644,21 +648,36 @@ mod tests {
     }
 
     /// And the other direction: our LZ4 output must decode with the
-    /// reference. We can't run liblz4 here, but `lz4_flex`'s own
-    /// decompress is the reference algorithm — block format has no
-    /// encoder freedom for short literals. Spot-check that our output
-    /// for a tiny input matches the C KAT byte-for-byte (LZ4 block
-    /// format is deterministic for inputs this short — no match
-    /// choices to make).
+    /// reference. We can't run liblz4 here, so spot-check the bytes.
+    /// The format leaves each match to the encoder: liblz4 takes the
+    /// 4-byte repeat of "the " (the KAT above), lz4rip hashes 5 bytes
+    /// and leaves this input as one literal run. That is the plainest
+    /// valid block: token 0xf0 (15+ literals, no match), length byte 28
+    /// (15 + 28 = 43 literals), then the input as is.
     #[test]
-    fn lz4_kat_compress_matches() {
+    fn lz4_compress_emits_plain_block() {
         let mut c = Compressor::new();
         let src = b"the quick brown fox jumps over the lazy dog";
         let ours = c.compress(src, Level::Lz4).unwrap();
-        let kat = unhex(
-            "f01074686520717569636b2062726f776e20666f78206a756d7073206f766572201f00806c617a7920646f67",
-        );
-        assert_eq!(ours, kat);
+        let mut plain = vec![0xf0, 28];
+        plain.extend_from_slice(src);
+        assert_eq!(ours, plain);
+        assert_eq!(c.decompress(&ours, Level::Lz4, 100).unwrap(), src);
+    }
+
+    /// The LZ4 table is reused from packet to packet, but each packet is
+    /// a block of its own: it decodes without the ones sent before it
+    /// (peers may lose or reorder them).
+    #[test]
+    fn lz4_packets_decode_on_their_own() {
+        let mut c = Compressor::new();
+        let page = b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n".repeat(30);
+        let first = c.compress(&page, Level::Lz4).unwrap();
+        let second = c.compress(&page, Level::Lz4).unwrap();
+        assert!(second.len() < page.len());
+        let mut fresh = Compressor::new();
+        assert_eq!(fresh.decompress(&second, Level::Lz4, 2048).unwrap(), page);
+        assert_eq!(fresh.decompress(&first, Level::Lz4, 2048).unwrap(), page);
     }
 
     #[test]
